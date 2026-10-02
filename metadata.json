@@ -1,0 +1,6 @@
+{
+  "name": "NetPulse ISP OS - Next-Gen ISP Management & RouterOS Operations",
+  "description": "Comprehensive ISP Management System featuring MikroTik RouterOS v7 integration, automated billing CRON engine, SLA ticket dispatch, WhatsApp notifications, and field agent cash recovery app.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
