@@ -26,6 +26,7 @@ import {
   Layers,
 } from 'lucide-react';
 import { useISP } from '../context/ISPContext';
+import { useCurrency } from '../context/CurrencyContext';
 import { Customer, Invoice } from '../types/isp';
 import { HandoverCashModal } from './HandoverCashModal';
 import { OfflineActivityDashboard } from './OfflineActivityDashboard';
@@ -51,6 +52,7 @@ export const MobileAppSimulator: React.FC<MobileAppSimulatorProps> = ({
     collectAgentCashPayment,
     createComplaintTicket,
   } = useISP();
+  const { formatCurrency, currencySymbol } = useCurrency();
 
   const [deviceMode, setDeviceMode] = useState<'agent' | 'client'>('agent');
   const [selectedAgentId, setSelectedAgentId] = useState<string>(agents[0]?.id || '');
@@ -121,14 +123,14 @@ export const MobileAppSimulator: React.FC<MobileAppSimulatorProps> = ({
       currentAgent.cashInHand += record.amount;
       alert(
         `[OFFLINE MODE - NO CELL COVERAGE]\n\n` +
-        `Collected: $${targetInv.totalAmount.toFixed(2)} Cash from ${cust.name}\n` +
+        `Collected: ${formatCurrency(targetInv.totalAmount)} Cash from ${cust.name}\n` +
         `Offline Receipt Ref: ${record.offlineReceiptNumber}\n` +
         `HMAC Signature: ${record.cryptographicSignature.slice(0, 16)}...\n\n` +
         `Payment committed locally to SQLite storage. Switch to the 'Offline Sync' tab to review and batch-sync with server!`
       );
     } else {
       await collectAgentCashPayment(targetInv.id, currentAgent.id, targetInv.totalAmount);
-      alert(`Collected $${targetInv.totalAmount.toFixed(2)} cash from ${cust.name}. Digital WhatsApp receipt issued!`);
+      alert(`Collected ${formatCurrency(targetInv.totalAmount)} cash from ${cust.name}. Digital WhatsApp receipt issued!`);
     }
   };
 
@@ -282,7 +284,7 @@ export const MobileAppSimulator: React.FC<MobileAppSimulatorProps> = ({
                 <div className="text-right">
                   <span className="text-[10px] text-slate-400 block font-mono">Cash in Hand</span>
                   <span className="text-sm font-bold text-cyan-300 font-mono block">
-                    ${currentAgent.cashInHand.toFixed(2)}
+                    {formatCurrency(currentAgent.cashInHand)}
                   </span>
                   <button
                     onClick={() => setIsHandoverModalOpen(true)}
@@ -372,7 +374,7 @@ export const MobileAppSimulator: React.FC<MobileAppSimulatorProps> = ({
                           </div>
                           <div className="text-right">
                             <span className="text-xs font-bold text-rose-400 font-mono block">
-                              ${cust.balanceDue.toFixed(2)}
+                              {formatCurrency(cust.balanceDue)}
                             </span>
                             <span className="text-[9px] px-1.5 py-0.2 rounded bg-amber-950 text-amber-300 font-mono">
                               {cust.status === 'walled_garden' ? 'Walled Garden' : 'Overdue'}
@@ -482,7 +484,7 @@ export const MobileAppSimulator: React.FC<MobileAppSimulatorProps> = ({
                           Collected by {currentAgent.name.split(' ')[0]}
                         </span>
                         <div className="text-base font-bold text-emerald-400 font-mono mt-0.5">
-                          ${specificAgentTotalCollected.toFixed(2)}
+                          {formatCurrency(specificAgentTotalCollected)}
                         </div>
                         <span className="text-[9px] text-slate-500 font-mono">
                           {specificAgentInvoices.length} Paid Receipts
@@ -494,7 +496,7 @@ export const MobileAppSimulator: React.FC<MobileAppSimulatorProps> = ({
                           Cash in Hand
                         </span>
                         <div className="text-base font-bold text-cyan-300 font-mono mt-0.5">
-                          ${currentAgent.cashInHand.toFixed(2)}
+                          {formatCurrency(currentAgent.cashInHand)}
                         </div>
                         <span className="text-[9px] text-slate-500 font-mono">
                           Available to Handover
@@ -510,7 +512,7 @@ export const MobileAppSimulator: React.FC<MobileAppSimulatorProps> = ({
                           Handover Cash to Boss
                         </span>
                         <span className="text-[10px] text-slate-400 font-mono">
-                          Deposited: ${specificAgentTotalHandedOver.toFixed(2)}
+                          Deposited: {formatCurrency(specificAgentTotalHandedOver)}
                         </span>
                       </div>
                       <p className="text-[11px] text-slate-400 leading-tight">
@@ -521,7 +523,7 @@ export const MobileAppSimulator: React.FC<MobileAppSimulatorProps> = ({
                         className="w-full bg-emerald-600 hover:bg-emerald-500 text-slate-950 font-bold py-2 rounded-lg text-xs flex items-center justify-center gap-1.5 transition shadow-sm"
                       >
                         <ShieldCheck className="w-3.5 h-3.5" />
-                        <span>Handover Cash to Boss (${currentAgent.cashInHand.toFixed(2)})</span>
+                        <span>Handover Cash to Boss ({formatCurrency(currentAgent.cashInHand)})</span>
                       </button>
                     </div>
 
@@ -565,7 +567,7 @@ export const MobileAppSimulator: React.FC<MobileAppSimulatorProps> = ({
                             </div>
                             <div className="text-right">
                               <span className="font-mono font-bold text-emerald-400 block">
-                                +${inv.totalAmount.toFixed(2)}
+                                +{formatCurrency(inv.totalAmount)}
                               </span>
                               <span className="text-[9px] text-cyan-400">Paid to {currentAgent.name.split(' ')[0]}</span>
                             </div>
@@ -602,7 +604,7 @@ export const MobileAppSimulator: React.FC<MobileAppSimulatorProps> = ({
                             </div>
                             <div className="text-right">
                               <span className="font-mono font-bold text-amber-300 block">
-                                -${h.amount.toFixed(2)}
+                                -{formatCurrency(h.amount)}
                               </span>
                               <span className="text-[9px] px-1.5 py-0.5 rounded bg-emerald-950 text-emerald-400 font-mono">
                                 Confirmed
@@ -708,7 +710,7 @@ export const MobileAppSimulator: React.FC<MobileAppSimulatorProps> = ({
                           <span>Line Redirected to Payment Portal</span>
                         </div>
                         <p className="text-[11px] text-amber-200/90 leading-tight">
-                          Please clear your balance of ${currentCustomer.balanceDue.toFixed(2)} to restore full broadband speeds.
+                          Please clear your balance of {formatCurrency(currentCustomer.balanceDue)} to restore full broadband speeds.
                         </p>
                       </div>
                     )}
@@ -758,7 +760,7 @@ export const MobileAppSimulator: React.FC<MobileAppSimulatorProps> = ({
                       <div className="flex justify-between">
                         <span className="text-slate-400">Outstanding Due:</span>
                         <span className="text-rose-400 font-bold">
-                          ${currentCustomer.balanceDue.toFixed(2)}
+                          {formatCurrency(currentCustomer.balanceDue)}
                         </span>
                       </div>
                     </div>
@@ -856,7 +858,7 @@ export const MobileAppSimulator: React.FC<MobileAppSimulatorProps> = ({
                         </div>
                         <div className="flex justify-between items-center pt-2 border-t border-slate-800 font-mono">
                           <span className="text-slate-300 text-sm font-bold">
-                            ${inv.totalAmount.toFixed(2)}
+                            {formatCurrency(inv.totalAmount)}
                           </span>
                           {inv.status === 'paid' ? (
                             <button
@@ -974,7 +976,7 @@ export const MobileAppSimulator: React.FC<MobileAppSimulatorProps> = ({
         isOpen={isHandoverModalOpen}
         onClose={() => setIsHandoverModalOpen(false)}
         onHandoverSuccess={(handoverNum, amount) => {
-          setHandoverSuccessBanner(`Handover ${handoverNum} ($${amount.toFixed(2)}) submitted to Boss!`);
+          setHandoverSuccessBanner(`Handover ${handoverNum} (${formatCurrency(amount)}) submitted to Boss!`);
           setTimeout(() => setHandoverSuccessBanner(null), 5000);
         }}
       />

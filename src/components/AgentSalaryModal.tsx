@@ -2,6 +2,7 @@ import React, { useState, useEffect } from 'react';
 import { X, DollarSign, ArrowUpRight, ArrowDownLeft, CheckCircle2, ShieldCheck, Wallet, Calendar, FileText } from 'lucide-react';
 import { FieldAgent } from '../types/isp';
 import { useISP } from '../context/ISPContext';
+import { useCurrency } from '../context/CurrencyContext';
 
 export type SalaryModalMode = 'disburse_advance' | 'return_advance' | 'pay_salary' | 'edit_salary';
 
@@ -19,6 +20,7 @@ export const AgentSalaryModal: React.FC<AgentSalaryModalProps> = ({
   onClose,
 }) => {
   const { disburseAdvanceSalary, recordAdvanceReturn, payMonthlySalary, updateAgentSalary } = useISP();
+  const { formatCurrency, currencySymbol } = useCurrency();
 
   const [amount, setAmount] = useState<number>(0);
   const [paymentMethod, setPaymentMethod] = useState<'cash' | 'bank_transfer' | 'salary_deduction'>('cash');
@@ -69,7 +71,7 @@ export const AgentSalaryModal: React.FC<AgentSalaryModalProps> = ({
           paymentMethod as 'cash' | 'bank_transfer',
           notes || 'Advance salary disbursed'
         );
-        setSuccessMessage(`Advance of $${amount.toFixed(2)} disbursed! Ref: ${res.transactionNumber}`);
+        setSuccessMessage(`Advance of ${formatCurrency(amount)} disbursed! Ref: ${res.transactionNumber}`);
       } else if (mode === 'return_advance') {
         const res = await recordAdvanceReturn(
           agent.id,
@@ -78,7 +80,7 @@ export const AgentSalaryModal: React.FC<AgentSalaryModalProps> = ({
           notes || 'Advance salary returned',
           deductFromCashInHand
         );
-        setSuccessMessage(`Advance return of $${amount.toFixed(2)} recorded! Ref: ${res.transactionNumber}`);
+        setSuccessMessage(`Advance return of ${formatCurrency(amount)} recorded! Ref: ${res.transactionNumber}`);
       } else if (mode === 'pay_salary') {
         const res = await payMonthlySalary(
           agent.id,
@@ -87,10 +89,10 @@ export const AgentSalaryModal: React.FC<AgentSalaryModalProps> = ({
           paymentMethod as 'cash' | 'bank_transfer',
           notes
         );
-        setSuccessMessage(`Salary of $${res.netAmount.toFixed(2)} paid for ${month}! Ref: ${res.transactionNumber}`);
+        setSuccessMessage(`Salary of ${formatCurrency(res.netAmount)} paid for ${month}! Ref: ${res.transactionNumber}`);
       } else if (mode === 'edit_salary') {
         updateAgentSalary(agent.id, newBaseSalary);
-        setSuccessMessage(`Base salary updated to $${newBaseSalary.toFixed(2)}/mo`);
+        setSuccessMessage(`Base salary updated to ${formatCurrency(newBaseSalary)}/mo`);
       }
     } catch (err) {
       console.error(err);
@@ -159,25 +161,25 @@ export const AgentSalaryModal: React.FC<AgentSalaryModalProps> = ({
             <div className="bg-slate-950 p-3 rounded-xl border border-slate-800 space-y-2 font-mono text-[11px]">
               <div className="flex justify-between">
                 <span className="text-slate-400">Base Monthly Salary:</span>
-                <span className="text-white font-bold">${agent.baseSalary.toFixed(2)}</span>
+                <span className="text-white font-bold">{formatCurrency(agent.baseSalary)}</span>
               </div>
               <div className="flex justify-between">
                 <span className="text-slate-400">Advance Taken:</span>
-                <span className="text-amber-400 font-bold">${agent.advanceSalaryTaken.toFixed(2)}</span>
+                <span className="text-amber-400 font-bold">{formatCurrency(agent.advanceSalaryTaken)}</span>
               </div>
               <div className="flex justify-between">
                 <span className="text-slate-400">Advance Repaid/Returned:</span>
-                <span className="text-cyan-400 font-bold">${agent.advanceSalaryReturned.toFixed(2)}</span>
+                <span className="text-cyan-400 font-bold">{formatCurrency(agent.advanceSalaryReturned)}</span>
               </div>
               <div className="flex justify-between pt-1 border-t border-slate-800">
                 <span className="text-slate-300">Outstanding Advance:</span>
                 <span className={`font-bold ${outstandingAdvance > 0 ? 'text-rose-400' : 'text-emerald-400'}`}>
-                  ${outstandingAdvance.toFixed(2)}
+                  {formatCurrency(outstandingAdvance)}
                 </span>
               </div>
               <div className="flex justify-between">
                 <span className="text-slate-300">Current Field Cash in Hand:</span>
-                <span className="text-cyan-300 font-bold">${agent.cashInHand.toFixed(2)}</span>
+                <span className="text-cyan-300 font-bold">{formatCurrency(agent.cashInHand)}</span>
               </div>
             </div>
 
@@ -185,7 +187,7 @@ export const AgentSalaryModal: React.FC<AgentSalaryModalProps> = ({
             {mode === 'disburse_advance' && (
               <>
                 <div>
-                  <label className="block text-slate-300 font-medium mb-1">Advance Amount to Disburse ($)</label>
+                  <label className="block text-slate-300 font-medium mb-1">Advance Amount to Disburse ({currencySymbol})</label>
                   <input
                     type="number"
                     step="0.01"
@@ -196,7 +198,7 @@ export const AgentSalaryModal: React.FC<AgentSalaryModalProps> = ({
                     className="w-full bg-slate-950 border border-slate-700 text-amber-300 font-mono text-sm p-2 rounded-lg focus:outline-none focus:border-amber-500 font-bold"
                   />
                   <p className="text-[10px] text-slate-400 mt-1 font-mono">
-                    New outstanding advance balance will be: ${(outstandingAdvance + amount).toFixed(2)}
+                    New outstanding advance balance will be: {formatCurrency(outstandingAdvance + amount)}
                   </p>
                 </div>
 
@@ -231,14 +233,14 @@ export const AgentSalaryModal: React.FC<AgentSalaryModalProps> = ({
               <>
                 <div>
                   <div className="flex justify-between items-center mb-1">
-                    <label className="text-slate-300 font-medium">Return Amount ($)</label>
+                    <label className="text-slate-300 font-medium">Return Amount ({currencySymbol})</label>
                     {outstandingAdvance > 0 && (
                       <button
                         type="button"
                         onClick={() => setAmount(outstandingAdvance)}
                         className="text-[10px] text-cyan-400 hover:underline font-mono"
                       >
-                        Return Full (${outstandingAdvance.toFixed(2)})
+                        Return Full ({formatCurrency(outstandingAdvance)})
                       </button>
                     )}
                   </div>
@@ -253,7 +255,7 @@ export const AgentSalaryModal: React.FC<AgentSalaryModalProps> = ({
                     className="w-full bg-slate-950 border border-slate-700 text-cyan-300 font-mono text-sm p-2 rounded-lg focus:outline-none focus:border-cyan-500 font-bold"
                   />
                   <p className="text-[10px] text-slate-400 mt-1 font-mono">
-                    Remaining advance balance will be: ${Math.max(0, outstandingAdvance - amount).toFixed(2)}
+                    Remaining advance balance will be: {formatCurrency(Math.max(0, outstandingAdvance - amount))}
                   </p>
                 </div>
 
@@ -280,7 +282,7 @@ export const AgentSalaryModal: React.FC<AgentSalaryModalProps> = ({
                         className="rounded bg-slate-900 border-slate-700 text-cyan-600 focus:ring-0"
                       />
                       <span className="text-[11px]">
-                        Also deduct from Agent's current Cash-in-Hand (-${amount.toFixed(2)})
+                        Also deduct from Agent's current Cash-in-Hand (-{formatCurrency(amount)})
                       </span>
                     </label>
                   </div>
@@ -340,7 +342,7 @@ export const AgentSalaryModal: React.FC<AgentSalaryModalProps> = ({
                         className="rounded bg-slate-900 border-slate-700 text-emerald-600 focus:ring-0"
                       />
                       <span className="text-[11px] font-semibold text-emerald-400">
-                        Automatically Deduct Outstanding Advance (-${outstandingAdvance.toFixed(2)})
+                        Automatically Deduct Outstanding Advance (-{formatCurrency(outstandingAdvance)})
                       </span>
                     </label>
                     <p className="text-[10px] text-slate-400 pl-5">
@@ -352,17 +354,17 @@ export const AgentSalaryModal: React.FC<AgentSalaryModalProps> = ({
                 <div className="bg-slate-950 p-3 rounded-lg border border-emerald-800/80 font-mono text-xs space-y-1.5">
                   <div className="flex justify-between text-slate-400">
                     <span>Base Salary:</span>
-                    <span>${agent.baseSalary.toFixed(2)}</span>
+                    <span>{formatCurrency(agent.baseSalary)}</span>
                   </div>
                   {deductAdvance && (
                     <div className="flex justify-between text-rose-400">
                       <span>Less Advance Deduction:</span>
-                      <span>-${outstandingAdvance.toFixed(2)}</span>
+                      <span>-{formatCurrency(outstandingAdvance)}</span>
                     </div>
                   )}
                   <div className="flex justify-between text-white font-bold pt-1 border-t border-slate-800 text-sm">
                     <span>Net Disbursed Salary:</span>
-                    <span className="text-emerald-400">${netPayableSalary.toFixed(2)}</span>
+                    <span className="text-emerald-400">{formatCurrency(netPayableSalary)}</span>
                   </div>
                 </div>
 
@@ -382,7 +384,7 @@ export const AgentSalaryModal: React.FC<AgentSalaryModalProps> = ({
             {/* MODE 4: Edit Base Salary */}
             {mode === 'edit_salary' && (
               <div>
-                <label className="block text-slate-300 font-medium mb-1">Monthly Base Salary ($)</label>
+                <label className="block text-slate-300 font-medium mb-1">Monthly Base Salary ({currencySymbol})</label>
                 <input
                   type="number"
                   step="10"
@@ -416,7 +418,7 @@ export const AgentSalaryModal: React.FC<AgentSalaryModalProps> = ({
                 <span>
                   {mode === 'disburse_advance' && 'Disburse Advance'}
                   {mode === 'return_advance' && 'Confirm Advance Return'}
-                  {mode === 'pay_salary' && `Disburse Net Salary ($${netPayableSalary.toFixed(2)})`}
+                  {mode === 'pay_salary' && `Disburse Net Salary (${formatCurrency(netPayableSalary)})`}
                   {mode === 'edit_salary' && 'Save Base Salary'}
                 </span>
               </button>

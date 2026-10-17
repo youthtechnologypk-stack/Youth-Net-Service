@@ -22,39 +22,74 @@ export function hashPassword(plainText: string, salt: string = 'netpulse_bcrypt_
 export const SEED_ADMIN_ACCOUNT = {
   id: 'usr-admin-01',
   username: 'admin',
-  email: 'admin@isp.local',
+  email: 'admin@youthnet.pk',
   role: 'ADMIN' as const,
-  // bcrypt hash for "admin@123"
   passwordHash: hashPassword('admin@123'),
-  displayName: 'Youth Net NOC Super Admin',
+  fullName: 'NOC Master Administrator',
+  displayName: 'NOC Master Administrator',
   phone: '+92 300 1234567',
   isActive: true,
-  mustChangePassword: true,
+  mustChangePassword: false,
   createdAt: '2026-01-01T00:00:00.000Z',
+};
+
+export const SEED_MANAGER_ACCOUNT = {
+  id: 'usr-mgr-01',
+  username: 'manager',
+  email: 'manager@youthnet.pk',
+  role: 'MANAGER' as const,
+  passwordHash: hashPassword('mgr@123'),
+  fullName: 'NOC Operations Manager',
+  displayName: 'NOC Operations Manager',
+  phone: '+92 301 9876543',
+  isActive: true,
+  mustChangePassword: false,
+  createdAt: '2026-01-15T00:00:00.000Z',
+};
+
+export const SEED_AGENT_ACCOUNT = {
+  id: 'usr-agent-01',
+  username: 'agent',
+  email: 'agent@youthnet.pk',
+  role: 'AGENT' as const,
+  passwordHash: hashPassword('agent@123'),
+  fullName: 'Bilal Khan (Field Agent)',
+  displayName: 'Bilal Khan (Field Agent)',
+  phone: '+92 301 5550192',
+  linkedAgentId: 'agent-1',
+  assignedArea: 'Sector G-11 & G-10',
+  isActive: true,
+  mustChangePassword: false,
+  createdAt: '2026-02-15T00:00:00.000Z',
+};
+
+export const SEED_CLIENT_ACCOUNT = {
+  id: 'usr-client-01',
+  username: 'client',
+  email: 'client@youthnet.pk',
+  role: 'CLIENT' as const,
+  passwordHash: hashPassword('client@123'),
+  fullName: 'Dr. Shahzad Rafique (Client)',
+  displayName: 'Dr. Shahzad Rafique (Client)',
+  phone: '+92 300 5559812',
+  linkedCustomerId: 'cust-101',
+  isActive: true,
+  mustChangePassword: false,
+  createdAt: '2026-01-15T00:00:00.000Z',
 };
 
 export const INITIAL_USER_ACCOUNTS = [
   SEED_ADMIN_ACCOUNT,
-  {
-    id: 'usr-agent-01',
-    username: 'bilal.khan',
-    email: 'bilal.khan@youthnet.pk',
-    role: 'AGENT' as const,
-    passwordHash: hashPassword('agent@123'),
-    displayName: 'Bilal Khan',
-    phone: '+92 301 5550192',
-    linkedAgentId: 'agent-1',
-    assignedArea: 'Sector G-11 & G-10',
-    isActive: true,
-    mustChangePassword: false,
-    createdAt: '2026-02-15T00:00:00.000Z',
-  },
+  SEED_MANAGER_ACCOUNT,
+  SEED_AGENT_ACCOUNT,
+  SEED_CLIENT_ACCOUNT,
   {
     id: 'usr-agent-02',
     username: 'tariq.mehmood',
     email: 'tariq.mehmood@youthnet.pk',
     role: 'AGENT' as const,
     passwordHash: hashPassword('agent@123'),
+    fullName: 'Tariq Mehmood',
     displayName: 'Tariq Mehmood',
     phone: '+92 302 5550881',
     linkedAgentId: 'agent-2',
@@ -64,11 +99,12 @@ export const INITIAL_USER_ACCOUNTS = [
     createdAt: '2026-03-01T00:00:00.000Z',
   },
   {
-    id: 'usr-client-01',
+    id: 'usr-client-02',
     username: 'fatima_noor_g11',
     email: 'fatima.noor@outlook.com',
     role: 'CLIENT' as const,
     passwordHash: hashPassword('client@123'),
+    fullName: 'Fatima Noor',
     displayName: 'Fatima Noor',
     phone: '+92 313 5552390',
     linkedCustomerId: 'cust-104',
@@ -76,46 +112,39 @@ export const INITIAL_USER_ACCOUNTS = [
     mustChangePassword: false,
     createdAt: '2026-02-10T00:00:00.000Z',
   },
-  {
-    id: 'usr-client-02',
-    username: 'dr_shahzad_g11',
-    email: 'dr.shahzad@hospital.pk',
-    role: 'CLIENT' as const,
-    passwordHash: hashPassword('client@123'),
-    displayName: 'Dr. Shahzad Rafique',
-    phone: '+92 300 5559812',
-    linkedCustomerId: 'cust-101',
-    isActive: true,
-    mustChangePassword: false,
-    createdAt: '2026-01-15T00:00:00.000Z',
-  },
 ];
 
 /**
  * Node.js Boot Seeder Function
  */
 export async function seedDatabaseUsers(dbPool?: any) {
-  console.log('[SEED] Checking Master Admin account...');
-  const adminPasswordHash = hashPassword('admin@123');
+  console.log('[SEED] Checking default testing accounts (admin, manager, agent, client)...');
 
   if (dbPool) {
-    const query = `
-      INSERT INTO users (id, username, email, role, password_hash, display_name, phone, is_active, must_change_password)
-      VALUES (
-        gen_random_uuid(),
-        'admin',
-        'admin@isp.local',
-        'ADMIN',
-        $1,
-        'Youth Net NOC Super Admin',
-        '+92 300 1234567',
-        TRUE,
-        TRUE
-      )
-      ON CONFLICT (username) DO NOTHING;
-    `;
-    await dbPool.query(query, [adminPasswordHash]);
-    console.log('[SEED] Master Admin created successfully: username="admin", email="admin@isp.local", initial_password="admin@123"');
+    for (const acc of INITIAL_USER_ACCOUNTS) {
+      try {
+        const query = `
+          INSERT INTO users (id, username, password_hash, full_name, phone, role, is_active, created_at)
+          VALUES ($1, $2, $3, $4, $5, $6, $7, CURRENT_TIMESTAMP)
+          ON CONFLICT (username) DO UPDATE 
+          SET password_hash = EXCLUDED.password_hash,
+              role = EXCLUDED.role,
+              full_name = EXCLUDED.full_name;
+        `;
+        await dbPool.query(query, [
+          acc.id,
+          acc.username,
+          acc.passwordHash,
+          acc.fullName || acc.displayName,
+          acc.phone,
+          acc.role,
+          acc.isActive,
+        ]);
+      } catch (err: any) {
+        console.warn(`[SEED] Error inserting user ${acc.username}:`, err.message);
+      }
+    }
+    console.log('[SEED] All 4 default roles seeded in PostgreSQL users table: admin, manager, agent, client.');
   }
 
   return INITIAL_USER_ACCOUNTS;

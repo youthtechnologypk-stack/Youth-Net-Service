@@ -109,10 +109,22 @@ export class MikrotikRouterOSv7Service {
         },
       });
 
+      const contentType = response.headers.get('content-type') || '';
+      const isJson = contentType.toLowerCase().includes('application/json');
+
       if (!response.ok) {
         const errorText = await response.text();
+        const cleanPreview = errorText.slice(0, 150).replace(/\s+/g, ' ');
         throw new Error(
-          `RouterOS v7 API error [${response.status} ${response.statusText}]: ${errorText}`
+          `RouterOS v7 API error [HTTP ${response.status} ${response.statusText}]: ${cleanPreview || 'Host unreachable'}`
+        );
+      }
+
+      if (!isJson) {
+        const text = await response.text();
+        const cleanPreview = text.slice(0, 100).replace(/\s+/g, ' ');
+        throw new Error(
+          `RouterOS API returned non-JSON response (${contentType || 'HTML/Text'}): ${cleanPreview || 'Invalid response'}`
         );
       }
 

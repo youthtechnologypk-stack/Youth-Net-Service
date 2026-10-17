@@ -19,6 +19,7 @@ import {
 } from 'lucide-react';
 import { Customer, Invoice } from '../types/isp';
 import { useISP } from '../context/ISPContext';
+import { useCurrency } from '../context/CurrencyContext';
 import { ActiveTab } from './Header';
 
 interface CustomerQuickDetailModalProps {
@@ -37,6 +38,7 @@ export const CustomerQuickDetailModal: React.FC<CustomerQuickDetailModalProps> =
   onOpenReceiptModal,
 }) => {
   const { packages, invoices, onus, activeSessions, logWhatsAppNotice } = useISP();
+  const { formatCurrency } = useCurrency();
 
   if (!customer) return null;
 
@@ -53,7 +55,7 @@ export const CustomerQuickDetailModal: React.FC<CustomerQuickDetailModalProps> =
       `Dear *${customer.name}* (Acct: ${customer.accountNumber}),\n` +
       `PPPoE Login: \`${customer.pppoeUsername}\`\n` +
       `Current Plan: ${pkg?.name || 'Standard Package'} (${pkg?.downloadSpeedMbps || 20} Mbps)\n` +
-      `Current Balance: $${customer.balanceDue.toFixed(2)}\n` +
+      `Current Balance: ${formatCurrency(customer.balanceDue)}\n` +
       `Status: ${customer.status.toUpperCase()}\n` +
       `Assigned IP: ${customer.assignedIp}\n\n` +
       `For queries or immediate support, reply to this message.\n` +
@@ -133,7 +135,7 @@ export const CustomerQuickDetailModal: React.FC<CustomerQuickDetailModalProps> =
                   customer.balanceDue > 0 ? 'text-rose-400' : 'text-emerald-400'
                 }`}
               >
-                ${customer.balanceDue.toFixed(2)}
+                {formatCurrency(customer.balanceDue)}
               </span>
               <span className="text-[9px] text-slate-500">Bill Cycle: 1st of month</span>
             </div>
@@ -236,7 +238,7 @@ export const CustomerQuickDetailModal: React.FC<CustomerQuickDetailModalProps> =
                     </div>
 
                     <div className="flex items-center gap-3">
-                      <span className="text-white font-bold">${inv.totalAmount.toFixed(2)}</span>
+                      <span className="text-white font-bold">{formatCurrency(inv.totalAmount)}</span>
                       <span
                         className={`text-[9px] px-1.5 py-0.2 rounded font-bold uppercase ${
                           inv.status === 'paid'

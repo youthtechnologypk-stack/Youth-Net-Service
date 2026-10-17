@@ -16,6 +16,7 @@ import {
   Sparkles,
 } from 'lucide-react';
 import { useISP } from '../context/ISPContext';
+import { useCurrency } from '../context/CurrencyContext';
 import { Customer, Invoice, ActiveSession } from '../types/isp';
 import { OnuDevice } from '../types/olt';
 import { ActiveTab } from './Header';
@@ -35,6 +36,7 @@ export const GlobalSearchBar: React.FC<GlobalSearchBarProps> = ({
   className = '',
 }) => {
   const { customers, invoices, activeSessions, onus, packages } = useISP();
+  const { formatCurrency } = useCurrency();
 
   const [query, setQuery] = useState('');
   const [isOpen, setIsOpen] = useState(false);
@@ -313,7 +315,7 @@ export const GlobalSearchBar: React.FC<GlobalSearchBarProps> = ({
                                         cust.balanceDue > 0 ? 'text-rose-400' : 'text-emerald-400'
                                       }`}
                                     >
-                                      ${cust.balanceDue.toFixed(2)}
+                                      {formatCurrency(cust.balanceDue)}
                                     </span>
                                     <span className="text-[9px] text-slate-500">
                                       {cust.balanceDue > 0 ? 'Due' : 'Paid'}
@@ -376,7 +378,7 @@ export const GlobalSearchBar: React.FC<GlobalSearchBarProps> = ({
                               <div className="text-right shrink-0 flex items-center gap-2">
                                 <div>
                                   <span className="text-white font-bold text-xs block">
-                                    ${inv.totalAmount.toFixed(2)}
+                                    {formatCurrency(inv.totalAmount)}
                                   </span>
                                   <span
                                     className={`text-[9px] px-1.5 py-0.2 rounded font-bold uppercase ${

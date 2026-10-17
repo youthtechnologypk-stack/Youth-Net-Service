@@ -2,6 +2,7 @@ import React, { useState, useEffect } from 'react';
 import { X, Edit3, DollarSign, Calendar, CheckCircle2, ShieldAlert } from 'lucide-react';
 import { Invoice, InvoiceStatus } from '../types/isp';
 import { useISP } from '../context/ISPContext';
+import { useCurrency } from '../context/CurrencyContext';
 
 interface EditInvoiceModalProps {
   invoice: Invoice | null;
@@ -15,6 +16,7 @@ export const EditInvoiceModal: React.FC<EditInvoiceModalProps> = ({
   onClose,
 }) => {
   const { updateInvoice, packages } = useISP();
+  const { formatCurrency, currencySymbol } = useCurrency();
 
   const [invoiceNumber, setInvoiceNumber] = useState('');
   const [customerName, setCustomerName] = useState('');
@@ -197,7 +199,7 @@ export const EditInvoiceModal: React.FC<EditInvoiceModalProps> = ({
             <span className="text-[11px] font-semibold text-slate-300 block">Financial Adjustment</span>
             <div className="grid grid-cols-3 gap-2">
               <div>
-                <label className="block text-slate-400 text-[10px] mb-1 font-mono">Base Fee ($)</label>
+                <label className="block text-slate-400 text-[10px] mb-1 font-mono">Base Fee ({currencySymbol})</label>
                 <input
                   type="number"
                   step="0.01"
@@ -208,7 +210,7 @@ export const EditInvoiceModal: React.FC<EditInvoiceModalProps> = ({
               </div>
 
               <div>
-                <label className="block text-slate-400 text-[10px] mb-1 font-mono">Tax 16% ($)</label>
+                <label className="block text-slate-400 text-[10px] mb-1 font-mono">Tax 16% ({currencySymbol})</label>
                 <input
                   type="number"
                   step="0.01"
@@ -219,7 +221,7 @@ export const EditInvoiceModal: React.FC<EditInvoiceModalProps> = ({
               </div>
 
               <div>
-                <label className="block text-slate-400 text-[10px] mb-1 font-mono">Discount ($)</label>
+                <label className="block text-slate-400 text-[10px] mb-1 font-mono">Discount ({currencySymbol})</label>
                 <input
                   type="number"
                   step="0.01"
@@ -233,7 +235,7 @@ export const EditInvoiceModal: React.FC<EditInvoiceModalProps> = ({
             <div className="flex justify-between items-center pt-2 border-t border-slate-800 text-xs">
               <span className="text-slate-400 font-mono">Adjusted Total Due:</span>
               <span className="text-emerald-400 font-bold font-mono text-sm">
-                ${totalAmount.toFixed(2)}
+                {formatCurrency(totalAmount)}
               </span>
             </div>
           </div>

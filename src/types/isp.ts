@@ -25,6 +25,15 @@ export interface InternetPackage {
   mikrotikProfile: string;
   dataLimitGb: number | null; // null for unlimited
   isPopular?: boolean;
+  localAddress?: string; // e.g. "192.168.8.1"
+  remoteAddressPool?: string; // e.g. "pppoe-pool-1"
+  dnsServers?: string; // e.g. "8.8.8.8, 1.1.1.1"
+  queueType?: string; // e.g. "default" | "pcq-download-default" | "fq_codel"
+  burstDownloadMbps?: number;
+  burstUploadMbps?: number;
+  burstThresholdMbps?: number;
+  burstTimeSeconds?: number;
+  description?: string;
 }
 
 export interface Customer {
@@ -65,7 +74,8 @@ export interface MikrotikRouter {
   memoryUsageMb: number;
   totalMemoryMb: number;
   uptime: string;
-  status: 'online' | 'unreachable' | 'syncing';
+  status: 'online' | 'unreachable' | 'syncing' | 'hybrid_online';
+  mode?: 'live' | 'hybrid';
   wanInterface: string;
   currentWanRxMbps: number;
   currentWanTxMbps: number;
@@ -87,6 +97,27 @@ export interface ActiveSession {
   routerId: string;
   customerName?: string;
   profileName: string;
+  liveRateFormatted?: string;
+}
+
+export type InvoiceItemCategory =
+  | 'monthly_subscription'
+  | 'installation_fee'
+  | 'router_onu_ont'
+  | 'fiber_cable'
+  | 'patch_cord'
+  | 'joint_box_splitter'
+  | 'custom_hardware';
+
+export interface InvoiceLineItem {
+  id: string;
+  category: InvoiceItemCategory;
+  description: string;
+  quantity: number;
+  unitPrice: number;
+  totalPrice: number;
+  serialNumber?: string; // Optional MAC / Serial Number for ONUs, ONT devices, routers
+  unit?: string; // e.g. "meter", "pcs", "month"
 }
 
 export interface Invoice {
@@ -106,11 +137,13 @@ export interface Invoice {
   dueDate: string;
   issuedAt: string;
   paidAt?: string;
+  paymentMethod?: PaymentMethod | string;
   collectedByAgentId?: string;
   agentName?: string;
   receiptNumber?: string;
   whatsappNoticeSent: boolean;
   whatsappNoticeTimestamp?: string;
+  lineItems?: InvoiceLineItem[];
 }
 
 export interface PaymentCollection {

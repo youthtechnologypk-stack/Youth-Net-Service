@@ -1,0 +1,38 @@
+[
+  {
+    "id": "usr-admin-01",
+    "username": "admin",
+    "password_hash": "$2b$12$netpulse.7a8b9c0d1e2f3a4b5c6d7e8f9a0b1c2d3e4f5a6b7c8d9e0f",
+    "full_name": "NOC Master Administrator",
+    "phone": "+92 300 1234567",
+    "role": "ADMIN",
+    "is_active": true
+  },
+  {
+    "id": "usr-mgr-01",
+    "username": "manager",
+    "password_hash": "$2b$12$netpulse.manager123hash7a8b9c0d1e2f3a4b5c6d7e8f9a0b1c2d",
+    "full_name": "NOC Operations Manager",
+    "phone": "+92 301 9876543",
+    "role": "MANAGER",
+    "is_active": true
+  },
+  {
+    "id": "usr-agent-01",
+    "username": "agent",
+    "password_hash": "$2b$12$netpulse.agent123hash7a8b9c0d1e2f3a4b5c6d7e8f9a0b1c2d3e",
+    "full_name": "Bilal Khan (Field Recovery Agent)",
+    "phone": "+92 301 5550192",
+    "role": "AGENT",
+    "is_active": true
+  },
+  {
+    "id": "usr-client-01",
+    "username": "client",
+    "password_hash": "$2b$12$netpulse.client123hash7a8b9c0d1e2f3a4b5c6d7e8f9a0b1c2d3",
+    "full_name": "Dr. Shahzad Rafique (Subscriber)",
+    "phone": "+92 300 5559812",
+    "role": "CLIENT",
+    "is_active": true
+  }
+]

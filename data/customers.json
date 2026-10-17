@@ -1,0 +1,22 @@
+[
+  {
+    "accountNumber": "NP-2546",
+    "connectionType": "pppoe",
+    "service": "pppoe",
+    "status": "archived",
+    "balanceDue": 0,
+    "isDeleted": true,
+    "createdAt": "2026-10-09T16:42:27.976Z",
+    "id": "cust-1791564147976-937",
+    "name": "Hybrid Test Subscriber",
+    "phone": "+92 300 1234567",
+    "address": "Sector G-11/2",
+    "areaNode": "Sector G-11",
+    "pppoeUsername": "hybrid_test_user",
+    "pppoePassword": "testpass123",
+    "packageId": "50M_Turbo_Profile",
+    "assignedIp": "10.50.29.67",
+    "routerId": "rt-core-01",
+    "comment": "Hybrid Test Subscriber | +92 300 1234567"
+  }
+]

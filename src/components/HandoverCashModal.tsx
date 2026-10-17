@@ -2,6 +2,7 @@ import React, { useState, useEffect } from 'react';
 import { X, DollarSign, UserCheck, ShieldCheck, ArrowRight, Building, CheckCircle2 } from 'lucide-react';
 import { FieldAgent } from '../types/isp';
 import { useISP } from '../context/ISPContext';
+import { useCurrency } from '../context/CurrencyContext';
 
 interface HandoverCashModalProps {
   agent: FieldAgent;
@@ -17,6 +18,7 @@ export const HandoverCashModal: React.FC<HandoverCashModalProps> = ({
   onHandoverSuccess,
 }) => {
   const { handoverCashToBoss } = useISP();
+  const { formatCurrency, currencySymbol } = useCurrency();
 
   const [handoverAmount, setHandoverAmount] = useState<number>(agent.cashInHand);
   const [receiver, setReceiver] = useState<string>('Boss / CEO Desk (Mr. Farhan)');
@@ -82,7 +84,7 @@ export const HandoverCashModal: React.FC<HandoverCashModalProps> = ({
             <div>
               <h4 className="text-base font-bold text-white">Cash Handover Completed!</h4>
               <p className="text-xs text-slate-400 mt-1">
-                Successfully deposited <span className="text-emerald-400 font-bold font-mono">${successResult.amount.toFixed(2)}</span> with {receiver}.
+                Successfully deposited <span className="text-emerald-400 font-bold font-mono">{formatCurrency(successResult.amount)}</span> with {receiver}.
               </p>
             </div>
 
@@ -97,7 +99,7 @@ export const HandoverCashModal: React.FC<HandoverCashModalProps> = ({
               </div>
               <div className="flex justify-between">
                 <span className="text-slate-400">Remaining in Hand:</span>
-                <span className="text-emerald-400 font-bold">${agent.cashInHand.toFixed(2)}</span>
+                <span className="text-emerald-400 font-bold">{formatCurrency(agent.cashInHand)}</span>
               </div>
               <div className="flex justify-between text-[10px] text-slate-500 pt-1 border-t border-slate-800">
                 <span>WhatsApp Notice:</span>
@@ -125,33 +127,33 @@ export const HandoverCashModal: React.FC<HandoverCashModalProps> = ({
               <div className="text-right">
                 <span className="text-[10px] text-slate-400 block font-mono">Current Cash in Hand</span>
                 <span className="text-base font-bold text-emerald-400 font-mono">
-                  ${agent.cashInHand.toFixed(2)}
+                  {formatCurrency(agent.cashInHand)}
                 </span>
               </div>
             </div>
 
             {agent.cashInHand <= 0 && (
               <div className="p-2.5 rounded-lg bg-amber-950/60 border border-amber-800 text-amber-300 text-[11px]">
-                ⚠️ You currently have $0.00 cash in hand. Collect subscriber dues before submitting handover.
+                ⚠️ You currently have {formatCurrency(0)} cash in hand. Collect subscriber dues before submitting handover.
               </div>
             )}
 
             {/* Handover Amount Input */}
             <div>
               <div className="flex justify-between items-center mb-1">
-                <label className="text-slate-300 font-medium">Amount to Handover ($)</label>
+                <label className="text-slate-300 font-medium">Amount to Handover ({currencySymbol})</label>
                 {agent.cashInHand > 0 && (
                   <button
                     type="button"
                     onClick={() => setHandoverAmount(agent.cashInHand)}
                     className="text-[10px] text-cyan-400 hover:underline font-mono"
                   >
-                    Handover All (${agent.cashInHand.toFixed(2)})
+                    Handover All ({formatCurrency(agent.cashInHand)})
                   </button>
                 )}
               </div>
               <div className="relative">
-                <span className="absolute left-3 top-2.5 text-slate-500 font-mono">$</span>
+                <span className="absolute left-3 top-2.5 text-slate-500 font-mono">{currencySymbol}</span>
                 <input
                   type="number"
                   step="0.01"
@@ -196,12 +198,12 @@ export const HandoverCashModal: React.FC<HandoverCashModalProps> = ({
             <div className="bg-slate-950/70 p-2.5 rounded-lg border border-slate-800 text-[11px] font-mono space-y-1">
               <div className="flex justify-between text-slate-400">
                 <span>Handover Amount:</span>
-                <span className="text-white font-bold">${handoverAmount.toFixed(2)}</span>
+                <span className="text-white font-bold">{formatCurrency(handoverAmount)}</span>
               </div>
               <div className="flex justify-between text-slate-400">
                 <span>Remaining in Hand after Handover:</span>
                 <span className="text-cyan-400 font-bold">
-                  ${Math.max(0, agent.cashInHand - handoverAmount).toFixed(2)}
+                  {formatCurrency(Math.max(0, agent.cashInHand - handoverAmount))}
                 </span>
               </div>
             </div>

@@ -1,0 +1,47 @@
+{
+  "roles": {
+    "ADMIN": {
+      "manager_view_billing_revenue": true,
+      "manager_manual_cash_approval": true,
+      "manager_edit_subscribers": true,
+      "manager_routeros_active_kick": true,
+      "manager_tickets_create_assign": true,
+      "manager_olt_optical_telemetry": true,
+      "agent_collect_cash_receipts": true,
+      "agent_view_subscriber_contact_location": true,
+      "agent_check_ont_optical_power": true,
+      "agent_resolve_fiber_tickets": true,
+      "agent_full_area_directory": true,
+      "client_online_bill_payment": true,
+      "client_lodge_complaint_ticket": true,
+      "client_live_speed_bandwidth_monitor": true,
+      "client_download_invoices_receipts": true,
+      "client_wifi_password_self_service": true
+    },
+    "MANAGER": {
+      "manager_view_billing_revenue": true,
+      "manager_manual_cash_approval": true,
+      "manager_edit_subscribers": true,
+      "manager_routeros_active_kick": true,
+      "manager_tickets_create_assign": true,
+      "manager_olt_optical_telemetry": true
+    },
+    "AGENT": {
+      "agent_collect_cash_receipts": true,
+      "agent_view_subscriber_contact_location": true,
+      "agent_check_ont_optical_power": true,
+      "agent_resolve_fiber_tickets": true,
+      "agent_full_area_directory": false
+    },
+    "CLIENT": {
+      "client_online_bill_payment": true,
+      "client_lodge_complaint_ticket": true,
+      "client_live_speed_bandwidth_monitor": true,
+      "client_download_invoices_receipts": true,
+      "client_wifi_password_self_service": true
+    }
+  },
+  "userOverrides": {},
+  "updatedAt": "2026-10-16T12:20:18.963Z",
+  "updatedBy": "reset_to_defaults"
+}

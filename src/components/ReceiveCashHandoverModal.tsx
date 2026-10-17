@@ -2,6 +2,7 @@ import React, { useState, useEffect } from 'react';
 import { X, DollarSign, ShieldCheck, CheckCircle2, User, Building } from 'lucide-react';
 import { FieldAgent } from '../types/isp';
 import { useISP } from '../context/ISPContext';
+import { useCurrency } from '../context/CurrencyContext';
 
 interface ReceiveCashHandoverModalProps {
   isOpen: boolean;
@@ -15,6 +16,7 @@ export const ReceiveCashHandoverModal: React.FC<ReceiveCashHandoverModalProps> =
   defaultAgentId,
 }) => {
   const { agents, receiveDirectHandoverFromAgent } = useISP();
+  const { formatCurrency, currencySymbol } = useCurrency();
 
   const [agentId, setAgentId] = useState<string>(defaultAgentId || agents[0]?.id || '');
   const [amount, setAmount] = useState<number>(0);
@@ -52,7 +54,7 @@ export const ReceiveCashHandoverModal: React.FC<ReceiveCashHandoverModalProps> =
         receiver,
         notes
       );
-      setSuccessMessage(`Cash Handover ${res.handoverNumber} of $${amount.toFixed(2)} accepted & confirmed!`);
+      setSuccessMessage(`Cash Handover ${res.handoverNumber} of ${formatCurrency(amount)} accepted & confirmed!`);
     } catch (err) {
       console.error(err);
     } finally {
@@ -110,7 +112,7 @@ export const ReceiveCashHandoverModal: React.FC<ReceiveCashHandoverModalProps> =
               >
                 {agents.map((a) => (
                   <option key={a.id} value={a.id}>
-                    {a.name} &bull; Cash-in-Hand: ${a.cashInHand.toFixed(2)} ({a.assignedArea})
+                    {a.name} &bull; Cash-in-Hand: {formatCurrency(a.cashInHand)} ({a.assignedArea})
                   </option>
                 ))}
               </select>
@@ -121,11 +123,11 @@ export const ReceiveCashHandoverModal: React.FC<ReceiveCashHandoverModalProps> =
               <div className="bg-slate-950 p-3 rounded-xl border border-slate-800 flex justify-between items-center text-xs font-mono">
                 <div>
                   <span className="text-slate-400 text-[10px] block">Current Cash Held by Agent:</span>
-                  <span className="text-cyan-300 font-bold">${selectedAgent.cashInHand.toFixed(2)}</span>
+                  <span className="text-cyan-300 font-bold">{formatCurrency(selectedAgent.cashInHand)}</span>
                 </div>
                 <div className="text-right">
                   <span className="text-slate-400 text-[10px] block">Collected Today:</span>
-                  <span className="text-emerald-400 font-bold">${selectedAgent.totalCollectedToday.toFixed(2)}</span>
+                  <span className="text-emerald-400 font-bold">{formatCurrency(selectedAgent.totalCollectedToday)}</span>
                 </div>
               </div>
             )}
@@ -133,14 +135,14 @@ export const ReceiveCashHandoverModal: React.FC<ReceiveCashHandoverModalProps> =
             {/* Amount Received Input */}
             <div>
               <div className="flex justify-between items-center mb-1">
-                <label className="text-slate-300 font-medium">Physical Cash Amount Received ($)</label>
+                <label className="text-slate-300 font-medium">Physical Cash Amount Received ({currencySymbol})</label>
                 {selectedAgent && selectedAgent.cashInHand > 0 && (
                   <button
                     type="button"
                     onClick={() => setAmount(selectedAgent.cashInHand)}
                     className="text-[10px] text-cyan-400 hover:underline font-mono"
                   >
-                    Receive All (${selectedAgent.cashInHand.toFixed(2)})
+                    Receive All ({formatCurrency(selectedAgent.cashInHand)})
                   </button>
                 )}
               </div>
@@ -197,7 +199,7 @@ export const ReceiveCashHandoverModal: React.FC<ReceiveCashHandoverModalProps> =
                 className="px-4 py-2 rounded-lg bg-emerald-600 hover:bg-emerald-500 disabled:opacity-50 text-slate-950 font-bold transition shadow-sm flex items-center gap-1.5"
               >
                 <ShieldCheck className="w-4 h-4" />
-                <span>Confirm & Accept Deposit (${amount.toFixed(2)})</span>
+                <span>Confirm & Accept Deposit ({formatCurrency(amount)})</span>
               </button>
             </div>
           </form>

@@ -21,6 +21,7 @@ import {
   Trash2,
 } from 'lucide-react';
 import { useISP } from '../context/ISPContext';
+import { useCurrency } from '../context/CurrencyContext';
 import { offlineQueueManager } from '../services/offlineQueueManager';
 import {
   OfflineCollectionRecord,
@@ -39,6 +40,7 @@ export const OfflineActivityDashboard: React.FC<OfflineActivityDashboardProps> =
   onOpenReceiptModal,
 }) => {
   const { customers, invoices, agents, collectAgentCashPayment } = useISP();
+  const { formatCurrency, currencySymbol } = useCurrency();
 
   const currentAgent = agents.find((a) => a.id === currentAgentId) || agents[0];
 
@@ -389,7 +391,7 @@ export const OfflineActivityDashboard: React.FC<OfflineActivityDashboardProps> =
             >
               {unpaidInvoices.map((inv) => (
                 <option key={inv.id} value={inv.id}>
-                  {inv.customerName} - {inv.invoiceNumber} (${inv.totalAmount.toFixed(2)})
+                  {inv.customerName} - {inv.invoiceNumber} ({formatCurrency(inv.totalAmount)})
                 </option>
               ))}
               {unpaidInvoices.length === 0 && (
@@ -399,7 +401,7 @@ export const OfflineActivityDashboard: React.FC<OfflineActivityDashboardProps> =
           </div>
 
           <div>
-            <label className="block text-[10px] text-slate-400 mb-1">Amount ($)</label>
+            <label className="block text-[10px] text-slate-400 mb-1">Amount ({currencySymbol})</label>
             <input
               type="number"
               min={1}
@@ -523,7 +525,7 @@ export const OfflineActivityDashboard: React.FC<OfflineActivityDashboardProps> =
 
                 <div className="text-right font-mono">
                   <span className="text-emerald-400 font-bold block text-sm">
-                    ${item.amount.toFixed(2)}
+                    {formatCurrency(item.amount)}
                   </span>
                   <span className="text-[10px] text-slate-500">
                     {item.serverReceiptNumber || 'Local Stored'}

@@ -15,6 +15,7 @@ import {
   Shield,
 } from 'lucide-react';
 import { useISP } from '../context/ISPContext';
+import { useCurrency } from '../context/CurrencyContext';
 import { FieldAgent } from '../types/isp';
 
 interface AddOrEditAgentModalProps {
@@ -42,6 +43,7 @@ export const AddOrEditAgentModal: React.FC<AddOrEditAgentModalProps> = ({
   onSuccess,
 }) => {
   const { addAgent, updateAgent, deleteAgent, agents } = useISP();
+  const { currencySymbol } = useCurrency();
 
   const isEditMode = Boolean(agentToEdit);
 
@@ -347,10 +349,10 @@ export const AddOrEditAgentModal: React.FC<AddOrEditAgentModalProps> = ({
               <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 font-mono">
                 <div>
                   <label className="block text-slate-300 font-sans font-medium mb-1">
-                    Base Monthly Salary ($/mo) <span className="text-rose-400">*</span>
+                    Base Monthly Salary ({currencySymbol}/mo) <span className="text-rose-400">*</span>
                   </label>
                   <div className="relative">
-                    <span className="absolute left-3 top-2.5 text-slate-500">$</span>
+                    <span className="absolute left-3 top-2.5 text-slate-500 font-mono">{currencySymbol}</span>
                     <input
                       type="number"
                       min={0}
@@ -358,7 +360,7 @@ export const AddOrEditAgentModal: React.FC<AddOrEditAgentModalProps> = ({
                       required
                       value={baseSalary}
                       onChange={(e) => setBaseSalary(parseFloat(e.target.value) || 0)}
-                      className="w-full bg-slate-950 border border-slate-700 text-emerald-400 pl-7 pr-3 py-2 rounded-lg focus:outline-none focus:border-cyan-500 text-xs font-bold"
+                      className="w-full bg-slate-950 border border-slate-700 text-emerald-400 pl-8 pr-3 py-2 rounded-lg focus:outline-none focus:border-cyan-500 text-xs font-bold"
                     />
                   </div>
                   <span className="text-[10px] text-slate-500 mt-0.5 block font-sans">
@@ -369,17 +371,17 @@ export const AddOrEditAgentModal: React.FC<AddOrEditAgentModalProps> = ({
                 {isEditMode && (
                   <div>
                     <label className="block text-slate-300 font-sans font-medium mb-1">
-                      Active Cash-in-Hand ($)
+                      Active Cash-in-Hand ({currencySymbol})
                     </label>
                     <div className="relative">
-                      <span className="absolute left-3 top-2.5 text-slate-500">$</span>
+                      <span className="absolute left-3 top-2.5 text-slate-500 font-mono">{currencySymbol}</span>
                       <input
                         type="number"
                         min={0}
                         step={1}
                         value={cashInHand}
                         onChange={(e) => setCashInHand(parseFloat(e.target.value) || 0)}
-                        className="w-full bg-slate-950 border border-slate-700 text-cyan-300 pl-7 pr-3 py-2 rounded-lg focus:outline-none focus:border-cyan-500 text-xs font-bold"
+                        className="w-full bg-slate-950 border border-slate-700 text-cyan-300 pl-8 pr-3 py-2 rounded-lg focus:outline-none focus:border-cyan-500 text-xs font-bold"
                       />
                     </div>
                     <span className="text-[10px] text-slate-500 mt-0.5 block font-sans">

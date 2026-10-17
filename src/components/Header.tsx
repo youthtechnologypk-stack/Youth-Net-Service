@@ -13,18 +13,34 @@ import {
   PlusCircle,
   Megaphone,
   Shield,
+  ShieldCheck,
   Users,
   Layers,
   Settings,
   Menu,
   X,
+  LogOut,
 } from 'lucide-react';
 import { useISP } from '../context/ISPContext';
-import { SystemRole } from '../types/auth';
+import { SystemRole, UserAccount } from '../types/auth';
 import { Invoice } from '../types/isp';
 import { GlobalSearchBar } from './GlobalSearchBar';
+import { PWAInstallPrompt } from './PWAInstallPrompt';
 
-export type ActiveTab = 'noc' | 'mikrotik' | 'olt' | 'billing' | 'complaints' | 'mobile' | 'users' | 'architecture' | 'settings';
+export type ActiveTab =
+  | 'noc'
+  | 'operations'
+  | 'mikrotik'
+  | 'olt'
+  | 'billing'
+  | 'complaints'
+  | 'mobile'
+  | 'users'
+  | 'permissions'
+  | 'architecture'
+  | 'settings'
+  | 'agent_portal'
+  | 'client_portal';
 
 interface HeaderProps {
   activeTab: ActiveTab;
@@ -37,6 +53,8 @@ interface HeaderProps {
   onOpenReceiptModal?: (invoice: Invoice) => void;
   currentRole?: SystemRole;
   onSwitchRole?: (role: SystemRole) => void;
+  currentUser?: UserAccount | null;
+  onLogout?: () => void;
   isSidebarOpen?: boolean;
   onToggleSidebar?: () => void;
 }
@@ -52,6 +70,8 @@ export const Header: React.FC<HeaderProps> = ({
   onOpenReceiptModal,
   currentRole,
   onSwitchRole,
+  currentUser,
+  onLogout,
   isSidebarOpen,
   onToggleSidebar,
 }) => {
@@ -164,7 +184,7 @@ export const Header: React.FC<HeaderProps> = ({
             </span>
           </div>
 
-          {/* Quick Action Buttons & Role Badge */}
+          {/* Quick Action Buttons, User Session & Logout */}
           <div className="flex items-center gap-2">
             <div className="flex items-center gap-1.5 bg-slate-900 border border-slate-800 px-2.5 py-1.5 rounded-md">
               <Shield className="w-3.5 h-3.5 text-cyan-400" />
@@ -172,159 +192,326 @@ export const Header: React.FC<HeaderProps> = ({
               <span className={`text-[10px] px-1.5 py-0.5 rounded font-mono font-bold ${
                 currentRole === 'ADMIN'
                   ? 'bg-rose-950 text-rose-300 border border-rose-800'
+                  : currentRole === 'MANAGER'
+                  ? 'bg-indigo-950 text-indigo-300 border border-indigo-800'
                   : currentRole === 'AGENT'
                   ? 'bg-cyan-950 text-cyan-300 border border-cyan-800'
                   : 'bg-emerald-950 text-emerald-300 border border-emerald-800'
               }`}>
                 {currentRole || 'ADMIN'}
               </span>
+              {currentUser?.username && (
+                <span className="text-[10px] text-slate-300 font-mono hidden sm:inline">
+                  ({currentUser.username})
+                </span>
+              )}
             </div>
 
-            <button
-              onClick={() => onOpenProvisionModal()}
-              className="flex items-center gap-1.5 bg-cyan-600 hover:bg-cyan-500 text-slate-950 font-semibold px-2.5 py-1.5 rounded text-xs transition shadow-sm"
-              title="Provision PPPoE Customer"
-            >
-              <PlusCircle className="w-3.5 h-3.5" />
-              <span>+ Provision PPPoE</span>
-            </button>
+            {currentRole === 'ADMIN' && (
+              <>
+                <button
+                  onClick={() => onOpenProvisionModal()}
+                  className="hidden sm:flex items-center gap-1.5 bg-cyan-600 hover:bg-cyan-500 text-slate-950 font-semibold px-2.5 py-1.5 rounded text-xs transition shadow-sm"
+                  title="Provision PPPoE Customer"
+                >
+                  <PlusCircle className="w-3.5 h-3.5" />
+                  <span>+ Provision PPPoE</span>
+                </button>
 
-            <button
-              onClick={() => onOpenOutageModal()}
-              className="flex items-center gap-1.5 bg-rose-600/90 hover:bg-rose-500 text-white font-medium px-2.5 py-1.5 rounded text-xs transition"
-              title="Broadcast Emergency Outage Alert"
-            >
-              <Megaphone className="w-3.5 h-3.5" />
-              <span className="hidden sm:inline">Outage Broadcast</span>
-            </button>
+                <button
+                  onClick={() => onOpenOutageModal()}
+                  className="hidden sm:flex items-center gap-1.5 bg-rose-600/90 hover:bg-rose-500 text-white font-medium px-2.5 py-1.5 rounded text-xs transition"
+                  title="Broadcast Emergency Outage Alert"
+                >
+                  <Megaphone className="w-3.5 h-3.5" />
+                  <span>Outage Broadcast</span>
+                </button>
+              </>
+            )}
+
+            {/* PWA Install Button */}
+            <PWAInstallPrompt role={currentRole} variant="button" />
+
+            {onLogout && (
+              <button
+                onClick={onLogout}
+                className="flex items-center gap-1.5 bg-slate-800 hover:bg-rose-900/60 hover:text-rose-200 text-slate-300 font-medium px-2.5 py-1.5 rounded text-xs transition border border-slate-700 cursor-pointer shadow-sm"
+                title="Sign Out of Session"
+              >
+                <LogOut className="w-3.5 h-3.5 text-rose-400" />
+                <span>Logout</span>
+              </button>
+            )}
           </div>
         </div>
       </div>
 
-      {/* Main Navigation Tabs */}
+      {/* Main Navigation Tabs Filtered by Role */}
       <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8">
         <nav className="flex space-x-1 sm:space-x-2 overflow-x-auto py-2 scrollbar-none">
-          <button
-            onClick={() => setActiveTab('noc')}
-            className={`flex items-center gap-2 px-3 py-2 text-xs sm:text-sm font-medium rounded-lg transition whitespace-nowrap ${
-              activeTab === 'noc'
-                ? 'bg-slate-800 text-cyan-400 border border-cyan-500/30 shadow-sm'
-                : 'text-slate-400 hover:text-slate-200 hover:bg-slate-900'
-            }`}
-          >
-            <Activity className="w-4 h-4" />
-            NOC Command Center
-          </button>
+          {/* ADMIN TABS */}
+          {currentRole === 'ADMIN' && (
+            <>
+              <button
+                onClick={() => setActiveTab('noc')}
+                className={`flex items-center gap-2 px-3 py-2 text-xs sm:text-sm font-medium rounded-lg transition whitespace-nowrap ${
+                  activeTab === 'noc'
+                    ? 'bg-slate-800 text-cyan-400 border border-cyan-500/30 shadow-sm'
+                    : 'text-slate-400 hover:text-slate-200 hover:bg-slate-900'
+                }`}
+              >
+                <Activity className="w-4 h-4" />
+                NOC Command Center
+              </button>
 
-          <button
-            onClick={() => setActiveTab('mikrotik')}
-            className={`flex items-center gap-2 px-3 py-2 text-xs sm:text-sm font-medium rounded-lg transition whitespace-nowrap ${
-              activeTab === 'mikrotik'
-                ? 'bg-slate-800 text-cyan-400 border border-cyan-500/30 shadow-sm'
-                : 'text-slate-400 hover:text-slate-200 hover:bg-slate-900'
-            }`}
-          >
-            <Radio className="w-4 h-4" />
-            MikroTik RouterOS v7
-            <span className="text-[10px] px-1.5 py-0.5 rounded bg-cyan-900/60 text-cyan-300 font-mono">
-              Live
-            </span>
-          </button>
+              <button
+                onClick={() => setActiveTab('operations')}
+                className={`flex items-center gap-2 px-3 py-2 text-xs sm:text-sm font-medium rounded-lg transition whitespace-nowrap ${
+                  activeTab === 'operations'
+                    ? 'bg-slate-800 text-cyan-400 border border-cyan-500/30 shadow-sm'
+                    : 'text-slate-400 hover:text-slate-200 hover:bg-slate-900'
+                }`}
+              >
+                <Network className="w-4 h-4" />
+                Operations &amp; Dispatch
+              </button>
 
-          <button
-            onClick={() => setActiveTab('olt')}
-            className={`flex items-center gap-2 px-3 py-2 text-xs sm:text-sm font-medium rounded-lg transition whitespace-nowrap ${
-              activeTab === 'olt'
-                ? 'bg-slate-800 text-cyan-400 border border-cyan-500/30 shadow-sm'
-                : 'text-slate-400 hover:text-slate-200 hover:bg-slate-900'
-            }`}
-          >
-            <Layers className="w-4 h-4 text-cyan-400" />
-            VSOL OLT
-            <span className="text-[10px] px-1.5 py-0.5 rounded bg-emerald-900/60 text-emerald-300 font-mono">
-              GPON/EPON
-            </span>
-          </button>
+              <button
+                onClick={() => setActiveTab('mikrotik')}
+                className={`flex items-center gap-2 px-3 py-2 text-xs sm:text-sm font-medium rounded-lg transition whitespace-nowrap ${
+                  activeTab === 'mikrotik'
+                    ? 'bg-slate-800 text-cyan-400 border border-cyan-500/30 shadow-sm'
+                    : 'text-slate-400 hover:text-slate-200 hover:bg-slate-900'
+                }`}
+              >
+                <Radio className="w-4 h-4" />
+                MikroTik RouterOS v7
+                <span className="text-[10px] px-1.5 py-0.5 rounded bg-cyan-900/60 text-cyan-300 font-mono">
+                  Live
+                </span>
+              </button>
 
-          <button
-            onClick={() => setActiveTab('billing')}
-            className={`flex items-center gap-2 px-3 py-2 text-xs sm:text-sm font-medium rounded-lg transition whitespace-nowrap ${
-              activeTab === 'billing'
-                ? 'bg-slate-800 text-cyan-400 border border-cyan-500/30 shadow-sm'
-                : 'text-slate-400 hover:text-slate-200 hover:bg-slate-900'
-            }`}
-          >
-            <CreditCard className="w-4 h-4" />
-            Billing & Agent Cash
-          </button>
+              <button
+                onClick={() => setActiveTab('olt')}
+                className={`flex items-center gap-2 px-3 py-2 text-xs sm:text-sm font-medium rounded-lg transition whitespace-nowrap ${
+                  activeTab === 'olt'
+                    ? 'bg-slate-800 text-cyan-400 border border-cyan-500/30 shadow-sm'
+                    : 'text-slate-400 hover:text-slate-200 hover:bg-slate-900'
+                }`}
+              >
+                <Layers className="w-4 h-4 text-cyan-400" />
+                VSOL OLT
+                <span className="text-[10px] px-1.5 py-0.5 rounded bg-emerald-900/60 text-emerald-300 font-mono">
+                  GPON
+                </span>
+              </button>
 
-          <button
-            onClick={() => setActiveTab('complaints')}
-            className={`flex items-center gap-2 px-3 py-2 text-xs sm:text-sm font-medium rounded-lg transition whitespace-nowrap ${
-              activeTab === 'complaints'
-                ? 'bg-slate-800 text-cyan-400 border border-cyan-500/30 shadow-sm'
-                : 'text-slate-400 hover:text-slate-200 hover:bg-slate-900'
-            }`}
-          >
-            <AlertTriangle className="w-4 h-4" />
-            Complaints & SLA
-            {pendingSlaCount > 0 && (
-              <span className="text-[10px] px-1.5 py-0.2 rounded-full bg-rose-900/80 text-rose-300 border border-rose-700/50 font-mono">
-                {pendingSlaCount}
-              </span>
-            )}
-          </button>
+              <button
+                onClick={() => setActiveTab('billing')}
+                className={`flex items-center gap-2 px-3 py-2 text-xs sm:text-sm font-medium rounded-lg transition whitespace-nowrap ${
+                  activeTab === 'billing'
+                    ? 'bg-slate-800 text-cyan-400 border border-cyan-500/30 shadow-sm'
+                    : 'text-slate-400 hover:text-slate-200 hover:bg-slate-900'
+                }`}
+              >
+                <CreditCard className="w-4 h-4" />
+                Billing &amp; MRR
+              </button>
 
-          <button
-            onClick={() => setActiveTab('mobile')}
-            className={`flex items-center gap-2 px-3 py-2 text-xs sm:text-sm font-medium rounded-lg transition whitespace-nowrap ${
-              activeTab === 'mobile'
-                ? 'bg-slate-800 text-cyan-400 border border-cyan-500/30 shadow-sm'
-                : 'text-slate-400 hover:text-slate-200 hover:bg-slate-900'
-            }`}
-          >
-            <Smartphone className="w-4 h-4" />
-            Field & Client Mobile Apps
-            <span className="text-[10px] px-1.5 py-0.2 rounded bg-amber-900/50 text-amber-300 font-mono">
-              Dual
-            </span>
-          </button>
+              <button
+                onClick={() => setActiveTab('complaints')}
+                className={`flex items-center gap-2 px-3 py-2 text-xs sm:text-sm font-medium rounded-lg transition whitespace-nowrap ${
+                  activeTab === 'complaints'
+                    ? 'bg-slate-800 text-cyan-400 border border-cyan-500/30 shadow-sm'
+                    : 'text-slate-400 hover:text-slate-200 hover:bg-slate-900'
+                }`}
+              >
+                <AlertTriangle className="w-4 h-4" />
+                Complaints &amp; SLA
+                {pendingSlaCount > 0 && (
+                  <span className="text-[10px] px-1.5 py-0.2 rounded-full bg-rose-900/80 text-rose-300 border border-rose-700/50 font-mono">
+                    {pendingSlaCount}
+                  </span>
+                )}
+              </button>
 
-          <button
-            onClick={() => setActiveTab('users')}
-            className={`flex items-center gap-2 px-3 py-2 text-xs sm:text-sm font-medium rounded-lg transition whitespace-nowrap ${
-              activeTab === 'users'
-                ? 'bg-slate-800 text-cyan-400 border border-cyan-500/30 shadow-sm'
-                : 'text-slate-400 hover:text-slate-200 hover:bg-slate-900'
-            }`}
-          >
-            <Shield className="w-4 h-4 text-cyan-400" />
-            Users &amp; RBAC
-          </button>
+              <button
+                onClick={() => setActiveTab('users')}
+                className={`flex items-center gap-2 px-3 py-2 text-xs sm:text-sm font-medium rounded-lg transition whitespace-nowrap ${
+                  activeTab === 'users'
+                    ? 'bg-slate-800 text-cyan-400 border border-cyan-500/30 shadow-sm'
+                    : 'text-slate-400 hover:text-slate-200 hover:bg-slate-900'
+                }`}
+              >
+                <Shield className="w-4 h-4 text-cyan-400" />
+                User &amp; Access Management
+              </button>
 
-          <button
-            onClick={() => setActiveTab('architecture')}
-            className={`flex items-center gap-2 px-3 py-2 text-xs sm:text-sm font-medium rounded-lg transition whitespace-nowrap ${
-              activeTab === 'architecture'
-                ? 'bg-slate-800 text-cyan-400 border border-cyan-500/30 shadow-sm'
-                : 'text-slate-400 hover:text-slate-200 hover:bg-slate-900'
-            }`}
-          >
-            <Code2 className="w-4 h-4" />
-            Architecture & SQL DDL
-          </button>
+              <button
+                onClick={() => setActiveTab('permissions')}
+                className={`flex items-center gap-2 px-3 py-2 text-xs sm:text-sm font-medium rounded-lg transition whitespace-nowrap ${
+                  activeTab === 'permissions'
+                    ? 'bg-slate-800 text-cyan-400 border border-cyan-500/30 shadow-sm'
+                    : 'text-slate-400 hover:text-slate-200 hover:bg-slate-900'
+                }`}
+              >
+                <ShieldCheck className="w-4 h-4 text-emerald-400" />
+                Feature Matrix
+              </button>
 
-          <button
-            onClick={() => setActiveTab('settings')}
-            className={`flex items-center gap-2 px-3 py-2 text-xs sm:text-sm font-medium rounded-lg transition whitespace-nowrap ${
-              activeTab === 'settings'
-                ? 'bg-slate-800 text-cyan-400 border border-cyan-500/30 shadow-sm'
-                : 'text-slate-400 hover:text-slate-200 hover:bg-slate-900'
-            }`}
-          >
-            <Settings className="w-4 h-4 text-cyan-400" />
-            Settings
-          </button>
+              <button
+                onClick={() => setActiveTab('mobile')}
+                className={`flex items-center gap-2 px-3 py-2 text-xs sm:text-sm font-medium rounded-lg transition whitespace-nowrap ${
+                  activeTab === 'mobile'
+                    ? 'bg-slate-800 text-cyan-400 border border-cyan-500/30 shadow-sm'
+                    : 'text-slate-400 hover:text-slate-200 hover:bg-slate-900'
+                }`}
+              >
+                <Smartphone className="w-4 h-4" />
+                Mobile Apps
+              </button>
+
+              <button
+                onClick={() => setActiveTab('architecture')}
+                className={`flex items-center gap-2 px-3 py-2 text-xs sm:text-sm font-medium rounded-lg transition whitespace-nowrap ${
+                  activeTab === 'architecture'
+                    ? 'bg-slate-800 text-cyan-400 border border-cyan-500/30 shadow-sm'
+                    : 'text-slate-400 hover:text-slate-200 hover:bg-slate-900'
+                }`}
+              >
+                <Code2 className="w-4 h-4" />
+                Architecture
+              </button>
+
+              <button
+                onClick={() => setActiveTab('settings')}
+                className={`flex items-center gap-2 px-3 py-2 text-xs sm:text-sm font-medium rounded-lg transition whitespace-nowrap ${
+                  activeTab === 'settings'
+                    ? 'bg-slate-800 text-cyan-400 border border-cyan-500/30 shadow-sm'
+                    : 'text-slate-400 hover:text-slate-200 hover:bg-slate-900'
+                }`}
+              >
+                <Settings className="w-4 h-4 text-cyan-400" />
+                Settings
+              </button>
+            </>
+          )}
+
+          {/* MANAGER TABS */}
+          {currentRole === 'MANAGER' && (
+            <>
+              <button
+                onClick={() => setActiveTab('operations')}
+                className={`flex items-center gap-2 px-3 py-2 text-xs sm:text-sm font-medium rounded-lg transition whitespace-nowrap ${
+                  activeTab === 'operations'
+                    ? 'bg-slate-800 text-indigo-400 border border-indigo-500/30 shadow-sm'
+                    : 'text-slate-400 hover:text-slate-200 hover:bg-slate-900'
+                }`}
+              >
+                <Activity className="w-4 h-4" />
+                Operations &amp; Dispatch
+              </button>
+
+              <button
+                onClick={() => setActiveTab('noc')}
+                className={`flex items-center gap-2 px-3 py-2 text-xs sm:text-sm font-medium rounded-lg transition whitespace-nowrap ${
+                  activeTab === 'noc'
+                    ? 'bg-slate-800 text-indigo-400 border border-indigo-500/30 shadow-sm'
+                    : 'text-slate-400 hover:text-slate-200 hover:bg-slate-900'
+                }`}
+              >
+                <Network className="w-4 h-4" />
+                NOC Overview
+              </button>
+
+              <button
+                onClick={() => setActiveTab('complaints')}
+                className={`flex items-center gap-2 px-3 py-2 text-xs sm:text-sm font-medium rounded-lg transition whitespace-nowrap ${
+                  activeTab === 'complaints'
+                    ? 'bg-slate-800 text-indigo-400 border border-indigo-500/30 shadow-sm'
+                    : 'text-slate-400 hover:text-slate-200 hover:bg-slate-900'
+                }`}
+              >
+                <AlertTriangle className="w-4 h-4" />
+                Complaints &amp; SLA
+                {pendingSlaCount > 0 && (
+                  <span className="text-[10px] px-1.5 py-0.2 rounded-full bg-rose-900/80 text-rose-300 border border-rose-700/50 font-mono">
+                    {pendingSlaCount}
+                  </span>
+                )}
+              </button>
+
+              <button
+                onClick={() => setActiveTab('olt')}
+                className={`flex items-center gap-2 px-3 py-2 text-xs sm:text-sm font-medium rounded-lg transition whitespace-nowrap ${
+                  activeTab === 'olt'
+                    ? 'bg-slate-800 text-indigo-400 border border-indigo-500/30 shadow-sm'
+                    : 'text-slate-400 hover:text-slate-200 hover:bg-slate-900'
+                }`}
+              >
+                <Layers className="w-4 h-4 text-cyan-400" />
+                VSOL OLT
+              </button>
+
+              <button
+                onClick={() => setActiveTab('billing')}
+                className={`flex items-center gap-2 px-3 py-2 text-xs sm:text-sm font-medium rounded-lg transition whitespace-nowrap ${
+                  activeTab === 'billing'
+                    ? 'bg-slate-800 text-indigo-400 border border-indigo-500/30 shadow-sm'
+                    : 'text-slate-400 hover:text-slate-200 hover:bg-slate-900'
+                }`}
+              >
+                <CreditCard className="w-4 h-4" />
+                Agent Cash &amp; Billing
+              </button>
+            </>
+          )}
+
+          {/* FIELD AGENT TABS */}
+          {currentRole === 'AGENT' && (
+            <>
+              <button
+                onClick={() => setActiveTab('agent_portal')}
+                className={`flex items-center gap-2 px-3 py-2 text-xs sm:text-sm font-medium rounded-lg transition whitespace-nowrap ${
+                  activeTab === 'agent_portal'
+                    ? 'bg-slate-800 text-cyan-400 border border-cyan-500/30 shadow-sm'
+                    : 'text-slate-400 hover:text-slate-200 hover:bg-slate-900'
+                }`}
+              >
+                <Smartphone className="w-4 h-4" />
+                My Field Portal (Tickets &amp; Cash)
+              </button>
+
+              <button
+                onClick={() => setActiveTab('mobile')}
+                className={`flex items-center gap-2 px-3 py-2 text-xs sm:text-sm font-medium rounded-lg transition whitespace-nowrap ${
+                  activeTab === 'mobile'
+                    ? 'bg-slate-800 text-cyan-400 border border-cyan-500/30 shadow-sm'
+                    : 'text-slate-400 hover:text-slate-200 hover:bg-slate-900'
+                }`}
+              >
+                <Activity className="w-4 h-4" />
+                Mobile Device Simulator
+              </button>
+            </>
+          )}
+
+          {/* CLIENT TABS */}
+          {currentRole === 'CLIENT' && (
+            <>
+              <button
+                onClick={() => setActiveTab('client_portal')}
+                className={`flex items-center gap-2 px-3 py-2 text-xs sm:text-sm font-medium rounded-lg transition whitespace-nowrap ${
+                  activeTab === 'client_portal'
+                    ? 'bg-slate-800 text-purple-400 border border-purple-500/30 shadow-sm'
+                    : 'text-slate-400 hover:text-slate-200 hover:bg-slate-900'
+                }`}
+              >
+                <Activity className="w-4 h-4" />
+                Subscriber Self-Service Portal
+              </button>
+            </>
+          )}
         </nav>
       </div>
 

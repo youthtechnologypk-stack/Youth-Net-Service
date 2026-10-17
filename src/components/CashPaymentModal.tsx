@@ -1,6 +1,7 @@
 import React, { useState } from 'react';
 import { X, DollarSign, UserCheck, ShieldCheck } from 'lucide-react';
 import { useISP } from '../context/ISPContext';
+import { useCurrency } from '../context/CurrencyContext';
 import { Invoice } from '../types/isp';
 
 interface CashPaymentModalProps {
@@ -15,6 +16,7 @@ export const CashPaymentModal: React.FC<CashPaymentModalProps> = ({
   onPaymentSuccess,
 }) => {
   const { agents, collectAgentCashPayment } = useISP();
+  const { formatCurrency } = useCurrency();
   const [selectedAgentId, setSelectedAgentId] = useState(agents[0]?.id || '');
   const [isProcessing, setIsProcessing] = useState(false);
 
@@ -72,7 +74,7 @@ export const CashPaymentModal: React.FC<CashPaymentModalProps> = ({
             <div className="flex justify-between text-slate-400">
               <span>Payable Due:</span>
               <span className="text-emerald-400 font-bold text-sm">
-                ${invoice.totalAmount.toFixed(2)}
+                {formatCurrency(invoice.totalAmount)}
               </span>
             </div>
           </div>
@@ -86,7 +88,7 @@ export const CashPaymentModal: React.FC<CashPaymentModalProps> = ({
             >
               {agents.map((agent) => (
                 <option key={agent.id} value={agent.id}>
-                  {agent.name} ({agent.assignedArea}) - Current Cash: ${agent.cashInHand.toFixed(2)}
+                  {agent.name} ({agent.assignedArea}) - Current Cash: {formatCurrency(agent.cashInHand)}
                 </option>
               ))}
             </select>

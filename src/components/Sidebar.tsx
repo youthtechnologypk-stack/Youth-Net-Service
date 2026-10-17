@@ -16,10 +16,13 @@ import {
   HardDrive,
   Wifi,
   X,
+  LogOut,
+  Network,
 } from 'lucide-react';
 import { ActiveTab } from './Header';
-import { SystemRole } from '../types/auth';
+import { SystemRole, UserAccount } from '../types/auth';
 import { useISP } from '../context/ISPContext';
+import { useCurrency } from '../context/CurrencyContext';
 
 export interface SidebarProps {
   isOpen: boolean;
@@ -31,6 +34,8 @@ export interface SidebarProps {
   onOpenTicketModal: () => void;
   currentRole: SystemRole;
   onSwitchRole?: (role: SystemRole) => void;
+  currentUser?: UserAccount | null;
+  onLogout?: () => void;
 }
 
 export const Sidebar: React.FC<SidebarProps> = ({
@@ -43,15 +48,19 @@ export const Sidebar: React.FC<SidebarProps> = ({
   onOpenTicketModal,
   currentRole,
   onSwitchRole,
+  currentUser,
+  onLogout,
 }) => {
   const { complaints, customers, onus, activeSessions, outages } = useISP();
+  const { currencySymbol } = useCurrency();
 
   const activeOutages = outages.filter((o) => o.status === 'investigating' || o.status === 'active');
   const criticalTickets = complaints.filter(
     (c) => (c.priority === 'critical' || c.priority === 'high') && c.status !== 'resolved'
   );
 
-  const menuItems = [
+  // Full item dictionary
+  const allMenuItems = [
     {
       id: 'noc' as ActiveTab,
       label: 'Dashboard / Overview',
@@ -59,14 +68,25 @@ export const Sidebar: React.FC<SidebarProps> = ({
       icon: Activity,
       badge: `${activeSessions.length} Online`,
       badgeColor: 'bg-emerald-950 text-emerald-300 border-emerald-800',
+      roles: ['ADMIN', 'MANAGER'],
+    },
+    {
+      id: 'operations' as ActiveTab,
+      label: 'Operations & Dispatch',
+      subtitle: 'SLA Escalations & Field Hub',
+      icon: Network,
+      badge: `${activeOutages.length} Outages`,
+      badgeColor: activeOutages.length > 0 ? 'bg-rose-950 text-rose-300 border-rose-800 animate-pulse' : 'bg-slate-800 text-slate-300',
+      roles: ['ADMIN', 'MANAGER'],
     },
     {
       id: 'billing' as ActiveTab,
       label: 'Billing & Invoices',
       subtitle: 'MRR Recovery & Agent Cash',
       icon: CreditCard,
-      badge: '$ Recv',
+      badge: `${currencySymbol} Recv`,
       badgeColor: 'bg-indigo-950 text-indigo-300 border-indigo-800',
+      roles: ['ADMIN', 'MANAGER'],
     },
     {
       id: 'mikrotik' as ActiveTab,
@@ -75,6 +95,7 @@ export const Sidebar: React.FC<SidebarProps> = ({
       icon: Radio,
       badge: 'v7 Live',
       badgeColor: 'bg-cyan-950 text-cyan-300 border-cyan-800',
+      roles: ['ADMIN'], // Strictly hidden for Manager, Agent, Client
     },
     {
       id: 'olt' as ActiveTab,
@@ -83,6 +104,7 @@ export const Sidebar: React.FC<SidebarProps> = ({
       icon: Layers,
       badge: `${onus.length} ONUs`,
       badgeColor: 'bg-emerald-950 text-emerald-300 border-emerald-800',
+      roles: ['ADMIN', 'MANAGER'],
     },
     {
       id: 'complaints' as ActiveTab,
@@ -94,14 +116,43 @@ export const Sidebar: React.FC<SidebarProps> = ({
         criticalTickets.length > 0
           ? 'bg-rose-950 text-rose-300 border-rose-800 animate-pulse'
           : 'bg-slate-800 text-slate-300 border-slate-700',
+      roles: ['ADMIN', 'MANAGER'],
+    },
+    {
+      id: 'agent_portal' as ActiveTab,
+      label: 'Field Recovery Portal',
+      subtitle: 'Assigned Tickets & Cash',
+      icon: Smartphone,
+      badge: 'Field App',
+      badgeColor: 'bg-emerald-950 text-emerald-300 border-emerald-800',
+      roles: ['AGENT'],
+    },
+    {
+      id: 'client_portal' as ActiveTab,
+      label: 'Subscriber Self-Service',
+      subtitle: 'Speed, Invoices & Tickets',
+      icon: Activity,
+      badge: 'Portal',
+      badgeColor: 'bg-purple-950 text-purple-300 border-purple-800',
+      roles: ['CLIENT'],
     },
     {
       id: 'users' as ActiveTab,
-      label: 'User & Agent Hub',
-      subtitle: 'RBAC, Passwords & Staff',
+      label: 'User & Access Management',
+      subtitle: 'Clients, Agents & Managers',
       icon: Users,
-      badge: 'Security',
-      badgeColor: 'bg-slate-800 text-slate-300 border-slate-700',
+      badge: 'Portal Passwords',
+      badgeColor: 'bg-cyan-950 text-cyan-300 border-cyan-800',
+      roles: ['ADMIN'],
+    },
+    {
+      id: 'permissions' as ActiveTab,
+      label: 'Feature Matrix & RBAC',
+      subtitle: 'Manager, Agent & Client Gates',
+      icon: Shield,
+      badge: 'Granular Matrix',
+      badgeColor: 'bg-indigo-950 text-indigo-300 border-indigo-800',
+      roles: ['ADMIN'],
     },
     {
       id: 'mobile' as ActiveTab,
@@ -110,6 +161,7 @@ export const Sidebar: React.FC<SidebarProps> = ({
       icon: Smartphone,
       badge: 'PWA',
       badgeColor: 'bg-cyan-950 text-cyan-300 border-cyan-800',
+      roles: ['ADMIN', 'AGENT'],
     },
     {
       id: 'architecture' as ActiveTab,
@@ -118,6 +170,7 @@ export const Sidebar: React.FC<SidebarProps> = ({
       icon: Database,
       badge: 'SQL',
       badgeColor: 'bg-slate-800 text-slate-400 border-slate-700',
+      roles: ['ADMIN'],
     },
     {
       id: 'settings' as ActiveTab,
@@ -126,8 +179,12 @@ export const Sidebar: React.FC<SidebarProps> = ({
       icon: Settings,
       badge: null,
       badgeColor: '',
+      roles: ['ADMIN'], // Strictly hidden for Manager, Agent, Client
     },
   ];
+
+  // Filter menu strictly by role
+  const menuItems = allMenuItems.filter((item) => item.roles.includes(currentRole));
 
   const handleSelectTab = (tab: ActiveTab) => {
     setActiveTab(tab);
@@ -292,23 +349,26 @@ export const Sidebar: React.FC<SidebarProps> = ({
         </nav>
 
         {/* Bottom User / Role Card */}
-        <div className="p-3 border-t border-slate-800 bg-slate-950/80 text-xs font-mono space-y-2">
+        <div className="p-3 border-t border-slate-800 bg-slate-950/80 text-xs font-mono space-y-2.5">
           <div className="flex items-center justify-between">
             <div className="flex items-center gap-2">
               <div className="w-7 h-7 rounded-lg bg-indigo-600/30 border border-indigo-500/40 flex items-center justify-center text-indigo-300 font-bold text-xs">
                 <Shield className="w-3.5 h-3.5 text-indigo-400" />
               </div>
-              <div>
-                <span className="text-[11px] font-bold text-slate-200 block leading-tight">
-                  {currentRole === 'ADMIN'
-                    ? 'NOC Administrator'
-                    : currentRole === 'AGENT'
-                    ? 'Field Recovery Agent'
-                    : 'Subscriber Portal'}
+              <div className="truncate max-w-[120px]">
+                <span className="text-[11px] font-bold text-slate-200 block leading-tight truncate">
+                  {currentUser?.fullName || (
+                    currentRole === 'ADMIN'
+                      ? 'NOC Administrator'
+                      : currentRole === 'MANAGER'
+                      ? 'Operations Manager'
+                      : currentRole === 'AGENT'
+                      ? 'Field Recovery Agent'
+                      : 'Subscriber Portal'
+                  )}
                 </span>
-                <span className="text-[9px] text-emerald-400 flex items-center gap-1">
-                  <span className="w-1.5 h-1.5 rounded-full bg-emerald-400" />
-                  <span>Full Access</span>
+                <span className="text-[9px] text-cyan-400 font-mono block">
+                  [{currentRole}]
                 </span>
               </div>
             </div>
@@ -321,11 +381,25 @@ export const Sidebar: React.FC<SidebarProps> = ({
                 title="Switch RBAC Test Role"
               >
                 <option value="ADMIN">ADMIN</option>
+                <option value="MANAGER">MANAGER</option>
                 <option value="AGENT">AGENT</option>
                 <option value="CLIENT">CLIENT</option>
               </select>
             )}
           </div>
+
+          {onLogout && (
+            <button
+              onClick={() => {
+                onLogout();
+                onClose();
+              }}
+              className="w-full py-1.5 px-3 rounded-lg bg-rose-950/60 hover:bg-rose-900/80 border border-rose-800 text-rose-300 text-xs flex items-center justify-center gap-1.5 transition cursor-pointer font-bold"
+            >
+              <LogOut className="w-3.5 h-3.5" />
+              <span>Sign Out of NOC</span>
+            </button>
+          )}
         </div>
       </aside>
     </>

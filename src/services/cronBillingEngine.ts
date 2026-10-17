@@ -8,6 +8,7 @@
  */
 
 import { Customer, Invoice, InternetPackage, WhatsAppNotificationLog } from '../types/isp';
+import { formatCurrency } from '../context/CurrencyContext';
 import { MikrotikRouterOSv7Service } from './mikrotikRouterOSv7';
 
 export interface BillingCronSummary {
@@ -257,7 +258,7 @@ export class BillingCronEngine {
       `📄 *Invoice #:* ${invoiceNo}\n` +
       `🆔 *Account ID:* ${accountNo}\n` +
       `🚀 *Package:* ${packageName}\n` +
-      `💰 *Payable Amount:* $${amount.toFixed(2)}\n` +
+      `💰 *Payable Amount:* ${formatCurrency(amount)}\n` +
       `📅 *Due Date:* ${dueDate}\n\n` +
       `💡 *How to Pay:*\n` +
       `1. Request a Field Cash Recovery Agent via App\n` +
@@ -281,7 +282,7 @@ export class BillingCronEngine {
       `Your Youth Net high-speed fiber connection has been redirected to the *Walled-Garden Payment Portal* due to overdue balance.\n\n` +
       `🆔 *Account ID:* ${accountNo}\n` +
       `🌐 *PPPoE User:* ${pppoeUsername}\n` +
-      `💸 *Overdue Balance:* $${overdueAmount.toFixed(2)}\n\n` +
+      `💸 *Overdue Balance:* ${formatCurrency(overdueAmount)}\n\n` +
       `⚡ *Instant Restoration:*\n` +
       `Please clear your dues via our Mobile App or hand over cash to our assigned Area Field Agent. Your full bandwidth will be restored in <60 seconds automatically!`
     );
@@ -303,7 +304,7 @@ export class BillingCronEngine {
       `We have received your cash payment. Thank you for choosing Youth Net Service!\n\n` +
       `🧾 *Receipt #:* ${receiptNo}\n` +
       `📄 *Invoice #:* ${invoiceNo}\n` +
-      `💵 *Amount Received:* $${amount.toFixed(2)}\n` +
+      `💵 *Amount Received:* ${formatCurrency(amount)}\n` +
       `👮 *Collected By Agent:* ${agentName}\n` +
       `🕒 *Time:* ${new Date().toLocaleTimeString()} on ${new Date().toLocaleDateString()}\n\n` +
       `Your MikroTik line is 100% active with unlimited ultra-low latency fiber speeds.`

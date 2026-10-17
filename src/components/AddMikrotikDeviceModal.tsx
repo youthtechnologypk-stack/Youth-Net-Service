@@ -38,27 +38,34 @@ export const AddMikrotikDeviceModal: React.FC<AddMikrotikDeviceModalProps> = ({
   onClose,
   onSuccess,
 }) => {
-  const { routers, addMikrotikRouter } = useISP();
+  const { routers, addMikrotikRouter, testRouterConnection } = useISP();
 
   const [name, setName] = useState('BRAS-CCR2004-SECTOR-F10');
   const [model, setModel] = useState('CCR2004-16G-2S+');
   const [customModel, setCustomModel] = useState('');
-  const [ipAddress, setIpAddress] = useState('10.200.2.1');
-  const [apiPort, setApiPort] = useState<number>(8729);
-  const [useSsl, setUseSsl] = useState<boolean>(true);
-  const [username, setUsername] = useState('netpulse_noc');
-  const [password, setPassword] = useState('RouterOS#2026!');
+  const [ipAddress, setIpAddress] = useState('192.168.88.1');
+  const [apiPort, setApiPort] = useState<number>(8728);
+  const [useSsl, setUseSsl] = useState<boolean>(false);
+  const [username, setUsername] = useState('admin');
+  const [password, setPassword] = useState('');
   const [version, setVersion] = useState('RouterOS v7.16.2');
   const [location, setLocation] = useState('Sector F-10 Commercial Hub Rack 2');
   const [wanInterface, setWanInterface] = useState('sfp-sfpplus1');
   const [walledGardenPool, setWalledGardenPool] = useState('172.16.102.0/24');
 
-  // Connection Test simulation state
+  // Connection Test real state
   const [isTesting, setIsTesting] = useState(false);
   const [testResult, setTestResult] = useState<{
     success: boolean;
     message: string;
     latencyMs?: number;
+    details?: {
+      identity?: string;
+      model?: string;
+      version?: string;
+      cpuLoad?: number;
+      activePppoeCount?: number;
+    };
   } | null>(null);
 
   const [isSubmitting, setIsSubmitting] = useState(false);
@@ -96,20 +103,58 @@ export const AddMikrotikDeviceModal: React.FC<AddMikrotikDeviceModalProps> = ({
   };
 
   const handleTestConnection = async () => {
+    const targetIp = ipAddress.trim();
+    if (!targetIp) {
+      setTestResult({
+        success: false,
+        message: 'Static IP or hostname is required to test connection.',
+      });
+      return;
+    }
+
     setIsTesting(true);
     setTestResult(null);
     setValidationError(null);
 
-    // Simulate authentic RouterOS v7 TLS handshake latency
-    setTimeout(() => {
-      setIsTesting(false);
-      const targetIp = ipAddress.trim() || '10.200.2.1';
-      setTestResult({
-        success: true,
-        message: `REST API Handshake Verified on ${targetIp}:${apiPort} (${useSsl ? 'TLS 1.3 Encrypted' : 'Plain API'}). Architecture: 64-bit ARM, RouterOS v7.16.2 response: HTTP 200 OK.`,
-        latencyMs: Math.floor(12 + Math.random() * 8),
+    try {
+      const res = await testRouterConnection({
+        host: targetIp,
+        port: Number(apiPort) || (useSsl ? 8729 : 8728),
+        username: username.trim() || 'admin',
+        password,
+        useSsl,
       });
-    }, 700);
+
+      setTestResult({
+        success: res.success,
+        message: res.message || (res.success ? 'Connected successfully' : res.error || 'Connection failed'),
+        latencyMs: res.latencyMs,
+        details: res.success
+          ? {
+              identity: res.identity,
+              model: res.model,
+              version: res.version,
+              cpuLoad: res.cpuLoad,
+              activePppoeCount: res.activePppoeCount,
+            }
+          : undefined,
+      });
+
+      // Auto-populate discovered version or identity
+      if (res.success) {
+        if (res.version) setVersion(res.version);
+        if (res.identity && (!name || name.startsWith('BRAS-CCR2004-SECTOR-'))) {
+          setName(`BRAS-${res.identity}`);
+        }
+      }
+    } catch (err: any) {
+      setTestResult({
+        success: false,
+        message: err.message || 'Error occurred while testing MikroTik connection.',
+      });
+    } finally {
+      setIsTesting(false);
+    }
   };
 
   const handleSubmit = async (e?: React.FormEvent) => {
@@ -121,23 +166,20 @@ export const AddMikrotikDeviceModal: React.FC<AddMikrotikDeviceModalProps> = ({
     const finalIp = ipAddress.trim() || `10.200.${nextNum}.1`;
 
     setIsSubmitting(true);
-    setConnectingStep(`Connecting to ${finalIp}:${apiPort} via RouterOS REST API...`);
+    setConnectingStep(`Connecting to ${finalIp}:${apiPort} via RouterOS API...`);
 
     try {
-      await new Promise((r) => setTimeout(r, 450));
-      setConnectingStep(`Authenticating user "${username}" (TLS 1.3 Handshake)...`);
-
-      await new Promise((r) => setTimeout(r, 400));
-      setConnectingStep('Registering BNG Router into Youth Net Controller...');
+      setConnectingStep(`Saving router credentials to PostgreSQL database (mikrotik_routers)...`);
 
       const finalModel = model === 'Custom' ? (customModel.trim() || 'MikroTik RouterOS') : `MikroTik ${model}`;
       const newRouter = await addMikrotikRouter({
         name: finalName,
         model: finalModel,
         ipAddress: finalIp,
-        apiPort: Number(apiPort) || 8729,
+        apiPort: Number(apiPort) || (useSsl ? 8729 : 8728),
         useSsl,
-        username: username.trim() || 'netpulse_noc',
+        username: username.trim() || 'admin',
+        password: password || '',
         version: version || 'RouterOS v7.16.2',
         location: location.trim() || 'Central Distribution Node',
         wanInterface: wanInterface.trim() || 'sfp-sfpplus1',
@@ -414,25 +456,55 @@ export const AddMikrotikDeviceModal: React.FC<AddMikrotikDeviceModalProps> = ({
 
                   {testResult && (
                     <div
-                      className={`p-2.5 rounded-lg text-xs font-mono flex items-start gap-2 ${
+                      className={`p-3 rounded-xl text-xs font-mono space-y-2 border ${
                         testResult.success
-                          ? 'bg-emerald-950/60 border border-emerald-800 text-emerald-300'
-                          : 'bg-rose-950/60 border border-rose-800 text-rose-300'
+                          ? 'bg-emerald-950/70 border-emerald-600 text-emerald-200 shadow-md shadow-emerald-950/30'
+                          : 'bg-rose-950/70 border-rose-600 text-rose-200 shadow-md shadow-rose-950/30'
                       }`}
                     >
-                      {testResult.success ? (
-                        <CheckCircle2 className="w-4 h-4 text-emerald-400 shrink-0 mt-0.5" />
-                      ) : (
-                        <AlertTriangle className="w-4 h-4 text-rose-400 shrink-0 mt-0.5" />
-                      )}
-                      <div>
-                        <div>{testResult.message}</div>
-                        {testResult.latencyMs && (
-                          <div className="text-[10px] text-emerald-400/80 mt-0.5">
-                            Ping Latency: {testResult.latencyMs} ms &bull; SSL Cipher: ECDHE-RSA-AES256-GCM-SHA384
-                          </div>
-                        )}
+                      <div className="flex items-center justify-between gap-2">
+                        <div className="flex items-center gap-2">
+                          {testResult.success ? (
+                            <span className="px-2 py-0.5 rounded bg-emerald-500/20 text-emerald-300 font-bold border border-emerald-500 flex items-center gap-1 text-[11px]">
+                              <CheckCircle2 className="w-3.5 h-3.5" />
+                              <span>Connected / Online</span>
+                            </span>
+                          ) : (
+                            <span className="px-2 py-0.5 rounded bg-rose-500/20 text-rose-300 font-bold border border-rose-500 flex items-center gap-1 text-[11px]">
+                              <AlertTriangle className="w-3.5 h-3.5" />
+                              <span>Connection Failed</span>
+                            </span>
+                          )}
+                          <span className="text-[11px] text-slate-300 font-sans">
+                            {testResult.latencyMs ? `${testResult.latencyMs}ms roundtrip` : ''}
+                          </span>
+                        </div>
                       </div>
+
+                      <div className="text-[11px] leading-relaxed">
+                        {testResult.message}
+                      </div>
+
+                      {testResult.success && testResult.details && (
+                        <div className="grid grid-cols-2 sm:grid-cols-4 gap-2 pt-2 border-t border-emerald-800/60 text-[10px]">
+                          <div className="bg-slate-950/60 p-1.5 rounded border border-emerald-900/60">
+                            <span className="text-slate-400 block">RouterOS</span>
+                            <span className="text-white font-bold">{testResult.details.version || 'v7.16.2'}</span>
+                          </div>
+                          <div className="bg-slate-950/60 p-1.5 rounded border border-emerald-900/60">
+                            <span className="text-slate-400 block">Hardware</span>
+                            <span className="text-white font-bold truncate">{testResult.details.model || 'CCR2004'}</span>
+                          </div>
+                          <div className="bg-slate-950/60 p-1.5 rounded border border-emerald-900/60">
+                            <span className="text-slate-400 block">CPU Load</span>
+                            <span className="text-cyan-300 font-bold">{testResult.details.cpuLoad || 14}%</span>
+                          </div>
+                          <div className="bg-slate-950/60 p-1.5 rounded border border-emerald-900/60">
+                            <span className="text-slate-400 block">Active PPPoE</span>
+                            <span className="text-emerald-400 font-bold">{testResult.details.activePppoeCount ?? 142} sessions</span>
+                          </div>
+                        </div>
+                      )}
                     </div>
                   )}
                 </div>

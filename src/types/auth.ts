@@ -1,20 +1,26 @@
 // Authentication & RBAC (Role-Based Access Control) Types
 
-export type SystemRole = 'ADMIN' | 'AGENT' | 'CLIENT';
+export type SystemRole = 'ADMIN' | 'MANAGER' | 'AGENT' | 'CLIENT';
 
 export interface UserAccount {
   id: string;
-  username: string; // e.g. "admin", "bilal.khan", "fatima.noor"
-  email: string;
+  username: string; // e.g. "admin", "manager", "agent", "client"
+  fullName: string;
+  displayName?: string;
+  email?: string;
   role: SystemRole;
-  passwordHash: string; // bcrypt hash ($2b$12$...)
+  passwordHash?: string; // bcrypt hash ($2b$12$...)
+  phone: string;
   isActive: boolean;
-  mustChangePassword: boolean;
+  mustChangePassword?: boolean;
   linkedAgentId?: string; // Foreign key linking to FieldAgent
   linkedCustomerId?: string; // Foreign key linking to Customer
-  displayName: string;
-  phone: string;
   assignedArea?: string;
+  department?: string; // For Managers: NOC, Operations, Accounts, Field SLA
+  cashLimit?: number; // For Agents: Cash Collection Limit in PKR
+  grantClientPortal?: boolean; // For Clients: Grant Self-Service Portal Access
+  sendWhatsAppNotice?: boolean;
+  permissions?: Record<string, boolean>; // Granular feature override flags
   createdAt: string;
   lastLoginAt?: string;
 }

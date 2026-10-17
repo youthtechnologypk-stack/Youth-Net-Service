@@ -1,4 +1,4 @@
-import React, { useState, useMemo } from 'react';
+import React, { useState, useMemo, useEffect } from 'react';
 import {
   ResponsiveContainer,
   AreaChart,
@@ -27,6 +27,12 @@ import {
   HardDrive,
   Gauge,
   Percent,
+  Search,
+  X,
+  Filter,
+  CheckCircle2,
+  ChevronRight,
+  Sparkles,
 } from 'lucide-react';
 import { useISP } from '../context/ISPContext';
 import { ActiveSession, Customer } from '../types/isp';
@@ -44,6 +50,7 @@ export const UsageAnalytics: React.FC = () => {
   const [analyticsView, setAnalyticsView] = useState<'interface' | 'subscriber' | 'top_talkers'>('interface');
   const [selectedInterface, setSelectedInterface] = useState<string>('sfp-sfpplus1');
   const [timeRange, setTimeRange] = useState<'realtime' | '1h' | '24h' | '7d'>('realtime');
+  const [searchQuery, setSearchQuery] = useState('');
   const [selectedSubscriberUsername, setSelectedSubscriberUsername] = useState<string>(
     activeSessions[0]?.username || 'dr_shahzad_g11'
   );
@@ -198,6 +205,47 @@ export const UsageAnalytics: React.FC = () => {
     }).sort((a, b) => b.totalRate - a.totalRate);
   }, [activeSessions, customers, packages]);
 
+  // Filtered sessions based on search query (username, name, IP, or profile)
+  const filteredSessions = useMemo(() => {
+    if (!searchQuery.trim()) return activeSessions;
+    const q = searchQuery.toLowerCase().trim();
+    return activeSessions.filter((s) => {
+      const cust = customers.find((c) => c.pppoeUsername === s.username);
+      return (
+        s.username.toLowerCase().includes(q) ||
+        (s.customerName && s.customerName.toLowerCase().includes(q)) ||
+        (cust?.name && cust.name.toLowerCase().includes(q)) ||
+        s.address.includes(q) ||
+        s.profileName.toLowerCase().includes(q)
+      );
+    });
+  }, [activeSessions, customers, searchQuery]);
+
+  // Filtered Top Talkers based on search query
+  const filteredTopTalkers = useMemo(() => {
+    if (!searchQuery.trim()) return topTalkersData;
+    const q = searchQuery.toLowerCase().trim();
+    return topTalkersData.filter(
+      (t) =>
+        t.username.toLowerCase().includes(q) ||
+        t.name.toLowerCase().includes(q) ||
+        t.ip.includes(q) ||
+        t.profile.toLowerCase().includes(q)
+    );
+  }, [topTalkersData, searchQuery]);
+
+  // Synchronize selected subscriber if current selection doesn't match search query
+  useEffect(() => {
+    if (searchQuery.trim() && filteredSessions.length > 0) {
+      const isCurrentInMatches = filteredSessions.some(
+        (s) => s.username === selectedSubscriberUsername
+      );
+      if (!isCurrentInMatches) {
+        setSelectedSubscriberUsername(filteredSessions[0].username);
+      }
+    }
+  }, [searchQuery, filteredSessions, selectedSubscriberUsername]);
+
   // Custom Dark Recharts Tooltip for Interface Chart
   const CustomInterfaceTooltip = ({ active, payload, label }: any) => {
     if (active && payload && payload.length) {
@@ -292,9 +340,32 @@ export const UsageAnalytics: React.FC = () => {
           </p>
         </div>
 
-        {/* View Switcher: Interface vs Subscriber vs Top Talkers */}
-        <div className="flex items-center gap-2 flex-wrap">
-          <div className="flex bg-slate-950 p-1 rounded-lg border border-slate-800">
+        {/* Right Controls: Search bar & View Switcher */}
+        <div className="flex flex-col sm:flex-row items-stretch sm:items-center gap-2.5 w-full lg:w-auto">
+          {/* Search Option for Usage Analytics */}
+          <div className="relative w-full sm:w-64">
+            <Search className="w-3.5 h-3.5 absolute left-2.5 top-2.5 text-slate-400 pointer-events-none" />
+            <input
+              type="text"
+              value={searchQuery}
+              onChange={(e) => setSearchQuery(e.target.value)}
+              placeholder="Search subscriber, IP, plan profile..."
+              className="w-full bg-slate-950 border border-slate-700/80 hover:border-cyan-500/50 focus:border-cyan-500 rounded-lg pl-8 pr-7 py-1.5 text-xs text-slate-100 placeholder-slate-500 focus:outline-none focus:ring-1 focus:ring-cyan-500/50 font-mono transition"
+            />
+            {searchQuery && (
+              <button
+                type="button"
+                onClick={() => setSearchQuery('')}
+                className="absolute right-2 top-2 text-slate-400 hover:text-white p-0.5 rounded transition cursor-pointer"
+                title="Clear Search"
+              >
+                <X className="w-3 h-3" />
+              </button>
+            )}
+          </div>
+
+          {/* View Switcher: Interface vs Subscriber vs Top Talkers */}
+          <div className="flex bg-slate-950 p-1 rounded-lg border border-slate-800 shrink-0">
             <button
               onClick={() => setAnalyticsView('interface')}
               className={`px-3 py-1.5 rounded-md text-xs font-semibold transition flex items-center gap-1.5 ${
@@ -333,6 +404,44 @@ export const UsageAnalytics: React.FC = () => {
           </div>
         </div>
       </div>
+
+      {/* Active Search Filter Banner */}
+      {searchQuery.trim() && (
+        <div className="flex flex-wrap items-center justify-between gap-2 bg-slate-950/80 border border-cyan-800/60 px-3.5 py-2 rounded-xl text-xs font-mono animate-fade-in">
+          <div className="flex items-center gap-2 flex-wrap">
+            <span className="w-2 h-2 rounded-full bg-cyan-400 animate-pulse" />
+            <span className="text-slate-400">Search Filter:</span>
+            <span className="text-cyan-300 font-bold bg-slate-900 px-2 py-0.5 rounded border border-slate-800">
+              "{searchQuery}"
+            </span>
+            <span className="text-slate-500">
+              ({filteredSessions.length} session{filteredSessions.length === 1 ? '' : 's'} matched)
+            </span>
+          </div>
+
+          <div className="flex items-center gap-2">
+            {analyticsView !== 'subscriber' && filteredSessions.length > 0 && (
+              <button
+                type="button"
+                onClick={() => {
+                  setSelectedSubscriberUsername(filteredSessions[0].username);
+                  setAnalyticsView('subscriber');
+                }}
+                className="text-[11px] text-cyan-400 hover:underline flex items-center gap-1 cursor-pointer font-bold"
+              >
+                <span>View "{filteredSessions[0].username}" trend chart &rarr;</span>
+              </button>
+            )}
+            <button
+              type="button"
+              onClick={() => setSearchQuery('')}
+              className="text-[11px] text-slate-400 hover:text-rose-300 underline cursor-pointer"
+            >
+              Reset Filter
+            </button>
+          </div>
+        </div>
+      )}
 
       {/* VIEW 1: INTERFACE THROUGHPUT ANALYTICS */}
       {analyticsView === 'interface' && (
@@ -504,19 +613,24 @@ export const UsageAnalytics: React.FC = () => {
         <div className="space-y-4">
           {/* Subscriber Selector & Package Profile Header */}
           <div className="flex flex-col sm:flex-row items-start sm:items-center justify-between gap-3 bg-slate-950 p-3 rounded-lg border border-slate-800 text-xs">
-            <div className="flex items-center gap-3">
+            <div className="flex items-center gap-3 flex-wrap">
               <span className="text-slate-400 font-mono">Select PPPoE Session:</span>
               <select
                 value={selectedSubscriberUsername}
                 onChange={(e) => setSelectedSubscriberUsername(e.target.value)}
-                className="bg-slate-900 border border-slate-700 text-cyan-300 font-mono text-xs px-3 py-1.5 rounded-md focus:outline-none focus:border-cyan-500"
+                className="bg-slate-900 border border-slate-700 text-cyan-300 font-mono text-xs px-3 py-1.5 rounded-md focus:outline-none focus:border-cyan-500 cursor-pointer"
               >
-                {activeSessions.map((session) => (
+                {filteredSessions.map((session) => (
                   <option key={session.id} value={session.username}>
                     {session.username} - {session.customerName} ({session.profileName})
                   </option>
                 ))}
               </select>
+              {searchQuery.trim() && (
+                <span className="text-[11px] text-cyan-400 font-mono">
+                  ({filteredSessions.length} match{filteredSessions.length === 1 ? '' : 'es'})
+                </span>
+              )}
             </div>
 
             <div className="flex items-center gap-3 font-mono text-[11px]">
@@ -527,6 +641,47 @@ export const UsageAnalytics: React.FC = () => {
               <span className="text-emerald-400 font-bold">{currentCustomer.ontSignalDbm} dBm</span>
             </div>
           </div>
+
+          {/* Quick Clickable Match Chips when filtering */}
+          {searchQuery.trim() && filteredSessions.length > 0 && (
+            <div className="flex items-center gap-1.5 flex-wrap text-[11px] font-mono">
+              <span className="text-slate-500">Quick Match Switch:</span>
+              {filteredSessions.slice(0, 5).map((s) => (
+                <button
+                  key={s.id}
+                  type="button"
+                  onClick={() => setSelectedSubscriberUsername(s.username)}
+                  className={`px-2 py-0.5 rounded-md border transition cursor-pointer ${
+                    selectedSubscriberUsername === s.username
+                      ? 'bg-cyan-600 text-slate-950 font-bold border-cyan-500 shadow-sm'
+                      : 'bg-slate-950 text-slate-300 border-slate-800 hover:border-slate-700'
+                  }`}
+                >
+                  {s.username} ({s.address})
+                </button>
+              ))}
+            </div>
+          )}
+
+          {/* Empty search state for subscriber trends */}
+          {filteredSessions.length === 0 && (
+            <div className="p-6 text-center bg-slate-950/70 border border-slate-800 rounded-xl space-y-2">
+              <Search className="w-6 h-6 text-slate-600 mx-auto" />
+              <p className="text-sm font-bold text-slate-300">
+                No active PPPoE subscribers matched "{searchQuery}"
+              </p>
+              <p className="text-xs text-slate-500">
+                Try searching by username (e.g. dr_shahzad_g11), subscriber name, or IP (192.168.8...)
+              </p>
+              <button
+                type="button"
+                onClick={() => setSearchQuery('')}
+                className="mt-2 px-3 py-1 bg-slate-800 hover:bg-slate-700 text-cyan-300 rounded text-xs font-mono font-bold cursor-pointer"
+              >
+                Clear Search Filter
+              </button>
+            </div>
+          )}
 
           {/* Subscriber Telemetry Cards */}
           <div className="grid grid-cols-2 sm:grid-cols-4 gap-3 text-xs font-mono">
@@ -640,76 +795,127 @@ export const UsageAnalytics: React.FC = () => {
       {/* VIEW 3: TOP TALKERS & BANDWIDTH CONSUMERS */}
       {analyticsView === 'top_talkers' && (
         <div className="space-y-4">
-          <div className="flex items-center justify-between text-xs">
+          <div className="flex flex-col sm:flex-row items-start sm:items-center justify-between gap-2 text-xs">
             <span className="text-slate-400">
               Real-time active PPPoE sessions sorted by highest instantaneous bandwidth consumption:
             </span>
-            <span className="text-cyan-400 font-mono">{topTalkersData.length} Active Sessions Analyzed</span>
+            <div className="flex items-center gap-2 font-mono">
+              <span className="text-cyan-400">
+                {searchQuery.trim()
+                  ? `Showing ${filteredTopTalkers.length} of ${topTalkersData.length} Sessions`
+                  : `${topTalkersData.length} Active Sessions Analyzed`}
+              </span>
+              {searchQuery.trim() && (
+                <button
+                  type="button"
+                  onClick={() => setSearchQuery('')}
+                  className="text-slate-500 hover:text-white underline text-[11px] cursor-pointer"
+                >
+                  Clear filter
+                </button>
+              )}
+            </div>
           </div>
 
-          <div className="overflow-x-auto">
-            <table className="w-full text-left text-xs font-mono">
-              <thead className="bg-slate-950 text-slate-400 uppercase tracking-wider text-[11px] border-b border-slate-800">
-                <tr>
-                  <th className="py-2.5 px-3">Subscriber & Account</th>
-                  <th className="py-2.5 px-3">Assigned IP</th>
-                  <th className="py-2.5 px-3">Package Profile</th>
-                  <th className="py-2.5 px-3">Live RX / TX</th>
-                  <th className="py-2.5 px-3">Session Volume</th>
-                  <th className="py-2.5 px-3">Line Utilization</th>
-                </tr>
-              </thead>
-              <tbody className="divide-y divide-slate-800 text-slate-300">
-                {topTalkersData.map((talker, idx) => (
-                  <tr key={talker.username} className="hover:bg-slate-800/40 transition">
-                    <td className="py-2.5 px-3">
-                      <div className="flex items-center gap-2">
-                        <span className="w-5 h-5 rounded-full bg-slate-800 flex items-center justify-center text-[10px] text-cyan-300 font-bold">
-                          #{idx + 1}
-                        </span>
-                        <div>
-                          <div className="font-bold text-slate-100">{talker.username}</div>
-                          <div className="text-[11px] text-slate-400 font-sans">{talker.name}</div>
-                        </div>
-                      </div>
-                    </td>
-                    <td className="py-2.5 px-3 text-cyan-300">{talker.ip}</td>
-                    <td className="py-2.5 px-3 text-slate-400">{talker.profile}</td>
-                    <td className="py-2.5 px-3">
-                      <div className="flex items-center gap-1.5 font-bold">
-                        <span className="text-emerald-400">{talker.rxRate}M</span>
-                        <span className="text-slate-600">/</span>
-                        <span className="text-cyan-400">{talker.txRate}M</span>
-                      </div>
-                    </td>
-                    <td className="py-2.5 px-3 font-semibold text-indigo-300">
-                      {talker.totalGb} GB
-                    </td>
-                    <td className="py-2.5 px-3">
-                      <div className="w-32">
-                        <div className="flex justify-between text-[10px] text-slate-400 mb-0.5">
-                          <span>{talker.utilization}%</span>
-                          <span>Cap: {talker.cap}M</span>
-                        </div>
-                        <div className="w-full bg-slate-800 rounded-full h-1.5">
-                          <div
-                            className={`h-1.5 rounded-full ${
-                              talker.utilization > 80
-                                ? 'bg-rose-500'
-                                : talker.utilization > 50
-                                ? 'bg-amber-400'
-                                : 'bg-emerald-400'
-                            }`}
-                            style={{ width: `${talker.utilization}%` }}
-                          />
-                        </div>
-                      </div>
-                    </td>
+          {filteredTopTalkers.length === 0 ? (
+            <div className="p-8 text-center bg-slate-950/70 border border-slate-800 rounded-xl space-y-2 font-mono">
+              <Search className="w-6 h-6 text-slate-600 mx-auto" />
+              <p className="text-sm font-bold text-slate-300">
+                No active talkers match "{searchQuery}"
+              </p>
+              <p className="text-xs text-slate-500">
+                Try searching by username, customer name, assigned IP, or rate limit profile
+              </p>
+              <button
+                type="button"
+                onClick={() => setSearchQuery('')}
+                className="mt-2 px-3 py-1 bg-slate-800 hover:bg-slate-700 text-cyan-300 rounded text-xs font-mono font-bold cursor-pointer"
+              >
+                Clear Search Filter
+              </button>
+            </div>
+          ) : (
+            <div className="overflow-x-auto">
+              <table className="w-full text-left text-xs font-mono">
+                <thead className="bg-slate-950 text-slate-400 uppercase tracking-wider text-[11px] border-b border-slate-800">
+                  <tr>
+                    <th className="py-2.5 px-3">Subscriber &amp; Account</th>
+                    <th className="py-2.5 px-3">Assigned IP</th>
+                    <th className="py-2.5 px-3">Package Profile</th>
+                    <th className="py-2.5 px-3">Live RX / TX</th>
+                    <th className="py-2.5 px-3">Session Volume</th>
+                    <th className="py-2.5 px-3">Line Utilization</th>
+                    <th className="py-2.5 px-3 text-right">Trend Analysis</th>
                   </tr>
-                ))}
-              </tbody>
-            </table>
-          </div>
+                </thead>
+                <tbody className="divide-y divide-slate-800 text-slate-300">
+                  {filteredTopTalkers.map((talker, idx) => (
+                    <tr
+                      key={talker.username}
+                      onClick={() => {
+                        setSelectedSubscriberUsername(talker.username);
+                        setAnalyticsView('subscriber');
+                      }}
+                      className="hover:bg-slate-800/60 transition cursor-pointer group"
+                      title="Click to inspect this subscriber's historical bandwidth chart"
+                    >
+                      <td className="py-2.5 px-3">
+                        <div className="flex items-center gap-2">
+                          <span className="w-5 h-5 rounded-full bg-slate-800 flex items-center justify-center text-[10px] text-cyan-300 font-bold group-hover:bg-cyan-950 transition">
+                            #{idx + 1}
+                          </span>
+                          <div>
+                            <div className="font-bold text-slate-100 group-hover:text-cyan-300 transition">
+                              {talker.username}
+                            </div>
+                            <div className="text-[11px] text-slate-400 font-sans">{talker.name}</div>
+                          </div>
+                        </div>
+                      </td>
+                      <td className="py-2.5 px-3 text-cyan-300">{talker.ip}</td>
+                      <td className="py-2.5 px-3 text-slate-400">{talker.profile}</td>
+                      <td className="py-2.5 px-3">
+                        <div className="flex items-center gap-1.5 font-bold">
+                          <span className="text-emerald-400">{talker.rxRate}M</span>
+                          <span className="text-slate-600">/</span>
+                          <span className="text-cyan-400">{talker.txRate}M</span>
+                        </div>
+                      </td>
+                      <td className="py-2.5 px-3 font-semibold text-indigo-300">
+                        {talker.totalGb} GB
+                      </td>
+                      <td className="py-2.5 px-3">
+                        <div className="w-32">
+                          <div className="flex justify-between text-[10px] text-slate-400 mb-0.5">
+                            <span>{talker.utilization}%</span>
+                            <span>Cap: {talker.cap}M</span>
+                          </div>
+                          <div className="w-full bg-slate-800 rounded-full h-1.5">
+                            <div
+                              className={`h-1.5 rounded-full ${
+                                talker.utilization > 80
+                                  ? 'bg-rose-500'
+                                  : talker.utilization > 50
+                                  ? 'bg-amber-400'
+                                  : 'bg-emerald-400'
+                              }`}
+                              style={{ width: `${talker.utilization}%` }}
+                            />
+                          </div>
+                        </div>
+                      </td>
+                      <td className="py-2.5 px-3 text-right">
+                        <span className="inline-flex items-center gap-1 text-[11px] text-cyan-400 font-bold group-hover:underline">
+                          <span>Inspect</span>
+                          <ChevronRight className="w-3 h-3 group-hover:translate-x-0.5 transition" />
+                        </span>
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          )}
         </div>
       )}
     </div>

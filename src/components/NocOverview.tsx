@@ -18,6 +18,7 @@ import {
   Layers,
 } from 'lucide-react';
 import { useISP } from '../context/ISPContext';
+import { useCurrency } from '../context/CurrencyContext';
 import { ActiveTab } from './Header';
 import { UsageAnalytics } from './UsageAnalytics';
 import { OutageBanner } from './OutageBanner';
@@ -51,6 +52,7 @@ export const NocOverview: React.FC<NocOverviewProps> = ({
     olts,
     onus,
   } = useISP();
+  const { formatCurrency } = useCurrency();
 
   const currentRouter = routers.find((r) => r.id === selectedRouterId) || routers[0];
 
@@ -139,15 +141,15 @@ export const NocOverview: React.FC<NocOverviewProps> = ({
           </div>
           <div className="mt-2 flex items-baseline gap-2">
             <span className="text-2xl font-bold font-mono text-white">
-              ${totalCollected.toFixed(0)}
+              {formatCurrency(totalCollected, 0)}
             </span>
             <span className="text-xs text-slate-400 font-mono">
-              of ${totalMonthlyBilled.toFixed(0)} billed
+              of {formatCurrency(totalMonthlyBilled, 0)} billed
             </span>
           </div>
           <div className="mt-3 flex items-center justify-between text-xs text-slate-400 pt-2 border-t border-slate-800">
             <span className="text-rose-400 font-medium font-mono">
-              Overdue: ${totalDueAmount.toFixed(1)}
+              Overdue: {formatCurrency(totalDueAmount, 1)}
             </span>
             <span className="text-emerald-400 font-medium">
               {Math.round((totalCollected / (totalMonthlyBilled || 1)) * 100)}% Collected

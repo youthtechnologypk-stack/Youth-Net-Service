@@ -12,29 +12,46 @@ export function generateRandomPassword(): string {
   return `${word}@${num}`;
 }
 
+export function getPortalUrlForRole(role: string): string {
+  const origin = typeof window !== 'undefined' ? window.location.origin : 'https://youthnet.pk';
+  switch (role) {
+    case 'ADMIN':
+      return `${origin}/dashboard/admin`;
+    case 'MANAGER':
+      return `${origin}/dashboard/operations`;
+    case 'AGENT':
+      return `${origin}/agent/portal`;
+    case 'CLIENT':
+      return `${origin}/client/portal`;
+    default:
+      return `${origin}/login`;
+  }
+}
+
+/**
+ * Exact specification format for WhatsApp credential dispatch:
+ * "Hello [Name], your Youth Net Portal access has been created.
+ * Login URL: [Portal Link]
+ * Username: [username]
+ * Password: [password]
+ * Please keep your login credentials secure."
+ */
+export function buildStandardWhatsAppCredentialText(
+  name: string,
+  username: string,
+  password: string,
+  portalUrl?: string
+): string {
+  const link = portalUrl || (typeof window !== 'undefined' ? `${window.location.origin}/login` : 'https://youthnet.pk/login');
+  return `Hello ${name},\n\nYour Youth Net Portal access has been created.\nLogin URL: ${link}\nUsername: ${username}\nPassword: ${password}\n\nPlease keep your login credentials secure.`;
+}
+
 export function buildWhatsAppShareText(
   user: UserAccount,
   temporaryPassword: string,
-  portalUrl: string = 'https://youthnet.pk/portal'
+  portalUrl?: string
 ): string {
-  const roleTitle =
-    user.role === 'ADMIN'
-      ? 'NOC Master Admin'
-      : user.role === 'AGENT'
-      ? 'Field Recovery Agent'
-      : 'Subscriber Self-Service';
-
-  return (
-    `🔐 *YOUTH NET ISP - OFFICIAL ACCOUNT CREDENTIALS*\n` +
-    `----------------------------------------\n` +
-    `Dear *${user.displayName}*,\n` +
-    `Your *${roleTitle}* access credentials have been provisioned by Youth Net NOC Administration:\n\n` +
-    `🌐 *Portal Login URL:* ${portalUrl}\n` +
-    `👤 *Username:* \`${user.username}\`\n` +
-    `🔑 *Temporary Password:* \`${temporaryPassword}\`\n` +
-    `📱 *Registered Mobile:* ${user.phone}\n` +
-    `🛡️ *Role:* ${user.role}\n\n` +
-    `⚠️ *Security Notice:* Please login within 24 hours and change your temporary password upon first login.\n` +
-    `_Youth Net NOC Security & Compliance Team_`
-  );
+  const url = portalUrl || getPortalUrlForRole(user.role);
+  const name = user.displayName || user.fullName;
+  return buildStandardWhatsAppCredentialText(name, user.username, temporaryPassword, url);
 }

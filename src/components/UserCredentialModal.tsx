@@ -71,6 +71,7 @@ export const UserCredentialModal: React.FC<UserCredentialModalProps> = ({
   const previewUser: UserAccount = {
     id: userToEdit?.id || `usr-${Date.now()}`,
     username: username || 'user.login',
+    fullName: displayName || (role === 'AGENT' ? agents.find((a) => a.id === linkedAgentId)?.name || 'Field Agent' : 'User Account'),
     email: email || `${username || 'user'}@youthnet.pk`,
     role,
     passwordHash: '',

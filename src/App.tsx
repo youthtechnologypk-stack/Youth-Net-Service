@@ -1,5 +1,7 @@
 import React, { useState, useEffect } from 'react';
+import { CurrencyProvider } from './context/CurrencyContext';
 import { ISPProvider } from './context/ISPContext';
+import { PermissionProvider } from './context/PermissionContext';
 import { Sidebar } from './components/Sidebar';
 import { Header, ActiveTab } from './components/Header';
 import { NocOverview } from './components/NocOverview';
@@ -9,21 +11,58 @@ import { BillingStudio } from './components/BillingStudio';
 import { ComplaintsStudio } from './components/ComplaintsStudio';
 import { MobileAppSimulator } from './components/MobileAppSimulator';
 import { UserManagementStudio } from './components/UserManagementStudio';
+import { PermissionMatrixStudio } from './components/PermissionMatrixStudio';
 import { ArchitectureStudio } from './components/ArchitectureStudio';
 import { SettingsStudio } from './components/SettingsStudio';
+import { ManagerOperationsDashboard } from './components/ManagerOperationsDashboard';
+import { FieldAgentPortal } from './components/FieldAgentPortal';
+import { ClientSubscriberPortal } from './components/ClientSubscriberPortal';
+import { AccessDeniedView } from './components/AccessDeniedView';
+import { LoginPage } from './components/LoginPage';
 import { ProvisionSecretModal } from './components/ProvisionSecretModal';
 import { OutageBroadcasterModal } from './components/OutageBroadcasterModal';
 import { NewTicketModal } from './components/NewTicketModal';
 import { ReceiptModal } from './components/ReceiptModal';
 import { CashPaymentModal } from './components/CashPaymentModal';
 import { AddMikrotikDeviceModal } from './components/AddMikrotikDeviceModal';
+import { PWAInstallPrompt } from './components/PWAInstallPrompt';
 import { Invoice } from './types/isp';
-import { SystemRole } from './types/auth';
-import { Radio, ShieldCheck, Database, ShieldAlert } from 'lucide-react';
+import { SystemRole, UserAccount } from './types/auth';
+import {
+  getStoredUser,
+  apiLogout,
+  isRouteAllowedForRole,
+  saveAuthSession,
+  getStoredToken,
+} from './lib/auth';
+import { Radio, ShieldCheck, Database, ShieldAlert, ArrowLeft } from 'lucide-react';
+
+function getLandingTabForRole(role: SystemRole): ActiveTab {
+  switch (role) {
+    case 'ADMIN':
+      return 'noc';
+    case 'MANAGER':
+      return 'operations';
+    case 'AGENT':
+      return 'agent_portal';
+    case 'CLIENT':
+      return 'client_portal';
+    default:
+      return 'noc';
+  }
+}
 
 function ISPAppContent() {
-  const [activeTab, setActiveTab] = useState<ActiveTab>('noc');
-  const [currentRole, setCurrentRole] = useState<SystemRole>('ADMIN');
+  const [currentUser, setCurrentUser] = useState<UserAccount | null>(() => getStoredUser());
+  const [currentRole, setCurrentRole] = useState<SystemRole>(() => {
+    const user = getStoredUser();
+    return user?.role || 'ADMIN';
+  });
+
+  const [activeTab, setActiveTab] = useState<ActiveTab>(() => {
+    const user = getStoredUser();
+    return user ? getLandingTabForRole(user.role) : 'noc';
+  });
 
   // Sidebar collapsible state (HIDDEN by default)
   const [isSidebarOpen, setIsSidebarOpen] = useState(false);
@@ -47,6 +86,32 @@ function ISPAppContent() {
     return () => window.removeEventListener('keydown', handleKeyDown);
   }, [isSidebarOpen]);
 
+  // Handle Login success
+  const handleLoginSuccess = (user: UserAccount) => {
+    setCurrentUser(user);
+    setCurrentRole(user.role);
+    const landingTab = getLandingTabForRole(user.role);
+    setActiveTab(landingTab);
+  };
+
+  // Handle Logout
+  const handleLogout = async () => {
+    await apiLogout();
+    setCurrentUser(null);
+  };
+
+  // Handle Role Switching for Testing/Simulation
+  const handleSwitchRole = (newRole: SystemRole) => {
+    setCurrentRole(newRole);
+    if (currentUser) {
+      const updatedUser: UserAccount = { ...currentUser, role: newRole };
+      setCurrentUser(updatedUser);
+      const token = getStoredToken() || `sim-token-${Date.now()}`;
+      saveAuthSession(token, updatedUser);
+    }
+    setActiveTab(getLandingTabForRole(newRole));
+  };
+
   const handleOpenReceipt = (invoice: Invoice) => {
     setSelectedReceiptInvoice(invoice);
   };
@@ -59,6 +124,14 @@ function ISPAppContent() {
     setSelectedPaymentInvoice(null);
     setSelectedReceiptInvoice({ ...invoice, receiptNumber: receiptNum });
   };
+
+  // If unauthenticated, display sleek Login Page
+  if (!currentUser) {
+    return <LoginPage onLoginSuccess={handleLoginSuccess} />;
+  }
+
+  // Route permission validation
+  const isPermitted = isRouteAllowedForRole(currentRole, activeTab);
 
   return (
     <div className="flex h-screen w-screen overflow-hidden bg-slate-950 text-slate-100 font-sans selection:bg-cyan-900 selection:text-cyan-200">
@@ -84,7 +157,9 @@ function ISPAppContent() {
           setIsSidebarOpen(false);
         }}
         currentRole={currentRole}
-        onSwitchRole={setCurrentRole}
+        onSwitchRole={handleSwitchRole}
+        currentUser={currentUser}
+        onLogout={handleLogout}
       />
 
       {/* 2. Main Flex Viewport (Navbar + Scrollable Body + Footer) */}
@@ -102,80 +177,139 @@ function ISPAppContent() {
           onOpenPaymentModal={handleOpenPayment}
           onOpenReceiptModal={handleOpenReceipt}
           currentRole={currentRole}
-          onSwitchRole={setCurrentRole}
+          onSwitchRole={handleSwitchRole}
+          currentUser={currentUser}
+          onLogout={handleLogout}
         />
 
-        {/* RBAC Role-Guard Notice Banner when simulating non-Admin roles */}
+        {/* RBAC Role Indicator Banner when simulating non-Admin roles */}
         {currentRole !== 'ADMIN' && (
-          <div className="bg-amber-950/80 border-b border-amber-800 text-amber-300 text-xs px-4 py-2 font-mono flex items-center justify-between shrink-0">
+          <div className="bg-slate-900 border-b border-indigo-900/60 text-slate-300 text-xs px-4 py-2 font-mono flex items-center justify-between shrink-0">
             <div className="flex items-center gap-2">
-              <ShieldAlert className="w-4 h-4 text-amber-400 shrink-0" />
+              <ShieldAlert className="w-4 h-4 text-cyan-400 shrink-0" />
               <span>
-                Role-Based Access Simulation: Logged in as <strong>{currentRole}</strong> (
-                {currentRole === 'AGENT' ? 'Field Recovery & Complaints' : 'Self-Service Subscriber'}
-                ).
+                Active RBAC Profile: Logged in as <strong className="text-white">{currentUser.fullName || currentUser.username}</strong> (<span className="text-cyan-400 font-bold">{currentRole}</span>).
               </span>
             </div>
-            <button
-              onClick={() => setCurrentRole('ADMIN')}
-              className="px-2.5 py-1 rounded bg-amber-500 hover:bg-amber-400 text-slate-950 font-bold text-[11px] cursor-pointer"
-            >
-              Switch to Master Admin
-            </button>
+            <div className="flex items-center gap-2">
+              <button
+                onClick={() => handleSwitchRole('ADMIN')}
+                className="px-2.5 py-1 rounded bg-indigo-600 hover:bg-indigo-500 text-white font-bold text-[11px] cursor-pointer transition"
+              >
+                Switch to Admin
+              </button>
+            </div>
           </div>
         )}
 
         {/* Scrollable Main Content Body */}
         <main className="flex-1 overflow-y-auto p-4 sm:p-6 bg-slate-950">
           <div className="max-w-7xl mx-auto space-y-6">
-            {activeTab === 'noc' && (
-              <NocOverview
-                onNavigateTab={(tab) => setActiveTab(tab)}
-                onOpenOutageModal={() => setIsOutageOpen(true)}
-                onOpenTicketModal={() => setIsTicketOpen(true)}
+            {/* PWA Mobile Install Banner for Agents & Clients */}
+            <PWAInstallPrompt role={currentRole} variant="banner" forceVisibleOnDesktop={false} />
+
+            {/* Route Protection Guard: If current role lacks permission, show 403 Forbidden screen */}
+            {!isPermitted ? (
+              <AccessDeniedView
+                currentRole={currentRole}
+                attemptedResource={activeTab}
+                onReturnToAllowed={() => setActiveTab(getLandingTabForRole(currentRole))}
               />
+            ) : (
+              <>
+                {/* 1. Admin NOC Command Center */}
+                {activeTab === 'noc' && (
+                  <NocOverview
+                    onNavigateTab={(tab) => setActiveTab(tab)}
+                    onOpenOutageModal={() => setIsOutageOpen(true)}
+                    onOpenTicketModal={() => setIsTicketOpen(true)}
+                  />
+                )}
+
+                {/* 2. Operations & Dispatch (Customized for Manager / Admin) */}
+                {activeTab === 'operations' && (
+                  <ManagerOperationsDashboard
+                    onOpenTicketModal={() => setIsTicketOpen(true)}
+                    onOpenOutageModal={() => setIsOutageOpen(true)}
+                  />
+                )}
+
+                {/* 3. Field Agent Dedicated Portal (Mobile Friendly) */}
+                {activeTab === 'agent_portal' && (
+                  <FieldAgentPortal
+                    currentUser={currentUser}
+                    onOpenReceiptModal={handleOpenReceipt}
+                    onOpenPaymentModal={handleOpenPayment}
+                  />
+                )}
+
+                {/* 4. Client / Subscriber Self-Service Portal */}
+                {activeTab === 'client_portal' && (
+                  <ClientSubscriberPortal
+                    currentUser={currentUser}
+                    onOpenReceiptModal={handleOpenReceipt}
+                    onOpenPaymentModal={handleOpenPayment}
+                  />
+                )}
+
+                {/* MikroTik Fleet Studio (Admin Only) */}
+                {activeTab === 'mikrotik' && (
+                  <MikrotikStudio
+                    onOpenProvisionModal={() => setIsProvisionOpen(true)}
+                    onOpenAddRouterModal={() => setIsAddRouterOpen(true)}
+                  />
+                )}
+
+                {/* VSOL OLT Studio */}
+                {activeTab === 'olt' && <VsolOltStudio />}
+
+                {/* Billing & Invoices */}
+                {activeTab === 'billing' && (
+                  <BillingStudio
+                    onOpenReceiptModal={handleOpenReceipt}
+                    onOpenPaymentModal={handleOpenPayment}
+                  />
+                )}
+
+                {/* Complaints & SLA Ticketing */}
+                {activeTab === 'complaints' && (
+                  <ComplaintsStudio
+                    onOpenTicketModal={() => setIsTicketOpen(true)}
+                    onOpenOutageModal={() => setIsOutageOpen(true)}
+                  />
+                )}
+
+                {/* Mobile Simulator */}
+                {activeTab === 'mobile' && (
+                  <MobileAppSimulator
+                    onOpenReceiptModal={handleOpenReceipt}
+                    onOpenPaymentModal={handleOpenPayment}
+                  />
+                )}
+
+                {/* User & Agent Hub */}
+                {activeTab === 'users' && (
+                  <UserManagementStudio
+                    currentSimulatedRole={currentRole}
+                    onSwitchSimulatedRole={handleSwitchRole}
+                  />
+                )}
+
+                {/* Granular Feature & Permission Management Matrix */}
+                {activeTab === 'permissions' && (
+                  <PermissionMatrixStudio
+                    currentSimulatedRole={currentRole}
+                    onSwitchSimulatedRole={handleSwitchRole}
+                  />
+                )}
+
+                {/* Architecture & SQL */}
+                {activeTab === 'architecture' && <ArchitectureStudio />}
+
+                {/* Settings Studio */}
+                {activeTab === 'settings' && <SettingsStudio />}
+              </>
             )}
-
-            {activeTab === 'mikrotik' && (
-              <MikrotikStudio
-                onOpenProvisionModal={() => setIsProvisionOpen(true)}
-                onOpenAddRouterModal={() => setIsAddRouterOpen(true)}
-              />
-            )}
-
-            {activeTab === 'olt' && <VsolOltStudio />}
-
-            {activeTab === 'billing' && (
-              <BillingStudio
-                onOpenReceiptModal={handleOpenReceipt}
-                onOpenPaymentModal={handleOpenPayment}
-              />
-            )}
-
-            {activeTab === 'complaints' && (
-              <ComplaintsStudio
-                onOpenTicketModal={() => setIsTicketOpen(true)}
-                onOpenOutageModal={() => setIsOutageOpen(true)}
-              />
-            )}
-
-            {activeTab === 'mobile' && (
-              <MobileAppSimulator
-                onOpenReceiptModal={handleOpenReceipt}
-                onOpenPaymentModal={handleOpenPayment}
-              />
-            )}
-
-            {activeTab === 'users' && (
-              <UserManagementStudio
-                currentSimulatedRole={currentRole}
-                onSwitchSimulatedRole={setCurrentRole}
-              />
-            )}
-
-            {activeTab === 'architecture' && <ArchitectureStudio />}
-
-            {activeTab === 'settings' && <SettingsStudio />}
           </div>
         </main>
 
@@ -185,16 +319,16 @@ function ISPAppContent() {
             <div className="flex items-center gap-2">
               <Radio className="w-3.5 h-3.5 text-cyan-400" />
               <span className="text-slate-300 font-bold">Youth Net Carrier NOC v4.2</span>
-              <span>&bull; RouterOS v7.16 + VSOL OLT Live Telemetry</span>
+              <span>&bull; RBAC Tier [{currentRole}] Active</span>
             </div>
 
             <div className="flex items-center gap-3">
               <span className="flex items-center gap-1 text-emerald-400">
-                <ShieldCheck className="w-3 h-3" /> Carrier SLA Active
+                <ShieldCheck className="w-3 h-3" /> Secure Auth Active
               </span>
               <span>&bull;</span>
               <span className="flex items-center gap-1 text-cyan-400">
-                <Database className="w-3 h-3" /> PostgreSQL 16
+                <Database className="w-3 h-3" /> PostgreSQL 16 `users` Table
               </span>
             </div>
           </div>
@@ -238,8 +372,12 @@ function ISPAppContent() {
 
 export default function App() {
   return (
-    <ISPProvider>
-      <ISPAppContent />
-    </ISPProvider>
+    <CurrencyProvider>
+      <ISPProvider>
+        <PermissionProvider>
+          <ISPAppContent />
+        </PermissionProvider>
+      </ISPProvider>
+    </CurrencyProvider>
   );
 }

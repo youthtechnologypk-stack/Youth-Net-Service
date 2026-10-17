@@ -1,0 +1,42 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" width="512" height="512">
+  <defs>
+    <linearGradient id="bgGradMask" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#020617"/>
+      <stop offset="50%" stop-color="#0f172a"/>
+      <stop offset="100%" stop-color="#020617"/>
+    </linearGradient>
+    <linearGradient id="cyanGradMask" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#22d3ee"/>
+      <stop offset="100%" stop-color="#0284c7"/>
+    </linearGradient>
+    <linearGradient id="emeraldGradMask" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#34d399"/>
+      <stop offset="100%" stop-color="#059669"/>
+    </linearGradient>
+  </defs>
+
+  <!-- Full-bleed background for maskable safe zone -->
+  <rect width="512" height="512" fill="url(#bgGradMask)"/>
+
+  <!-- Centered Scaled Content (80% safe zone) -->
+  <g transform="translate(51.2, 51.2) scale(0.8)">
+    <!-- Glowing Accent Ring -->
+    <circle cx="256" cy="256" r="190" fill="none" stroke="#06b6d4" stroke-width="2" stroke-opacity="0.2" stroke-dasharray="8 8"/>
+    <circle cx="256" cy="256" r="160" fill="none" stroke="#10b981" stroke-width="2" stroke-opacity="0.3"/>
+
+    <!-- Network Waves -->
+    <path d="M 176 170 A 110 110 0 0 1 336 170" fill="none" stroke="url(#cyanGradMask)" stroke-width="12" stroke-linecap="round" opacity="0.8"/>
+    <path d="M 206 200 A 70 70 0 0 1 306 200" fill="none" stroke="url(#emeraldGradMask)" stroke-width="10" stroke-linecap="round"/>
+    <circle cx="256" cy="230" r="12" fill="#38bdf8"/>
+
+    <!-- Letter Y -->
+    <path d="M 190 260 L 225 315 L 225 380" fill="none" stroke="url(#cyanGradMask)" stroke-width="20" stroke-linecap="round" stroke-linejoin="round"/>
+    <path d="M 260 260 L 225 315" fill="none" stroke="url(#cyanGradMask)" stroke-width="20" stroke-linecap="round" stroke-linejoin="round"/>
+
+    <!-- Letter N -->
+    <path d="M 285 380 L 285 280 L 335 380 L 335 280" fill="none" stroke="url(#emeraldGradMask)" stroke-width="20" stroke-linecap="round" stroke-linejoin="round"/>
+
+    <!-- Bottom Pulse Line -->
+    <path d="M 130 430 L 210 430 L 230 405 L 256 450 L 282 410 L 302 430 L 382 430" fill="none" stroke="#06b6d4" stroke-width="6" stroke-linecap="round" stroke-linejoin="round" opacity="0.9"/>
+  </g>
+</svg>

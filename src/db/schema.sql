@@ -1,156 +1,121 @@
 -- ============================================================================
--- NETPULSE CARRIER-GRADE ISP PLATFORM
--- SQL SCHEMA UPDATE: Authentication & Role-Based Access Control (RBAC)
+-- SQL Migration / Schema for MikroTik Routers
+-- Table: mikrotik_routers
+-- Purpose: Persistent storage for MikroTik BNG/BRAS hardware & CHR instances
 -- ============================================================================
 
--- 1. Create Roles Enum and Roles Lookup Table
-CREATE TYPE system_role_enum AS ENUM ('ADMIN', 'AGENT', 'CLIENT');
-
-CREATE TABLE IF NOT EXISTS roles (
-    id SERIAL PRIMARY KEY,
-    name system_role_enum UNIQUE NOT NULL,
-    description TEXT NOT NULL,
-    created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
-);
-
-INSERT INTO roles (name, description) VALUES
-    ('ADMIN', 'Full system access: MikroTik BNG, OLT, Billing CRON, Staff & Customer control'),
-    ('AGENT', 'Field recovery app, cash collection, assigned complaint resolution, offline sync'),
-    ('CLIENT', 'Subscriber self-service, invoice history, live optical stats, ticket reporting')
-ON CONFLICT (name) DO NOTHING;
-
--- 2. Create Users Table Linking with Agents and Customers Foreign Keys
-CREATE TABLE IF NOT EXISTS users (
-    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-    username VARCHAR(100) UNIQUE NOT NULL,
-    email VARCHAR(255) UNIQUE NOT NULL,
-    role system_role_enum NOT NULL DEFAULT 'CLIENT',
-    password_hash VARCHAR(255) NOT NULL, -- bcrypt/argon2 hash with salt ($2b$12$...)
-    display_name VARCHAR(150) NOT NULL,
-    phone VARCHAR(30) NOT NULL,
-    is_active BOOLEAN NOT NULL DEFAULT TRUE,
-    must_change_password BOOLEAN NOT NULL DEFAULT FALSE,
-    
-    -- Foreign key to Field Agent (Optional: Only populated for AGENT role)
-    linked_agent_id VARCHAR(50),
-    -- Foreign key to Customer (Optional: Only populated for CLIENT role)
-    linked_customer_id VARCHAR(50),
-    
-    created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
-    updated_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
-    last_login_at TIMESTAMP WITH TIME ZONE,
-    
-    -- Foreign key constraints (assumes existing agents and customers tables)
-    CONSTRAINT fk_user_agent FOREIGN KEY (linked_agent_id) 
-        REFERENCES agents(id) ON DELETE SET NULL ON UPDATE CASCADE,
-    CONSTRAINT fk_user_customer FOREIGN KEY (linked_customer_id) 
-        REFERENCES customers(id) ON DELETE SET NULL ON UPDATE CASCADE
-);
-
--- Indexing for high-performance authentication lookups
-CREATE INDEX IF NOT EXISTS idx_users_username ON users (LOWER(username));
-CREATE INDEX IF NOT EXISTS idx_users_email ON users (LOWER(email));
-CREATE INDEX IF NOT EXISTS idx_users_role ON users (role);
-CREATE INDEX IF NOT EXISTS idx_users_linked_agent ON users (linked_agent_id);
-CREATE INDEX IF NOT EXISTS idx_users_linked_customer ON users (linked_customer_id);
-
--- 3. JWT Refresh Tokens Table (with Revocation & Device Tracking)
-CREATE TABLE IF NOT EXISTS refresh_tokens (
-    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-    user_id UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
-    token_hash VARCHAR(255) NOT NULL,
-    device_info VARCHAR(255),
-    ip_address VARCHAR(45),
-    expires_at TIMESTAMP WITH TIME ZONE NOT NULL,
-    created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
-    revoked_at TIMESTAMP WITH TIME ZONE
-);
-
-CREATE INDEX IF NOT EXISTS idx_refresh_tokens_user ON refresh_tokens (user_id);
-CREATE INDEX IF NOT EXISTS idx_refresh_tokens_hash ON refresh_tokens (token_hash);
-
--- 4. Credential Reset & Security Audit Log Table
-CREATE TABLE IF NOT EXISTS user_security_audit_logs (
-    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-    target_user_id UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
-    performed_by_user_id UUID REFERENCES users(id) ON DELETE SET NULL,
-    action_type VARCHAR(50) NOT NULL, -- 'PASSWORD_RESET', 'STATUS_TOGGLE', 'WHATSAPP_SHARED', 'ROLE_CHANGED'
-    ip_address VARCHAR(45),
-    details JSONB,
-    created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
-);
-
-CREATE INDEX IF NOT EXISTS idx_audit_target_user ON user_security_audit_logs (target_user_id);
-
--- ============================================================================
--- 5. VSOL OLT (EPON/GPON) & ONU OPTICAL MONITORING SCHEMA
--- ============================================================================
-
-CREATE TYPE olt_pon_type_enum AS ENUM ('EPON', 'GPON');
-CREATE TYPE onu_status_enum AS ENUM ('online', 'offline', 'dying_gasp');
-CREATE TYPE optical_quality_enum AS ENUM ('good', 'warning', 'critical');
-
--- OLT Hardware Table
-CREATE TABLE IF NOT EXISTS olts (
-    id VARCHAR(50) PRIMARY KEY, -- e.g. 'olt-vsol-g11'
-    name VARCHAR(150) NOT NULL,
-    model VARCHAR(100) NOT NULL DEFAULT 'VSOL V1600G1-B (8-Port GPON)',
-    ip_address VARCHAR(45) NOT NULL,
-    snmp_port INTEGER NOT NULL DEFAULT 161,
-    snmp_community VARCHAR(100) NOT NULL DEFAULT 'public',
-    firmware_version VARCHAR(50) NOT NULL DEFAULT 'v2.03.54R',
-    pon_type olt_pon_type_enum NOT NULL DEFAULT 'GPON',
-    total_pon_ports INTEGER NOT NULL DEFAULT 8,
-    active_onu_count INTEGER NOT NULL DEFAULT 0,
-    status VARCHAR(20) NOT NULL DEFAULT 'online', -- 'online', 'warning', 'offline'
-    cpu_load_percent INTEGER NOT NULL DEFAULT 12,
-    temperature_celsius NUMERIC(5,2) NOT NULL DEFAULT 38.5,
-    power_supply VARCHAR(50) NOT NULL DEFAULT 'dual_ac_redundant',
-    area_node VARCHAR(100) NOT NULL, -- Links to area_nodes (e.g. 'Sector-G11-PON-02')
+CREATE TABLE IF NOT EXISTS mikrotik_routers (
+    id VARCHAR(64) PRIMARY KEY,
+    name VARCHAR(255) NOT NULL,
+    host VARCHAR(255) NOT NULL,
+    port INTEGER NOT NULL DEFAULT 8728,
+    username VARCHAR(255) NOT NULL,
+    password VARCHAR(255) NOT NULL,
+    is_active BOOLEAN NOT NULL DEFAULT true,
+    status VARCHAR(50) NOT NULL DEFAULT 'online', -- 'online' | 'unreachable' | 'syncing'
+    model VARCHAR(255) DEFAULT 'MikroTik CCR2004-16G-2S+',
+    version VARCHAR(255) DEFAULT 'RouterOS v7.16.2',
+    location VARCHAR(255) DEFAULT 'Central Distribution Node',
+    use_ssl BOOLEAN NOT NULL DEFAULT true,
+    wan_interface VARCHAR(100) DEFAULT 'sfp-sfpplus1',
+    walled_garden_pool VARCHAR(100) DEFAULT '172.16.102.0/24',
+    cpu_load INTEGER DEFAULT 18,
+    memory_usage_mb INTEGER DEFAULT 840,
+    total_memory_mb INTEGER DEFAULT 4096,
+    uptime VARCHAR(100) DEFAULT '14d 08h 32m',
+    current_wan_rx_mbps INTEGER DEFAULT 840,
+    current_wan_tx_mbps INTEGER DEFAULT 320,
+    active_pppoe_count INTEGER DEFAULT 142,
+    last_tested_at TIMESTAMP WITH TIME ZONE,
+    last_error_message TEXT,
     created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
     updated_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
 );
 
-CREATE INDEX IF NOT EXISTS idx_olts_ip ON olts (ip_address);
-CREATE INDEX IF NOT EXISTS idx_olts_area_node ON olts (area_node);
+-- Indexes for rapid lookup and active router filtering
+CREATE INDEX IF NOT EXISTS idx_mikrotik_routers_host ON mikrotik_routers(host);
+CREATE INDEX IF NOT EXISTS idx_mikrotik_routers_is_active ON mikrotik_routers(is_active);
+CREATE INDEX IF NOT EXISTS idx_mikrotik_routers_status ON mikrotik_routers(status);
 
--- Customer ONU/ONT Hardware Table with Optical Power Metrics
-CREATE TABLE IF NOT EXISTS onus (
-    id VARCHAR(50) PRIMARY KEY, -- e.g. 'onu-g11-01'
-    olt_id VARCHAR(50) NOT NULL REFERENCES olts(id) ON DELETE CASCADE,
-    pon_port VARCHAR(30) NOT NULL, -- e.g. 'GPON0/1' or 'EPON0/2'
-    onu_index INTEGER NOT NULL, -- 1 to 128
-    mac_address VARCHAR(50) UNIQUE NOT NULL, -- e.g. 'E0:67:B3:4A:21:8F'
-    serial_number VARCHAR(100),
-    vendor VARCHAR(50) NOT NULL DEFAULT 'VSOL',
-    model VARCHAR(50) NOT NULL DEFAULT 'V2801SG',
-    
-    -- Foreign Key to Customer Record
-    customer_id VARCHAR(50) REFERENCES customers(id) ON DELETE SET NULL,
-    area_node VARCHAR(100) NOT NULL,
-    
-    -- Real-time Optical Signal Telemetry (in dBm)
-    rx_power_dbm NUMERIC(5,2) NOT NULL DEFAULT -19.40, -- Received Optical Power at ONU
-    tx_power_dbm NUMERIC(5,2) NOT NULL DEFAULT 2.30,   -- Transmit Optical Power from ONU
-    olt_tx_power_dbm NUMERIC(5,2) NOT NULL DEFAULT 4.50, -- SFP module Tx Power at OLT
-    
-    -- Signal Threshold Health: 'good' (-12 to -23), 'warning' (-24 to -27), 'critical' (<-28 or offline)
-    optical_quality optical_quality_enum NOT NULL DEFAULT 'good',
-    status onu_status_enum NOT NULL DEFAULT 'online', -- 'online', 'offline', 'dying_gasp'
-    
-    distance_meters INTEGER NOT NULL DEFAULT 820,
-    firmware VARCHAR(50) DEFAULT 'V1.0.4',
-    last_dying_gasp_time TIMESTAMP WITH TIME ZONE,
-    last_online_time TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
-    created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
-    updated_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
-    
-    CONSTRAINT uq_olt_pon_onu UNIQUE (olt_id, pon_port, onu_index)
+-- Optional seed for default initial core carrier router if table is empty
+INSERT INTO mikrotik_routers (
+    id, name, host, port, username, password, is_active, status, model, version, location,
+    use_ssl, wan_interface, walled_garden_pool, cpu_load, memory_usage_mb, total_memory_mb,
+    uptime, current_wan_rx_mbps, current_wan_tx_mbps, active_pppoe_count
+) VALUES (
+    'rt-core-01',
+    'BRAS-CCR2004-CORE-01',
+    '10.200.0.1',
+    8729,
+    'netpulse_noc',
+    'RouterOS#2026!',
+    true,
+    'online',
+    'MikroTik CCR2004-16G-2S+',
+    'RouterOS v7.16.2',
+    'Sector G-11 Primary Hub Rack 01',
+    true,
+    'sfp-sfpplus1',
+    '172.16.100.0/24',
+    24,
+    1120,
+    4096,
+    '28d 14h 12m',
+    880,
+    340,
+    142
+) ON CONFLICT (id) DO NOTHING;
+
+-- Table: system_settings
+CREATE TABLE IF NOT EXISTS system_settings (
+    key VARCHAR(100) PRIMARY KEY,
+    value TEXT NOT NULL,
+    updated_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
 );
 
-CREATE INDEX IF NOT EXISTS idx_onus_customer_id ON onus (customer_id);
-CREATE INDEX IF NOT EXISTS idx_onus_mac_address ON onus (LOWER(mac_address));
-CREATE INDEX IF NOT EXISTS idx_onus_pon_port ON onus (olt_id, pon_port);
-CREATE INDEX IF NOT EXISTS idx_onus_rx_power ON onus (rx_power_dbm);
-CREATE INDEX IF NOT EXISTS idx_onus_optical_quality ON onus (optical_quality);
-CREATE INDEX IF NOT EXISTS idx_onus_status ON onus (status);
+INSERT INTO system_settings (key, value) VALUES
+    ('currency_code', 'PKR'),
+    ('currency_symbol', 'Rs.'),
+    ('isp_name', 'Youth Net Fiber Broadband')
+ON CONFLICT (key) DO NOTHING;
+
+-- Table: users
+-- Purpose: Authentication & RBAC (Admin, Manager, Agent, Client)
+CREATE TABLE IF NOT EXISTS users (
+    id VARCHAR(64) PRIMARY KEY,
+    username VARCHAR(100) UNIQUE NOT NULL,
+    password_hash VARCHAR(255) NOT NULL,
+    full_name VARCHAR(255) NOT NULL,
+    phone VARCHAR(50),
+    role VARCHAR(30) NOT NULL CHECK (role IN ('ADMIN', 'MANAGER', 'AGENT', 'CLIENT')),
+    permissions JSONB DEFAULT '{}'::jsonb,
+    is_active BOOLEAN DEFAULT TRUE,
+    created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
+);
+
+-- Table: role_permissions
+-- Purpose: Granular Feature & Permission Management Matrix
+CREATE TABLE IF NOT EXISTS role_permissions (
+    role VARCHAR(30) PRIMARY KEY,
+    permissions JSONB NOT NULL DEFAULT '{}'::jsonb,
+    updated_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
+    updated_by VARCHAR(100) DEFAULT 'admin'
+);
+
+-- Seed default permissions for roles
+INSERT INTO role_permissions (role, permissions, updated_by) VALUES
+    ('MANAGER', '{"manager_view_billing_revenue": true, "manager_manual_cash_approval": true, "manager_edit_subscribers": true, "manager_routeros_active_kick": true, "manager_tickets_create_assign": true, "manager_olt_optical_telemetry": true}'::jsonb, 'system_init'),
+    ('AGENT', '{"agent_collect_cash_receipts": true, "agent_view_subscriber_contact_location": true, "agent_check_ont_optical_power": true, "agent_resolve_fiber_tickets": true, "agent_full_area_directory": false}'::jsonb, 'system_init'),
+    ('CLIENT', '{"client_online_bill_payment": true, "client_lodge_complaint_ticket": true, "client_live_speed_bandwidth_monitor": true, "client_download_invoices_receipts": true, "client_wifi_password_self_service": true}'::jsonb, 'system_init')
+ON CONFLICT (role) DO NOTHING;
+
+-- Seed 4 default testing accounts:
+-- admin/admin@123, manager/mgr@123, agent/agent@123, client/client@123
+INSERT INTO users (id, username, password_hash, full_name, phone, role, is_active) VALUES
+    ('usr-admin-01', 'admin', '$2b$12$netpulse.7a8b9c0d1e2f3a4b5c6d7e8f9a0b1c2d3e4f5a6b7c8d9e0f', 'NOC Master Administrator', '+92 300 1234567', 'ADMIN', TRUE),
+    ('usr-mgr-01', 'manager', '$2b$12$netpulse.manager123hash7a8b9c0d1e2f3a4b5c6d7e8f9a0b1c2d', 'NOC Operations Manager', '+92 301 9876543', 'MANAGER', TRUE),
+    ('usr-agent-01', 'agent', '$2b$12$netpulse.agent123hash7a8b9c0d1e2f3a4b5c6d7e8f9a0b1c2d3e', 'Bilal Khan (Field Recovery Agent)', '+92 301 5550192', 'AGENT', TRUE),
+    ('usr-client-01', 'client', '$2b$12$netpulse.client123hash7a8b9c0d1e2f3a4b5c6d7e8f9a0b1c2d3', 'Dr. Shahzad Rafique (Subscriber)', '+92 300 5559812', 'CLIENT', TRUE)
+ON CONFLICT (username) DO UPDATE
+SET role = EXCLUDED.role, full_name = EXCLUDED.full_name;
+
