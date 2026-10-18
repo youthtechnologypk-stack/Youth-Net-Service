@@ -34,6 +34,7 @@ import {
   isRouteAllowedForRole,
   saveAuthSession,
   getStoredToken,
+  isOriginalAdminSession,
 } from './lib/auth';
 import { Radio, ShieldCheck, Database, ShieldAlert, ArrowLeft } from 'lucide-react';
 
@@ -100,16 +101,31 @@ function ISPAppContent() {
     setCurrentUser(null);
   };
 
-  // Handle Role Switching for Testing/Simulation
+  // Handle Role Switching for Testing/Simulation (Guarded strictly to genuine ADMIN sessions)
   const handleSwitchRole = (newRole: SystemRole) => {
+    const isOriginalAdmin = isOriginalAdminSession();
+    // Production Role Guard: Client accounts must NEVER escalate privilege
+    if (currentUser?.role === 'CLIENT' || !isOriginalAdmin) {
+      console.warn('Security Alert: Unauthorized role escalation blocked for client session.');
+      return;
+    }
     setCurrentRole(newRole);
     if (currentUser) {
       const updatedUser: UserAccount = { ...currentUser, role: newRole };
       setCurrentUser(updatedUser);
       const token = getStoredToken() || `sim-token-${Date.now()}`;
-      saveAuthSession(token, updatedUser);
+      saveAuthSession(token, updatedUser, true);
     }
     setActiveTab(getLandingTabForRole(newRole));
+  };
+
+  // Guard Outage Broadcaster modal (Never accessible to Client)
+  const handleOpenOutage = () => {
+    if (currentRole === 'CLIENT' || currentUser?.role === 'CLIENT') {
+      console.warn('Security Alert: Outage broadcasting is strictly prohibited for client accounts.');
+      return;
+    }
+    setIsOutageOpen(true);
   };
 
   const handleOpenReceipt = (invoice: Invoice) => {
@@ -132,35 +148,39 @@ function ISPAppContent() {
 
   // Route permission validation
   const isPermitted = isRouteAllowedForRole(currentRole, activeTab);
+  const isClient = currentRole === 'CLIENT' || currentUser.role === 'CLIENT';
+  const isOriginalAdmin = isOriginalAdminSession();
 
   return (
     <div className="flex h-screen w-screen overflow-hidden bg-slate-950 text-slate-100 font-sans selection:bg-cyan-900 selection:text-cyan-200">
-      {/* 1. Off-Canvas Collapsible Sidebar (HIDDEN by default, toggled via Navbar Menu button) */}
-      <Sidebar
-        isOpen={isSidebarOpen}
-        onClose={() => setIsSidebarOpen(false)}
-        activeTab={activeTab}
-        setActiveTab={(tab) => {
-          setActiveTab(tab);
-          setIsSidebarOpen(false);
-        }}
-        onOpenProvisionModal={() => {
-          setIsProvisionOpen(true);
-          setIsSidebarOpen(false);
-        }}
-        onOpenOutageModal={() => {
-          setIsOutageOpen(true);
-          setIsSidebarOpen(false);
-        }}
-        onOpenTicketModal={() => {
-          setIsTicketOpen(true);
-          setIsSidebarOpen(false);
-        }}
-        currentRole={currentRole}
-        onSwitchRole={handleSwitchRole}
-        currentUser={currentUser}
-        onLogout={handleLogout}
-      />
+      {/* 1. Off-Canvas Collapsible Sidebar (Strictly hidden for Client subscribers; internal NOC operations only) */}
+      {!isClient && (
+        <Sidebar
+          isOpen={isSidebarOpen}
+          onClose={() => setIsSidebarOpen(false)}
+          activeTab={activeTab}
+          setActiveTab={(tab) => {
+            setActiveTab(tab);
+            setIsSidebarOpen(false);
+          }}
+          onOpenProvisionModal={() => {
+            setIsProvisionOpen(true);
+            setIsSidebarOpen(false);
+          }}
+          onOpenOutageModal={() => {
+            handleOpenOutage();
+            setIsSidebarOpen(false);
+          }}
+          onOpenTicketModal={() => {
+            setIsTicketOpen(true);
+            setIsSidebarOpen(false);
+          }}
+          currentRole={currentRole}
+          onSwitchRole={isOriginalAdmin ? handleSwitchRole : undefined}
+          currentUser={currentUser}
+          onLogout={handleLogout}
+        />
+      )}
 
       {/* 2. Main Flex Viewport (Navbar + Scrollable Body + Footer) */}
       <div className="flex-1 flex flex-col h-full overflow-hidden min-w-0">
@@ -171,19 +191,19 @@ function ISPAppContent() {
           isSidebarOpen={isSidebarOpen}
           onToggleSidebar={() => setIsSidebarOpen((prev) => !prev)}
           onOpenProvisionModal={() => setIsProvisionOpen(true)}
-          onOpenOutageModal={() => setIsOutageOpen(true)}
+          onOpenOutageModal={handleOpenOutage}
           onOpenTicketModal={() => setIsTicketOpen(true)}
           onOpenAddRouterModal={() => setIsAddRouterOpen(true)}
           onOpenPaymentModal={handleOpenPayment}
           onOpenReceiptModal={handleOpenReceipt}
           currentRole={currentRole}
-          onSwitchRole={handleSwitchRole}
+          onSwitchRole={isOriginalAdmin ? handleSwitchRole : undefined}
           currentUser={currentUser}
           onLogout={handleLogout}
         />
 
-        {/* RBAC Role Indicator Banner when simulating non-Admin roles */}
-        {currentRole !== 'ADMIN' && (
+        {/* RBAC Role Indicator Banner (ONLY for genuine Admin sessions simulating other roles; REMOVED completely for Client) */}
+        {currentRole !== 'ADMIN' && isOriginalAdmin && !isClient && (
           <div className="bg-slate-900 border-b border-indigo-900/60 text-slate-300 text-xs px-4 py-2 font-mono flex items-center justify-between shrink-0">
             <div className="flex items-center gap-2">
               <ShieldAlert className="w-4 h-4 text-cyan-400 shrink-0" />
@@ -195,6 +215,7 @@ function ISPAppContent() {
               <button
                 onClick={() => handleSwitchRole('ADMIN')}
                 className="px-2.5 py-1 rounded bg-indigo-600 hover:bg-indigo-500 text-white font-bold text-[11px] cursor-pointer transition"
+                title="Return to Administrator Profile"
               >
                 Switch to Admin
               </button>
@@ -316,33 +337,51 @@ function ISPAppContent() {
         {/* Compact Footer Strip */}
         <footer className="border-t border-slate-900 bg-slate-950/90 py-2.5 px-4 sm:px-6 text-[11px] text-slate-500 shrink-0">
           <div className="max-w-7xl mx-auto flex flex-col sm:flex-row items-center justify-between gap-2 font-mono">
-            <div className="flex items-center gap-2">
-              <Radio className="w-3.5 h-3.5 text-cyan-400" />
-              <span className="text-slate-300 font-bold">Youth Net Carrier NOC v4.2</span>
-              <span>&bull; RBAC Tier [{currentRole}] Active</span>
-            </div>
+            {isClient ? (
+              <>
+                <div className="flex items-center gap-2">
+                  <span className="font-bold text-slate-300">Youth Net</span>
+                  <span>&bull; Subscriber Self-Care Portal</span>
+                </div>
+                <div className="flex items-center gap-3">
+                  <span className="flex items-center gap-1 text-emerald-400">
+                    <ShieldCheck className="w-3.5 h-3.5" /> 256-bit TLS Encrypted
+                  </span>
+                  <span>&bull;</span>
+                  <span className="text-slate-400">24/7 Helpline: +92 51 111-968-846</span>
+                </div>
+              </>
+            ) : (
+              <>
+                <div className="flex items-center gap-2">
+                  <Radio className="w-3.5 h-3.5 text-cyan-400" />
+                  <span className="text-slate-300 font-bold">Youth Net Carrier NOC v4.2</span>
+                  <span>&bull; RBAC Tier [{currentRole}] Active</span>
+                </div>
 
-            <div className="flex items-center gap-3">
-              <span className="flex items-center gap-1 text-emerald-400">
-                <ShieldCheck className="w-3 h-3" /> Secure Auth Active
-              </span>
-              <span>&bull;</span>
-              <span className="flex items-center gap-1 text-cyan-400">
-                <Database className="w-3 h-3" /> PostgreSQL 16 `users` Table
-              </span>
-            </div>
+                <div className="flex items-center gap-3">
+                  <span className="flex items-center gap-1 text-emerald-400">
+                    <ShieldCheck className="w-3 h-3" /> Secure Auth Active
+                  </span>
+                  <span>&bull;</span>
+                  <span className="flex items-center gap-1 text-cyan-400">
+                    <Database className="w-3 h-3" /> PostgreSQL 16 `users` Table
+                  </span>
+                </div>
+              </>
+            )}
           </div>
         </footer>
       </div>
 
-      {/* Global Modals */}
+      {/* Global Modals (Guarded by strict RBAC) */}
       <ProvisionSecretModal
-        isOpen={isProvisionOpen}
+        isOpen={isProvisionOpen && currentRole === 'ADMIN'}
         onClose={() => setIsProvisionOpen(false)}
       />
 
       <OutageBroadcasterModal
-        isOpen={isOutageOpen}
+        isOpen={isOutageOpen && (currentRole === 'ADMIN' || currentRole === 'MANAGER') && !isClient}
         onClose={() => setIsOutageOpen(false)}
       />
 

@@ -55,11 +55,36 @@ export const RouterFleet: React.FC<RouterFleetProps> = ({ onOpenAddDeviceModal }
   const handleDeleteRouter = async () => {
     if (!routerToDelete) return;
     setIsDeleting(true);
+    const targetId = routerToDelete.id;
+    const deletedName = routerToDelete.name;
     try {
-      await deleteMikrotikRouter(routerToDelete.id);
+      // 1. Complete Delete Pipeline: Await backend API response
+      const res = await deleteMikrotikRouter(targetId);
+
+      // 2. Synchronously ensure client/mock fallback storage is updated
+      if (typeof window !== 'undefined') {
+        try {
+          const raw = localStorage.getItem('registered_routers');
+          if (raw) {
+            const list = JSON.parse(raw);
+            if (Array.isArray(list)) {
+              const updated = list.filter((r: any) => r.id !== targetId && r.name !== deletedName);
+              localStorage.setItem('registered_routers', JSON.stringify(updated));
+            }
+          }
+          const deletedRaw = localStorage.getItem('deleted_router_ids') || '[]';
+          const deletedList = JSON.parse(deletedRaw);
+          if (Array.isArray(deletedList) && !deletedList.includes(targetId)) {
+            deletedList.push(targetId);
+            localStorage.setItem('deleted_router_ids', JSON.stringify(deletedList));
+          }
+        } catch {}
+      }
+
       setIsDeleteDialogOpen(false);
-      setRouterToDelete(null);
-      showToast(`Router ${routerToDelete.name} deleted successfully`);
+      showToast(`Router "${deletedName}" deleted permanently from fleet & database.`);
+    } catch (err: any) {
+      showToast(`Error deleting router: ${err?.message || 'Failed'}`);
     } finally {
       setIsDeleting(false);
     }
@@ -255,23 +280,41 @@ export const RouterFleet: React.FC<RouterFleetProps> = ({ onOpenAddDeviceModal }
                   </button>
 
                   {/* DELETE ROUTER BUTTON */}
-                  {routers.length > 1 && (
-                    <button
-                      onClick={() => {
-                        setRouterToDelete(router);
-                        setIsDeleteDialogOpen(true);
-                      }}
-                      className="p-1.5 text-slate-400 hover:text-rose-400 hover:bg-rose-950/40 border border-transparent hover:border-rose-900 rounded-lg transition cursor-pointer"
-                      title="Delete MikroTik Router"
-                    >
-                      <Trash2 className="w-4 h-4" />
-                    </button>
-                  )}
+                  <button
+                    onClick={() => {
+                      setRouterToDelete(router);
+                      setIsDeleteDialogOpen(true);
+                    }}
+                    className="p-1.5 text-slate-400 hover:text-rose-400 hover:bg-rose-950/40 border border-transparent hover:border-rose-900 rounded-lg transition cursor-pointer"
+                    title="Delete MikroTik Router Permanently"
+                  >
+                    <Trash2 className="w-4 h-4" />
+                  </button>
                 </div>
               </div>
             </div>
           );
         })}
+
+        {/* Empty Fleet State */}
+        {routers.length === 0 && (
+          <div className="col-span-full py-12 px-4 text-center bg-slate-900/60 border border-slate-800 rounded-xl space-y-3">
+            <div className="w-12 h-12 rounded-xl bg-slate-800/80 border border-slate-700 flex items-center justify-center mx-auto text-slate-400">
+              <Server className="w-6 h-6 text-slate-500" />
+            </div>
+            <h4 className="text-sm font-bold text-slate-200">No MikroTik Routers in Fleet</h4>
+            <p className="text-xs text-slate-400 max-w-md mx-auto">
+              All routers have been removed. Click "+ Add MikroTik Device" to register a physical RouterOS BNG, CCR, or Cloud Hosted Router (CHR).
+            </p>
+            <button
+              onClick={onOpenAddDeviceModal}
+              className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-cyan-600 hover:bg-cyan-500 text-slate-950 font-bold text-xs transition shadow-md cursor-pointer"
+            >
+              <Plus className="w-3.5 h-3.5" />
+              <span>+ Add MikroTik Device</span>
+            </button>
+          </div>
+        )}
       </div>
 
       {/* Edit Router Modal */}

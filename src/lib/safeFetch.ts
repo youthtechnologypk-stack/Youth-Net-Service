@@ -27,13 +27,20 @@ export async function safeResponseJson<T = any>(
   if (!isJson) {
     const text = await response.text();
     const cleanPreview = text.slice(0, 150).replace(/\s+/g, ' ').trim();
-    const errorMessage = `API returned non-JSON response (${contentType || 'text/html'}) [HTTP ${response.status}]: ${cleanPreview || 'Empty/HTML body'}`;
+    
+    // Graceful error message if serverless host returns 404 HTML fallback
+    let errorMessage = `API returned non-JSON response (${contentType || 'text/html'}) [HTTP ${response.status}]: ${cleanPreview || 'Empty/HTML body'}`;
+    if (response.status === 404 || cleanPreview.toLowerCase().includes('not found') || cleanPreview.toLowerCase().includes('<!doctype')) {
+      errorMessage = 'Backend API route not deployed on this host. Run locally or configure Netlify Next.js runtime.';
+    }
     
     console.warn('[SafeFetch Safeguard] Non-JSON payload intercepted:', errorMessage);
     
     return {
       success: false,
-      status: response.status >= 200 && response.status < 300 ? 'online' : 'unreachable',
+      status: 'unreachable',
+      is404: response.status === 404,
+      isHtmlFallback: true,
       error: errorMessage,
       message: errorMessage,
       ...(fallbackData || {}),

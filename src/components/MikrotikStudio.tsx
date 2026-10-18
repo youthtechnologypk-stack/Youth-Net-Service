@@ -446,6 +446,9 @@ export const MikrotikStudio: React.FC<MikrotikStudioProps> = ({
           routerIp={currentRouter.ipAddress}
           onSelectSession={(session) => setSelectedSubscriberUsername(session.username)}
           onKickSession={handleKick}
+          onDeleteSecret={async (username) => {
+            await deletePppoeUser(username, currentRouter.id);
+          }}
           isKickingId={isKicking}
         />
       )}

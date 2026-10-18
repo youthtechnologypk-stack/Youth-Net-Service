@@ -807,6 +807,7 @@ export async function probeDirectSocketConnection(
  * NO MOCK FALLBACKS: Returns real error if device is unreachable or auth fails!
  */
 export async function testMikrotikConnection(params: MikrotikTestParams): Promise<MikrotikTestResult> {
+  const startTime = Date.now();
   const host = (params.host || '').trim();
   const port = Number(params.port) || 8728;
   const username = (params.username || 'admin').trim();
@@ -827,6 +828,33 @@ export async function testMikrotikConnection(params: MikrotikTestParams): Promis
   // Socket reachability probe first (especially for testing specific IP addresses like 202.142.186.150:8728)
   const socketProbe = await probeDirectSocketConnection(host, port, 3000);
   if (!socketProbe.reachable) {
+    // If raw socket failed or timed out on port 8728/8729, attempt RouterOS v7 HTTPS REST API alternative (e.g. port 443 or 8729)
+    if (useSsl || port === 443 || port === 8729 || port === 80) {
+      const restPortsToTry = port === 443 ? [443] : [port, 443];
+      for (const tryPort of restPortsToTry) {
+        try {
+          const restData = await queryViaRouterOsRest({ host, port: tryPort, username, password, useSsl: true }, 4000);
+          return {
+            success: true,
+            status: 'online',
+            latencyMs: Date.now() - startTime,
+            socketReachable: true,
+            host,
+            port: tryPort,
+            message: `Connected successfully to MikroTik router at ${host}:${tryPort} (RouterOS v7 HTTPS REST API). Identity: ${restData.identity}, Model: ${restData.model}, Version: ${restData.version}`,
+            identity: restData.identity,
+            model: restData.model,
+            version: restData.version,
+            cpuLoad: restData.cpuLoad,
+            memoryUsageMb: restData.memoryUsageMb,
+            totalMemoryMb: restData.totalMemoryMb,
+            uptime: restData.uptime,
+            activePppoeCount: restData.activeSessions.length,
+          };
+        } catch {}
+      }
+    }
+
     return {
       success: false,
       status: 'unreachable',
@@ -839,7 +867,41 @@ export async function testMikrotikConnection(params: MikrotikTestParams): Promis
     };
   }
 
-  const startTime = Date.now();
+  // If useSsl is checked and port is 443, query RouterOS v7 native REST API directly
+  if (port === 443) {
+    try {
+      const restData = await queryViaRouterOsRest({ host, port: 443, username, password, useSsl: true }, 4500);
+      return {
+        success: true,
+        status: 'online',
+        latencyMs: Date.now() - startTime,
+        socketReachable: true,
+        host,
+        port: 443,
+        message: `Connected successfully to MikroTik router at ${host}:443 (RouterOS v7 HTTPS REST API). Identity: ${restData.identity}, Model: ${restData.model}, Version: ${restData.version}`,
+        identity: restData.identity,
+        model: restData.model,
+        version: restData.version,
+        cpuLoad: restData.cpuLoad,
+        memoryUsageMb: restData.memoryUsageMb,
+        totalMemoryMb: restData.totalMemoryMb,
+        uptime: restData.uptime,
+        activePppoeCount: restData.activeSessions.length,
+      };
+    } catch (err: any) {
+      const formattedError = formatRouterOsError(err, host, 443, username);
+      return {
+        success: false,
+        status: 'unreachable',
+        latencyMs: Date.now() - startTime,
+        host,
+        port: 443,
+        socketReachable: true,
+        message: formattedError,
+        error: formattedError,
+      };
+    }
+  }
 
   // Try binary RouterOS API first (standard for port 8728, 8729)
   try {
@@ -864,44 +926,35 @@ export async function testMikrotikConnection(params: MikrotikTestParams): Promis
       activePppoeCount: data.activeSessions.length,
     };
   } catch (apiErr: any) {
-    // If binary API failed, check if port is HTTP/HTTPS (e.g. 80, 443) or user configured REST API
-    if (port === 80 || port === 443 || port === 8080) {
-      try {
-        const restData = await queryViaRouterOsRest({ host, port, username, password, useSsl }, 4000);
-        const latencyMs = Date.now() - startTime;
-        return {
-          success: true,
-          status: 'online',
-          latencyMs,
-          socketReachable: true,
-          host,
-          port,
-          message: `Connected successfully to MikroTik router at ${host}:${port} (RouterOS v7 REST API). Identity: ${restData.identity}, Model: ${restData.model}, Version: ${restData.version}`,
-          identity: restData.identity,
-          model: restData.model,
-          version: restData.version,
-          cpuLoad: restData.cpuLoad,
-          memoryUsageMb: restData.memoryUsageMb,
-          totalMemoryMb: restData.totalMemoryMb,
-          uptime: restData.uptime,
-          activePppoeCount: restData.activeSessions.length,
-        };
-      } catch (restErr: any) {
-        const finalError = formatRouterOsError(restErr, host, port, username);
-        return {
-          success: false,
-          status: 'unreachable',
-          latencyMs: Date.now() - startTime,
-          host,
-          port,
-          socketReachable: true,
-          message: finalError,
-          error: finalError,
-        };
+    // If binary API failed, check if REST API can connect (supports port 443 / 8729 / 80 / 8080)
+    if (useSsl || port === 80 || port === 443 || port === 8729 || port === 8080) {
+      const restPortsToTry = port === 443 || port === 80 ? [port] : [port, 443];
+      for (const tryPort of restPortsToTry) {
+        try {
+          const restData = await queryViaRouterOsRest({ host, port: tryPort, username, password, useSsl: Boolean(useSsl || tryPort === 443) }, 4000);
+          const latencyMs = Date.now() - startTime;
+          return {
+            success: true,
+            status: 'online',
+            latencyMs,
+            socketReachable: true,
+            host,
+            port: tryPort,
+            message: `Connected successfully to MikroTik router at ${host}:${tryPort} (RouterOS v7 HTTPS REST API). Identity: ${restData.identity}, Model: ${restData.model}, Version: ${restData.version}`,
+            identity: restData.identity,
+            model: restData.model,
+            version: restData.version,
+            cpuLoad: restData.cpuLoad,
+            memoryUsageMb: restData.memoryUsageMb,
+            totalMemoryMb: restData.totalMemoryMb,
+            uptime: restData.uptime,
+            activePppoeCount: restData.activeSessions.length,
+          };
+        } catch {}
       }
     }
 
-    // Binary API failed and not REST port -> return exact error diagnostic
+    // Binary API failed and REST failed -> return exact error diagnostic
     const formattedError = formatRouterOsError(apiErr, host, port, username);
     return {
       success: false,

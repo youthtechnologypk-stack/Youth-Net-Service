@@ -1,5 +1,5 @@
-import { deletePppoeUserFromMikrotik } from '@/src/lib/mikrotikConnection';
-import { getRouterCredentials, getAllRouters, deleteCustomerInDb } from '@/src/db/routerRepo';
+import { deletePppoeUserFromMikrotik } from '../../../../../src/lib/mikrotikConnection';
+import { getRouterCredentials, getAllRouters, deleteCustomerInDb } from '../../../../../src/db/routerRepo';
 
 /**
  * Route Handler: DELETE /api/mikrotik/users/:username

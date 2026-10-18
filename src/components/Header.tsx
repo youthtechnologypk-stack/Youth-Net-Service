@@ -20,12 +20,14 @@ import {
   Menu,
   X,
   LogOut,
+  User,
 } from 'lucide-react';
 import { useISP } from '../context/ISPContext';
 import { SystemRole, UserAccount } from '../types/auth';
 import { Invoice } from '../types/isp';
 import { GlobalSearchBar } from './GlobalSearchBar';
 import { PWAInstallPrompt } from './PWAInstallPrompt';
+import { getStoredUser } from '../lib/auth';
 
 export type ActiveTab =
   | 'noc'
@@ -88,8 +90,78 @@ export const Header: React.FC<HeaderProps> = ({
     complaints,
   } = useISP();
 
+  const pendingSlaCount = complaints.filter(
+    (c) => (c.priority === 'critical' || c.priority === 'high') && c.status !== 'resolved'
+  ).length;
+
   const currentRouter = routers.find((r) => r.id === selectedRouterId) || routers[0];
-  const pendingSlaCount = complaints.filter((c) => c.status !== 'resolved' && c.status !== 'closed').length;
+  const activeUser = currentUser || getStoredUser();
+  const effectiveRole = currentUser?.role || activeUser?.role || currentRole || 'ADMIN';
+  const isClient =
+    currentUser?.role === 'CLIENT' ||
+    activeUser?.role === 'CLIENT' ||
+    currentRole === 'CLIENT' ||
+    effectiveRole === 'CLIENT';
+
+  // ==========================================================================
+  // ISOLATED CLIENT PORTAL HEADER (Zero Internal Telemetry & No Admin Tools)
+  // Only shows: Company Logo ("Youth Net"), Client Account Name badge, "Install App", and "Logout"
+  // ==========================================================================
+  if (isClient) {
+    return (
+      <header className="bg-slate-950 border-b border-slate-800 text-slate-100 sticky top-0 z-40 backdrop-blur-md bg-opacity-95 shadow-lg select-none">
+        <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-3 flex items-center justify-between gap-4">
+          {/* Company Logo: Youth Net */}
+          <div className="flex items-center gap-3">
+            <div className="flex items-center justify-center w-9 h-9 rounded-xl bg-gradient-to-tr from-cyan-600 to-emerald-600 text-white shadow-lg shadow-cyan-500/20">
+              <Network className="w-5 h-5 animate-pulse" />
+            </div>
+            <div>
+              <div className="flex items-center gap-2">
+                <span className="font-black tracking-wider text-base text-slate-100 uppercase">
+                  Youth Net
+                </span>
+                <span className="text-[10px] px-2 py-0.5 rounded-full bg-cyan-950 text-cyan-300 border border-cyan-800 font-mono font-bold">
+                  Subscriber Portal
+                </span>
+              </div>
+              <p className="text-[11px] text-slate-400 font-sans">
+                Self-Service Dashboard &amp; Billing Management
+              </p>
+            </div>
+          </div>
+
+          {/* Right Section: Client Account Name Badge, Install App Button, Logout */}
+          <div className="flex items-center gap-2.5 sm:gap-3">
+            {/* Client Account Name Badge */}
+            <div className="flex items-center gap-2 bg-slate-900 border border-slate-800 px-3 py-1.5 rounded-xl font-mono text-xs">
+              <User className="w-3.5 h-3.5 text-cyan-400 shrink-0" />
+              <span className="text-slate-400 text-[10px] hidden sm:inline">Subscriber:</span>
+              <span className="text-white font-bold font-sans">
+                {activeUser?.fullName || activeUser?.username || 'Client'}
+              </span>
+            </div>
+
+            {/* Install App Button */}
+            <PWAInstallPrompt role="CLIENT" variant="button" />
+
+            {/* Logout Button */}
+            {onLogout && (
+              <button
+                type="button"
+                onClick={onLogout}
+                className="flex items-center gap-1.5 bg-slate-900 hover:bg-rose-950/80 text-slate-300 hover:text-rose-200 border border-slate-800 hover:border-rose-800/80 px-3 py-1.5 rounded-xl text-xs font-semibold transition cursor-pointer shadow-sm"
+                title="Sign Out of Session"
+              >
+                <LogOut className="w-3.5 h-3.5 text-rose-400" />
+                <span>Logout</span>
+              </button>
+            )}
+          </div>
+        </div>
+      </header>
+    );
+  }
 
   return (
     <header className="bg-slate-950 border-b border-slate-800 text-slate-100 sticky top-0 z-40 backdrop-blur-md bg-opacity-95">
@@ -492,23 +564,6 @@ export const Header: React.FC<HeaderProps> = ({
               >
                 <Activity className="w-4 h-4" />
                 Mobile Device Simulator
-              </button>
-            </>
-          )}
-
-          {/* CLIENT TABS */}
-          {currentRole === 'CLIENT' && (
-            <>
-              <button
-                onClick={() => setActiveTab('client_portal')}
-                className={`flex items-center gap-2 px-3 py-2 text-xs sm:text-sm font-medium rounded-lg transition whitespace-nowrap ${
-                  activeTab === 'client_portal'
-                    ? 'bg-slate-800 text-purple-400 border border-purple-500/30 shadow-sm'
-                    : 'text-slate-400 hover:text-slate-200 hover:bg-slate-900'
-                }`}
-              >
-                <Activity className="w-4 h-4" />
-                Subscriber Self-Service Portal
               </button>
             </>
           )}

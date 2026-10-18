@@ -15,6 +15,7 @@ import {
   Radio,
   Download,
   Upload,
+  Trash2,
 } from 'lucide-react';
 import { ActiveSession, InternetPackage } from '../types/isp';
 
@@ -25,6 +26,7 @@ export interface ActiveSessionsTableProps {
   routerIp?: string;
   onSelectSession?: (session: ActiveSession) => void;
   onKickSession?: (sessionId: string, username: string) => Promise<void> | void;
+  onDeleteSecret?: (username: string) => Promise<void> | void;
   isKickingId?: string | null;
 }
 
@@ -108,9 +110,11 @@ export const ActiveSessionsTable: React.FC<ActiveSessionsTableProps> = ({
   routerIp,
   onSelectSession,
   onKickSession,
+  onDeleteSecret,
   isKickingId,
 }) => {
   const [searchQuery, setSearchQuery] = useState('');
+  const [deletingUser, setDeletingUser] = useState<string | null>(null);
   const [quickSort, setQuickSort] = useState<'highest-tx' | 'highest-rx' | 'longest-uptime' | 'alpha-asc' | 'custom'>('highest-tx');
   const [sortField, setSortField] = useState<SortField>('tx');
   const [sortDirection, setSortDirection] = useState<SortDirection>('desc');
@@ -529,6 +533,31 @@ export const ActiveSessionsTable: React.FC<ActiveSessionsTableProps> = ({
                           title="Force disconnect / kick session"
                         >
                           {isKickingId === session.id ? 'Kicking...' : 'Kick'}
+                        </button>
+                      )}
+
+                      {onDeleteSecret && (
+                        <button
+                          onClick={async () => {
+                            if (
+                              window.confirm(
+                                `Permanently delete PPPoE subscriber & secret "${session.username}" from MikroTik router and PostgreSQL database?`
+                              )
+                            ) {
+                              setDeletingUser(session.username);
+                              try {
+                                await onDeleteSecret(session.username);
+                              } finally {
+                                setDeletingUser(null);
+                              }
+                            }
+                          }}
+                          disabled={deletingUser === session.username}
+                          className="p-1 rounded text-[11px] transition bg-rose-950/60 hover:bg-rose-900 border border-rose-800/80 text-rose-300 hover:text-rose-100 disabled:opacity-50 cursor-pointer flex items-center gap-1"
+                          title={`Permanently delete secret for "${session.username}"`}
+                        >
+                          <Trash2 className="w-3.5 h-3.5 text-rose-400" />
+                          <span className="sr-only">Delete Secret</span>
                         </button>
                       )}
                     </div>

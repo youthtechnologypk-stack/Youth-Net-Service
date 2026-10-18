@@ -1,4 +1,4 @@
-import { deleteRouter, updateRouter, getRouterCredentials } from '@/src/db/routerRepo';
+import { deleteRouter, updateRouter, getRouterCredentials } from '../../../../../src/db/routerRepo';
 
 /**
  * Route Handler: PUT /api/mikrotik/routers/:id

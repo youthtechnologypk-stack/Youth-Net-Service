@@ -28,6 +28,9 @@ import {
   saveDbRolePermissions,
   resetDbRolePermissions,
   saveDbUserPermissionOverrides,
+  getAllPackagesFromDb,
+  savePackageInDb,
+  deletePackageInDb,
 } from './src/db/routerRepo.js';
 import { signJwtToken, verifyJwtToken } from './src/server/authMiddleware.js';
 import { hashPassword } from './src/server/seed.js';
@@ -1661,6 +1664,74 @@ app.delete('/api/mikrotik/users/:username', async (req: Request, res: Response) 
   } catch (err: any) {
     console.error('Delete user error:', err);
     res.status(500).json({ success: false, error: err.message || 'Failed to delete user' });
+  }
+});
+
+/**
+ * DELETE /api/customers/:id & DELETE /api/mikrotik/secrets/:username
+ * Permanently delete PPPoE customer / secret from PostgreSQL and persistent storage
+ */
+app.delete(['/api/customers/:id', '/api/mikrotik/secrets/:username'], async (req: Request, res: Response) => {
+  try {
+    const target = req.params.id || req.params.username;
+    if (!target) {
+      return res.status(400).json({ success: false, error: 'Customer identifier is required' });
+    }
+    await deleteCustomerInDb(target);
+    res.json({ success: true, message: `Subscriber ${target} deleted permanently.` });
+  } catch (err: any) {
+    console.error('Error deleting customer:', err);
+    res.status(500).json({ success: false, error: err.message || 'Failed to delete customer' });
+  }
+});
+
+/**
+ * GET /api/packages
+ * Fetch all bandwidth profiles from PostgreSQL / storage
+ */
+app.get('/api/packages', async (_req: Request, res: Response) => {
+  try {
+    const packages = await getAllPackagesFromDb();
+    res.json({ success: true, packages });
+  } catch (err: any) {
+    console.error('Error fetching packages:', err);
+    res.status(500).json({ success: false, error: err.message || 'Failed to fetch packages' });
+  }
+});
+
+/**
+ * POST /api/packages
+ * Save or update bandwidth profile in PostgreSQL / storage
+ */
+app.post('/api/packages', async (req: Request, res: Response) => {
+  try {
+    const pkg = req.body;
+    if (!pkg || !pkg.id || !pkg.name) {
+      return res.status(400).json({ success: false, error: 'Package ID and name are required' });
+    }
+    const saved = await savePackageInDb(pkg);
+    res.status(201).json({ success: true, package: saved });
+  } catch (err: any) {
+    console.error('Error saving package:', err);
+    res.status(500).json({ success: false, error: err.message || 'Failed to save package' });
+  }
+});
+
+/**
+ * DELETE /api/packages/:id & DELETE /api/mikrotik/profiles/:id
+ * Permanently delete bandwidth profile from PostgreSQL / storage
+ */
+app.delete(['/api/packages/:id', '/api/mikrotik/profiles/:id'], async (req: Request, res: Response) => {
+  try {
+    const { id } = req.params;
+    if (!id) {
+      return res.status(400).json({ success: false, error: 'Package ID is required' });
+    }
+    await deletePackageInDb(id);
+    res.json({ success: true, message: `Bandwidth profile ${id} deleted successfully.` });
+  } catch (err: any) {
+    console.error('Error deleting package:', err);
+    res.status(500).json({ success: false, error: err.message || 'Failed to delete package' });
   }
 });
 

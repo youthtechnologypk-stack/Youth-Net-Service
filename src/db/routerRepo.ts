@@ -1,7 +1,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import pg from 'pg';
-import { MikrotikRouter } from '../types/isp';
+import { MikrotikRouter, InternetPackage } from '../types/isp';
 
 const { Pool } = pg;
 
@@ -12,6 +12,7 @@ const SECRETS_FILE = path.join(DATA_DIR, 'router_secrets.json');
 const SETTINGS_FILE = path.join(DATA_DIR, 'system_settings.json');
 const USERS_FILE = path.join(DATA_DIR, 'users.json');
 const PERMISSIONS_FILE = path.join(DATA_DIR, 'role_permissions.json');
+const PACKAGES_FILE = path.join(DATA_DIR, 'packages.json');
 
 export interface StoredRouterCredentials {
   id: string;
@@ -130,10 +131,68 @@ export async function initPostgres(): Promise<boolean> {
             updated_by VARCHAR(100) DEFAULT 'admin'
           );
 
+          CREATE TABLE IF NOT EXISTS packages (
+            id VARCHAR(64) PRIMARY KEY,
+            name VARCHAR(255) NOT NULL,
+            download_speed_mbps INTEGER NOT NULL,
+            upload_speed_mbps INTEGER NOT NULL,
+            price_monthly NUMERIC(10,2) NOT NULL,
+            mikrotik_profile VARCHAR(100),
+            data_limit_gb INTEGER,
+            is_popular BOOLEAN DEFAULT false,
+            local_address VARCHAR(50),
+            remote_address_pool VARCHAR(100),
+            dns_servers VARCHAR(100),
+            rate_limit VARCHAR(100),
+            created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
+            updated_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
+          );
+
+          CREATE TABLE IF NOT EXISTS routers (
+            id VARCHAR(64) PRIMARY KEY,
+            name VARCHAR(255) NOT NULL,
+            host VARCHAR(255) NOT NULL,
+            port INTEGER NOT NULL DEFAULT 8728,
+            username VARCHAR(255) NOT NULL,
+            password VARCHAR(255) NOT NULL DEFAULT '',
+            is_active BOOLEAN NOT NULL DEFAULT true,
+            status VARCHAR(50) NOT NULL DEFAULT 'online',
+            model VARCHAR(255) DEFAULT 'MikroTik CCR2004-16G-2S+',
+            version VARCHAR(255) DEFAULT 'RouterOS v7.16.2',
+            location VARCHAR(255) DEFAULT 'Central Distribution Node',
+            use_ssl BOOLEAN NOT NULL DEFAULT true,
+            wan_interface VARCHAR(100) DEFAULT 'sfp-sfpplus1',
+            walled_garden_pool VARCHAR(100) DEFAULT '172.16.102.0/24',
+            cpu_load INTEGER DEFAULT 18,
+            memory_usage_mb INTEGER DEFAULT 840,
+            total_memory_mb INTEGER DEFAULT 4096,
+            uptime VARCHAR(100) DEFAULT '14d 08h 32m',
+            current_wan_rx_mbps NUMERIC(10,2) DEFAULT 0,
+            current_wan_tx_mbps NUMERIC(10,2) DEFAULT 0,
+            active_pppoe_count INTEGER DEFAULT 0,
+            last_tested_at TIMESTAMP WITH TIME ZONE,
+            last_error_message TEXT,
+            created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
+            updated_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
+          );
+
+          CREATE TABLE IF NOT EXISTS profiles (
+            id VARCHAR(64) PRIMARY KEY,
+            name VARCHAR(255) NOT NULL,
+            mikrotik_profile VARCHAR(100),
+            rate_limit VARCHAR(100),
+            local_address VARCHAR(50),
+            remote_address_pool VARCHAR(100),
+            dns_servers VARCHAR(100),
+            price_monthly NUMERIC(10,2) DEFAULT 0,
+            created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
+            updated_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
+          );
+
           ALTER TABLE users ADD COLUMN IF NOT EXISTS permissions JSONB DEFAULT '{}'::jsonb;
         `);
         isPgAvailable = true;
-        console.log('[PostgreSQL] mikrotik_routers, customers, system_settings, users, and role_permissions tables verified and ready.');
+        console.log('[PostgreSQL] mikrotik_routers, routers, customers, packages, profiles, system_settings, users, and role_permissions tables verified and ready.');
         return true;
       } finally {
         client.release();
@@ -215,29 +274,27 @@ export async function getAllRouters(): Promise<MikrotikRouter[]> {
   if (isPgAvailable && pgPool) {
     try {
       const res = await pgPool.query('SELECT * FROM mikrotik_routers ORDER BY created_at ASC');
-      if (res.rows && res.rows.length > 0) {
-        return res.rows.map((row) => ({
-          id: row.id,
-          name: row.name,
-          model: row.model || 'MikroTik RouterOS',
-          ipAddress: row.host,
-          apiPort: row.port,
-          username: row.username,
-          useSsl: row.use_ssl ?? true,
-          version: row.version || 'RouterOS v7',
-          location: row.location || 'Central Distribution Node',
-          cpuLoad: Number(row.cpu_load || 0),
-          memoryUsageMb: Number(row.memory_usage_mb || 0),
-          totalMemoryMb: Number(row.total_memory_mb || 0),
-          uptime: row.uptime || '0m',
-          status: row.status as any,
-          wanInterface: row.wan_interface || 'ether1',
-          currentWanRxMbps: Number(row.current_wan_rx_mbps || 0),
-          currentWanTxMbps: Number(row.current_wan_tx_mbps || 0),
-          activePppoeCount: Number(row.active_pppoe_count || 0),
-          walledGardenPool: row.walled_garden_pool || '172.16.102.0/24',
-        }));
-      }
+      return res.rows.map((row) => ({
+        id: row.id,
+        name: row.name,
+        model: row.model || 'MikroTik RouterOS',
+        ipAddress: row.host,
+        apiPort: row.port,
+        username: row.username,
+        useSsl: row.use_ssl ?? true,
+        version: row.version || 'RouterOS v7',
+        location: row.location || 'Central Distribution Node',
+        cpuLoad: Number(row.cpu_load || 0),
+        memoryUsageMb: Number(row.memory_usage_mb || 0),
+        totalMemoryMb: Number(row.total_memory_mb || 0),
+        uptime: row.uptime || '0m',
+        status: row.status as any,
+        wanInterface: row.wan_interface || 'ether1',
+        currentWanRxMbps: Number(row.current_wan_rx_mbps || 0),
+        currentWanTxMbps: Number(row.current_wan_tx_mbps || 0),
+        activePppoeCount: Number(row.active_pppoe_count || 0),
+        walledGardenPool: row.walled_garden_pool || '172.16.102.0/24',
+      }));
     } catch (err) {
       console.warn('PostgreSQL query error, falling back to disk:', err);
     }
@@ -395,16 +452,22 @@ export async function saveRouter(router: MikrotikRouter, rawPassword = ''): Prom
  */
 export async function deleteRouter(id: string): Promise<boolean> {
   const current = ensureFileStorage();
-  const filtered = current.filter((r) => r.id !== id);
+  const filtered = current.filter((r) => r.id !== id && r.name !== id && r.ipAddress !== id);
   saveToFile(filtered);
 
   const secrets = loadSecrets();
   delete secrets[id];
+  for (const k of Object.keys(secrets)) {
+    if (secrets[k].host === id || secrets[k].id === id) {
+      delete secrets[k];
+    }
+  }
   saveSecrets(secrets);
 
   if (isPgAvailable && pgPool) {
     try {
-      await pgPool.query('DELETE FROM mikrotik_routers WHERE id = $1', [id]);
+      await pgPool.query('DELETE FROM mikrotik_routers WHERE id = $1 OR name = $1 OR host = $1', [id]);
+      await pgPool.query('DELETE FROM routers WHERE id = $1 OR name = $1 OR host = $1', [id]).catch(() => {});
     } catch (err) {
       console.error('Failed to delete router from PostgreSQL:', err);
     }
@@ -714,22 +777,22 @@ export async function saveCustomerInDb(customer: CustomerRecord): Promise<Custom
 }
 
 /**
- * Dual-cleanup: Soft-delete / archive customer record in database
+ * Dual-cleanup: Permanent delete customer record in database
  */
 export async function deleteCustomerInDb(username: string): Promise<boolean> {
   const current = ensureCustomersFile();
-  const updated = current.map((c) =>
-    c.pppoeUsername.toLowerCase() === username.toLowerCase()
-      ? { ...c, isDeleted: true, status: 'archived' }
-      : c
+  const updated = current.filter(
+    (c) =>
+      c.pppoeUsername.toLowerCase() !== username.toLowerCase() &&
+      c.id !== username
   );
   saveCustomersFile(updated);
 
   if (isPgAvailable && pgPool) {
     try {
       await pgPool.query(
-        'UPDATE customers SET is_deleted = true, status = $1, updated_at = CURRENT_TIMESTAMP WHERE LOWER(pppoe_username) = LOWER($2)',
-        ['archived', username]
+        'DELETE FROM customers WHERE LOWER(pppoe_username) = LOWER($1) OR id = $1',
+        [username]
       );
     } catch (err: any) {
       console.error('Failed to delete customer in PostgreSQL:', err.message);
@@ -800,36 +863,162 @@ export async function getAllCustomersFromDb(): Promise<CustomerRecord[]> {
       const res = await pgPool.query(
         'SELECT * FROM customers WHERE is_deleted = false ORDER BY created_at DESC'
       );
-      if (res.rows.length > 0) {
-        return res.rows.map((row) => ({
-          id: row.id,
-          accountNumber: row.account_number,
-          name: row.name,
-          phone: row.phone,
-          email: row.email,
-          address: row.address,
-          areaNode: row.area_node,
-          connectionType: row.connection_type,
-          pppoeUsername: row.pppoe_username,
-          pppoePassword: row.pppoe_password,
-          service: row.service,
-          assignedIp: row.assigned_ip,
-          macAddress: row.mac_address,
-          packageId: row.package_id,
-          routerId: row.router_id,
-          status: row.status,
-          balanceDue: Number(row.balance_due || 0),
-          comment: row.comment,
-          isDeleted: row.is_deleted,
-          createdAt: row.created_at,
-        }));
-      }
+      // Return PostgreSQL result directly (even if 0 rows, respect deleted state)
+      return res.rows.map((row) => ({
+        id: row.id,
+        accountNumber: row.account_number,
+        name: row.name,
+        phone: row.phone,
+        email: row.email,
+        address: row.address,
+        areaNode: row.area_node,
+        connectionType: row.connection_type,
+        pppoeUsername: row.pppoe_username,
+        pppoePassword: row.pppoe_password,
+        service: row.service,
+        assignedIp: row.assigned_ip,
+        macAddress: row.mac_address,
+        packageId: row.package_id,
+        routerId: row.router_id,
+        status: row.status,
+        balanceDue: Number(row.balance_due || 0),
+        comment: row.comment,
+        isDeleted: row.is_deleted,
+        createdAt: row.created_at,
+      }));
     } catch (err: any) {
       console.error('Failed to query customers from PostgreSQL:', err.message);
     }
   }
 
   return ensureCustomersFile().filter((c) => !c.isDeleted);
+}
+
+// -----------------------------------------------------------------------------
+// Packages & Profiles Persistence (PostgreSQL packages table + JSON fallback)
+// -----------------------------------------------------------------------------
+
+function ensurePackagesFile(): InternetPackage[] {
+  try {
+    if (!fs.existsSync(DATA_DIR)) {
+      fs.mkdirSync(DATA_DIR, { recursive: true });
+    }
+    if (!fs.existsSync(PACKAGES_FILE)) {
+      return [];
+    }
+    const raw = fs.readFileSync(PACKAGES_FILE, 'utf-8');
+    const parsed = JSON.parse(raw);
+    return Array.isArray(parsed) ? parsed : [];
+  } catch {
+    return [];
+  }
+}
+
+function savePackagesFile(list: InternetPackage[]) {
+  try {
+    if (!fs.existsSync(DATA_DIR)) {
+      fs.mkdirSync(DATA_DIR, { recursive: true });
+    }
+    fs.writeFileSync(PACKAGES_FILE, JSON.stringify(list, null, 2), 'utf-8');
+  } catch (err) {
+    console.error('Failed to write packages to disk:', err);
+  }
+}
+
+export async function getAllPackagesFromDb(): Promise<InternetPackage[]> {
+  if (isPgAvailable && pgPool) {
+    try {
+      const res = await pgPool.query('SELECT * FROM packages ORDER BY created_at ASC');
+      return res.rows.map((r) => ({
+        id: r.id,
+        name: r.name,
+        downloadSpeedMbps: Number(r.download_speed_mbps || 0),
+        uploadSpeedMbps: Number(r.upload_speed_mbps || 0),
+        priceMonthly: Number(r.price_monthly || 0),
+        mikrotikProfile: r.mikrotik_profile || r.name,
+        dataLimitGb: r.data_limit_gb ? Number(r.data_limit_gb) : null,
+        isPopular: Boolean(r.is_popular),
+        localAddress: r.local_address || '192.168.8.1',
+        remoteAddressPool: r.remote_address_pool || 'pppoe-pool-1',
+        dnsServers: r.dns_servers || '8.8.8.8, 1.1.1.1',
+        rateLimit: r.rate_limit,
+      }));
+    } catch (err: any) {
+      console.warn('PostgreSQL query error for packages:', err.message);
+    }
+  }
+  return ensurePackagesFile();
+}
+
+export async function savePackageInDb(pkg: InternetPackage): Promise<InternetPackage> {
+  const current = ensurePackagesFile();
+  const idx = current.findIndex((p) => p.id === pkg.id);
+  if (idx >= 0) {
+    current[idx] = { ...current[idx], ...pkg };
+  } else {
+    current.push(pkg);
+  }
+  savePackagesFile(current);
+
+  if (isPgAvailable && pgPool) {
+    try {
+      await pgPool.query(
+        `INSERT INTO packages (
+          id, name, download_speed_mbps, upload_speed_mbps, price_monthly,
+          mikrotik_profile, data_limit_gb, is_popular, local_address,
+          remote_address_pool, dns_servers, rate_limit, updated_at
+        ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, CURRENT_TIMESTAMP)
+        ON CONFLICT (id) DO UPDATE SET
+          name = EXCLUDED.name,
+          download_speed_mbps = EXCLUDED.download_speed_mbps,
+          upload_speed_mbps = EXCLUDED.upload_speed_mbps,
+          price_monthly = EXCLUDED.price_monthly,
+          mikrotik_profile = EXCLUDED.mikrotik_profile,
+          data_limit_gb = EXCLUDED.data_limit_gb,
+          is_popular = EXCLUDED.is_popular,
+          local_address = EXCLUDED.local_address,
+          remote_address_pool = EXCLUDED.remote_address_pool,
+          dns_servers = EXCLUDED.dns_servers,
+          rate_limit = EXCLUDED.rate_limit,
+          updated_at = CURRENT_TIMESTAMP`,
+        [
+          pkg.id,
+          pkg.name,
+          pkg.downloadSpeedMbps,
+          pkg.uploadSpeedMbps,
+          pkg.priceMonthly,
+          pkg.mikrotikProfile,
+          pkg.dataLimitGb,
+          pkg.isPopular || false,
+          pkg.localAddress || '192.168.8.1',
+          pkg.remoteAddressPool || 'pppoe-pool-1',
+          pkg.dnsServers || '8.8.8.8, 1.1.1.1',
+          (pkg as any).rateLimit || `${pkg.uploadSpeedMbps}M/${pkg.downloadSpeedMbps}M`,
+        ]
+      );
+    } catch (err: any) {
+      console.error('Failed to save package in PostgreSQL:', err.message);
+    }
+  }
+
+  return pkg;
+}
+
+export async function deletePackageInDb(id: string): Promise<boolean> {
+  const current = ensurePackagesFile();
+  const filtered = current.filter((p) => p.id !== id && p.name !== id && p.mikrotikProfile !== id);
+  savePackagesFile(filtered);
+
+  if (isPgAvailable && pgPool) {
+    try {
+      await pgPool.query('DELETE FROM packages WHERE id = $1 OR name = $1 OR mikrotik_profile = $1', [id]);
+      await pgPool.query('DELETE FROM profiles WHERE id = $1 OR name = $1 OR mikrotik_profile = $1', [id]).catch(() => {});
+    } catch (err: any) {
+      console.error('Failed to delete package in PostgreSQL:', err.message);
+    }
+  }
+
+  return true;
 }
 
 // -----------------------------------------------------------------------------

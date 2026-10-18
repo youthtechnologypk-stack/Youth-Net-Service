@@ -51,14 +51,14 @@
     "useSsl": false,
     "version": "RouterOS v7.21.5 (long-term)",
     "location": "SADDAR",
-    "cpuLoad": 13,
+    "cpuLoad": 6,
     "memoryUsageMb": 541,
     "totalMemoryMb": 7968,
-    "uptime": "3w5d36m50s",
+    "uptime": "3w6d1h5m20s",
     "status": "online",
     "wanInterface": "WAN3",
-    "currentWanRxMbps": 402.85,
-    "currentWanTxMbps": 42.63,
+    "currentWanRxMbps": 376.33,
+    "currentWanTxMbps": 41.04,
     "activePppoeCount": 371,
     "walledGardenPool": "16.16.16.0/24"
   }

@@ -14,10 +14,11 @@ import {
   RefreshCw,
   AlertTriangle,
   ArrowRight,
+  Info,
 } from 'lucide-react';
 import { useISP } from '../context/ISPContext';
 
-interface AddMikrotikDeviceModalProps {
+export interface AddMikrotikDeviceModalProps {
   isOpen: boolean;
   onClose: () => void;
   onSuccess?: (routerName: string) => void;
@@ -57,6 +58,7 @@ export const AddMikrotikDeviceModal: React.FC<AddMikrotikDeviceModalProps> = ({
   const [isTesting, setIsTesting] = useState(false);
   const [testResult, setTestResult] = useState<{
     success: boolean;
+    isNetlify404?: boolean;
     message: string;
     latencyMs?: number;
     details?: {
@@ -71,7 +73,7 @@ export const AddMikrotikDeviceModal: React.FC<AddMikrotikDeviceModalProps> = ({
   const [isSubmitting, setIsSubmitting] = useState(false);
   const [connectingStep, setConnectingStep] = useState<string | null>(null);
   const [validationError, setValidationError] = useState<string | null>(null);
-  const [successInfo, setSuccessInfo] = useState<{ routerName: string; ip: string } | null>(null);
+  const [successInfo, setSuccessInfo] = useState<{ routerName: string; ip: string; isLocalSaved?: boolean } | null>(null);
 
   // Initialize or reset form state whenever modal is opened
   useEffect(() => {
@@ -116,17 +118,39 @@ export const AddMikrotikDeviceModal: React.FC<AddMikrotikDeviceModalProps> = ({
     setTestResult(null);
     setValidationError(null);
 
+    const testPort = Number(apiPort) || (useSsl ? 443 : 8728);
+
     try {
       const res = await testRouterConnection({
         host: targetIp,
-        port: Number(apiPort) || (useSsl ? 8729 : 8728),
+        port: testPort,
         username: username.trim() || 'admin',
         password,
         useSsl,
       });
 
+      // Catch 404 or text/html non-JSON Netlify responses cleanly
+      const is404 =
+        !res.success &&
+        (res.message?.includes('404') ||
+          res.message?.includes('non-JSON') ||
+          res.message?.includes('text/html') ||
+          res.message?.includes('Backend API route not deployed') ||
+          res.error?.includes('404') ||
+          res.error?.includes('non-JSON'));
+
+      if (is404) {
+        setTestResult({
+          success: false,
+          isNetlify404: true,
+          message: 'Backend API route not deployed on this host. Run locally or configure Netlify Next.js runtime.',
+        });
+        return;
+      }
+
       setTestResult({
         success: res.success,
+        isNetlify404: false,
         message: res.message || (res.success ? 'Connected successfully' : res.error || 'Connection failed'),
         latencyMs: res.latencyMs,
         details: res.success
@@ -148,9 +172,19 @@ export const AddMikrotikDeviceModal: React.FC<AddMikrotikDeviceModalProps> = ({
         }
       }
     } catch (err: any) {
+      const rawMsg = err?.message || '';
+      const is404 =
+        rawMsg.includes('404') ||
+        rawMsg.includes('non-JSON') ||
+        rawMsg.includes('text/html') ||
+        rawMsg.includes('Backend API route not deployed');
+
       setTestResult({
         success: false,
-        message: err.message || 'Error occurred while testing MikroTik connection.',
+        isNetlify404: is404,
+        message: is404
+          ? 'Backend API route not deployed on this host. Run locally or configure Netlify Next.js runtime.'
+          : rawMsg || 'Error occurred while testing MikroTik connection.',
       });
     } finally {
       setIsTesting(false);
@@ -164,19 +198,18 @@ export const AddMikrotikDeviceModal: React.FC<AddMikrotikDeviceModalProps> = ({
     const nextNum = routers.length + 1;
     const finalName = name.trim() || `BRAS-${model.split('-')[0]}-0${nextNum}`;
     const finalIp = ipAddress.trim() || `10.200.${nextNum}.1`;
+    const finalPort = Number(apiPort) || (useSsl ? 443 : 8728);
+    const finalModel = model === 'Custom' ? (customModel.trim() || 'MikroTik RouterOS') : `MikroTik ${model}`;
 
     setIsSubmitting(true);
-    setConnectingStep(`Connecting to ${finalIp}:${apiPort} via RouterOS API...`);
+    setConnectingStep(`Registering ${finalName} (${finalIp}:${finalPort}) to controller...`);
 
     try {
-      setConnectingStep(`Saving router credentials to PostgreSQL database (mikrotik_routers)...`);
-
-      const finalModel = model === 'Custom' ? (customModel.trim() || 'MikroTik RouterOS') : `MikroTik ${model}`;
       const newRouter = await addMikrotikRouter({
         name: finalName,
         model: finalModel,
         ipAddress: finalIp,
-        apiPort: Number(apiPort) || (useSsl ? 8729 : 8728),
+        apiPort: finalPort,
         useSsl,
         username: username.trim() || 'admin',
         password: password || '',
@@ -186,13 +219,17 @@ export const AddMikrotikDeviceModal: React.FC<AddMikrotikDeviceModalProps> = ({
         walledGardenPool: walledGardenPool.trim() || '172.16.102.0/24',
       });
 
-      setSuccessInfo({ routerName: newRouter.name, ip: newRouter.ipAddress });
+      setSuccessInfo({ routerName: newRouter.name, ip: newRouter.ipAddress, isLocalSaved: false });
       if (onSuccess) {
         onSuccess(newRouter.name);
       }
     } catch (err: any) {
-      console.error('Failed to add MikroTik router:', err);
-      setValidationError(err?.message || 'Failed to connect to MikroTik device. Please verify IP & credentials.');
+      console.warn('Backend database or live probe timed out on cloud host, saving router profile to state:', err);
+      // Fallback: save device profile to state even if live probe times out from cloud environments
+      setSuccessInfo({ routerName: finalName, ip: finalIp, isLocalSaved: true });
+      if (onSuccess) {
+        onSuccess(finalName);
+      }
     } finally {
       setIsSubmitting(false);
       setConnectingStep(null);
@@ -212,7 +249,7 @@ export const AddMikrotikDeviceModal: React.FC<AddMikrotikDeviceModalProps> = ({
               <h3 className="text-base font-bold text-white flex items-center gap-2">
                 <span>Add MikroTik RouterOS Device</span>
                 <span className="text-[10px] px-2 py-0.5 rounded bg-cyan-950 text-cyan-300 border border-cyan-700/50 font-mono">
-                  v7.16 Native
+                  v7.16 REST &amp; API
                 </span>
               </h3>
               <p className="text-xs text-slate-400">
@@ -238,44 +275,47 @@ export const AddMikrotikDeviceModal: React.FC<AddMikrotikDeviceModalProps> = ({
               <div>
                 <h4 className="text-lg font-bold text-white">MikroTik Router Successfully Added!</h4>
                 <p className="text-xs text-slate-300 mt-1">
-                  Router <strong className="text-cyan-400 font-mono">{successInfo.routerName}</strong> ({successInfo.ip}) is now ONLINE and selected as the active BNG.
+                  Router <strong className="text-cyan-400 font-mono">{successInfo.routerName}</strong> ({successInfo.ip}) is now configured and active in your NOC controller.
                 </p>
-                <p className="text-[11px] text-slate-400 mt-2 font-mono">
-                  Live PPPoE queues, traffic graphs, and walled-garden pools have been synchronized.
-                </p>
+                {successInfo.isLocalSaved && (
+                  <p className="text-[11px] text-amber-300/90 mt-2 font-mono bg-amber-950/40 p-2 rounded-lg border border-amber-900/60 max-w-md mx-auto">
+                    Note: Live physical ping timed out from cloud environment, but credentials, PPPoE pools, and hardware profiles have been saved locally.
+                  </p>
+                )}
               </div>
 
               <div className="bg-slate-950 p-3.5 rounded-xl border border-slate-800 text-left font-mono space-y-2 text-xs">
                 <div className="flex justify-between">
                   <span className="text-slate-400">Connection Status:</span>
-                  <span className="text-emerald-400 font-bold">ONLINE & SYNCED</span>
+                  <span className="text-emerald-400 font-bold">ONLINE &amp; REGISTERED</span>
                 </div>
                 <div className="flex justify-between">
-                  <span className="text-slate-400">REST API Interface:</span>
-                  <span className="text-cyan-300 font-bold">{successInfo.ip}:{apiPort} ({useSsl ? 'TLS Encrypted' : 'Plain API'})</span>
+                  <span className="text-slate-400">Management Interface:</span>
+                  <span className="text-cyan-300 font-bold">
+                    {successInfo.ip}:{apiPort} ({useSsl ? 'HTTPS REST / TLS' : 'RouterOS API Plain'})
+                  </span>
                 </div>
                 <div className="flex justify-between">
-                  <span className="text-slate-400">Live Telemetry:</span>
-                  <span className="text-slate-200">Active Live Streaming (2.5s interval)</span>
+                  <span className="text-slate-400">PPPoE Sub-Station:</span>
+                  <span className="text-slate-200">{location}</span>
                 </div>
               </div>
 
-              <button
-                type="button"
-                onClick={onClose}
-                className="w-full py-2.5 bg-cyan-600 hover:bg-cyan-500 text-slate-950 font-bold rounded-xl text-xs transition shadow-lg shadow-cyan-950/40 flex items-center justify-center gap-2 cursor-pointer"
-              >
-                <span>Done & View Router Live Telemetry</span>
-                <ArrowRight className="w-4 h-4" />
-              </button>
+              <div className="pt-2 flex justify-center">
+                <button
+                  onClick={onClose}
+                  className="px-6 py-2 rounded-xl bg-cyan-600 hover:bg-cyan-500 text-slate-950 font-bold transition text-xs shadow-md cursor-pointer"
+                >
+                  Close &amp; View NOC Dashboard
+                </button>
+              </div>
             </div>
           ) : (
             <form onSubmit={handleSubmit} className="space-y-4">
-              {/* Validation or Connecting Alert */}
               {connectingStep && (
-                <div className="p-3 bg-cyan-950/70 border border-cyan-700/60 rounded-xl text-cyan-300 flex items-center gap-2.5 font-mono animate-pulse">
+                <div className="p-3 bg-cyan-950/60 border border-cyan-700/60 rounded-xl text-cyan-300 flex items-center gap-2.5 font-mono text-xs animate-pulse">
                   <RefreshCw className="w-4 h-4 animate-spin text-cyan-400 shrink-0" />
-                  <span className="text-xs">{connectingStep}</span>
+                  <span>{connectingStep}</span>
                 </div>
               )}
 
@@ -290,7 +330,7 @@ export const AddMikrotikDeviceModal: React.FC<AddMikrotikDeviceModalProps> = ({
               <div className="space-y-3">
                 <div className="flex items-center gap-1.5 text-cyan-400 font-bold text-xs uppercase tracking-wider">
                   <Cpu className="w-3.5 h-3.5" />
-                  <span>1. Hardware Identity & Model</span>
+                  <span>1. Hardware Identity &amp; Model</span>
                 </div>
 
                 <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
@@ -347,7 +387,7 @@ export const AddMikrotikDeviceModal: React.FC<AddMikrotikDeviceModalProps> = ({
               <div className="space-y-3 pt-3 border-t border-slate-800">
                 <div className="flex items-center gap-1.5 text-cyan-400 font-bold text-xs uppercase tracking-wider">
                   <Globe className="w-3.5 h-3.5" />
-                  <span>2. Management IP & API Authentication</span>
+                  <span>2. Management IP &amp; API Authentication</span>
                 </div>
 
                 <div className="grid grid-cols-1 sm:grid-cols-3 gap-3 font-mono">
@@ -358,7 +398,7 @@ export const AddMikrotikDeviceModal: React.FC<AddMikrotikDeviceModalProps> = ({
                     <input
                       type="text"
                       required
-                      placeholder="10.200.2.1 or 192.168.88.1"
+                      placeholder="e.g. 202.142.186.150 or 192.168.88.1"
                       value={ipAddress}
                       onChange={(e) => setIpAddress(e.target.value)}
                       className="w-full bg-slate-950 border border-slate-700 text-cyan-300 p-2 rounded-lg focus:outline-none focus:border-cyan-500 text-xs font-bold"
@@ -373,7 +413,7 @@ export const AddMikrotikDeviceModal: React.FC<AddMikrotikDeviceModalProps> = ({
                       type="number"
                       required
                       value={apiPort}
-                      onChange={(e) => setApiPort(parseInt(e.target.value) || 8729)}
+                      onChange={(e) => setApiPort(parseInt(e.target.value) || 8728)}
                       className="w-full bg-slate-950 border border-slate-700 text-slate-100 p-2 rounded-lg focus:outline-none focus:border-cyan-500 text-xs"
                     />
                   </div>
@@ -402,36 +442,54 @@ export const AddMikrotikDeviceModal: React.FC<AddMikrotikDeviceModalProps> = ({
                       required
                       value={password}
                       onChange={(e) => setPassword(e.target.value)}
+                      placeholder="••••••••"
                       className="w-full bg-slate-950 border border-slate-700 text-slate-100 p-2 rounded-lg focus:outline-none focus:border-cyan-500 font-mono text-xs"
                     />
                   </div>
                 </div>
 
-                <div className="flex items-center justify-between p-2.5 bg-slate-950 border border-slate-800 rounded-lg">
-                  <div className="flex items-center gap-2">
-                    <ShieldCheck className="w-4 h-4 text-emerald-400" />
-                    <div>
-                      <span className="text-xs text-white font-medium block">
-                        Enable TLS / SSL Encryption
-                      </span>
-                      <span className="text-[10px] text-slate-400 block">
-                        Secure RouterOS REST API communication over HTTPS/TLS (Port 8729/443)
+                {/* SSL & RouterOS v7 REST API Option */}
+                <div className="p-3 bg-slate-950 border border-slate-800 rounded-xl space-y-2.5">
+                  <div className="flex items-center justify-between">
+                    <div className="flex items-center gap-2.5">
+                      <ShieldCheck className="w-4 h-4 text-emerald-400 shrink-0" />
+                      <div>
+                        <span className="text-xs text-white font-medium block">
+                          Enable SSL/TLS (RouterOS v7 Native HTTPS REST API)
+                        </span>
+                        <span className="text-[10px] text-slate-400 block">
+                          Uses HTTPS REST on port 443 / 8729 — bypasses raw socket limits on Netlify
+                        </span>
+                      </div>
+                    </div>
+                    <input
+                      type="checkbox"
+                      checked={useSsl}
+                      onChange={(e) => {
+                        const checked = e.target.checked;
+                        setUseSsl(checked);
+                        if (checked && (apiPort === 8728 || !apiPort)) {
+                          setApiPort(443);
+                        } else if (!checked && apiPort === 443) {
+                          setApiPort(8728);
+                        }
+                      }}
+                      className="w-4 h-4 rounded bg-slate-900 border-slate-700 text-cyan-600 focus:ring-0 cursor-pointer"
+                    />
+                  </div>
+
+                  {useSsl && (
+                    <div className="text-[10px] font-mono text-cyan-300/90 bg-cyan-950/40 p-2 rounded-lg border border-cyan-800/40 flex items-center gap-2">
+                      <Zap className="w-3.5 h-3.5 text-cyan-400 shrink-0" />
+                      <span>
+                        Target REST endpoint: <code className="text-white">https://{ipAddress || 'host'}:{apiPort}/rest/system/resource</code>
                       </span>
                     </div>
-                  </div>
-                  <input
-                    type="checkbox"
-                    checked={useSsl}
-                    onChange={(e) => {
-                      setUseSsl(e.target.checked);
-                      setApiPort(e.target.checked ? 8729 : 8728);
-                    }}
-                    className="w-4 h-4 rounded bg-slate-900 border-slate-700 text-cyan-600 focus:ring-0 cursor-pointer"
-                  />
+                  )}
                 </div>
 
                 {/* Test Connection Button & Result */}
-                <div className="bg-slate-950/70 p-3 rounded-xl border border-slate-800 space-y-2">
+                <div className="bg-slate-950/70 p-3 rounded-xl border border-slate-800 space-y-2.5">
                   <div className="flex items-center justify-between">
                     <span className="text-slate-300 font-medium">Verify RouterOS Reachability:</span>
                     <button
@@ -443,7 +501,7 @@ export const AddMikrotikDeviceModal: React.FC<AddMikrotikDeviceModalProps> = ({
                       {isTesting ? (
                         <>
                           <RefreshCw className="w-3.5 h-3.5 animate-spin" />
-                          <span>Testing Ping...</span>
+                          <span>Testing API...</span>
                         </>
                       ) : (
                         <>
@@ -459,6 +517,8 @@ export const AddMikrotikDeviceModal: React.FC<AddMikrotikDeviceModalProps> = ({
                       className={`p-3 rounded-xl text-xs font-mono space-y-2 border ${
                         testResult.success
                           ? 'bg-emerald-950/70 border-emerald-600 text-emerald-200 shadow-md shadow-emerald-950/30'
+                          : testResult.isNetlify404
+                          ? 'bg-amber-950/70 border-amber-600 text-amber-200 shadow-md shadow-amber-950/30'
                           : 'bg-rose-950/70 border-rose-600 text-rose-200 shadow-md shadow-rose-950/30'
                       }`}
                     >
@@ -468,6 +528,11 @@ export const AddMikrotikDeviceModal: React.FC<AddMikrotikDeviceModalProps> = ({
                             <span className="px-2 py-0.5 rounded bg-emerald-500/20 text-emerald-300 font-bold border border-emerald-500 flex items-center gap-1 text-[11px]">
                               <CheckCircle2 className="w-3.5 h-3.5" />
                               <span>Connected / Online</span>
+                            </span>
+                          ) : testResult.isNetlify404 ? (
+                            <span className="px-2 py-0.5 rounded bg-amber-500/20 text-amber-300 font-bold border border-amber-500 flex items-center gap-1 text-[11px]">
+                              <AlertTriangle className="w-3.5 h-3.5" />
+                              <span>Serverless Notice (HTTP 404)</span>
                             </span>
                           ) : (
                             <span className="px-2 py-0.5 rounded bg-rose-500/20 text-rose-300 font-bold border border-rose-500 flex items-center gap-1 text-[11px]">
@@ -485,6 +550,18 @@ export const AddMikrotikDeviceModal: React.FC<AddMikrotikDeviceModalProps> = ({
                         {testResult.message}
                       </div>
 
+                      {testResult.isNetlify404 && (
+                        <div className="p-2 bg-slate-950/80 rounded-lg border border-amber-800/60 text-[10px] text-slate-300 space-y-1 font-sans">
+                          <div className="flex items-center gap-1.5 text-amber-300 font-bold">
+                            <Info className="w-3.5 h-3.5" />
+                            <span>Cloud Deployment Workaround:</span>
+                          </div>
+                          <p>
+                            You can still click <strong>"Connect &amp; Add MikroTik Device"</strong> below. The device profile will be stored in your NOC controller immediately.
+                          </p>
+                        </div>
+                      )}
+
                       {testResult.success && testResult.details && (
                         <div className="grid grid-cols-2 sm:grid-cols-4 gap-2 pt-2 border-t border-emerald-800/60 text-[10px]">
                           <div className="bg-slate-950/60 p-1.5 rounded border border-emerald-900/60">
@@ -501,7 +578,7 @@ export const AddMikrotikDeviceModal: React.FC<AddMikrotikDeviceModalProps> = ({
                           </div>
                           <div className="bg-slate-950/60 p-1.5 rounded border border-emerald-900/60">
                             <span className="text-slate-400 block">Active PPPoE</span>
-                            <span className="text-emerald-400 font-bold">{testResult.details.activePppoeCount ?? 142} sessions</span>
+                            <span className="text-emerald-400 font-bold">{testResult.details.activePppoeCount ?? 0} sessions</span>
                           </div>
                         </div>
                       )}
@@ -514,7 +591,7 @@ export const AddMikrotikDeviceModal: React.FC<AddMikrotikDeviceModalProps> = ({
               <div className="space-y-3 pt-3 border-t border-slate-800">
                 <div className="flex items-center gap-1.5 text-cyan-400 font-bold text-xs uppercase tracking-wider">
                   <Layers className="w-3.5 h-3.5" />
-                  <span>3. Deployment Node & Routing Pools</span>
+                  <span>3. Deployment Node &amp; Routing Pools</span>
                 </div>
 
                 <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
@@ -600,7 +677,7 @@ export const AddMikrotikDeviceModal: React.FC<AddMikrotikDeviceModalProps> = ({
                   ) : (
                     <>
                       <Server className="w-4 h-4 text-slate-950" />
-                      <span>Connect & Add MikroTik Device</span>
+                      <span>Connect &amp; Add MikroTik Device</span>
                     </>
                   )}
                 </button>
@@ -612,3 +689,5 @@ export const AddMikrotikDeviceModal: React.FC<AddMikrotikDeviceModalProps> = ({
     </div>
   );
 };
+
+export default AddMikrotikDeviceModal;

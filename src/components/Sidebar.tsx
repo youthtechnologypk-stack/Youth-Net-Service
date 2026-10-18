@@ -23,6 +23,7 @@ import { ActiveTab } from './Header';
 import { SystemRole, UserAccount } from '../types/auth';
 import { useISP } from '../context/ISPContext';
 import { useCurrency } from '../context/CurrencyContext';
+import { isOriginalAdminSession } from '../lib/auth';
 
 export interface SidebarProps {
   isOpen: boolean;
@@ -53,6 +54,11 @@ export const Sidebar: React.FC<SidebarProps> = ({
 }) => {
   const { complaints, customers, onus, activeSessions, outages } = useISP();
   const { currencySymbol } = useCurrency();
+
+  // Strict Production Role Guard: Internal NOC Sidebar is never rendered for Client accounts
+  if (currentRole === 'CLIENT' || currentUser?.role === 'CLIENT') {
+    return null;
+  }
 
   const activeOutages = outages.filter((o) => o.status === 'investigating' || o.status === 'active');
   const criticalTickets = complaints.filter(
@@ -373,17 +379,16 @@ export const Sidebar: React.FC<SidebarProps> = ({
               </div>
             </div>
 
-            {onSwitchRole && (
+            {onSwitchRole && isOriginalAdminSession() && (
               <select
                 value={currentRole}
                 onChange={(e) => onSwitchRole(e.target.value as SystemRole)}
                 className="bg-slate-900 border border-slate-700 text-slate-300 text-[10px] rounded px-1.5 py-1 focus:outline-none cursor-pointer"
-                title="Switch RBAC Test Role"
+                title="Switch RBAC Test Role (NOC Staff Only)"
               >
                 <option value="ADMIN">ADMIN</option>
                 <option value="MANAGER">MANAGER</option>
                 <option value="AGENT">AGENT</option>
-                <option value="CLIENT">CLIENT</option>
               </select>
             )}
           </div>

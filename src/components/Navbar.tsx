@@ -11,32 +11,40 @@ import {
   Layers,
   RotateCw,
   Search,
+  Network,
+  User,
+  LogOut,
+  Smartphone,
 } from 'lucide-react';
 import { ActiveTab } from './Header';
-import { SystemRole } from '../types/auth';
+import { SystemRole, UserAccount } from '../types/auth';
 import { useISP } from '../context/ISPContext';
 import { Invoice } from '../types/isp';
 import { GlobalSearchBar } from './GlobalSearchBar';
+import { PWAInstallPrompt } from './PWAInstallPrompt';
+import { getStoredUser } from '../lib/auth';
 
 export interface NavbarProps {
-  isSidebarOpen: boolean;
-  onToggleSidebar: () => void;
-  activeTab: ActiveTab;
-  setActiveTab: (tab: ActiveTab) => void;
-  onOpenProvisionModal: () => void;
-  onOpenOutageModal: () => void;
-  onOpenTicketModal: () => void;
+  isSidebarOpen?: boolean;
+  onToggleSidebar?: () => void;
+  activeTab?: ActiveTab;
+  setActiveTab?: (tab: ActiveTab) => void;
+  onOpenProvisionModal?: () => void;
+  onOpenOutageModal?: () => void;
+  onOpenTicketModal?: () => void;
   onOpenAddRouterModal?: () => void;
   onOpenPaymentModal?: (invoice: Invoice) => void;
   onOpenReceiptModal?: (invoice: Invoice) => void;
   currentRole?: SystemRole;
   onSwitchRole?: (role: SystemRole) => void;
+  currentUser?: UserAccount | null;
+  onLogout?: () => void;
 }
 
 export const Navbar: React.FC<NavbarProps> = ({
-  isSidebarOpen,
+  isSidebarOpen = false,
   onToggleSidebar,
-  activeTab,
+  activeTab = 'noc',
   setActiveTab,
   onOpenProvisionModal,
   onOpenOutageModal,
@@ -44,8 +52,10 @@ export const Navbar: React.FC<NavbarProps> = ({
   onOpenAddRouterModal,
   onOpenPaymentModal,
   onOpenReceiptModal,
-  currentRole = 'ADMIN',
+  currentRole,
   onSwitchRole,
+  currentUser,
+  onLogout,
 }) => {
   const {
     routers,
@@ -55,11 +65,79 @@ export const Navbar: React.FC<NavbarProps> = ({
     selectedOltId,
     setSelectedOltId,
     lastCronMessage,
+    activeSessions,
   } = useISP();
 
   const currentRouter = routers.find((r) => r.id === selectedRouterId) || routers[0];
   const currentOlt = olts.find((o) => o.id === selectedOltId) || olts[0];
 
+  const activeUser = currentUser || getStoredUser();
+  const effectiveRole = currentUser?.role || activeUser?.role || currentRole || 'ADMIN';
+  const isClient =
+    currentUser?.role === 'CLIENT' ||
+    activeUser?.role === 'CLIENT' ||
+    currentRole === 'CLIENT' ||
+    effectiveRole === 'CLIENT';
+
+  // Check if authentic session was originally an Admin (prevent client role escalation)
+  const isOriginalAdmin =
+    typeof sessionStorage !== 'undefined' &&
+    sessionStorage.getItem('auth_original_role') === 'ADMIN';
+
+  // ==========================================================================
+  // ISOLATED CLIENT PORTAL NAVBAR (Strict Clean Layout: Zero Telemetry & No Admin Tools)
+  // Only shows: Company Logo ("Youth Net"), Client Account Name badge, "Install App", and "Logout"
+  // ==========================================================================
+  if (isClient) {
+    return (
+      <header className="bg-slate-900 border-b border-slate-800 sticky top-0 z-30 shadow-md select-none">
+        <div className="max-w-7xl mx-auto px-4 py-3 flex items-center justify-between gap-4">
+          {/* Company Logo: Youth Net */}
+          <div className="flex items-center gap-3">
+            <div className="flex items-center justify-center w-8 h-8 rounded-xl bg-gradient-to-tr from-cyan-600 to-emerald-600 text-white shadow-md shadow-cyan-600/20">
+              <Network className="w-4 h-4" />
+            </div>
+            <div>
+              <span className="font-bold text-white text-sm block tracking-wide">Youth Net</span>
+              <span className="text-[10px] text-cyan-400 font-mono">Subscriber Portal</span>
+            </div>
+          </div>
+
+          {/* Right Section: Client Account Name Badge, Install App Button, Logout */}
+          <div className="flex items-center gap-3">
+            {/* Client Account Name Badge */}
+            <div className="flex items-center gap-2 bg-slate-950 border border-slate-800 px-3 py-1.5 rounded-xl text-xs font-mono">
+              <User className="w-3.5 h-3.5 text-cyan-400" />
+              <span className="text-slate-400 text-[10px] hidden sm:inline">Subscriber:</span>
+              <span className="text-white font-bold font-sans">
+                {activeUser?.fullName || activeUser?.username || 'Client'}
+              </span>
+            </div>
+
+            {/* Install App Button */}
+            <PWAInstallPrompt role="CLIENT" variant="button" />
+
+            {/* Logout Button */}
+            {onLogout && (
+              <button
+                type="button"
+                onClick={onLogout}
+                className="flex items-center gap-1.5 bg-slate-800 hover:bg-rose-950 text-slate-300 hover:text-rose-200 border border-slate-700 px-3 py-1.5 rounded-lg text-xs font-semibold transition cursor-pointer shadow-sm"
+                title="Sign Out of Session"
+              >
+                <LogOut className="w-3.5 h-3.5 text-rose-400" />
+                <span>Logout</span>
+              </button>
+            )}
+          </div>
+        </div>
+      </header>
+    );
+  }
+
+  // ==========================================================================
+  // OPERATIONAL / NOC NAVBAR (For Admin and Field Engineers)
+  // ==========================================================================
   return (
     <header className="bg-slate-900 border-b border-slate-800 sticky top-0 z-30 shadow-md select-none">
       {/* Top Navbar Row */}
@@ -114,7 +192,7 @@ export const Navbar: React.FC<NavbarProps> = ({
         {/* Global Search Bar (Name, IP, Invoice # across app) */}
         <div className="order-last sm:order-none w-full sm:w-auto flex-1 max-w-lg mx-auto sm:mx-4">
           <GlobalSearchBar
-            onNavigateTab={setActiveTab}
+            onNavigateTab={setActiveTab || (() => {})}
             onOpenPaymentModal={onOpenPaymentModal}
             onOpenReceiptModal={onOpenReceiptModal}
             className="w-full"
@@ -159,40 +237,55 @@ export const Navbar: React.FC<NavbarProps> = ({
             </div>
           )}
 
-          {/* Quick Action Buttons */}
-          <button
-            onClick={onOpenProvisionModal}
-            className="hidden sm:flex items-center gap-1.5 bg-cyan-600 hover:bg-cyan-500 text-slate-950 px-2.5 py-1.5 rounded-lg text-xs font-bold transition shadow-sm cursor-pointer"
-            title="Fast PPPoE Provisioning"
-          >
-            <PlusCircle className="w-3.5 h-3.5" />
-            <span>Provision</span>
-          </button>
+          {/* Quick Action Buttons (Guarded strictly to NOC Admin/Manager) */}
+          {effectiveRole === 'ADMIN' && onOpenProvisionModal && (
+            <button
+              onClick={onOpenProvisionModal}
+              className="hidden sm:flex items-center gap-1.5 bg-cyan-600 hover:bg-cyan-500 text-slate-950 px-2.5 py-1.5 rounded-lg text-xs font-bold transition shadow-sm cursor-pointer"
+              title="Fast PPPoE Provisioning"
+            >
+              <PlusCircle className="w-3.5 h-3.5" />
+              <span>Provision</span>
+            </button>
+          )}
 
-          <button
-            onClick={onOpenOutageModal}
-            className="flex items-center gap-1.5 bg-rose-950/80 hover:bg-rose-900 text-rose-300 border border-rose-800 px-2.5 py-1.5 rounded-lg text-xs font-bold transition cursor-pointer"
-            title="Broadcast Outage Notice"
-          >
-            <Megaphone className="w-3.5 h-3.5" />
-            <span className="hidden sm:inline">Broadcast</span>
-          </button>
+          {(effectiveRole === 'ADMIN' || effectiveRole === 'MANAGER') && onOpenOutageModal && (
+            <button
+              onClick={onOpenOutageModal}
+              className="flex items-center gap-1.5 bg-rose-950/80 hover:bg-rose-900 text-rose-300 border border-rose-800 px-2.5 py-1.5 rounded-lg text-xs font-bold transition cursor-pointer"
+              title="Broadcast Outage Notice"
+            >
+              <Megaphone className="w-3.5 h-3.5" />
+              <span className="hidden sm:inline">Broadcast</span>
+            </button>
+          )}
 
-          {/* Role Switcher */}
-          {onSwitchRole && (
+          {/* Role Switcher (Restricted Strictly to Verified Admin Sessions - Never Client) */}
+          {onSwitchRole && isOriginalAdmin && (
             <div className="flex items-center gap-1 bg-slate-950 border border-slate-800 px-2 py-1 rounded-lg text-[11px]">
               <Shield className="w-3.5 h-3.5 text-indigo-400 shrink-0" />
               <select
                 value={currentRole}
                 onChange={(e) => onSwitchRole(e.target.value as SystemRole)}
                 className="bg-transparent text-slate-300 text-[11px] focus:outline-none cursor-pointer"
-                title="Switch Testing Role"
+                title="Switch Testing Role (Admin Only)"
               >
                 <option value="ADMIN" className="bg-slate-900 text-white">ADMIN</option>
                 <option value="AGENT" className="bg-slate-900 text-white">AGENT</option>
                 <option value="CLIENT" className="bg-slate-900 text-white">CLIENT</option>
               </select>
             </div>
+          )}
+
+          {/* Logout Button */}
+          {onLogout && (
+            <button
+              onClick={onLogout}
+              className="p-1.5 rounded-lg bg-slate-950 hover:bg-rose-950 text-slate-400 hover:text-rose-300 border border-slate-800 transition"
+              title="Logout"
+            >
+              <LogOut className="w-3.5 h-3.5" />
+            </button>
           )}
         </div>
       </div>
@@ -207,3 +300,5 @@ export const Navbar: React.FC<NavbarProps> = ({
     </header>
   );
 };
+
+export default Navbar;

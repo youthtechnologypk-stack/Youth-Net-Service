@@ -99,19 +99,35 @@ export function getStoredToken(): string | null {
 }
 
 /**
- * Save auth session to localStorage
+ * Save auth session to localStorage and track authentic session role
  */
-export function saveAuthSession(token: string, user: UserAccount): void {
+export function saveAuthSession(token: string, user: UserAccount, isRoleSimulation = false): void {
   if (typeof window === 'undefined') return;
   localStorage.setItem(AUTH_STORAGE_KEY, JSON.stringify({ token, user }));
+  if (!isRoleSimulation) {
+    if (user.role === 'ADMIN') {
+      sessionStorage.setItem('auth_original_role', 'ADMIN');
+    } else {
+      sessionStorage.setItem('auth_original_role', user.role);
+    }
+  }
 }
 
 /**
- * Clear auth session from localStorage
+ * Check if the active logged-in session was genuinely authenticated as ADMIN
+ */
+export function isOriginalAdminSession(): boolean {
+  if (typeof window === 'undefined' || typeof sessionStorage === 'undefined') return false;
+  return sessionStorage.getItem('auth_original_role') === 'ADMIN';
+}
+
+/**
+ * Clear auth session from storage
  */
 export function clearAuthSession(): void {
   if (typeof window === 'undefined') return;
   localStorage.removeItem(AUTH_STORAGE_KEY);
+  sessionStorage.removeItem('auth_original_role');
 }
 
 /**
