@@ -13,7 +13,6 @@ import {
   Globe,
   RefreshCw,
   AlertTriangle,
-  ArrowRight,
   Info,
 } from 'lucide-react';
 import { useISP } from '../src/context/ISPContext';
@@ -38,11 +37,37 @@ const POPULAR_MODELS = [
 ];
 
 /**
+ * Global Green Toast Helper
+ * Displays "Router registered successfully" for 4 seconds after modal closes
+ */
+function showSuccessToast(message: string) {
+  if (typeof document === 'undefined') return;
+  const existing = document.getElementById('global-router-success-toast');
+  if (existing) existing.remove();
+
+  const toast = document.createElement('div');
+  toast.id = 'global-router-success-toast';
+  toast.className =
+    'fixed bottom-6 right-6 z-[9999] bg-emerald-950 border border-emerald-500 text-emerald-100 px-4 py-3 rounded-xl shadow-2xl flex items-center gap-2.5 text-xs font-semibold animate-fade-in backdrop-blur-md transition-all duration-300';
+  toast.innerHTML = `
+    <svg class="w-4 h-4 text-emerald-400 shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24" stroke-width="2">
+      <path stroke-linecap="round" stroke-linejoin="round" d="M5 13l4 4L19 7"></path>
+    </svg>
+    <span>${message}</span>
+  `;
+  document.body.appendChild(toast);
+  setTimeout(() => {
+    toast.style.opacity = '0';
+    setTimeout(() => toast.remove(), 300);
+  }, 3500);
+}
+
+/**
  * AddRouterModal component
- * Fully client-side verified for Netlify static deployment.
- * Completely zero network dependency for connection testing,
- * unblocked router addition whenever Name and IP are entered,
- * and direct persistence to localStorage under 'registered_routers'.
+ * Clean client-side implementation for Netlify static hosting:
+ * 1. Zero automatic background API fetch on mount. Initial error state is completely empty.
+ * 2. Pure client-side validation for "Test API Connection" without HTTP requests or 404 crashes.
+ * 3. Immediate persistence to localStorage['registered_routers'] and modal close with green toast.
  */
 export const AddRouterModal: React.FC<AddRouterModalProps> = ({
   isOpen,
@@ -64,34 +89,25 @@ export const AddRouterModal: React.FC<AddRouterModalProps> = ({
   const [wanInterface, setWanInterface] = useState('sfp-sfpplus1');
   const [walledGardenPool, setWalledGardenPool] = useState('172.16.102.0/24');
 
-  // Client-side simulated connection test state
+  // Client-side verification and feedback state
   const [isTesting, setIsTesting] = useState(false);
   const [isVerified, setIsVerified] = useState<boolean>(false);
-  const [statusMessage, setStatusMessage] = useState<string>('');
   const [validationError, setValidationError] = useState<string | null>(null);
-
-  const [testResult, setTestResult] = useState<{
-    details?: {
-      identity?: string;
-      model?: string;
-      version?: string;
-      cpuLoad?: number;
-      activePppoeCount?: number;
-    };
-  } | null>(null);
-
   const [isSubmitting, setIsSubmitting] = useState(false);
 
-  // Initialize or reset form state whenever modal is opened
+  /**
+   * 1. Remove Auto-Fetch on Mount:
+   * - Absolutely NO fetch call or background network request when modal opens
+   * - Error state is initialized to null / empty (not red)
+   */
   useEffect(() => {
     if (isOpen) {
-      setTestResult(null);
-      setIsVerified(false);
-      setStatusMessage('');
-      setIsSubmitting(false);
       setValidationError(null);
+      setIsVerified(false);
+      setIsTesting(false);
+      setIsSubmitting(false);
 
-      // Read registered_routers from localStorage to calculate accurate next router number
+      // Read registered_routers from localStorage to determine next available router number
       let fleetCount = routers?.length || 0;
       if (typeof window !== 'undefined') {
         try {
@@ -126,10 +142,12 @@ export const AddRouterModal: React.FC<AddRouterModalProps> = ({
   };
 
   /**
-   * 1. COMPLETELY REMOVED fetch call to /api/mikrotik/test
-   * 2. When user clicks "Test API Connection", do NOT make any HTTP network requests.
-   *    - Validate that IP Address, Username, and Password fields are not empty.
-   *    - Set simulated state: setIsVerified(true) and show green badge: "Connection Verified (Static Preview)".
+   * 2. Pure Client-Side Validation for "Test API Connection":
+   * - DO NOT make any HTTP fetch request to /api/mikrotik/test
+   * - Simply validate that IP Address, Username, and Password are typed
+   * - Show subtle informational banner:
+   *   "Notice: Running on cloud static preview. Direct TCP socket to port 8728 requires running the app locally. Configuration verified."
+   * - Set verification state to true without throwing 404 errors
    */
   const handleTestConnection = () => {
     setValidationError(null);
@@ -156,41 +174,30 @@ export const AddRouterModal: React.FC<AddRouterModalProps> = ({
 
     setIsTesting(true);
 
-    // Brief simulated probe delay for realistic UX, zero network calls
+    // Subtle instant validation without any HTTP request
     setTimeout(() => {
       setIsTesting(false);
       setIsVerified(true);
-      setStatusMessage('Connection Verified (Static Preview)');
-      setTestResult({
-        details: {
-          identity: `BRAS-${name.trim() || targetIp.split('.').pop() || 'Core-Node'}`,
-          model: model === 'Custom' ? (customModel.trim() || 'MikroTik RouterOS') : `MikroTik ${model}`,
-          version: version || 'RouterOS v7.16.2',
-          cpuLoad: 14,
-          activePppoeCount: 0,
-        },
-      });
-    }, 250);
+      setValidationError(null);
+    }, 200);
   };
 
   /**
-   * 3. Make the "Connect & Add MikroTik Device" button permanently clickable
-   *    as long as Name and IP are entered.
+   * 3. Router Persistence via LocalStorage:
+   * - Button is permanently clickable as long as Name and IP are entered
+   * - On click, constructs router object and saves directly into localStorage.getItem('registered_routers')
+   * - Updates parent component's router state so device immediately appears in the fleet
+   * - Closes modal with green success toast: "Router registered successfully"
    */
   const isSaveEnabled = Boolean(name.trim() && ipAddress.trim()) && !isSubmitting;
 
-  /**
-   * 4. On clicking "Connect & Add MikroTik Device":
-   *    - Save new device to localStorage under 'registered_routers'
-   *    - Update active fleet state
-   *    - Close the modal
-   */
   const handleSubmit = async (e?: React.FormEvent) => {
     if (e) e.preventDefault();
     setValidationError(null);
 
-    const targetIp = ipAddress.trim();
     const targetName = name.trim();
+    const targetIp = ipAddress.trim();
+
     if (!targetName) {
       setValidationError('Please enter Router Identifier Name.');
       return;
@@ -200,9 +207,6 @@ export const AddRouterModal: React.FC<AddRouterModalProps> = ({
       return;
     }
 
-    const nextNum = (routers?.length || 0) + 1;
-    const finalName = targetName;
-    const finalIp = targetIp;
     const finalPort = Number(apiPort) || (useSsl ? 443 : 8728);
     const finalModel = model === 'Custom' ? (customModel.trim() || 'MikroTik RouterOS') : `MikroTik ${model}`;
     const routerId = `rt-${Date.now()}`;
@@ -211,9 +215,9 @@ export const AddRouterModal: React.FC<AddRouterModalProps> = ({
 
     const createdRouter: MikrotikRouter = {
       id: routerId,
-      name: finalName,
+      name: targetName,
       model: finalModel,
-      ipAddress: finalIp,
+      ipAddress: targetIp,
       apiPort: finalPort,
       useSsl: Boolean(useSsl),
       username: username.trim() || 'admin',
@@ -231,7 +235,7 @@ export const AddRouterModal: React.FC<AddRouterModalProps> = ({
       activePppoeCount: 24,
     };
 
-    // 1. Save new device to localStorage under 'registered_routers'
+    // 1. Save directly into localStorage.getItem('registered_routers')
     if (typeof window !== 'undefined') {
       try {
         const raw = localStorage.getItem('registered_routers');
@@ -263,19 +267,23 @@ export const AddRouterModal: React.FC<AddRouterModalProps> = ({
       }
     }
 
-    // 2. Also update state in React context
+    // 2. Update parent component's router state in React context
     try {
       await addMikrotikRouter({
         ...createdRouter,
         password: password || '',
       });
     } catch (err: any) {
-      console.warn('Context sync caught fallback:', err);
+      console.warn('Context state update fallback:', err);
     } finally {
       setIsSubmitting(false);
+
+      // 3. Trigger success callback & show green success toast
       if (onSuccess) {
-        onSuccess(finalName);
+        onSuccess(targetName);
       }
+      showSuccessToast('Router registered successfully');
+
       // 4. Close the modal
       onClose();
     }
@@ -313,8 +321,9 @@ export const AddRouterModal: React.FC<AddRouterModalProps> = ({
         {/* Modal Body */}
         <div className="p-5 overflow-y-auto space-y-4 flex-1 text-xs">
           <form onSubmit={handleSubmit} className="space-y-4">
+            {/* Validation Error Banner (only shown if user submits without required inputs) */}
             {validationError && (
-              <div className="p-3 bg-rose-950/60 border border-rose-800/80 rounded-xl text-rose-300 flex items-center gap-2 text-xs">
+              <div className="p-3 bg-rose-950/60 border border-rose-800/80 rounded-xl text-rose-300 flex items-center gap-2 text-xs animate-fade-in">
                 <AlertTriangle className="w-4 h-4 text-rose-400 shrink-0" />
                 <span>{validationError}</span>
               </div>
@@ -482,7 +491,7 @@ export const AddRouterModal: React.FC<AddRouterModalProps> = ({
                 )}
               </div>
 
-              {/* Test Connection Button & Result (Client-side verified, zero network requests) */}
+              {/* Test Connection Button & Informational Banner */}
               <div className="bg-slate-950/70 p-3 rounded-xl border border-slate-800 space-y-2.5">
                 <div className="flex items-center justify-between">
                   <span className="text-slate-300 font-medium">Verify RouterOS Reachability:</span>
@@ -506,45 +515,19 @@ export const AddRouterModal: React.FC<AddRouterModalProps> = ({
                   </button>
                 </div>
 
-                {/* Green badge: "Connection Verified (Static Preview)" */}
+                {/* Subtle Informational Banner when verified */}
                 {isVerified && (
-                  <div className="p-3 rounded-xl text-xs font-mono space-y-2 border bg-emerald-950/70 border-emerald-500 text-emerald-200 shadow-md shadow-emerald-950/30 animate-fade-in">
-                    <div className="flex items-center justify-between gap-2">
-                      <div className="flex items-center gap-2">
-                        <span className="px-2.5 py-1 rounded bg-emerald-500/20 text-emerald-300 font-bold border border-emerald-500 flex items-center gap-1.5 text-xs">
-                          <CheckCircle2 className="w-3.5 h-3.5 text-emerald-400" />
-                          <span>Connection Verified (Static Preview)</span>
-                        </span>
-                        <span className="text-[11px] text-slate-300 font-sans">
-                          12ms roundtrip
-                        </span>
-                      </div>
+                  <div className="p-3 rounded-xl text-xs space-y-2 border bg-emerald-950/50 border-emerald-600/60 text-emerald-200 shadow-md animate-fade-in">
+                    <div className="flex items-center gap-2">
+                      <CheckCircle2 className="w-4 h-4 text-emerald-400 shrink-0" />
+                      <span className="font-semibold text-emerald-300">
+                        Notice: Running on cloud static preview. Direct TCP socket to port 8728 requires running the app locally. Configuration verified.
+                      </span>
                     </div>
-
-                    <div className="text-[11px] text-emerald-300/90 leading-relaxed">
-                      Static preview verified. Device configuration validated and ready to save to fleet.
+                    <div className="text-[11px] text-slate-300 font-mono pt-1 border-t border-emerald-800/30 flex items-center justify-between">
+                      <span>Target: {ipAddress}:{apiPort}</span>
+                      <span className="text-emerald-400 font-bold">✓ Ready to Add</span>
                     </div>
-
-                    {testResult?.details && (
-                      <div className="grid grid-cols-2 sm:grid-cols-4 gap-2 pt-2 border-t border-emerald-800/40 text-[10px]">
-                        <div className="bg-slate-950/60 p-1.5 rounded border border-slate-800">
-                          <span className="text-slate-400 block">RouterOS</span>
-                          <span className="text-white font-bold">{testResult.details.version || 'v7.16.2'}</span>
-                        </div>
-                        <div className="bg-slate-950/60 p-1.5 rounded border border-slate-800">
-                          <span className="text-slate-400 block">Hardware</span>
-                          <span className="text-white font-bold truncate">{testResult.details.model || 'CCR2004'}</span>
-                        </div>
-                        <div className="bg-slate-950/60 p-1.5 rounded border border-slate-800">
-                          <span className="text-slate-400 block">CPU Load</span>
-                          <span className="text-cyan-300 font-bold">{testResult.details.cpuLoad || 14}%</span>
-                        </div>
-                        <div className="bg-slate-950/60 p-1.5 rounded border border-slate-800">
-                          <span className="text-slate-400 block">Active PPPoE</span>
-                          <span className="text-emerald-400 font-bold">{testResult.details.activePppoeCount ?? 0} sessions</span>
-                        </div>
-                      </div>
-                    )}
                   </div>
                 )}
               </div>
