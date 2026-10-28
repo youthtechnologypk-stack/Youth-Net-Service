@@ -1750,6 +1750,41 @@ app.get('/api/mikrotik/customers', async (_req: Request, res: Response) => {
 });
 
 /**
+ * RouterOS REST API Proxy (/api/mikrotik/ppp/*, /api/mikrotik/interface*, /api/mikrotik/system/*)
+ * Mirrors Netlify proxy rewrite rule (/api/mikrotik/* -> https://202.142.186.150:8729/rest/:splat 200!)
+ */
+app.all(['/api/mikrotik/ppp/*', '/api/mikrotik/interface*', '/api/mikrotik/system/*'], async (req: Request, res: Response) => {
+  const subpath = req.path.replace(/^\/api\/mikrotik\//, '');
+  const targetUrl = `https://202.142.186.150:8729/rest/${subpath}${req.url.includes('?') ? req.url.slice(req.url.indexOf('?')) : ''}`;
+  try {
+    const authHeader = req.headers['authorization'];
+    const fetchHeaders: Record<string, string> = {
+      'Accept': (req.headers['accept'] as string) || 'application/json',
+    };
+    if (authHeader) {
+      fetchHeaders['Authorization'] = authHeader as string;
+    }
+    const controller = new AbortController();
+    const timeoutId = setTimeout(() => controller.abort(), 7000);
+    const mikrotikRes = await fetch(targetUrl, {
+      method: req.method,
+      headers: fetchHeaders,
+      signal: controller.signal,
+    });
+    clearTimeout(timeoutId);
+    res.status(mikrotikRes.status);
+    const contentType = mikrotikRes.headers.get('content-type');
+    if (contentType) res.setHeader('content-type', contentType);
+    const body = await mikrotikRes.text();
+    res.send(body);
+  } catch (err: any) {
+    res.status(502).json({
+      error: `Proxy to ${targetUrl} failed: ${err.message}`,
+    });
+  }
+});
+
+/**
  * GET /api/subscribers/:username/360
  * Unified 360° subscriber detail endpoint linking MikroTik, Billing, and Complaints
  */

@@ -3,6 +3,12 @@
   publish = "out"
 
 [[redirects]]
+  from = "/api/mikrotik/*"
+  to = "https://202.142.186.150:8729/rest/:splat"
+  status = 200
+  force = true
+
+[[redirects]]
   from = "/*"
   to = "/index.html"
   status = 200

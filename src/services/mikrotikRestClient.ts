@@ -49,25 +49,46 @@ export async function fetchMikrotikLiveTelemetry(activeRouter: {
   const username = activeRouter.username?.trim() || 'admin';
   const password = activeRouter.password || '';
 
+  // Forward Basic Auth headers directly in the request
   let authHeader = '';
   try {
-    authHeader = `Basic ${btoa(`${username}:${password}`)}`;
+    authHeader = 'Basic ' + btoa(`${username}:${password}`);
   } catch {
-    authHeader = `Basic ${btoa('admin:')}`;
+    try {
+      authHeader = 'Basic ' + btoa(unescape(encodeURIComponent(`${username}:${password}`)));
+    } catch {
+      authHeader = 'Basic ' + btoa('admin:');
+    }
   }
-
-  const baseUrl = `https://${ip}:${targetPort}/rest`;
 
   const commonHeaders: Record<string, string> = {
     Authorization: authHeader,
     Accept: 'application/json',
   };
 
+  // Determine whether running in production on Netlify or cloud environment
+  const isBrowser = typeof window !== 'undefined';
+  const isNetlify =
+    isBrowser &&
+    (window.location.hostname.includes('netlify.app') ||
+      window.location.hostname.includes('youthnetw') ||
+      window.location.hostname.includes('netlify') ||
+      (window.location.hostname !== 'localhost' &&
+        window.location.hostname !== '127.0.0.1' &&
+        ip === '202.142.186.150'));
+
+  // When running on Netlify, rewrite request path to same-origin Netlify proxy rewrite
+  // (/api/mikrotik/* -> https://202.142.186.150:8729/rest/:splat 200!)
+  // to eliminate browser CORS blocking on RouterOS v7.
+  const baseUrl = isNetlify
+    ? `${window.location.origin}/api/mikrotik`
+    : `https://${ip}:${targetPort}/rest`;
+
   const controller = new AbortController();
-  const timeoutId = setTimeout(() => controller.abort(), 6000);
+  const timeoutId = setTimeout(() => controller.abort(), 7000);
 
   try {
-    // 1. Fetch Live PPPoE Active Sessions (/rest/ppp/active)
+    // 1. Fetch Live PPPoE Active Sessions (/rest/ppp/active or /api/mikrotik/ppp/active)
     const sessionsRes = await fetch(`${baseUrl}/ppp/active`, {
       method: 'GET',
       headers: commonHeaders,
@@ -75,7 +96,16 @@ export async function fetchMikrotikLiveTelemetry(activeRouter: {
     });
 
     if (!sessionsRes.ok) {
+      const contentType = sessionsRes.headers.get('content-type') || '';
+      if (contentType.includes('text/html')) {
+        throw new Error(`Netlify Proxy upstream returned HTTP ${sessionsRes.status} (verify router public IP/port reachability)`);
+      }
       throw new Error(`HTTP ${sessionsRes.status}: ${sessionsRes.statusText}`);
+    }
+
+    const contentType = sessionsRes.headers.get('content-type') || '';
+    if (contentType.includes('text/html')) {
+      throw new Error(`Expected JSON but received HTML response from proxy`);
     }
 
     const sessionsData = await sessionsRes.json();
@@ -214,9 +244,10 @@ export async function fetchMikrotikLiveTelemetry(activeRouter: {
     };
   } catch (err: any) {
     clearTimeout(timeoutId);
+    const targetDesc = isNetlify ? `Netlify Proxy (/api/mikrotik -> ${ip}:${targetPort})` : `${ip}:${targetPort}`;
     return {
       success: false,
-      error: `Cannot reach router at ${ip}:${targetPort} - Check Public IP reachability, SSL cert, or CORS.`,
+      error: `Cannot reach router at ${targetDesc} - ${err?.message || 'Check Public IP reachability, SSL cert, or CORS.'}`,
       activeSessions: [],
       interfaces: [],
       router: {
