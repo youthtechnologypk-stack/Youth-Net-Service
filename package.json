@@ -5,10 +5,10 @@
   "type": "module",
   "scripts": {
     "dev": "tsx server.ts",
-    "build": "vite build",
+    "build": "vite build && mkdir -p out && cp -r dist/* out/",
     "start": "tsx server.ts",
     "preview": "vite preview",
-    "clean": "rm -rf dist server.js",
+    "clean": "rm -rf dist out server.js",
     "lint": "tsc --noEmit"
   },
   "dependencies": {

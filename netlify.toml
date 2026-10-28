@@ -1,42 +1,7 @@
 [build]
   command = "npm run build"
-  publish = "dist"
+  publish = "out"
 
-[[plugins]]
-  package = "@netlify/plugin-nextjs"
-
-# Direct API Rewrites for Serverless Handlers
-[[redirects]]
-  from = "/api/mikrotik/test"
-  to = "/.netlify/functions/mikrotik-test"
-  status = 200
-
-[[redirects]]
-  from = "/api/routers/test"
-  to = "/.netlify/functions/mikrotik-test"
-  status = 200
-
-[[redirects]]
-  from = "/api/mikrotik/routers"
-  to = "/.netlify/functions/mikrotik-routers"
-  status = 200
-
-[[redirects]]
-  from = "/api/mikrotik/routers/:id"
-  to = "/.netlify/functions/mikrotik-routers?id=:id"
-  status = 200
-
-[[redirects]]
-  from = "/api/routers"
-  to = "/.netlify/functions/mikrotik-routers"
-  status = 200
-
-[[redirects]]
-  from = "/api/routers/:id"
-  to = "/.netlify/functions/mikrotik-routers?id=:id"
-  status = 200
-
-# Single Page App routing fallback
 [[redirects]]
   from = "/*"
   to = "/index.html"
