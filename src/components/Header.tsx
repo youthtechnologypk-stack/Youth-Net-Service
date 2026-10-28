@@ -242,6 +242,11 @@ export const Header: React.FC<HeaderProps> = ({
             )}
           </div>
 
+          <span className="hidden xl:inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full bg-emerald-950/90 text-emerald-300 border border-emerald-500/30 text-[11px] font-mono shadow-sm">
+            <span className="w-1.5 h-1.5 rounded-full bg-emerald-400 animate-pulse" />
+            Demo Mode (Local Telemetry Stream)
+          </span>
+
           <div className="hidden lg:flex items-center gap-3 bg-slate-900/80 border border-slate-800 px-3 py-1.5 rounded-md text-slate-300">
             <span>
               CPU: <strong className="text-cyan-300">{currentRouter.cpuLoad}%</strong>

@@ -100,6 +100,26 @@ export interface ActiveSession {
   liveRateFormatted?: string;
 }
 
+export interface RouterInterface {
+  id: string;
+  name: string;
+  type: 'ether' | 'sfp-sfpplus' | 'bridge' | 'vlan';
+  status: 'running' | 'disabled' | 'link_down';
+  running: boolean;
+  disabled: boolean;
+  comment?: string;
+  macAddress: string;
+  mtu: number;
+  actualMtu?: number;
+  linkSpeed?: string; // e.g. "10Gbps" | "1Gbps" | "2.5Gbps"
+  fullDuplex?: boolean;
+  rxBytes: number;
+  txBytes: number;
+  rxRateMbps: number;
+  txRateMbps: number;
+  routerId: string;
+}
+
 export type InvoiceItemCategory =
   | 'monthly_subscription'
   | 'installation_fee'

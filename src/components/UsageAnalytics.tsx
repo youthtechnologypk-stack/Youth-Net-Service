@@ -41,6 +41,7 @@ export const UsageAnalytics: React.FC = () => {
   const {
     bandwidthHistory,
     activeSessions,
+    routerInterfaces,
     customers,
     packages,
     isTrafficStreaming,
@@ -455,9 +456,19 @@ export const UsageAnalytics: React.FC = () => {
                 onChange={(e) => setSelectedInterface(e.target.value)}
                 className="bg-slate-950 border border-slate-700 text-cyan-300 font-mono text-xs px-2.5 py-1.5 rounded-lg focus:outline-none focus:border-cyan-500"
               >
-                <option value="sfp-sfpplus1">sfp-sfpplus1 (10G WAN Uplink - Cogent Transit)</option>
-                <option value="sfp-sfpplus2">sfp-sfpplus2 (10G Dark Fiber Metro Ring)</option>
-                <option value="ether1">ether1 (Local Aggregation Subnet - Sector G-11)</option>
+                {routerInterfaces && routerInterfaces.length > 0 ? (
+                  routerInterfaces.map((iface) => (
+                    <option key={iface.id} value={iface.name}>
+                      {iface.name} ({iface.linkSpeed || '1Gbps'} - {iface.comment || iface.type})
+                    </option>
+                  ))
+                ) : (
+                  <>
+                    <option value="sfp-sfpplus1">sfp-sfpplus1 (10G WAN Uplink - Cogent Transit)</option>
+                    <option value="sfp-sfpplus2">sfp-sfpplus2 (10G Dark Fiber Metro Ring)</option>
+                    <option value="ether1">ether1 (Local Aggregation Subnet - Sector G-11)</option>
+                  </>
+                )}
               </select>
             </div>
 

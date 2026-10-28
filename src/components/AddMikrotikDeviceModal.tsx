@@ -12,6 +12,12 @@ import {
 } from 'lucide-react';
 import { useISP } from '../context/ISPContext';
 import { MikrotikRouter } from '../types/isp';
+import {
+  generateInterfacesForRouter,
+  generateSessionsForRouter,
+  generateBandwidthHistory,
+  saveRouterTelemetryToStorage,
+} from '../services/telemetrySimulator';
 
 export interface AddMikrotikDeviceModalProps {
   isOpen: boolean;
@@ -183,6 +189,23 @@ export const AddMikrotikDeviceModal: React.FC<AddMikrotikDeviceModalProps> = ({
         localStorage.setItem('registered_routers', JSON.stringify(updated));
         localStorage.setItem('isp_routers_initialized', 'true');
         localStorage.setItem('netpulse_selected_router_id', createdRouter.id);
+
+        // Generate and persist realistic mock telemetry data (active PPPoE sessions, interface status, bandwidth)
+        const mockInterfaces = generateInterfacesForRouter(createdRouter);
+        const mockSessions = generateSessionsForRouter(createdRouter);
+        const mockBandwidth = generateBandwidthHistory(createdRouter.currentWanRxMbps, createdRouter.currentWanTxMbps);
+        saveRouterTelemetryToStorage(createdRouter.id, mockSessions, mockInterfaces, mockBandwidth);
+
+        // Also update registered_active_sessions in localStorage
+        try {
+          const rawSessions = localStorage.getItem('registered_active_sessions');
+          let currentSessions: any[] = [];
+          if (rawSessions) {
+            try { currentSessions = JSON.parse(rawSessions); } catch {}
+          }
+          const updatedSessions = [...currentSessions.filter((s: any) => s.routerId !== createdRouter.id), ...mockSessions];
+          localStorage.setItem('registered_active_sessions', JSON.stringify(updatedSessions));
+        } catch {}
 
         // Remove from deleted_router_ids tombstone if previously present
         const deletedRaw = localStorage.getItem('deleted_router_ids') || '[]';

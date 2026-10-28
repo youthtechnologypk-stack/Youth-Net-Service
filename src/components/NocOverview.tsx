@@ -77,6 +77,35 @@ export const NocOverview: React.FC<NocOverviewProps> = ({
 
   return (
     <div className="space-y-6">
+      {/* Subtle Demo Mode Badge & Local Telemetry Stream Status */}
+      <div className="flex flex-wrap items-center justify-between gap-3 bg-slate-900/80 border border-slate-800/80 px-3.5 py-2.5 rounded-xl backdrop-blur-sm">
+        <div className="flex items-center gap-2.5">
+          <span className="inline-flex items-center gap-1.5 px-3 py-1 rounded-full text-xs font-mono font-medium bg-emerald-950/90 text-emerald-300 border border-emerald-500/30 shadow-sm shadow-emerald-950/40">
+            <span className="w-2 h-2 rounded-full bg-emerald-400 animate-pulse" />
+            Demo Mode (Local Telemetry Stream)
+          </span>
+          <span className="text-xs text-slate-400 font-mono hidden sm:inline">
+            Active BNG: <span className="text-slate-200 font-bold">{currentRouter?.name || 'CCR2004'}</span> ({currentRouter?.ipAddress})
+          </span>
+        </div>
+        <div className="flex items-center gap-3 text-xs font-mono text-slate-400">
+          <span className="flex items-center gap-1">
+            <span className="w-1.5 h-1.5 rounded-full bg-cyan-400" />
+            CPU: <span className="text-cyan-300 font-bold">{currentRouter?.cpuLoad || 16}%</span>
+          </span>
+          <span className="text-slate-700">|</span>
+          <span className="flex items-center gap-1">
+            <span className="w-1.5 h-1.5 rounded-full bg-emerald-400" />
+            Live WAN: <span className="text-emerald-400 font-bold">{currentWanRx}M</span> RX
+          </span>
+          <span className="text-slate-700">|</span>
+          <span className="flex items-center gap-1">
+            <span className="w-1.5 h-1.5 rounded-full bg-indigo-400" />
+            Sessions: <span className="text-indigo-300 font-bold">{activeSessions.filter(s => s.routerId === currentRouter?.id).length || currentRouter?.activePppoeCount || 24}</span>
+          </span>
+        </div>
+      </div>
+
       {/* Active Outage Warning Banner if any active (with minimize and full update modal) */}
       <OutageBanner onNavigateTab={onNavigateTab} />
 

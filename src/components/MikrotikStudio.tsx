@@ -39,6 +39,7 @@ import { DeleteConfirmDialog } from './DeleteConfirmDialog';
 import { RouterFleet } from './RouterFleet';
 import { ActiveSessionsTable } from './ActiveSessionsTable';
 import { SubscriberProfileDrawer } from './SubscriberProfileDrawer';
+import { RouterInterfacesTable } from './RouterInterfacesTable';
 
 interface MikrotikStudioProps {
   onOpenProvisionModal: () => void;
@@ -54,6 +55,7 @@ export const MikrotikStudio: React.FC<MikrotikStudioProps> = ({
     selectedRouterId,
     setSelectedRouterId,
     activeSessions,
+    routerInterfaces,
     customers,
     packages,
     routerError,
@@ -68,7 +70,7 @@ export const MikrotikStudio: React.FC<MikrotikStudioProps> = ({
   } = useISP();
   const { formatCurrency, currencySymbol } = useCurrency();
 
-  const [activeSubTab, setActiveSubTab] = useState<'sessions' | 'secrets' | 'profiles' | 'routers'>('sessions');
+  const [activeSubTab, setActiveSubTab] = useState<'sessions' | 'interfaces' | 'secrets' | 'profiles' | 'routers'>('sessions');
   const [searchQuery, setSearchQuery] = useState('');
   const [selectedSubscriberUsername, setSelectedSubscriberUsername] = useState<string | null>(null);
   const [isKicking, setIsKicking] = useState<string | null>(null);
@@ -200,23 +202,9 @@ export const MikrotikStudio: React.FC<MikrotikStudioProps> = ({
             <div>
               <div className="flex items-center gap-2">
                 <h2 className="text-lg font-bold text-white">{currentRouter.name}</h2>
-                <span className={`text-xs px-2.5 py-1 rounded-lg border font-mono font-bold flex items-center gap-1.5 ${
-                  currentRouter.status === 'online'
-                    ? 'bg-emerald-950 text-emerald-300 border-emerald-800'
-                    : currentRouter.status === 'hybrid_online' || currentRouter.mode === 'hybrid'
-                    ? 'bg-cyan-950 text-cyan-300 border-cyan-700/80'
-                    : 'bg-emerald-950/80 text-emerald-300 border-emerald-800'
-                }`}>
-                  <span className={`w-2 h-2 rounded-full ${
-                    currentRouter.status === 'online'
-                      ? 'bg-emerald-400'
-                      : 'bg-cyan-400'
-                  }`} />
-                  <span>
-                    {currentRouter.status === 'online'
-                      ? 'CONNECTED / ONLINE'
-                      : 'Connected (Simulation/Cache Mode)'}
-                  </span>
+                <span className="text-xs px-2.5 py-1 rounded-full bg-emerald-950/90 text-emerald-300 border border-emerald-500/30 font-mono font-medium flex items-center gap-1.5 shadow-sm">
+                  <span className="w-2 h-2 rounded-full bg-emerald-400 animate-pulse" />
+                  Demo Mode (Local Telemetry Stream)
                 </span>
                 <span className="text-xs px-2 py-0.5 rounded bg-slate-800 text-slate-300 font-mono">
                   {currentRouter.version}
@@ -388,6 +376,18 @@ export const MikrotikStudio: React.FC<MikrotikStudioProps> = ({
           </button>
 
           <button
+            onClick={() => setActiveSubTab('interfaces')}
+            className={`px-3 py-1.5 text-xs font-medium rounded-md transition flex items-center gap-1.5 ${
+              activeSubTab === 'interfaces'
+                ? 'bg-slate-800 text-cyan-400 border border-cyan-600/40 shadow-sm'
+                : 'text-slate-400 hover:text-slate-200'
+            }`}
+          >
+            <Activity className="w-3.5 h-3.5" />
+            Interfaces ({routerInterfaces.length})
+          </button>
+
+          <button
             onClick={() => setActiveSubTab('secrets')}
             className={`px-3 py-1.5 text-xs font-medium rounded-md transition flex items-center gap-1.5 ${
               activeSubTab === 'secrets'
@@ -450,6 +450,16 @@ export const MikrotikStudio: React.FC<MikrotikStudioProps> = ({
             await deletePppoeUser(username, currentRouter.id);
           }}
           isKickingId={isKicking}
+        />
+      )}
+
+      {/* SUB-TAB: Hardware Port & Interface Status (/interface) */}
+      {activeSubTab === 'interfaces' && (
+        <RouterInterfacesTable
+          interfaces={routerInterfaces}
+          routerName={currentRouter.name}
+          routerIp={currentRouter.ipAddress}
+          onRefresh={handleTriggerSync}
         />
       )}
 
