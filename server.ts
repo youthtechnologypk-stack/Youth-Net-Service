@@ -1,6 +1,9 @@
 import express, { Request, Response, NextFunction } from 'express';
 import path from 'node:path';
 import dotenv from 'dotenv';
+
+// Disable TLS reject for self-signed certificates on MikroTik RouterOS devices
+process.env.NODE_TLS_REJECT_UNAUTHORIZED = '0';
 import { createServer as createViteServer } from 'vite';
 import {
   initPostgres,

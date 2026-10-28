@@ -1,2 +1,2 @@
-/api/mikrotik/* https://202.142.186.150:8729/rest/:splat 200!
+/api/mikrotik/* /.netlify/functions/mikrotik-proxy/:splat 200!
 /* /index.html 200
