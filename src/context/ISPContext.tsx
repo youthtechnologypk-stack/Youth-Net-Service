@@ -577,6 +577,8 @@ export const ISPProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
     if (!targetRouter) {
       return { success: false, activeCount: 0, secretsCount: 0, error: 'No router selected' };
     }
+    const targetPort = targetRouter.port || targetRouter.apiPort || 8729;
+    const targetIp = targetRouter.ip || targetRouter.ipAddress || '127.0.0.1';
     setIsSyncingRouter(true);
     setRouterError(null);
 
@@ -618,7 +620,7 @@ export const ISPProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
       } else {
         const errorMsg =
           result.error ||
-          `Cannot reach router at ${targetRouter.ipAddress}:443 - Check Public IP reachability, SSL cert, or CORS.`;
+          `Cannot reach router at ${targetIp}:${targetPort} - Check Public IP reachability, SSL cert, or CORS.`;
         setRouterError(errorMsg);
         setRouters((prev) =>
           prev.map((r) => (r.id === selectedRouterId ? { ...r, status: 'unreachable' } : r))
@@ -633,7 +635,7 @@ export const ISPProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
         };
       }
     } catch (err: any) {
-      const errorMsg = `Cannot reach router at ${targetRouter.ipAddress}:443 - Check Public IP reachability, SSL cert, or CORS.`;
+      const errorMsg = `Cannot reach router at ${targetIp}:${targetPort} - Check Public IP reachability, SSL cert, or CORS.`;
       setRouterError(errorMsg);
       setRouters((prev) =>
         prev.map((r) => (r.id === selectedRouterId ? { ...r, status: 'unreachable' } : r))
@@ -667,6 +669,8 @@ export const ISPProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
           setRouterError(null);
           return;
         }
+        const targetPort = targetRouter.port || targetRouter.apiPort || 8729;
+        const targetIp = targetRouter.ip || targetRouter.ipAddress || '127.0.0.1';
 
         const result = await fetchMikrotikLiveTelemetry(targetRouter);
         if (isCancelled) return;
@@ -700,11 +704,11 @@ export const ISPProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
           }
         } else {
           // If fetch fails due to CORS, self-signed certificate, or network unreachable:
-          // Show the exact real error banner: "Cannot reach router at {IP}:443 - Check Public IP reachability, SSL cert, or CORS."
+          // Show the exact real error banner: "Cannot reach router at {IP}:{PORT} - Check Public IP reachability, SSL cert, or CORS."
           // DO NOT fallback to fake mock data.
           const errorMsg =
             result.error ||
-            `Cannot reach router at ${targetRouter.ipAddress}:443 - Check Public IP reachability, SSL cert, or CORS.`;
+            `Cannot reach router at ${targetIp}:${targetPort} - Check Public IP reachability, SSL cert, or CORS.`;
           setRouterError(errorMsg);
           setRouters((prev) =>
             prev.map((r) => (r.id === selectedRouterId ? { ...r, status: 'unreachable' } : r))
@@ -713,9 +717,10 @@ export const ISPProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
         }
       } catch (err: any) {
         if (!isCancelled) {
-          const targetRouter = routers.find((r) => r.id === selectedRouterId);
-          const ip = targetRouter?.ipAddress || 'host';
-          const errorMsg = `Cannot reach router at ${ip}:443 - Check Public IP reachability, SSL cert, or CORS.`;
+          const targetRouter = routers.find((r) => r.id === selectedRouterId) || routers[0];
+          const targetPort = targetRouter ? (targetRouter.port || targetRouter.apiPort || 8729) : 8729;
+          const ip = targetRouter ? (targetRouter.ip || targetRouter.ipAddress) : 'host';
+          const errorMsg = `Cannot reach router at ${ip}:${targetPort} - Check Public IP reachability, SSL cert, or CORS.`;
           setRouterError(errorMsg);
           setRouters((prev) =>
             prev.map((r) => (r.id === selectedRouterId ? { ...r, status: 'unreachable' } : r))

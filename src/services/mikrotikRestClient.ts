@@ -25,26 +25,29 @@ export interface FetchRouterLiveResult {
 /**
  * Direct client-side fetch for MikroTik RouterOS v7 REST API over HTTPS
  * Endpoints:
- *   - https://{ROUTER_IP}:443/rest/ppp/active
- *   - https://{ROUTER_IP}:443/rest/interface
- *   - https://{ROUTER_IP}:443/rest/system/resource
+ *   - https://${activeRouter.ip}:${targetPort}/rest/ppp/active
+ *   - https://${activeRouter.ip}:${targetPort}/rest/interface
+ *   - https://${activeRouter.ip}:${targetPort}/rest/system/resource
  * Uses Basic Authentication with configured credentials.
  * If unreachable or blocked by CORS / Self-signed certificate, returns exact error banner.
  * NEVER falls back to fake mock data.
  */
-export async function fetchMikrotikLiveTelemetry(router: {
+export async function fetchMikrotikLiveTelemetry(activeRouter: {
   id?: string;
-  ipAddress: string;
+  ipAddress?: string;
+  ip?: string;
   apiPort?: number;
+  port?: number;
   username: string;
   password?: string;
   useSsl?: boolean;
   wanInterface?: string;
 }): Promise<FetchRouterLiveResult> {
-  const ip = router.ipAddress?.trim() || '127.0.0.1';
-  const port = router.apiPort || 443;
-  const username = router.username?.trim() || 'admin';
-  const password = router.password || '';
+  const router = activeRouter;
+  const targetPort = activeRouter.port || activeRouter.apiPort || 8729;
+  const ip = (activeRouter.ip || activeRouter.ipAddress || '127.0.0.1').trim();
+  const username = activeRouter.username?.trim() || 'admin';
+  const password = activeRouter.password || '';
 
   let authHeader = '';
   try {
@@ -53,7 +56,7 @@ export async function fetchMikrotikLiveTelemetry(router: {
     authHeader = `Basic ${btoa('admin:')}`;
   }
 
-  const baseUrl = `https://${ip}:${port}/rest`;
+  const baseUrl = `https://${ip}:${targetPort}/rest`;
 
   const commonHeaders: Record<string, string> = {
     Authorization: authHeader,
@@ -213,7 +216,7 @@ export async function fetchMikrotikLiveTelemetry(router: {
     clearTimeout(timeoutId);
     return {
       success: false,
-      error: `Cannot reach router at ${ip}:443 - Check Public IP reachability, SSL cert, or CORS.`,
+      error: `Cannot reach router at ${ip}:${targetPort} - Check Public IP reachability, SSL cert, or CORS.`,
       activeSessions: [],
       interfaces: [],
       router: {

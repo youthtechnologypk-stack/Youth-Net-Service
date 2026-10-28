@@ -65,7 +65,9 @@ export interface MikrotikRouter {
   name: string;
   model: string;
   ipAddress: string;
+  ip?: string;
   apiPort: number;
+  port?: number;
   username: string;
   password?: string;
   useSsl: boolean;

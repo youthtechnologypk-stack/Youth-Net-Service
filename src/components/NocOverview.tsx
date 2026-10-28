@@ -104,7 +104,7 @@ export const NocOverview: React.FC<NocOverviewProps> = ({
               {currentRouter.status === 'online' ? 'RouterOS v7 REST Live' : 'Router Unreachable'}
             </span>
             <span className="text-xs text-slate-400 font-mono hidden sm:inline">
-              Active BNG: <span className="text-slate-200 font-bold">{currentRouter.name}</span> ({currentRouter.ipAddress}:{currentRouter.apiPort || 443})
+              Active BNG: <span className="text-slate-200 font-bold">{currentRouter.name}</span> ({currentRouter.ip || currentRouter.ipAddress}:{currentRouter.port || currentRouter.apiPort || 8729})
             </span>
           </div>
           <div className="flex items-center gap-3 text-xs font-mono text-slate-400">

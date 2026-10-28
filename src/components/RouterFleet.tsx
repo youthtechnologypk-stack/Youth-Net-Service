@@ -229,7 +229,7 @@ export const RouterFleet: React.FC<RouterFleetProps> = ({ onOpenAddDeviceModal }
                   <div className="flex justify-between items-center">
                     <span className="text-slate-400">Management IP:</span>
                     <span className="text-cyan-300 font-bold">
-                      {router.ipAddress}:{router.apiPort} {router.useSsl ? '(TLS)' : ''}
+                      {router.ip || router.ipAddress}:{router.port || router.apiPort || 8729} {router.useSsl ? '(TLS)' : ''}
                     </span>
                   </div>
                   <div className="flex justify-between items-center">

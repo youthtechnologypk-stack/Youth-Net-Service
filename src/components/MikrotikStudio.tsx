@@ -235,7 +235,7 @@ export const MikrotikStudio: React.FC<MikrotikStudioProps> = ({
                   </span>
                 </div>
                 <p className="text-xs text-slate-400 mt-0.5">
-                  Model: <strong className="text-slate-200">{currentRouter.model}</strong> &bull; IP: <code className="text-cyan-400">{currentRouter.ipAddress}:{currentRouter.apiPort || 443}</code> (RouterOS v7 HTTPS REST API)
+                  Model: <strong className="text-slate-200">{currentRouter.model}</strong> &bull; IP: <code className="text-cyan-400">{currentRouter.ip || currentRouter.ipAddress}:{currentRouter.port || currentRouter.apiPort || 8729}</code> (RouterOS v7 HTTPS REST API)
                 </p>
               </div>
             </div>
@@ -251,7 +251,7 @@ export const MikrotikStudio: React.FC<MikrotikStudioProps> = ({
                 >
                   {routers.map((r) => (
                     <option key={r.id} value={r.id}>
-                      {r.name} ({r.ipAddress}:{r.apiPort || 443}) [{r.status.toUpperCase()}]
+                      {r.name} ({r.ip || r.ipAddress}:{r.port || r.apiPort || 8729}) [{r.status.toUpperCase()}]
                     </option>
                   ))}
                 </select>
@@ -297,7 +297,7 @@ export const MikrotikStudio: React.FC<MikrotikStudioProps> = ({
                     {routerError}
                   </p>
                   <p className="mt-1.5 text-rose-400 text-[11px]">
-                    💡 <strong>REST API Diagnostic:</strong> Direct HTTPS request to <code className="font-mono text-white bg-rose-900/50 px-1 py-0.5 rounded">https://{currentRouter.ipAddress}:{currentRouter.apiPort || 443}/rest/</code> failed. Verify <code className="font-mono text-white bg-rose-900/50 px-1 py-0.5 rounded">/ip service enable www-ssl</code> is enabled, public IP reachability, SSL certificate validity, and browser CORS permissions.
+                    💡 <strong>REST API Diagnostic:</strong> Direct HTTPS request to <code className="font-mono text-white bg-rose-900/50 px-1 py-0.5 rounded">https://{currentRouter.ip || currentRouter.ipAddress}:{currentRouter.port || currentRouter.apiPort || 8729}/rest/</code> failed. Verify <code className="font-mono text-white bg-rose-900/50 px-1 py-0.5 rounded">/ip service enable www-ssl</code> is enabled, public IP reachability, SSL certificate validity, and browser CORS permissions.
                   </p>
                 </div>
               </div>
