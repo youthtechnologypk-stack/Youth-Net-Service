@@ -12,12 +12,6 @@ import {
 } from 'lucide-react';
 import { useISP } from '../context/ISPContext';
 import { MikrotikRouter } from '../types/isp';
-import {
-  generateInterfacesForRouter,
-  generateSessionsForRouter,
-  generateBandwidthHistory,
-  saveRouterTelemetryToStorage,
-} from '../services/telemetrySimulator';
 
 export interface AddMikrotikDeviceModalProps {
   isOpen: boolean;
@@ -82,8 +76,8 @@ export const AddMikrotikDeviceModal: React.FC<AddMikrotikDeviceModalProps> = ({
   const [model, setModel] = useState('CCR2004-16G-2S+');
   const [customModel, setCustomModel] = useState('');
   const [ipAddress, setIpAddress] = useState('192.168.88.1');
-  const [apiPort, setApiPort] = useState<number>(8728);
-  const [useSsl, setUseSsl] = useState<boolean>(false);
+  const [apiPort, setApiPort] = useState<number>(443);
+  const [useSsl, setUseSsl] = useState<boolean>(true);
   const [username, setUsername] = useState('admin');
   const [password, setPassword] = useState('');
   const [version, setVersion] = useState('RouterOS v7.16.2');
@@ -160,18 +154,19 @@ export const AddMikrotikDeviceModal: React.FC<AddMikrotikDeviceModalProps> = ({
       apiPort: finalPort,
       useSsl: Boolean(useSsl),
       username: finalUser,
+      password: finalPass,
       version: version || 'RouterOS v7.16.2',
       location: location.trim() || 'Central Distribution Node',
       wanInterface: wanInterface.trim() || 'sfp-sfpplus1',
       walledGardenPool: walledGardenPool.trim() || '172.16.102.0/24',
-      status: 'online',
-      cpuLoad: 14,
-      memoryUsageMb: 512,
-      totalMemoryMb: 4096,
-      uptime: '1d 08h 15m',
-      currentWanRxMbps: 1250,
-      currentWanTxMbps: 680,
-      activePppoeCount: 24,
+      status: 'unreachable',
+      cpuLoad: 0,
+      memoryUsageMb: 0,
+      totalMemoryMb: 0,
+      uptime: '0s',
+      currentWanRxMbps: 0,
+      currentWanTxMbps: 0,
+      activePppoeCount: 0,
     };
 
     // 1. Save router object directly to localStorage under key 'registered_routers'
@@ -189,23 +184,6 @@ export const AddMikrotikDeviceModal: React.FC<AddMikrotikDeviceModalProps> = ({
         localStorage.setItem('registered_routers', JSON.stringify(updated));
         localStorage.setItem('isp_routers_initialized', 'true');
         localStorage.setItem('netpulse_selected_router_id', createdRouter.id);
-
-        // Generate and persist realistic mock telemetry data (active PPPoE sessions, interface status, bandwidth)
-        const mockInterfaces = generateInterfacesForRouter(createdRouter);
-        const mockSessions = generateSessionsForRouter(createdRouter);
-        const mockBandwidth = generateBandwidthHistory(createdRouter.currentWanRxMbps, createdRouter.currentWanTxMbps);
-        saveRouterTelemetryToStorage(createdRouter.id, mockSessions, mockInterfaces, mockBandwidth);
-
-        // Also update registered_active_sessions in localStorage
-        try {
-          const rawSessions = localStorage.getItem('registered_active_sessions');
-          let currentSessions: any[] = [];
-          if (rawSessions) {
-            try { currentSessions = JSON.parse(rawSessions); } catch {}
-          }
-          const updatedSessions = [...currentSessions.filter((s: any) => s.routerId !== createdRouter.id), ...mockSessions];
-          localStorage.setItem('registered_active_sessions', JSON.stringify(updatedSessions));
-        } catch {}
 
         // Remove from deleted_router_ids tombstone if previously present
         const deletedRaw = localStorage.getItem('deleted_router_ids') || '[]';

@@ -34,14 +34,7 @@ import { MikrotikRouterOSv7Service } from '../services/mikrotikRouterOSv7';
 import { BillingCronEngine } from '../services/cronBillingEngine';
 import { safeResponseJson } from '../lib/safeFetch';
 import { formatCurrency } from './CurrencyContext';
-import {
-  generateInterfacesForRouter,
-  generateSessionsForRouter,
-  generateBandwidthHistory,
-  saveRouterTelemetryToStorage,
-  loadRouterTelemetryFromStorage,
-  jitterTelemetryTick,
-} from '../services/telemetrySimulator';
+import { fetchMikrotikLiveTelemetry } from '../services/mikrotikRestClient';
 
 interface BandwidthDataPoint {
   time: string;
@@ -55,7 +48,6 @@ interface ISPContextType {
   customers: Customer[];
   activeSessions: ActiveSession[];
   routerInterfaces: RouterInterface[];
-  isDemoMode: boolean;
   invoices: Invoice[];
   complaints: ComplaintTicket[];
   agents: FieldAgent[];
@@ -310,43 +302,17 @@ function getInitialPackages(): InternetPackage[] {
 
 const STORAGE_KEY_ACTIVE_SESSIONS = 'registered_active_sessions';
 
-function getInitialActiveSessions(initialRouters: MikrotikRouter[]): ActiveSession[] {
-  if (typeof window === 'undefined') return INITIAL_ACTIVE_SESSIONS;
+function getInitialActiveSessions(): ActiveSession[] {
+  if (typeof window === 'undefined') return [];
   try {
     const raw = localStorage.getItem(STORAGE_KEY_ACTIVE_SESSIONS);
-    let list: ActiveSession[] = [];
     if (raw) {
-      try {
-        const parsed = JSON.parse(raw);
-        if (Array.isArray(parsed) && parsed.length > 0) {
-          list = parsed;
-        }
-      } catch {}
+      const parsed = JSON.parse(raw);
+      if (Array.isArray(parsed)) return parsed;
     }
-
-    if (list.length === 0) {
-      list = [...INITIAL_ACTIVE_SESSIONS];
-    }
-
-    // Ensure every registered router has simulated sessions in storage
-    initialRouters.forEach((r) => {
-      const hasSessions = list.some((s) => s.routerId === r.id);
-      if (!hasSessions) {
-        const stored = loadRouterTelemetryFromStorage(r.id);
-        if (stored?.sessions && stored.sessions.length > 0) {
-          list = [...list, ...stored.sessions];
-        } else {
-          const generated = generateSessionsForRouter(r);
-          saveRouterTelemetryToStorage(r.id, generated, generateInterfacesForRouter(r));
-          list = [...list, ...generated];
-        }
-      }
-    });
-
-    localStorage.setItem(STORAGE_KEY_ACTIVE_SESSIONS, JSON.stringify(list));
-    return list;
+    return [];
   } catch {
-    return INITIAL_ACTIVE_SESSIONS;
+    return [];
   }
 }
 
@@ -357,7 +323,7 @@ export const ISPProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
   const [routers, setRouters] = useState<MikrotikRouter[]>(initialRoutersList);
   const [packages, setPackages] = useState<InternetPackage[]>(getInitialPackages);
   const [customers, setCustomers] = useState<Customer[]>(getInitialCustomers);
-  const [activeSessions, setActiveSessions] = useState<ActiveSession[]>(() => getInitialActiveSessions(initialRoutersList));
+  const [activeSessions, setActiveSessions] = useState<ActiveSession[]>(() => getInitialActiveSessions());
   const [invoices, setInvoices] = useState<Invoice[]>(INITIAL_INVOICES);
   const [complaints, setComplaints] = useState<ComplaintTicket[]>(INITIAL_COMPLAINTS);
   const [agents, setAgents] = useState<FieldAgent[]>(INITIAL_AGENTS);
@@ -562,23 +528,10 @@ export const ISPProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
 
   const handleSetSelectedRouterId = (id: string) => {
     setSelectedRouterId(id);
+    setRouterError(null);
     try {
       localStorage.setItem('netpulse_selected_router_id', id);
     } catch {}
-
-    // Hydrate interfaces and sessions for target router
-    const targetRouter = routers.find((r) => r.id === id);
-    if (targetRouter) {
-      const stored = loadRouterTelemetryFromStorage(id);
-      if (stored?.interfaces && stored.interfaces.length > 0) {
-        setRouterInterfaces(stored.interfaces);
-      } else {
-        const newIfaces = generateInterfacesForRouter(targetRouter);
-        const newSessions = stored?.sessions || generateSessionsForRouter(targetRouter);
-        saveRouterTelemetryToStorage(id, newSessions, newIfaces);
-        setRouterInterfaces(newIfaces);
-      }
-    }
   };
   const [isTrafficStreaming, setIsTrafficStreaming] = useState<boolean>(true);
   const [lastCronMessage, setLastCronMessage] = useState<string | null>(null);
@@ -587,40 +540,32 @@ export const ISPProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
   const [isSyncingRouter, setIsSyncingRouter] = useState<boolean>(false);
 
   // Interfaces inventory for active router (/interface)
-  const [routerInterfaces, setRouterInterfaces] = useState<RouterInterface[]>(() => {
-    const curRouter = initialRoutersList.find((r) => r.id === selectedRouterId) || initialRoutersList[0];
-    if (!curRouter) return [];
-    if (typeof window !== 'undefined') {
-      const stored = loadRouterTelemetryFromStorage(curRouter.id);
-      if (stored?.interfaces && stored.interfaces.length > 0) {
-        return stored.interfaces;
-      }
-    }
-    const generated = generateInterfacesForRouter(curRouter);
-    if (typeof window !== 'undefined') {
-      saveRouterTelemetryToStorage(curRouter.id, generateSessionsForRouter(curRouter), generated);
-    }
-    return generated;
-  });
+  const [routerInterfaces, setRouterInterfaces] = useState<RouterInterface[]>([]);
 
-  // Bandwidth history for real-time live graphs (15 data points, initialized with smooth wave)
+  // Bandwidth history for real-time live graphs (15 data points, initialized with 0)
   const [bandwidthHistory, setBandwidthHistory] = useState<BandwidthDataPoint[]>(() => {
-    const curRouter = initialRoutersList.find((r) => r.id === selectedRouterId) || initialRoutersList[0];
-    const rx = curRouter?.currentWanRxMbps || 1240;
-    const tx = curRouter?.currentWanTxMbps || 580;
-    return generateBandwidthHistory(rx, tx);
+    const initial: BandwidthDataPoint[] = [];
+    const now = Date.now();
+    for (let i = 14; i >= 0; i--) {
+      const d = new Date(now - i * 4000);
+      initial.push({
+        time: d.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' }),
+        rxMbps: 0,
+        txMbps: 0,
+      });
+    }
+    return initial;
   });
 
   const mikrotikService = new MikrotikRouterOSv7Service({
     host: '10.200.0.1',
-    username: 'netpulse_noc',
+    username: 'admin',
     useSsl: true,
   });
 
   const billingEngine = new BillingCronEngine(mikrotikService);
 
-  // Real-time live sync against physical MikroTik device:
-  // Sequentially queries /ppp/active, /ppp/secret, /ppp/profile, /system/resource
+  // Real-time live sync against physical MikroTik device via RouterOS v7 REST API over HTTPS (/rest/*)
   const syncSelectedRouterNow = async (): Promise<{
     success: boolean;
     activeCount: number;
@@ -628,160 +573,85 @@ export const ISPProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
     message?: string;
     error?: string;
   }> => {
-    if (!selectedRouterId) {
+    const targetRouter = routers.find((r) => r.id === selectedRouterId) || routers[0];
+    if (!targetRouter) {
       return { success: false, activeCount: 0, secretsCount: 0, error: 'No router selected' };
     }
     setIsSyncingRouter(true);
     setRouterError(null);
-    try {
-      const res = await fetch(`/api/mikrotik/sync?routerId=${encodeURIComponent(selectedRouterId)}`);
-      const data = await safeResponseJson<any>(res, {
-        success: false,
-        error: 'ROUTER_UNREACHABLE',
-        message: 'Could not connect to router IP on port 8728',
-      });
-      const nowStr = new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' });
 
-      if (data.success && data.router) {
+    try {
+      const result = await fetchMikrotikLiveTelemetry(targetRouter);
+
+      if (result.success && result.router) {
         setRouterError(null);
-        // 1. Immediate State Hydration: Update Hardware & WAN Telemetry & CPU & Uptime
         setRouters((prev) =>
           prev.map((r) =>
             r.id === selectedRouterId
               ? {
                   ...r,
+                  ...result.router,
                   status: 'online',
-                  mode: 'live',
-                  model: data.router.model || r.model,
-                  version: data.router.version || r.version,
-                  cpuLoad: data.router.cpuLoad ?? r.cpuLoad,
-                  memoryUsageMb: data.router.memoryUsageMb ?? r.memoryUsageMb,
-                  totalMemoryMb: data.router.totalMemoryMb ?? r.totalMemoryMb,
-                  uptime: data.router.uptime || r.uptime,
-                  activePppoeCount: Array.isArray(data.activeSessions) ? data.activeSessions.length : r.activePppoeCount,
-                  currentWanRxMbps: data.traffic?.rxMbps ?? r.currentWanRxMbps,
-                  currentWanTxMbps: data.traffic?.txMbps ?? r.currentWanTxMbps,
+                  activePppoeCount: result.activeSessions.length,
                 }
               : r
           )
         );
 
-        // 2. Immediate State Hydration: Map Real Live Active Sessions directly to table
-        if (Array.isArray(data.activeSessions)) {
-          setActiveSessions(data.activeSessions);
+        setActiveSessions(result.activeSessions);
+        setRouterInterfaces(result.interfaces);
+
+        if (result.traffic) {
+          const nowStr = new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' });
+          setBandwidthHistory((prev) => [
+            ...prev.slice(1),
+            { time: nowStr, rxMbps: result.traffic!.rxMbps, txMbps: result.traffic!.txMbps },
+          ]);
         }
-
-        // 3. Immediate State Hydration: Map Real Provisioned Secrets directly to Subscribers/Secrets table
-        if (Array.isArray(data.secrets)) {
-          const mappedSecrets: Customer[] = data.secrets.map((sec: any, idx: number) => {
-            let customerName = sec.name;
-            let customerPhone = '';
-            if (sec.comment) {
-              const parts = sec.comment.split('|');
-              customerName = parts[0]?.trim() || sec.name;
-              customerPhone = parts[1]?.trim() || '';
-            }
-            return {
-              id: sec.id || sec['.id'] || `sec-${sec.name}-${idx}`,
-              name: customerName,
-              phone: customerPhone || '+92 300 0000000',
-              address: 'MikroTik BNG Provisioned',
-              areaNode: sec.profile || 'General Pool',
-              pppoeUsername: sec.name,
-              pppoePassword: sec.password || '••••••••',
-              service: sec.service || 'pppoe',
-              packageId: sec.profile || 'default',
-              assignedIp: sec.remoteAddress || 'Dynamic Pool',
-              routerId: selectedRouterId,
-              status: sec.disabled ? 'disabled' : 'active',
-              monthlyFee: 25,
-              installationDate: '2026-01-01',
-              comment: sec.comment || '',
-              macAddress: sec.callerId || undefined,
-            };
-          });
-          setCustomers(mappedSecrets);
-        }
-
-        // 4. Immediate State Hydration: Map Real Bandwidth Profiles directly to Profiles table
-        if (Array.isArray(data.profiles)) {
-          const mappedProfiles: InternetPackage[] = data.profiles.map((prof: any, idx: number) => {
-            let down = 25;
-            let up = 10;
-            if (prof.rateLimit) {
-              const match = prof.rateLimit.match(/(\d+)[MmKk]?\/(\d+)[MmKk]?/);
-              if (match) {
-                up = parseInt(match[1], 10);
-                down = parseInt(match[2], 10);
-              }
-            }
-            return {
-              id: prof.id || prof['.id'] || `prof-${prof.name}-${idx}`,
-              name: prof.name,
-              mikrotikProfile: prof.name,
-              downloadSpeedMbps: down,
-              uploadSpeedMbps: up,
-              priceMonthly: 20 + idx * 10,
-              activeSubscribersCount: 0,
-              localAddress: prof.localAddress || '192.168.8.1',
-              remoteAddressPool: prof.remoteAddress || 'pppoe-pool-default',
-              dnsServers: prof.dnsServer || '8.8.8.8,1.1.1.1',
-            };
-          });
-          setPackages(mappedProfiles);
-        }
-
-        // 5. Bandwidth Graph data
-        const rx = data.traffic?.rxMbps ?? 0;
-        const tx = data.traffic?.txMbps ?? 0;
-        setBandwidthHistory((prev) => [...prev.slice(1), { time: nowStr, rxMbps: rx, txMbps: tx }]);
-
-        const activeCount = Array.isArray(data.activeSessions) ? data.activeSessions.length : 0;
-        const secretsCount = Array.isArray(data.secrets) ? data.secrets.length : 0;
 
         return {
           success: true,
-          activeCount,
-          secretsCount,
-          message: data.message || `Synchronized ${activeCount} active sessions, ${secretsCount} secrets successfully`,
+          activeCount: result.activeSessions.length,
+          secretsCount: customers.length,
+          message: `Live data synchronized from RouterOS v7 REST API (${result.activeSessions.length} active sessions, ${result.interfaces.length} interfaces)`,
         };
       } else {
-        if (data?.is404 || data?.isHtmlFallback || res.status === 404) {
-          // On Netlify static hosting, suppress 404 HTML error from appearing in red UI box
-          setRouterError(null);
-          return {
-            success: true,
-            activeCount: 24,
-            secretsCount: 42,
-            message: 'Netlify Static Mode: Router loaded from local storage cache.',
-          };
-        }
-        const errMessage = data.message || data.error || 'Could not connect to router IP on port 8728';
-        setRouterError(errMessage);
+        const errorMsg =
+          result.error ||
+          `Cannot reach router at ${targetRouter.ipAddress}:443 - Check Public IP reachability, SSL cert, or CORS.`;
+        setRouterError(errorMsg);
+        setRouters((prev) =>
+          prev.map((r) => (r.id === selectedRouterId ? { ...r, status: 'unreachable' } : r))
+        );
+        setActiveSessions([]);
         return {
           success: false,
           activeCount: 0,
           secretsCount: 0,
-          error: data.error || 'ROUTER_UNREACHABLE',
-          message: errMessage,
+          error: 'ROUTER_UNREACHABLE',
+          message: errorMsg,
         };
       }
     } catch (err: any) {
-      setRouterError(null);
+      const errorMsg = `Cannot reach router at ${targetRouter.ipAddress}:443 - Check Public IP reachability, SSL cert, or CORS.`;
+      setRouterError(errorMsg);
+      setRouters((prev) =>
+        prev.map((r) => (r.id === selectedRouterId ? { ...r, status: 'unreachable' } : r))
+      );
+      setActiveSessions([]);
       return {
         success: false,
         activeCount: 0,
         secretsCount: 0,
         error: 'ROUTER_UNREACHABLE',
-        message: 'Could not connect to router IP on port 8728',
+        message: errorMsg,
       };
     } finally {
       setIsSyncingRouter(false);
     }
   };
 
-  // Realtime Live Traffic streaming poller using persistent connection pool:
-  // Pushes continuous live WAN & Active Session Rx/Tx rates every 3.5s without re-authenticating
+  // Realtime Live Traffic streaming poller using RouterOS v7 REST API over HTTPS (/rest/ppp/active & /rest/interface)
   useEffect(() => {
     if (!isTrafficStreaming || !selectedRouterId) return;
 
@@ -792,120 +662,76 @@ export const ISPProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
       if (inFlight) return;
       inFlight = true;
       try {
-        let isLiveFromBackend = false;
-        try {
-          const res = await fetch(`/api/mikrotik/live-traffic?routerId=${encodeURIComponent(selectedRouterId)}`);
-          if (res.ok) {
-            const data = await res.json();
-            if (!isCancelled && data.success && data.wan) {
-              isLiveFromBackend = true;
-              const nowStr = new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' });
-              const rx = Number(data.wan.rxMbps ?? 0);
-              const tx = Number(data.wan.txMbps ?? 0);
+        const targetRouter = routers.find((r) => r.id === selectedRouterId);
+        if (!targetRouter) return;
 
-              setRouters((prev) =>
-                prev.map((r) =>
-                  r.id === selectedRouterId
-                    ? {
-                        ...r,
-                        currentWanRxMbps: rx,
-                        currentWanTxMbps: tx,
-                        cpuLoad: data.cpuLoad !== undefined ? data.cpuLoad : r.cpuLoad,
-                        uptime: data.uptime || r.uptime,
-                      }
-                    : r
-                )
-              );
+        const result = await fetchMikrotikLiveTelemetry(targetRouter);
+        if (isCancelled) return;
 
-              setBandwidthHistory((prev) => [
-                ...prev.slice(1),
-                { time: nowStr, rxMbps: rx, txMbps: tx },
-              ]);
+        if (result.success && result.router) {
+          setRouterError(null);
+          setRouters((prev) =>
+            prev.map((r) =>
+              r.id === selectedRouterId
+                ? {
+                    ...r,
+                    ...result.router,
+                    status: 'online',
+                    activePppoeCount: result.activeSessions.length,
+                  }
+                : r
+            )
+          );
 
-              if (Array.isArray(data.activeSessions) && data.activeSessions.length > 0) {
-                setActiveSessions((prevSessions) => {
-                  const liveMap = new Map<string, any>();
-                  data.activeSessions.forEach((s: any) => liveMap.set(s.username, s));
-
-                  return prevSessions.map((session) => {
-                    const live = liveMap.get(session.username);
-                    if (live) {
-                      return {
-                        ...session,
-                        rxRateMbps: live.rxRateMbps ?? session.rxRateMbps,
-                        txRateMbps: live.txRateMbps ?? session.txRateMbps,
-                        liveRateFormatted: live.liveRateFormatted || session.liveRateFormatted,
-                        uptime: live.uptime || session.uptime,
-                        address: live.address || session.address,
-                        callerId: live.callerId || session.callerId,
-                      };
-                    }
-                    return session;
-                  });
-                });
-              }
-            }
+          setActiveSessions(result.activeSessions);
+          if (result.interfaces && result.interfaces.length > 0) {
+            setRouterInterfaces(result.interfaces);
           }
-        } catch {
-          // Backend socket unreachable on static Netlify
-        }
 
-        if (!isLiveFromBackend && !isCancelled) {
-          // Local Telemetry Streaming Engine (Simulated live telemetry for Netlify / Static Cloud Preview)
-          const curRouter = routers.find((r) => r.id === selectedRouterId);
-          if (curRouter) {
-            const currentRouterSessions = activeSessions.filter((s) => s.routerId === selectedRouterId);
-            const sessionsToJitter =
-              currentRouterSessions.length > 0
-                ? currentRouterSessions
-                : generateSessionsForRouter(curRouter, packages);
-            const currentIfaces =
-              routerInterfaces.length > 0 ? routerInterfaces : generateInterfacesForRouter(curRouter);
-
-            const { updatedRouter, updatedSessions, updatedInterfaces, bandwidthPoint } = jitterTelemetryTick(
-              curRouter,
-              sessionsToJitter,
-              currentIfaces
-            );
-
-            setRouters((prev) => {
-              const updated = prev.map((r) => (r.id === selectedRouterId ? updatedRouter : r));
-              try {
-                localStorage.setItem(STORAGE_KEY_ROUTERS, JSON.stringify(updated));
-              } catch {}
-              return updated;
-            });
-
-            setRouterInterfaces(updatedInterfaces);
-            setBandwidthHistory((prev) => [...prev.slice(1), bandwidthPoint]);
-
-            setActiveSessions((prev) => {
-              const others = prev.filter((s) => s.routerId !== selectedRouterId);
-              const combined = [...others, ...updatedSessions];
-              try {
-                localStorage.setItem(STORAGE_KEY_ACTIVE_SESSIONS, JSON.stringify(combined));
-              } catch {}
-              return combined;
-            });
-
-            saveRouterTelemetryToStorage(selectedRouterId, updatedSessions, updatedInterfaces);
+          if (result.traffic) {
+            const nowStr = new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' });
+            setBandwidthHistory((prev) => [
+              ...prev.slice(1),
+              { time: nowStr, rxMbps: result.traffic!.rxMbps, txMbps: result.traffic!.txMbps },
+            ]);
           }
+        } else {
+          // If fetch fails due to CORS, self-signed certificate, or network unreachable:
+          // Show the exact real error banner: "Cannot reach router at {IP}:443 - Check Public IP reachability, SSL cert, or CORS."
+          // DO NOT fallback to fake mock data.
+          const errorMsg =
+            result.error ||
+            `Cannot reach router at ${targetRouter.ipAddress}:443 - Check Public IP reachability, SSL cert, or CORS.`;
+          setRouterError(errorMsg);
+          setRouters((prev) =>
+            prev.map((r) => (r.id === selectedRouterId ? { ...r, status: 'unreachable' } : r))
+          );
+          setActiveSessions([]);
         }
-      } catch {
-        // Quiet handling
+      } catch (err: any) {
+        if (!isCancelled) {
+          const targetRouter = routers.find((r) => r.id === selectedRouterId);
+          const ip = targetRouter?.ipAddress || 'host';
+          const errorMsg = `Cannot reach router at ${ip}:443 - Check Public IP reachability, SSL cert, or CORS.`;
+          setRouterError(errorMsg);
+          setRouters((prev) =>
+            prev.map((r) => (r.id === selectedRouterId ? { ...r, status: 'unreachable' } : r))
+          );
+          setActiveSessions([]);
+        }
       } finally {
         inFlight = false;
       }
     };
 
     pollLiveTraffic();
-    const interval = setInterval(pollLiveTraffic, 4000);
+    const interval = setInterval(pollLiveTraffic, 5000);
 
     return () => {
       isCancelled = true;
       clearInterval(interval);
     };
-  }, [isTrafficStreaming, selectedRouterId]);
+  }, [isTrafficStreaming, selectedRouterId, routers]);
 
   // Automated 5-Minute Unassigned Complaint Auto-Escalation Scanner
   useEffect(() => {
@@ -1162,21 +988,22 @@ export const ISPProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
           name: routerData.name,
           model: routerData.model || 'MikroTik CCR2004-16G-2S+',
           ipAddress: routerData.ipAddress,
-          apiPort: routerData.apiPort || (routerData.useSsl ? 8729 : 8728),
-          useSsl: Boolean(routerData.useSsl),
+          apiPort: routerData.apiPort || (routerData.useSsl ? 443 : 8728),
+          useSsl: routerData.useSsl !== undefined ? Boolean(routerData.useSsl) : true,
           username: routerData.username || 'admin',
+          password: routerData.password || '',
           version: routerData.version || 'RouterOS v7.16.2',
           location: routerData.location || 'Central Distribution Node',
           wanInterface: routerData.wanInterface || 'sfp-sfpplus1',
           walledGardenPool: routerData.walledGardenPool || '172.16.102.0/24',
-          status: 'online',
-          cpuLoad: 14,
-          memoryUsageMb: 512,
-          totalMemoryMb: 4096,
-          uptime: '1d 08h 15m',
-          currentWanRxMbps: 1250,
-          currentWanTxMbps: 680,
-          activePppoeCount: 24,
+          status: 'unreachable',
+          cpuLoad: 0,
+          memoryUsageMb: 0,
+          totalMemoryMb: 0,
+          uptime: '0s',
+          currentWanRxMbps: 0,
+          currentWanTxMbps: 0,
+          activePppoeCount: 0,
         };
       }
     } catch {
@@ -1185,44 +1012,28 @@ export const ISPProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
         name: routerData.name,
         model: routerData.model || 'MikroTik CCR2004-16G-2S+',
         ipAddress: routerData.ipAddress,
-        apiPort: routerData.apiPort || (routerData.useSsl ? 8729 : 8728),
-        useSsl: Boolean(routerData.useSsl),
+        apiPort: routerData.apiPort || (routerData.useSsl ? 443 : 8728),
+        useSsl: routerData.useSsl !== undefined ? Boolean(routerData.useSsl) : true,
         username: routerData.username || 'admin',
+        password: routerData.password || '',
         version: routerData.version || 'RouterOS v7.16.2',
         location: routerData.location || 'Central Distribution Node',
         wanInterface: routerData.wanInterface || 'sfp-sfpplus1',
         walledGardenPool: routerData.walledGardenPool || '172.16.102.0/24',
-        status: 'online',
-        cpuLoad: 14,
-        memoryUsageMb: 512,
-        totalMemoryMb: 4096,
-        uptime: '1d 08h 15m',
-        currentWanRxMbps: 1250,
-        currentWanTxMbps: 680,
-        activePppoeCount: 24,
+        status: 'unreachable',
+        cpuLoad: 0,
+        memoryUsageMb: 0,
+        totalMemoryMb: 0,
+        uptime: '0s',
+        currentWanRxMbps: 0,
+        currentWanTxMbps: 0,
+        activePppoeCount: 0,
       };
     }
 
-    // 1. Generate realistic simulated live telemetry (PPPoE sessions, interface status, real-time traffic graphs, CPU load)
-    const mockInterfaces = generateInterfacesForRouter(savedRouter);
-    const mockSessions = generateSessionsForRouter(savedRouter, packages);
-    const mockBandwidth = generateBandwidthHistory(savedRouter.currentWanRxMbps, savedRouter.currentWanTxMbps);
-
-    // 2. Persist mock telemetry data to localStorage
-    saveRouterTelemetryToStorage(savedRouter.id, mockSessions, mockInterfaces, mockBandwidth);
-
-    // 3. Update router interfaces and bandwidth state
-    setRouterInterfaces(mockInterfaces);
-    setBandwidthHistory(mockBandwidth);
-
-    // 4. Update activeSessions state and persistent storage
-    setActiveSessions((prev) => {
-      const updated = [...prev.filter((s) => s.routerId !== savedRouter.id), ...mockSessions];
-      try {
-        localStorage.setItem(STORAGE_KEY_ACTIVE_SESSIONS, JSON.stringify(updated));
-      } catch {}
-      return updated;
-    });
+    // Set real zero baseline before physical sync
+    setRouterInterfaces([]);
+    setActiveSessions([]);
 
     setRouters((prev) => {
       const updated = [...prev.filter((r) => r.id !== savedRouter.id), savedRouter];
@@ -2927,7 +2738,6 @@ export const ISPProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
         customers,
         activeSessions,
         routerInterfaces,
-        isDemoMode: true,
         invoices,
         complaints,
         agents,

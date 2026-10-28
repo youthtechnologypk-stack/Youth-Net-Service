@@ -242,9 +242,13 @@ export const Header: React.FC<HeaderProps> = ({
             )}
           </div>
 
-          <span className="hidden xl:inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full bg-emerald-950/90 text-emerald-300 border border-emerald-500/30 text-[11px] font-mono shadow-sm">
-            <span className="w-1.5 h-1.5 rounded-full bg-emerald-400 animate-pulse" />
-            Demo Mode (Local Telemetry Stream)
+          <span className={`hidden xl:inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full text-[11px] font-mono shadow-sm ${
+            currentRouter?.status === 'online'
+              ? 'bg-emerald-950/90 text-emerald-300 border border-emerald-500/30'
+              : 'bg-rose-950/90 text-rose-300 border border-rose-500/30'
+          }`}>
+            <span className={`w-1.5 h-1.5 rounded-full ${currentRouter?.status === 'online' ? 'bg-emerald-400 animate-pulse' : 'bg-rose-400'}`} />
+            {currentRouter?.status === 'online' ? 'RouterOS v7 REST Live' : 'Router Offline'}
           </span>
 
           <div className="hidden lg:flex items-center gap-3 bg-slate-900/80 border border-slate-800 px-3 py-1.5 rounded-md text-slate-300">

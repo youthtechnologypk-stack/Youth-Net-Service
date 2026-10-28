@@ -202,16 +202,20 @@ export const MikrotikStudio: React.FC<MikrotikStudioProps> = ({
             <div>
               <div className="flex items-center gap-2">
                 <h2 className="text-lg font-bold text-white">{currentRouter.name}</h2>
-                <span className="text-xs px-2.5 py-1 rounded-full bg-emerald-950/90 text-emerald-300 border border-emerald-500/30 font-mono font-medium flex items-center gap-1.5 shadow-sm">
-                  <span className="w-2 h-2 rounded-full bg-emerald-400 animate-pulse" />
-                  Demo Mode (Local Telemetry Stream)
+                <span className={`text-xs px-2.5 py-1 rounded-full font-mono font-medium flex items-center gap-1.5 shadow-sm ${
+                  currentRouter.status === 'online'
+                    ? 'bg-emerald-950/90 text-emerald-300 border border-emerald-500/30'
+                    : 'bg-rose-950/90 text-rose-300 border border-rose-500/30'
+                }`}>
+                  <span className={`w-2 h-2 rounded-full ${currentRouter.status === 'online' ? 'bg-emerald-400 animate-pulse' : 'bg-rose-400'}`} />
+                  {currentRouter.status === 'online' ? 'RouterOS v7 REST Live' : 'Router Unreachable'}
                 </span>
                 <span className="text-xs px-2 py-0.5 rounded bg-slate-800 text-slate-300 font-mono">
                   {currentRouter.version}
                 </span>
               </div>
               <p className="text-xs text-slate-400 mt-0.5">
-                Model: <strong className="text-slate-200">{currentRouter.model}</strong> &bull; IP: <code className="text-cyan-400">{currentRouter.ipAddress}:{currentRouter.apiPort}</code> ({currentRouter.useSsl ? 'TLS API' : 'RouterOS API'})
+                Model: <strong className="text-slate-200">{currentRouter.model}</strong> &bull; IP: <code className="text-cyan-400">{currentRouter.ipAddress}:{currentRouter.apiPort || 443}</code> (RouterOS v7 HTTPS REST API)
               </p>
             </div>
           </div>
@@ -227,7 +231,7 @@ export const MikrotikStudio: React.FC<MikrotikStudioProps> = ({
               >
                 {routers.map((r) => (
                   <option key={r.id} value={r.id}>
-                    {r.name} ({r.ipAddress}) [{r.status === 'hybrid_online' ? 'HYBRID' : r.status.toUpperCase()}]
+                    {r.name} ({r.ipAddress}:{r.apiPort || 443}) [{r.status.toUpperCase()}]
                   </option>
                 ))}
               </select>
@@ -237,7 +241,7 @@ export const MikrotikStudio: React.FC<MikrotikStudioProps> = ({
               onClick={handleTriggerSync}
               disabled={isSyncingRouter}
               className="flex items-center gap-1.5 bg-slate-800 hover:bg-slate-700 text-slate-200 border border-slate-700 text-xs px-3 py-2 rounded-lg transition shadow-sm cursor-pointer disabled:opacity-50"
-              title="Sync live router metrics (/system/resource, /ppp/active, /interface/monitor-traffic)"
+              title="Sync live router metrics (/rest/system/resource, /rest/ppp/active, /rest/interface)"
             >
               <RefreshCw className={`w-3.5 h-3.5 text-cyan-400 ${isSyncingRouter ? 'animate-spin' : ''}`} />
               <span>{isSyncingRouter ? 'Syncing with Router...' : 'Sync Now'}</span>
@@ -268,12 +272,12 @@ export const MikrotikStudio: React.FC<MikrotikStudioProps> = ({
             <div className="flex items-start gap-3">
               <AlertTriangle className="w-5 h-5 text-rose-400 shrink-0 mt-0.5" />
               <div>
-                <h4 className="font-bold text-rose-300 text-sm">RouterOS Direct Sync Error</h4>
+                <h4 className="font-bold text-rose-300 text-sm">RouterOS REST API Connection Error</h4>
                 <p className="mt-1 font-mono text-rose-200 leading-relaxed font-semibold">
                   {routerError}
                 </p>
                 <p className="mt-1.5 text-rose-400 text-[11px]">
-                  💡 <strong>Direct Sync Diagnostic:</strong> The backend attempted direct socket connection to the RouterOS API port. Ensure port <code className="font-mono text-white bg-rose-900/50 px-1 py-0.5 rounded">8728</code> is open, forwarded through NAT/firewall, and enabled on the MikroTik router (<code className="font-mono text-white bg-rose-900/50 px-1 py-0.5 rounded">/ip service enable api</code>).
+                  💡 <strong>REST API Diagnostic:</strong> Direct HTTPS request to <code className="font-mono text-white bg-rose-900/50 px-1 py-0.5 rounded">https://{currentRouter.ipAddress}:{currentRouter.apiPort || 443}/rest/</code> failed. Verify <code className="font-mono text-white bg-rose-900/50 px-1 py-0.5 rounded">/ip service enable www-ssl</code> is enabled, public IP reachability, SSL certificate validity, and browser CORS permissions.
                 </p>
               </div>
             </div>
@@ -284,29 +288,6 @@ export const MikrotikStudio: React.FC<MikrotikStudioProps> = ({
             >
               <RefreshCw className={`w-3.5 h-3.5 ${isSyncingRouter ? 'animate-spin' : ''}`} />
               <span>{isSyncingRouter ? 'Syncing with Router...' : 'Retry Sync'}</span>
-            </button>
-          </div>
-        )}
-
-        {/* Stable Hybrid Mode Notice Bar (Seamless & Non-Blocking) */}
-        {!routerError && (currentRouter.status === 'hybrid_online' || currentRouter.mode === 'hybrid' || currentRouter.status === 'unreachable') && (
-          <div className="mt-4 p-3 bg-cyan-950/30 border border-cyan-800/60 rounded-xl flex flex-col sm:flex-row items-start sm:items-center justify-between gap-3 text-xs text-cyan-200 shadow-inner">
-            <div className="flex items-start sm:items-center gap-2.5">
-              <span className="w-2.5 h-2.5 rounded-full bg-cyan-400 shrink-0 mt-0.5 sm:mt-0" />
-              <div>
-                <span className="font-bold text-white">Hybrid Cloud Mode Active:</span>{' '}
-                <span className="text-cyan-300">
-                  Target device (<code className="font-mono text-cyan-200 font-bold">{currentRouter.ipAddress}:{currentRouter.apiPort}</code>) is operating via cached session telemetry and PostgreSQL storage. PPPoE user creation, deletion, bandwidth throttling, and monitoring remain fully interactive.
-                </span>
-              </div>
-            </div>
-            <button
-              onClick={handleTriggerSync}
-              disabled={isSyncingRouter}
-              className="px-3 py-1.5 bg-cyan-900/50 hover:bg-cyan-800 text-cyan-200 border border-cyan-700 rounded-lg font-mono text-[11px] shrink-0 cursor-pointer disabled:opacity-50 transition flex items-center gap-1.5"
-            >
-              <RefreshCw className={`w-3 h-3 ${isSyncingRouter ? 'animate-spin' : ''}`} />
-              <span>{isSyncingRouter ? 'Syncing with Router...' : 'Re-probe Physical Link'}</span>
             </button>
           </div>
         )}

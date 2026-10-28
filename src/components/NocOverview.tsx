@@ -44,6 +44,7 @@ export const NocOverview: React.FC<NocOverviewProps> = ({
     complaints,
     outages,
     bandwidthHistory,
+    routerError,
     runMonthlyBillingCron,
     runOverdueScanCron,
     isTrafficStreaming,
@@ -72,26 +73,41 @@ export const NocOverview: React.FC<NocOverviewProps> = ({
     (c) => (c.priority === 'critical' || c.priority === 'high') && c.status !== 'resolved'
   );
 
-  const currentWanRx = bandwidthHistory[bandwidthHistory.length - 1]?.rxMbps || 820;
-  const currentWanTx = bandwidthHistory[bandwidthHistory.length - 1]?.txMbps || 340;
+  const currentWanRx = bandwidthHistory[bandwidthHistory.length - 1]?.rxMbps || 0;
+  const currentWanTx = bandwidthHistory[bandwidthHistory.length - 1]?.txMbps || 0;
 
   return (
     <div className="space-y-6">
-      {/* Subtle Demo Mode Badge & Local Telemetry Stream Status */}
+      {/* Real Router Connection Error Banner if router unreachable / CORS / SSL */}
+      {routerError && (
+        <div className="bg-rose-950/90 border border-rose-500/60 text-rose-200 px-4 py-3 rounded-xl flex items-center gap-3 text-xs sm:text-sm font-mono shadow-lg shadow-rose-950/50">
+          <AlertTriangle className="w-5 h-5 text-rose-400 shrink-0" />
+          <div className="flex-1">
+            <span className="text-rose-100 font-bold block sm:inline">Connection Failed: </span>
+            {routerError}
+          </div>
+        </div>
+      )}
+
+      {/* Router Status & Real Telemetry Status */}
       <div className="flex flex-wrap items-center justify-between gap-3 bg-slate-900/80 border border-slate-800/80 px-3.5 py-2.5 rounded-xl backdrop-blur-sm">
         <div className="flex items-center gap-2.5">
-          <span className="inline-flex items-center gap-1.5 px-3 py-1 rounded-full text-xs font-mono font-medium bg-emerald-950/90 text-emerald-300 border border-emerald-500/30 shadow-sm shadow-emerald-950/40">
-            <span className="w-2 h-2 rounded-full bg-emerald-400 animate-pulse" />
-            Demo Mode (Local Telemetry Stream)
+          <span className={`inline-flex items-center gap-1.5 px-3 py-1 rounded-full text-xs font-mono font-medium border shadow-sm ${
+            currentRouter?.status === 'online'
+              ? 'bg-emerald-950/90 text-emerald-300 border-emerald-500/30 shadow-emerald-950/40'
+              : 'bg-rose-950/90 text-rose-300 border-rose-500/30 shadow-rose-950/40'
+          }`}>
+            <span className={`w-2 h-2 rounded-full ${currentRouter?.status === 'online' ? 'bg-emerald-400 animate-pulse' : 'bg-rose-400'}`} />
+            {currentRouter?.status === 'online' ? 'RouterOS v7 REST Live' : 'Router Unreachable'}
           </span>
           <span className="text-xs text-slate-400 font-mono hidden sm:inline">
-            Active BNG: <span className="text-slate-200 font-bold">{currentRouter?.name || 'CCR2004'}</span> ({currentRouter?.ipAddress})
+            Active BNG: <span className="text-slate-200 font-bold">{currentRouter?.name || 'CCR2004'}</span> ({currentRouter?.ipAddress}:{currentRouter?.apiPort || 443})
           </span>
         </div>
         <div className="flex items-center gap-3 text-xs font-mono text-slate-400">
           <span className="flex items-center gap-1">
             <span className="w-1.5 h-1.5 rounded-full bg-cyan-400" />
-            CPU: <span className="text-cyan-300 font-bold">{currentRouter?.cpuLoad || 16}%</span>
+            CPU: <span className="text-cyan-300 font-bold">{currentRouter?.cpuLoad || 0}%</span>
           </span>
           <span className="text-slate-700">|</span>
           <span className="flex items-center gap-1">
@@ -101,7 +117,7 @@ export const NocOverview: React.FC<NocOverviewProps> = ({
           <span className="text-slate-700">|</span>
           <span className="flex items-center gap-1">
             <span className="w-1.5 h-1.5 rounded-full bg-indigo-400" />
-            Sessions: <span className="text-indigo-300 font-bold">{activeSessions.filter(s => s.routerId === currentRouter?.id).length || currentRouter?.activePppoeCount || 24}</span>
+            Sessions: <span className="text-indigo-300 font-bold">{activeSessions.filter(s => s.routerId === currentRouter?.id).length || currentRouter?.activePppoeCount || 0}</span>
           </span>
         </div>
       </div>

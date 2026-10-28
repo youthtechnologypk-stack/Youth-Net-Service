@@ -67,6 +67,7 @@ export interface MikrotikRouter {
   ipAddress: string;
   apiPort: number;
   username: string;
+  password?: string;
   useSsl: boolean;
   version: string; // e.g. "RouterOS v7.16.2"
   location: string;

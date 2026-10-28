@@ -172,20 +172,15 @@ export const RouterFleet: React.FC<RouterFleetProps> = ({ onOpenAddDeviceModal }
                   </div>
 
                   <div className="flex items-center gap-1.5 shrink-0">
-                    <span className="text-[10px] px-2 py-0.5 rounded bg-emerald-950 text-emerald-300 border border-emerald-500/40 font-mono font-medium flex items-center gap-1">
-                      <span className="w-1.5 h-1.5 rounded-full bg-emerald-400 animate-pulse" />
-                      Live Stream
-                    </span>
                     <span
-                      className={`text-[10px] px-2 py-0.5 rounded border uppercase font-mono ${
+                      className={`text-[10px] px-2 py-0.5 rounded border uppercase font-mono flex items-center gap-1 ${
                         router.status === 'online'
                           ? 'bg-emerald-950 text-emerald-300 border-emerald-800'
-                          : router.status === 'hybrid_online'
-                          ? 'bg-cyan-950 text-cyan-300 border-cyan-800'
                           : 'bg-rose-950 text-rose-300 border-rose-800'
                       }`}
                     >
-                      {router.status === 'hybrid_online' ? 'HYBRID' : router.status}
+                      <span className={`w-1.5 h-1.5 rounded-full ${router.status === 'online' ? 'bg-emerald-400 animate-pulse' : 'bg-rose-400'}`} />
+                      {router.status === 'online' ? 'REST Live' : 'Unreachable'}
                     </span>
                   </div>
                 </div>
