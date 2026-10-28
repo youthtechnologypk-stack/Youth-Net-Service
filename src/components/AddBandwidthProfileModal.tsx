@@ -206,7 +206,7 @@ export const AddBandwidthProfileModal: React.FC<AddBandwidthProfileModalProps> =
                 </span>
               </div>
               <p className="text-slate-400 text-xs mt-0.5 font-mono">
-                Synchronized across active BNG: <span className="text-cyan-300">{currentRouter.name}</span>
+                Synchronized across active BNG: <span className="text-cyan-300">{currentRouter?.name || 'All Routers'}</span>
               </p>
             </div>
           </div>

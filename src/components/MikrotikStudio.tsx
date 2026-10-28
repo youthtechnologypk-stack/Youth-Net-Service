@@ -186,160 +186,181 @@ export const MikrotikStudio: React.FC<MikrotikStudioProps> = ({
 
   return (
     <div className="space-y-6">
-      {/* Top Router Hardware Telemetry Banner */}
-      <div className="bg-slate-900 border border-slate-800 rounded-xl p-5 shadow-lg">
-        <div className="flex flex-col lg:flex-row items-start lg:items-center justify-between gap-4">
-          <div className="flex items-center gap-3">
-            <div className={`p-3 rounded-lg border ${
-              currentRouter.status === 'online'
-                ? 'bg-emerald-950 border-emerald-700/50 text-emerald-400'
-                : currentRouter.status === 'hybrid_online' || currentRouter.mode === 'hybrid'
-                ? 'bg-cyan-950 border-cyan-700/50 text-cyan-400'
-                : 'bg-rose-950 border-rose-700/50 text-rose-400'
-            }`}>
-              <Server className="w-6 h-6" />
-            </div>
-            <div>
-              <div className="flex items-center gap-2">
-                <h2 className="text-lg font-bold text-white">{currentRouter.name}</h2>
-                <span className={`text-xs px-2.5 py-1 rounded-full font-mono font-medium flex items-center gap-1.5 shadow-sm ${
-                  currentRouter.status === 'online'
-                    ? 'bg-emerald-950/90 text-emerald-300 border border-emerald-500/30'
-                    : 'bg-rose-950/90 text-rose-300 border border-rose-500/30'
-                }`}>
-                  <span className={`w-2 h-2 rounded-full ${currentRouter.status === 'online' ? 'bg-emerald-400 animate-pulse' : 'bg-rose-400'}`} />
-                  {currentRouter.status === 'online' ? 'RouterOS v7 REST Live' : 'Router Unreachable'}
-                </span>
-                <span className="text-xs px-2 py-0.5 rounded bg-slate-800 text-slate-300 font-mono">
-                  {currentRouter.version}
-                </span>
-              </div>
-              <p className="text-xs text-slate-400 mt-0.5">
-                Model: <strong className="text-slate-200">{currentRouter.model}</strong> &bull; IP: <code className="text-cyan-400">{currentRouter.ipAddress}:{currentRouter.apiPort || 443}</code> (RouterOS v7 HTTPS REST API)
-              </p>
-            </div>
+      {/* Top Router Hardware Telemetry Banner OR Empty State */}
+      {!currentRouter || routers.length === 0 ? (
+        <div className="bg-slate-900 border border-slate-800 rounded-2xl p-10 text-center space-y-4 shadow-xl">
+          <div className="w-16 h-16 bg-slate-800/80 rounded-2xl flex items-center justify-center mx-auto border border-slate-700 text-slate-400">
+            <Server className="w-8 h-8 text-cyan-400/70" />
           </div>
-
-          {/* Router Selection Dropdown & Add Router */}
-          <div className="flex items-center flex-wrap gap-2.5">
-            <div className="flex items-center gap-2">
-              <span className="text-xs text-slate-400">Target Router:</span>
-              <select
-                value={selectedRouterId}
-                onChange={(e) => setSelectedRouterId(e.target.value)}
-                className="bg-slate-950 border border-slate-700 text-slate-200 text-xs px-3 py-2 rounded-lg focus:outline-none focus:border-cyan-500 font-mono"
-              >
-                {routers.map((r) => (
-                  <option key={r.id} value={r.id}>
-                    {r.name} ({r.ipAddress}:{r.apiPort || 443}) [{r.status.toUpperCase()}]
-                  </option>
-                ))}
-              </select>
-            </div>
-
-            <button
-              onClick={handleTriggerSync}
-              disabled={isSyncingRouter}
-              className="flex items-center gap-1.5 bg-slate-800 hover:bg-slate-700 text-slate-200 border border-slate-700 text-xs px-3 py-2 rounded-lg transition shadow-sm cursor-pointer disabled:opacity-50"
-              title="Sync live router metrics (/rest/system/resource, /rest/ppp/active, /rest/interface)"
-            >
-              <RefreshCw className={`w-3.5 h-3.5 text-cyan-400 ${isSyncingRouter ? 'animate-spin' : ''}`} />
-              <span>{isSyncingRouter ? 'Syncing with Router...' : 'Sync Now'}</span>
-            </button>
-
-            <button
-              onClick={() => setIsAddDeviceModalOpen(true)}
-              className="flex items-center gap-1.5 bg-slate-800 hover:bg-slate-700 text-cyan-400 border border-slate-700 font-bold text-xs px-3 py-2 rounded-lg transition shadow-sm cursor-pointer"
-              title="Add New MikroTik Router"
-            >
-              <Plus className="w-3.5 h-3.5 text-cyan-400" />
-              <span>+ Add Router</span>
-            </button>
-
-            <button
-              onClick={() => setIsAddUserModalOpen(true)}
-              className="flex items-center gap-1.5 bg-cyan-600 hover:bg-cyan-500 text-slate-950 font-bold text-xs px-3.5 py-2 rounded-lg transition cursor-pointer shadow-sm shadow-cyan-950/40"
-            >
-              <Plus className="w-4 h-4" />
-              <span>+ Add PPPoE User</span>
-            </button>
+          <div className="space-y-1.5 max-w-md mx-auto">
+            <h4 className="text-base font-bold text-white">No MikroTik Routers Connected</h4>
+            <p className="text-xs text-slate-400 leading-relaxed">
+              No MikroTik Routers Connected. Click "+ Add Router" to register a BNG/BRAS device.
+            </p>
           </div>
+          <button
+            onClick={() => setIsAddDeviceModalOpen(true)}
+            className="inline-flex items-center gap-2 bg-cyan-600 hover:bg-cyan-500 text-slate-950 font-bold text-xs px-5 py-2.5 rounded-xl transition shadow-lg shadow-cyan-950/40 cursor-pointer"
+          >
+            <Plus className="w-4 h-4" />
+            <span>+ Add Router</span>
+          </button>
         </div>
-
-        {/* Live Sync Failure Error Banner */}
-        {routerError && (
-          <div className="mt-4 p-4 bg-rose-950/40 border border-rose-700/80 rounded-xl flex flex-col sm:flex-row items-start sm:items-center justify-between gap-3 text-xs text-rose-200 animate-fade-in shadow-lg">
-            <div className="flex items-start gap-3">
-              <AlertTriangle className="w-5 h-5 text-rose-400 shrink-0 mt-0.5" />
+      ) : (
+        <div className="bg-slate-900 border border-slate-800 rounded-xl p-5 shadow-lg">
+          <div className="flex flex-col lg:flex-row items-start lg:items-center justify-between gap-4">
+            <div className="flex items-center gap-3">
+              <div className={`p-3 rounded-lg border ${
+                currentRouter.status === 'online'
+                  ? 'bg-emerald-950 border-emerald-700/50 text-emerald-400'
+                  : currentRouter.status === 'hybrid_online' || currentRouter.mode === 'hybrid'
+                  ? 'bg-cyan-950 border-cyan-700/50 text-cyan-400'
+                  : 'bg-rose-950 border-rose-700/50 text-rose-400'
+              }`}>
+                <Server className="w-6 h-6" />
+              </div>
               <div>
-                <h4 className="font-bold text-rose-300 text-sm">RouterOS REST API Connection Error</h4>
-                <p className="mt-1 font-mono text-rose-200 leading-relaxed font-semibold">
-                  {routerError}
-                </p>
-                <p className="mt-1.5 text-rose-400 text-[11px]">
-                  💡 <strong>REST API Diagnostic:</strong> Direct HTTPS request to <code className="font-mono text-white bg-rose-900/50 px-1 py-0.5 rounded">https://{currentRouter.ipAddress}:{currentRouter.apiPort || 443}/rest/</code> failed. Verify <code className="font-mono text-white bg-rose-900/50 px-1 py-0.5 rounded">/ip service enable www-ssl</code> is enabled, public IP reachability, SSL certificate validity, and browser CORS permissions.
+                <div className="flex items-center gap-2">
+                  <h2 className="text-lg font-bold text-white">{currentRouter.name}</h2>
+                  <span className={`text-xs px-2.5 py-1 rounded-full font-mono font-medium flex items-center gap-1.5 shadow-sm ${
+                    currentRouter.status === 'online'
+                      ? 'bg-emerald-950/90 text-emerald-300 border border-emerald-500/30'
+                      : 'bg-rose-950/90 text-rose-300 border border-rose-500/30'
+                  }`}>
+                    <span className={`w-2 h-2 rounded-full ${currentRouter.status === 'online' ? 'bg-emerald-400 animate-pulse' : 'bg-rose-400'}`} />
+                    {currentRouter.status === 'online' ? 'RouterOS v7 REST Live' : 'Router Unreachable'}
+                  </span>
+                  <span className="text-xs px-2 py-0.5 rounded bg-slate-800 text-slate-300 font-mono">
+                    {currentRouter.version}
+                  </span>
+                </div>
+                <p className="text-xs text-slate-400 mt-0.5">
+                  Model: <strong className="text-slate-200">{currentRouter.model}</strong> &bull; IP: <code className="text-cyan-400">{currentRouter.ipAddress}:{currentRouter.apiPort || 443}</code> (RouterOS v7 HTTPS REST API)
                 </p>
               </div>
             </div>
-            <button
-              onClick={handleTriggerSync}
-              disabled={isSyncingRouter}
-              className="px-3 py-1.5 bg-rose-900/60 hover:bg-rose-800 text-white border border-rose-600 rounded-lg font-mono text-[11px] shrink-0 cursor-pointer disabled:opacity-50 transition flex items-center gap-1.5 shadow-sm"
-            >
-              <RefreshCw className={`w-3.5 h-3.5 ${isSyncingRouter ? 'animate-spin' : ''}`} />
-              <span>{isSyncingRouter ? 'Syncing with Router...' : 'Retry Sync'}</span>
-            </button>
-          </div>
-        )}
 
-        {/* Hardware Resource Indicators */}
-        <div className="grid grid-cols-2 sm:grid-cols-5 gap-3 mt-5 pt-4 border-t border-slate-800 text-xs font-mono">
-          <div className="bg-slate-950/60 p-2.5 rounded border border-slate-800/80">
-            <span className="text-slate-400">Live WAN (RX / TX)</span>
-            <div className="text-sm font-bold mt-0.5 flex items-center gap-1.5 font-mono">
-              <span className="w-1.5 h-1.5 rounded-full bg-emerald-400 animate-pulse" />
-              <span className="text-emerald-400">{currentRouter.currentWanRxMbps ?? 0}M</span>
-              <span className="text-slate-600">/</span>
-              <span className="text-cyan-400">{currentRouter.currentWanTxMbps ?? 0}M</span>
+            {/* Router Selection Dropdown & Add Router */}
+            <div className="flex items-center flex-wrap gap-2.5">
+              <div className="flex items-center gap-2">
+                <span className="text-xs text-slate-400">Target Router:</span>
+                <select
+                  value={selectedRouterId}
+                  onChange={(e) => setSelectedRouterId(e.target.value)}
+                  className="bg-slate-950 border border-slate-700 text-slate-200 text-xs px-3 py-2 rounded-lg focus:outline-none focus:border-cyan-500 font-mono"
+                >
+                  {routers.map((r) => (
+                    <option key={r.id} value={r.id}>
+                      {r.name} ({r.ipAddress}:{r.apiPort || 443}) [{r.status.toUpperCase()}]
+                    </option>
+                  ))}
+                </select>
+              </div>
+
+              <button
+                onClick={handleTriggerSync}
+                disabled={isSyncingRouter}
+                className="flex items-center gap-1.5 bg-slate-800 hover:bg-slate-700 text-slate-200 border border-slate-700 text-xs px-3 py-2 rounded-lg transition shadow-sm cursor-pointer disabled:opacity-50"
+                title="Sync live router metrics (/rest/system/resource, /rest/ppp/active, /rest/interface)"
+              >
+                <RefreshCw className={`w-3.5 h-3.5 text-cyan-400 ${isSyncingRouter ? 'animate-spin' : ''}`} />
+                <span>{isSyncingRouter ? 'Syncing with Router...' : 'Sync Now'}</span>
+              </button>
+
+              <button
+                onClick={() => setIsAddDeviceModalOpen(true)}
+                className="flex items-center gap-1.5 bg-slate-800 hover:bg-slate-700 text-cyan-400 border border-slate-700 font-bold text-xs px-3 py-2 rounded-lg transition shadow-sm cursor-pointer"
+                title="Add New MikroTik Router"
+              >
+                <Plus className="w-3.5 h-3.5 text-cyan-400" />
+                <span>+ Add Router</span>
+              </button>
+
+              <button
+                onClick={() => setIsAddUserModalOpen(true)}
+                className="flex items-center gap-1.5 bg-cyan-600 hover:bg-cyan-500 text-slate-950 font-bold text-xs px-3.5 py-2 rounded-lg transition cursor-pointer shadow-sm shadow-cyan-950/40"
+              >
+                <Plus className="w-4 h-4" />
+                <span>+ Add PPPoE User</span>
+              </button>
             </div>
           </div>
 
-          <div className="bg-slate-950/60 p-2.5 rounded border border-slate-800/80">
-            <span className="text-slate-400">CPU Usage</span>
-            <div className="text-cyan-300 font-bold text-sm mt-0.5 flex items-center gap-1.5">
-              <Cpu className="w-3.5 h-3.5 text-cyan-400" />
-              {currentRouter.status === 'online' || currentRouter.status === 'hybrid_online' || currentRouter.mode === 'hybrid'
-                ? `${currentRouter.cpuLoad}%`
-                : '0% (Offline)'}
+          {/* Live Sync Failure Error Banner */}
+          {routerError && (
+            <div className="mt-4 p-4 bg-rose-950/40 border border-rose-700/80 rounded-xl flex flex-col sm:flex-row items-start sm:items-center justify-between gap-3 text-xs text-rose-200 animate-fade-in shadow-lg">
+              <div className="flex items-start gap-3">
+                <AlertTriangle className="w-5 h-5 text-rose-400 shrink-0 mt-0.5" />
+                <div>
+                  <h4 className="font-bold text-rose-300 text-sm">RouterOS REST API Connection Error</h4>
+                  <p className="mt-1 font-mono text-rose-200 leading-relaxed font-semibold">
+                    {routerError}
+                  </p>
+                  <p className="mt-1.5 text-rose-400 text-[11px]">
+                    💡 <strong>REST API Diagnostic:</strong> Direct HTTPS request to <code className="font-mono text-white bg-rose-900/50 px-1 py-0.5 rounded">https://{currentRouter.ipAddress}:{currentRouter.apiPort || 443}/rest/</code> failed. Verify <code className="font-mono text-white bg-rose-900/50 px-1 py-0.5 rounded">/ip service enable www-ssl</code> is enabled, public IP reachability, SSL certificate validity, and browser CORS permissions.
+                  </p>
+                </div>
+              </div>
+              <button
+                onClick={handleTriggerSync}
+                disabled={isSyncingRouter}
+                className="px-3 py-1.5 bg-rose-900/60 hover:bg-rose-800 text-white border border-rose-600 rounded-lg font-mono text-[11px] shrink-0 cursor-pointer disabled:opacity-50 transition flex items-center gap-1.5 shadow-sm"
+              >
+                <RefreshCw className={`w-3.5 h-3.5 ${isSyncingRouter ? 'animate-spin' : ''}`} />
+                <span>{isSyncingRouter ? 'Syncing with Router...' : 'Retry Sync'}</span>
+              </button>
             </div>
-          </div>
+          )}
 
-          <div className="bg-slate-950/60 p-2.5 rounded border border-slate-800/80">
-            <span className="text-slate-400">Uptime</span>
-            <div className="text-slate-200 font-bold text-sm mt-0.5">
-              {currentRouter.status === 'online' || currentRouter.status === 'hybrid_online' || currentRouter.mode === 'hybrid'
-                ? currentRouter.uptime
-                : 'Offline'}
+          {/* Hardware Resource Indicators */}
+          <div className="grid grid-cols-2 sm:grid-cols-5 gap-3 mt-5 pt-4 border-t border-slate-800 text-xs font-mono">
+            <div className="bg-slate-950/60 p-2.5 rounded border border-slate-800/80">
+              <span className="text-slate-400">Live WAN (RX / TX)</span>
+              <div className="text-sm font-bold mt-0.5 flex items-center gap-1.5 font-mono">
+                <span className="w-1.5 h-1.5 rounded-full bg-emerald-400 animate-pulse" />
+                <span className="text-emerald-400">{currentRouter.currentWanRxMbps ?? 0}M</span>
+                <span className="text-slate-600">/</span>
+                <span className="text-cyan-400">{currentRouter.currentWanTxMbps ?? 0}M</span>
+              </div>
             </div>
-          </div>
 
-          <div className="bg-slate-950/60 p-2.5 rounded border border-slate-800/80">
-            <span className="text-slate-400">Active PPPoE</span>
-            <div className={`${currentRouter.status === 'online' || currentRouter.status === 'hybrid_online' || currentRouter.mode === 'hybrid' ? 'text-emerald-400' : 'text-slate-500'} font-bold text-sm mt-0.5`}>
-              {currentRouter.status === 'online' || currentRouter.status === 'hybrid_online' || currentRouter.mode === 'hybrid'
-                ? `${activeSessions.length} Online`
-                : '0 (Offline)'}
+            <div className="bg-slate-950/60 p-2.5 rounded border border-slate-800/80">
+              <span className="text-slate-400">CPU Usage</span>
+              <div className="text-cyan-300 font-bold text-sm mt-0.5 flex items-center gap-1.5">
+                <Cpu className="w-3.5 h-3.5 text-cyan-400" />
+                {currentRouter.status === 'online' || currentRouter.status === 'hybrid_online' || currentRouter.mode === 'hybrid'
+                  ? `${currentRouter.cpuLoad ?? 0}%`
+                  : '0% (Offline)'}
+              </div>
             </div>
-          </div>
 
-          <div className="bg-slate-950/60 p-2.5 rounded border border-slate-800/80">
-            <span className="text-slate-400">Walled Garden</span>
-            <div className="text-amber-400 font-bold text-sm mt-0.5 truncate">
-              {currentRouter.walledGardenPool}
+            <div className="bg-slate-950/60 p-2.5 rounded border border-slate-800/80">
+              <span className="text-slate-400">Uptime</span>
+              <div className="text-slate-200 font-bold text-sm mt-0.5">
+                {currentRouter.status === 'online' || currentRouter.status === 'hybrid_online' || currentRouter.mode === 'hybrid'
+                  ? (currentRouter.uptime || 'Offline')
+                  : 'Offline'}
+              </div>
+            </div>
+
+            <div className="bg-slate-950/60 p-2.5 rounded border border-slate-800/80">
+              <span className="text-slate-400">Active PPPoE</span>
+              <div className={`${currentRouter.status === 'online' || currentRouter.status === 'hybrid_online' || currentRouter.mode === 'hybrid' ? 'text-emerald-400' : 'text-slate-500'} font-bold text-sm mt-0.5`}>
+                {currentRouter.status === 'online' || currentRouter.status === 'hybrid_online' || currentRouter.mode === 'hybrid'
+                  ? `${activeSessions.length} Online`
+                  : '0 (Offline)'}
+              </div>
+            </div>
+
+            <div className="bg-slate-950/60 p-2.5 rounded border border-slate-800/80">
+              <span className="text-slate-400">Walled Garden</span>
+              <div className="text-amber-400 font-bold text-sm mt-0.5 truncate">
+                {currentRouter.walledGardenPool || '172.16.102.0/24'}
+              </div>
             </div>
           </div>
         </div>
-      </div>
+      )}
 
       {/* Sub-Navigation & Search Filter Bar */}
       <div className="flex flex-col sm:flex-row items-center justify-between gap-3 bg-slate-900/90 border border-slate-800 p-2 rounded-lg">
@@ -423,12 +444,12 @@ export const MikrotikStudio: React.FC<MikrotikStudioProps> = ({
         <ActiveSessionsTable
           sessions={activeSessions}
           packages={packages}
-          isRouterOnline={currentRouter.status === 'online'}
-          routerIp={currentRouter.ipAddress}
+          isRouterOnline={currentRouter?.status === 'online'}
+          routerIp={currentRouter?.ipAddress || ''}
           onSelectSession={(session) => setSelectedSubscriberUsername(session.username)}
           onKickSession={handleKick}
           onDeleteSecret={async (username) => {
-            await deletePppoeUser(username, currentRouter.id);
+            await deletePppoeUser(username, currentRouter?.id);
           }}
           isKickingId={isKicking}
         />
@@ -438,8 +459,8 @@ export const MikrotikStudio: React.FC<MikrotikStudioProps> = ({
       {activeSubTab === 'interfaces' && (
         <RouterInterfacesTable
           interfaces={routerInterfaces}
-          routerName={currentRouter.name}
-          routerIp={currentRouter.ipAddress}
+          routerName={currentRouter?.name || 'No Router'}
+          routerIp={currentRouter?.ipAddress || ''}
           onRefresh={handleTriggerSync}
         />
       )}

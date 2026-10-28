@@ -224,13 +224,21 @@ export const Header: React.FC<HeaderProps> = ({
               onChange={(e) => setSelectedRouterId(e.target.value)}
               className="bg-transparent text-slate-200 text-xs focus:outline-none cursor-pointer"
             >
-              {routers.map((r) => (
-                <option key={r.id} value={r.id} className="bg-slate-900 text-slate-100">
-                  {r.name} ({r.ipAddress})
+              {(!routers || routers.length === 0) ? (
+                <option value="" disabled className="bg-slate-900 text-slate-400">
+                  No Routers Connected
                 </option>
-              ))}
+              ) : (
+                routers.map((r) => (
+                  <option key={r.id} value={r.id} className="bg-slate-900 text-slate-100">
+                    {r.name} ({r.ipAddress})
+                  </option>
+                ))
+              )}
             </select>
-            <span className="inline-block w-2 h-2 rounded-full bg-emerald-400 animate-ping" />
+            {currentRouter && (
+              <span className={`inline-block w-2 h-2 rounded-full ${currentRouter.status === 'online' ? 'bg-emerald-400 animate-ping' : 'bg-rose-400'}`} />
+            )}
             {onOpenAddRouterModal && (
               <button
                 onClick={onOpenAddRouterModal}
@@ -242,28 +250,37 @@ export const Header: React.FC<HeaderProps> = ({
             )}
           </div>
 
-          <span className={`hidden xl:inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full text-[11px] font-mono shadow-sm ${
-            currentRouter?.status === 'online'
-              ? 'bg-emerald-950/90 text-emerald-300 border border-emerald-500/30'
-              : 'bg-rose-950/90 text-rose-300 border border-rose-500/30'
-          }`}>
-            <span className={`w-1.5 h-1.5 rounded-full ${currentRouter?.status === 'online' ? 'bg-emerald-400 animate-pulse' : 'bg-rose-400'}`} />
-            {currentRouter?.status === 'online' ? 'RouterOS v7 REST Live' : 'Router Offline'}
-          </span>
+          {currentRouter ? (
+            <>
+              <span className={`hidden xl:inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full text-[11px] font-mono shadow-sm ${
+                currentRouter.status === 'online'
+                  ? 'bg-emerald-950/90 text-emerald-300 border border-emerald-500/30'
+                  : 'bg-rose-950/90 text-rose-300 border border-rose-500/30'
+              }`}>
+                <span className={`w-1.5 h-1.5 rounded-full ${currentRouter.status === 'online' ? 'bg-emerald-400 animate-pulse' : 'bg-rose-400'}`} />
+                {currentRouter.status === 'online' ? 'RouterOS v7 REST Live' : 'Router Offline'}
+              </span>
 
-          <div className="hidden lg:flex items-center gap-3 bg-slate-900/80 border border-slate-800 px-3 py-1.5 rounded-md text-slate-300">
-            <span>
-              CPU: <strong className="text-cyan-300">{currentRouter.cpuLoad}%</strong>
+              <div className="hidden lg:flex items-center gap-3 bg-slate-900/80 border border-slate-800 px-3 py-1.5 rounded-md text-slate-300">
+                <span>
+                  CPU: <strong className="text-cyan-300">{currentRouter.cpuLoad ?? 0}%</strong>
+                </span>
+                <span className="text-slate-600">|</span>
+                <span>
+                  WAN: <strong className="text-emerald-400">{(((currentRouter.currentWanRxMbps || 0)) / 1000).toFixed(2)} Gbps</strong>
+                </span>
+                <span className="text-slate-600">|</span>
+                <span>
+                  Sessions: <strong className="text-indigo-300">{activeSessions.length} active</strong>
+                </span>
+              </div>
+            </>
+          ) : (
+            <span className="hidden xl:inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full text-[11px] font-mono bg-slate-900 text-slate-400 border border-slate-800">
+              <span className="w-1.5 h-1.5 rounded-full bg-slate-500" />
+              No Routers Connected
             </span>
-            <span className="text-slate-600">|</span>
-            <span>
-              WAN: <strong className="text-emerald-400">{(currentRouter.currentWanRxMbps / 1000).toFixed(2)} Gbps</strong>
-            </span>
-            <span className="text-slate-600">|</span>
-            <span>
-              Sessions: <strong className="text-indigo-300">{activeSessions.length} active</strong>
-            </span>
-          </div>
+          )}
 
           {/* Quick Action Buttons, User Session & Logout */}
           <div className="flex items-center gap-2">

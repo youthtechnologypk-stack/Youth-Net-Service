@@ -59,7 +59,7 @@ export const RouterFleet: React.FC<RouterFleetProps> = ({ onOpenAddDeviceModal }
     const deletedName = routerToDelete.name;
     try {
       // 1. Complete Delete Pipeline: Await backend API response
-      const res = await deleteMikrotikRouter(targetId);
+      await deleteMikrotikRouter(targetId);
 
       // 2. Synchronously ensure client/mock fallback storage is updated
       if (typeof window !== 'undefined') {
@@ -68,7 +68,7 @@ export const RouterFleet: React.FC<RouterFleetProps> = ({ onOpenAddDeviceModal }
           if (raw) {
             const list = JSON.parse(raw);
             if (Array.isArray(list)) {
-              const updated = list.filter((r: any) => r.id !== targetId && r.name !== deletedName);
+              const updated = list.filter((r: any) => r?.id !== targetId && r?.name !== deletedName);
               localStorage.setItem('registered_routers', JSON.stringify(updated));
             }
           }
@@ -77,6 +77,20 @@ export const RouterFleet: React.FC<RouterFleetProps> = ({ onOpenAddDeviceModal }
           if (Array.isArray(deletedList) && !deletedList.includes(targetId)) {
             deletedList.push(targetId);
             localStorage.setItem('deleted_router_ids', JSON.stringify(deletedList));
+          }
+        } catch {}
+      }
+
+      // 3. Safe fallback selection: switch to first remaining router or clear
+      const remainingRouters = (routers || []).filter((r) => r?.id !== targetId && r?.name !== deletedName);
+      if (selectedRouterId === targetId || !remainingRouters.some((r) => r?.id === selectedRouterId)) {
+        const nextRouter = remainingRouters.length > 0 ? remainingRouters[0] : null;
+        setSelectedRouterId(nextRouter ? nextRouter.id : '');
+        try {
+          if (nextRouter) {
+            localStorage.setItem('netpulse_selected_router_id', nextRouter.id);
+          } else {
+            localStorage.removeItem('netpulse_selected_router_id');
           }
         } catch {}
       }
@@ -113,7 +127,7 @@ export const RouterFleet: React.FC<RouterFleetProps> = ({ onOpenAddDeviceModal }
           <h3 className="text-sm font-bold text-white flex items-center gap-2">
             <span>MikroTik Hardware Fleet Inventory</span>
             <span className="text-[10px] px-2 py-0.5 rounded bg-cyan-950 text-cyan-300 border border-cyan-800 font-mono">
-              {routers.length} Devices Registered
+              {(routers || []).length} Devices Registered
             </span>
           </h3>
           <p className="text-xs text-slate-400 mt-0.5">
@@ -129,22 +143,43 @@ export const RouterFleet: React.FC<RouterFleetProps> = ({ onOpenAddDeviceModal }
         </button>
       </div>
 
-      {/* Router Cards Grid */}
-      <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
-        {routers.map((router) => {
-          const isSelected = router.id === selectedRouterId;
-          const routerSessionsCount = activeSessions.filter((s) => s.routerId === router.id).length;
-          const routerCustomersCount = customers.filter((c) => c.routerId === router.id).length;
+      {/* Empty State when no routers registered */}
+      {(!routers || routers.length === 0) ? (
+        <div className="bg-slate-900 border border-slate-800 rounded-2xl p-10 text-center space-y-4 shadow-xl">
+          <div className="w-16 h-16 bg-slate-800/80 rounded-2xl flex items-center justify-center mx-auto border border-slate-700 text-slate-400">
+            <Server className="w-8 h-8 text-cyan-400/70" />
+          </div>
+          <div className="space-y-1.5 max-w-md mx-auto">
+            <h4 className="text-base font-bold text-white">No MikroTik Routers Connected</h4>
+            <p className="text-xs text-slate-400 leading-relaxed">
+              No MikroTik Routers Connected. Click "+ Add Router" to register a BNG/BRAS device.
+            </p>
+          </div>
+          <button
+            onClick={onOpenAddDeviceModal}
+            className="inline-flex items-center gap-2 bg-cyan-600 hover:bg-cyan-500 text-slate-950 font-bold text-xs px-5 py-2.5 rounded-xl transition shadow-lg shadow-cyan-950/40 cursor-pointer"
+          >
+            <Plus className="w-4 h-4" />
+            <span>+ Add Router</span>
+          </button>
+        </div>
+      ) : (
+        <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
+          {routers.map((router) => {
+            if (!router) return null;
+            const isSelected = router.id === selectedRouterId;
+            const routerSessionsCount = activeSessions.filter((s) => s.routerId === router.id).length;
+            const routerCustomersCount = customers.filter((c) => c.routerId === router.id).length;
 
-          return (
-            <div
-              key={router.id}
-              className={`bg-slate-900 border rounded-xl p-5 space-y-4 shadow-lg transition flex flex-col justify-between ${
-                isSelected
-                  ? 'border-cyan-500/80 ring-1 ring-cyan-500/30 shadow-cyan-950/20'
-                  : 'border-slate-800 hover:border-slate-700'
-              }`}
-            >
+            return (
+              <div
+                key={router.id}
+                className={`bg-slate-900 border rounded-xl p-5 space-y-4 shadow-lg transition flex flex-col justify-between ${
+                  isSelected
+                    ? 'border-cyan-500/80 ring-1 ring-cyan-500/30 shadow-cyan-950/20'
+                    : 'border-slate-800 hover:border-slate-700'
+                }`}
+              >
               <div className="space-y-3">
                 {/* Device Header */}
                 <div className="flex items-start justify-between gap-3">
@@ -211,18 +246,18 @@ export const RouterFleet: React.FC<RouterFleetProps> = ({ onOpenAddDeviceModal }
                 <div className="grid grid-cols-3 gap-2 text-xs font-mono text-center">
                   <div className="bg-slate-950/70 p-2 rounded border border-slate-800">
                     <span className="text-slate-400 text-[10px] block">CPU Load</span>
-                    <span className="text-cyan-300 font-bold">{router.cpuLoad}%</span>
+                    <span className="text-cyan-300 font-bold">{router.cpuLoad ?? 0}%</span>
                   </div>
                   <div className="bg-slate-950/70 p-2 rounded border border-slate-800">
                     <span className="text-slate-400 text-[10px] block">Memory</span>
                     <span className="text-slate-200 font-bold">
-                      {router.memoryUsageMb} MB
+                      {router.memoryUsageMb ?? 0} MB
                     </span>
                   </div>
                   <div className="bg-slate-950/70 p-2 rounded border border-slate-800">
                     <span className="text-slate-400 text-[10px] block">WAN Bandwidth</span>
                     <span className="text-emerald-400 font-bold">
-                      {(router.currentWanRxMbps / 1000).toFixed(2)}G
+                      {((router.currentWanRxMbps || 0) / 1000).toFixed(2)}G
                     </span>
                   </div>
                 </div>
@@ -296,27 +331,8 @@ export const RouterFleet: React.FC<RouterFleetProps> = ({ onOpenAddDeviceModal }
             </div>
           );
         })}
-
-        {/* Empty Fleet State */}
-        {routers.length === 0 && (
-          <div className="col-span-full py-12 px-4 text-center bg-slate-900/60 border border-slate-800 rounded-xl space-y-3">
-            <div className="w-12 h-12 rounded-xl bg-slate-800/80 border border-slate-700 flex items-center justify-center mx-auto text-slate-400">
-              <Server className="w-6 h-6 text-slate-500" />
-            </div>
-            <h4 className="text-sm font-bold text-slate-200">No MikroTik Routers in Fleet</h4>
-            <p className="text-xs text-slate-400 max-w-md mx-auto">
-              All routers have been removed. Click "+ Add MikroTik Device" to register a physical RouterOS BNG, CCR, or Cloud Hosted Router (CHR).
-            </p>
-            <button
-              onClick={onOpenAddDeviceModal}
-              className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-cyan-600 hover:bg-cyan-500 text-slate-950 font-bold text-xs transition shadow-md cursor-pointer"
-            >
-              <Plus className="w-3.5 h-3.5" />
-              <span>+ Add MikroTik Device</span>
-            </button>
-          </div>
-        )}
-      </div>
+        </div>
+      )}
 
       {/* Edit Router Modal */}
       <EditRouterModal

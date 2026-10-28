@@ -27,12 +27,14 @@ interface NocOverviewProps {
   onNavigateTab: (tab: ActiveTab) => void;
   onOpenOutageModal: () => void;
   onOpenTicketModal: () => void;
+  onOpenAddRouterModal?: () => void;
 }
 
 export const NocOverview: React.FC<NocOverviewProps> = ({
   onNavigateTab,
   onOpenOutageModal,
   onOpenTicketModal,
+  onOpenAddRouterModal,
 }) => {
   const {
     routers,
@@ -90,37 +92,52 @@ export const NocOverview: React.FC<NocOverviewProps> = ({
       )}
 
       {/* Router Status & Real Telemetry Status */}
-      <div className="flex flex-wrap items-center justify-between gap-3 bg-slate-900/80 border border-slate-800/80 px-3.5 py-2.5 rounded-xl backdrop-blur-sm">
-        <div className="flex items-center gap-2.5">
-          <span className={`inline-flex items-center gap-1.5 px-3 py-1 rounded-full text-xs font-mono font-medium border shadow-sm ${
-            currentRouter?.status === 'online'
-              ? 'bg-emerald-950/90 text-emerald-300 border-emerald-500/30 shadow-emerald-950/40'
-              : 'bg-rose-950/90 text-rose-300 border-rose-500/30 shadow-rose-950/40'
-          }`}>
-            <span className={`w-2 h-2 rounded-full ${currentRouter?.status === 'online' ? 'bg-emerald-400 animate-pulse' : 'bg-rose-400'}`} />
-            {currentRouter?.status === 'online' ? 'RouterOS v7 REST Live' : 'Router Unreachable'}
-          </span>
-          <span className="text-xs text-slate-400 font-mono hidden sm:inline">
-            Active BNG: <span className="text-slate-200 font-bold">{currentRouter?.name || 'CCR2004'}</span> ({currentRouter?.ipAddress}:{currentRouter?.apiPort || 443})
-          </span>
+      {currentRouter ? (
+        <div className="flex flex-wrap items-center justify-between gap-3 bg-slate-900/80 border border-slate-800/80 px-3.5 py-2.5 rounded-xl backdrop-blur-sm">
+          <div className="flex items-center gap-2.5">
+            <span className={`inline-flex items-center gap-1.5 px-3 py-1 rounded-full text-xs font-mono font-medium border shadow-sm ${
+              currentRouter.status === 'online'
+                ? 'bg-emerald-950/90 text-emerald-300 border-emerald-500/30 shadow-emerald-950/40'
+                : 'bg-rose-950/90 text-rose-300 border-rose-500/30 shadow-rose-950/40'
+            }`}>
+              <span className={`w-2 h-2 rounded-full ${currentRouter.status === 'online' ? 'bg-emerald-400 animate-pulse' : 'bg-rose-400'}`} />
+              {currentRouter.status === 'online' ? 'RouterOS v7 REST Live' : 'Router Unreachable'}
+            </span>
+            <span className="text-xs text-slate-400 font-mono hidden sm:inline">
+              Active BNG: <span className="text-slate-200 font-bold">{currentRouter.name}</span> ({currentRouter.ipAddress}:{currentRouter.apiPort || 443})
+            </span>
+          </div>
+          <div className="flex items-center gap-3 text-xs font-mono text-slate-400">
+            <span className="flex items-center gap-1">
+              <span className="w-1.5 h-1.5 rounded-full bg-cyan-400" />
+              CPU: <span className="text-cyan-300 font-bold">{currentRouter.cpuLoad || 0}%</span>
+            </span>
+            <span className="text-slate-700">|</span>
+            <span className="flex items-center gap-1">
+              <span className="w-1.5 h-1.5 rounded-full bg-emerald-400" />
+              Live WAN: <span className="text-emerald-400 font-bold">{currentWanRx}M</span> RX
+            </span>
+            <span className="text-slate-700">|</span>
+            <span className="flex items-center gap-1">
+              <span className="w-1.5 h-1.5 rounded-full bg-indigo-400" />
+              Sessions: <span className="text-indigo-300 font-bold">{activeSessions.filter(s => s.routerId === currentRouter.id).length || currentRouter.activePppoeCount || 0}</span>
+            </span>
+          </div>
         </div>
-        <div className="flex items-center gap-3 text-xs font-mono text-slate-400">
-          <span className="flex items-center gap-1">
-            <span className="w-1.5 h-1.5 rounded-full bg-cyan-400" />
-            CPU: <span className="text-cyan-300 font-bold">{currentRouter?.cpuLoad || 0}%</span>
-          </span>
-          <span className="text-slate-700">|</span>
-          <span className="flex items-center gap-1">
-            <span className="w-1.5 h-1.5 rounded-full bg-emerald-400" />
-            Live WAN: <span className="text-emerald-400 font-bold">{currentWanRx}M</span> RX
-          </span>
-          <span className="text-slate-700">|</span>
-          <span className="flex items-center gap-1">
-            <span className="w-1.5 h-1.5 rounded-full bg-indigo-400" />
-            Sessions: <span className="text-indigo-300 font-bold">{activeSessions.filter(s => s.routerId === currentRouter?.id).length || currentRouter?.activePppoeCount || 0}</span>
-          </span>
+      ) : (
+        <div className="flex flex-wrap items-center justify-between gap-3 bg-slate-900/80 border border-slate-800/80 px-3.5 py-2.5 rounded-xl backdrop-blur-sm text-xs">
+          <div className="flex items-center gap-2.5 text-slate-400">
+            <Server className="w-4 h-4 text-slate-500 shrink-0" />
+            <span>No MikroTik Routers Connected. Click "+ Add Router" to register a BNG/BRAS device.</span>
+          </div>
+          <button
+            onClick={() => onOpenAddRouterModal ? onOpenAddRouterModal() : onNavigateTab('mikrotik')}
+            className="px-3 py-1 bg-cyan-600 hover:bg-cyan-500 text-slate-950 font-bold rounded-lg transition shrink-0 cursor-pointer"
+          >
+            + Add Router
+          </button>
         </div>
-      </div>
+      )}
 
       {/* Active Outage Warning Banner if any active (with minimize and full update modal) */}
       <OutageBanner onNavigateTab={onNavigateTab} />
@@ -252,8 +269,27 @@ export const NocOverview: React.FC<NocOverviewProps> = ({
         </div>
       </div>
 
-      {/* Usage Analytics Component with Recharts */}
-      <UsageAnalytics />
+      {/* Usage Analytics Component with Recharts (Disabled / hidden when no routers exist) */}
+      {currentRouter ? (
+        <UsageAnalytics />
+      ) : (
+        <div className="bg-slate-900/90 border border-slate-800 rounded-xl p-8 text-center space-y-3 shadow-lg">
+          <div className="w-12 h-12 bg-slate-800/80 rounded-xl flex items-center justify-center mx-auto border border-slate-700 text-slate-400">
+            <Activity className="w-6 h-6 text-cyan-400/50" />
+          </div>
+          <h4 className="text-sm font-bold text-white">Live Telemetry Graphs Inactive</h4>
+          <p className="text-xs text-slate-400 max-w-md mx-auto">
+            No MikroTik Routers Connected. Click "+ Add Router" to register a BNG/BRAS device and stream real-time throughput.
+          </p>
+          <button
+            onClick={() => onOpenAddRouterModal ? onOpenAddRouterModal() : onNavigateTab('mikrotik')}
+            className="inline-flex items-center gap-1.5 bg-cyan-600 hover:bg-cyan-500 text-slate-950 font-bold text-xs px-4 py-2 rounded-lg transition cursor-pointer"
+          >
+            <Server className="w-3.5 h-3.5" />
+            <span>+ Add Router</span>
+          </button>
+        </div>
+      )}
 
       {/* Quick Automation CRON Execution Bar */}
       <div className="bg-slate-900 border border-slate-800 p-4 rounded-xl flex flex-wrap items-center justify-between gap-4 shadow-lg">
@@ -289,66 +325,88 @@ export const NocOverview: React.FC<NocOverviewProps> = ({
       {/* Bottom Grid: MikroTik Hardware Telemetry & Automated WhatsApp Feed */}
       <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
         {/* Active MikroTik BNG Router Card */}
-        <div className="bg-slate-900/90 border border-slate-800 rounded-xl p-5 space-y-3.5 shadow-lg">
-          <div className="flex items-center justify-between">
-            <div className="flex items-center gap-2">
-              <Server className="w-4 h-4 text-cyan-400" />
-              <span className="font-bold text-slate-200 text-sm font-mono">{currentRouter.name}</span>
-            </div>
-            <div className="flex items-center gap-1.5">
-              <span className="text-[10px] bg-cyan-950 text-cyan-300 border border-cyan-800 px-2 py-0.5 rounded font-mono">
-                {routers.length} Fleet
-              </span>
-              <span className="text-[10px] bg-emerald-950 text-emerald-300 border border-emerald-800 px-2 py-0.5 rounded font-mono">
-                {currentRouter.version}
-              </span>
-            </div>
-          </div>
-
-          <p className="text-xs text-slate-400">{currentRouter.location}</p>
-
-          <div className="space-y-2 text-xs">
-            <div>
-              <div className="flex justify-between text-slate-300 font-mono mb-1">
-                <span>CPU Load:</span>
-                <span className="text-cyan-400">{currentRouter.cpuLoad}%</span>
+        {currentRouter ? (
+          <div className="bg-slate-900/90 border border-slate-800 rounded-xl p-5 space-y-3.5 shadow-lg">
+            <div className="flex items-center justify-between">
+              <div className="flex items-center gap-2">
+                <Server className="w-4 h-4 text-cyan-400" />
+                <span className="font-bold text-slate-200 text-sm font-mono">{currentRouter.name}</span>
               </div>
-              <div className="w-full bg-slate-800 rounded-full h-1.5">
-                <div
-                  className="bg-cyan-500 h-1.5 rounded-full transition-all duration-500"
-                  style={{ width: `${currentRouter.cpuLoad}%` }}
-                />
-              </div>
-            </div>
-
-            <div>
-              <div className="flex justify-between text-slate-300 font-mono mb-1">
-                <span>RAM Used:</span>
-                <span className="text-indigo-400">
-                  {currentRouter.memoryUsageMb} MB / {currentRouter.totalMemoryMb} MB
+              <div className="flex items-center gap-1.5">
+                <span className="text-[10px] bg-cyan-950 text-cyan-300 border border-cyan-800 px-2 py-0.5 rounded font-mono">
+                  {routers.length} Fleet
+                </span>
+                <span className="text-[10px] bg-emerald-950 text-emerald-300 border border-emerald-800 px-2 py-0.5 rounded font-mono">
+                  {currentRouter.version}
                 </span>
               </div>
-              <div className="w-full bg-slate-800 rounded-full h-1.5">
-                <div
-                  className="bg-indigo-500 h-1.5 rounded-full"
-                  style={{ width: `${(currentRouter.memoryUsageMb / currentRouter.totalMemoryMb) * 100}%` }}
-                />
+            </div>
+
+            <p className="text-xs text-slate-400">{currentRouter.location}</p>
+
+            <div className="space-y-2 text-xs">
+              <div>
+                <div className="flex justify-between text-slate-300 font-mono mb-1">
+                  <span>CPU Load:</span>
+                  <span className="text-cyan-400">{currentRouter.cpuLoad ?? 0}%</span>
+                </div>
+                <div className="w-full bg-slate-800 rounded-full h-1.5">
+                  <div
+                    className="bg-cyan-500 h-1.5 rounded-full transition-all duration-500"
+                    style={{ width: `${currentRouter.cpuLoad || 0}%` }}
+                  />
+                </div>
+              </div>
+
+              <div>
+                <div className="flex justify-between text-slate-300 font-mono mb-1">
+                  <span>RAM Used:</span>
+                  <span className="text-indigo-400">
+                    {currentRouter.memoryUsageMb ?? 0} MB / {currentRouter.totalMemoryMb ?? 0} MB
+                  </span>
+                </div>
+                <div className="w-full bg-slate-800 rounded-full h-1.5">
+                  <div
+                    className="bg-indigo-500 h-1.5 rounded-full"
+                    style={{
+                      width: `${
+                        currentRouter.totalMemoryMb && currentRouter.totalMemoryMb > 0
+                          ? ((currentRouter.memoryUsageMb || 0) / currentRouter.totalMemoryMb) * 100
+                          : 0
+                      }%`,
+                    }}
+                  />
+                </div>
+              </div>
+
+              <div className="pt-2 border-t border-slate-800 flex justify-between text-slate-400 text-[11px] font-mono">
+                <span>Uptime: {currentRouter.uptime || 'Offline'}</span>
+                <span className="text-slate-300">IP: {currentRouter.ipAddress}</span>
               </div>
             </div>
 
-            <div className="pt-2 border-t border-slate-800 flex justify-between text-slate-400 text-[11px] font-mono">
-              <span>Uptime: {currentRouter.uptime}</span>
-              <span className="text-slate-300">IP: {currentRouter.ipAddress}</span>
-            </div>
+            <button
+              onClick={() => onNavigateTab('mikrotik')}
+              className="w-full bg-slate-800 hover:bg-slate-700 text-cyan-400 font-semibold text-xs py-2 rounded-lg transition text-center"
+            >
+              Open MikroTik v7 Console &rarr;
+            </button>
           </div>
-
-          <button
-            onClick={() => onNavigateTab('mikrotik')}
-            className="w-full bg-slate-800 hover:bg-slate-700 text-cyan-400 font-semibold text-xs py-2 rounded-lg transition text-center"
-          >
-            Open MikroTik v7 Console &rarr;
-          </button>
-        </div>
+        ) : (
+          <div className="bg-slate-900/90 border border-slate-800 rounded-xl p-6 text-center space-y-3 shadow-lg flex flex-col items-center justify-center">
+            <Server className="w-8 h-8 text-slate-600" />
+            <h4 className="text-sm font-bold text-white">No MikroTik Routers Connected</h4>
+            <p className="text-xs text-slate-400 max-w-xs">
+              No MikroTik Routers Connected. Click "+ Add Router" to register a BNG/BRAS device.
+            </p>
+            <button
+              onClick={() => onOpenAddRouterModal ? onOpenAddRouterModal() : onNavigateTab('mikrotik')}
+              className="bg-cyan-600 hover:bg-cyan-500 text-slate-950 font-bold text-xs px-4 py-2 rounded-lg transition cursor-pointer"
+            >
+              + Add Router
+            </button>
+          </div>
+        )}
 
         {/* WhatsApp Automated Delivery Feed */}
         <div className="bg-slate-900/90 border border-slate-800 rounded-xl p-5 space-y-3.5 shadow-lg">

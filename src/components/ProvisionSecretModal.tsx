@@ -58,7 +58,7 @@ export const ProvisionSecretModal: React.FC<ProvisionSecretModalProps> = ({ isOp
                 Provision PPPoE Secret & Customer
               </h3>
               <p className="text-xs text-slate-400 font-mono">
-                Target BRAS: {currentRouter.name} ({currentRouter.ipAddress})
+                Target BRAS: {currentRouter?.name || 'Default Router'} ({currentRouter?.ipAddress || 'Offline'})
               </p>
             </div>
           </div>

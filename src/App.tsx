@@ -244,6 +244,7 @@ function ISPAppContent() {
                     onNavigateTab={(tab) => setActiveTab(tab)}
                     onOpenOutageModal={() => setIsOutageOpen(true)}
                     onOpenTicketModal={() => setIsTicketOpen(true)}
+                    onOpenAddRouterModal={() => setIsAddRouterOpen(true)}
                   />
                 )}
 

@@ -662,8 +662,11 @@ export const ISPProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
       if (inFlight) return;
       inFlight = true;
       try {
-        const targetRouter = routers.find((r) => r.id === selectedRouterId);
-        if (!targetRouter) return;
+        const targetRouter = routers.find((r) => r.id === selectedRouterId) || routers[0];
+        if (!targetRouter) {
+          setRouterError(null);
+          return;
+        }
 
         const result = await fetchMikrotikLiveTelemetry(targetRouter);
         if (isCancelled) return;
@@ -1109,18 +1112,33 @@ export const ISPProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
 
     // 3. Remove from React state AND localStorage synchronously
     setRouters((prev) => {
-      const remaining = prev.filter((r) => r.id !== routerId && r.name !== routerId && r.ipAddress !== routerId);
+      const remaining = (prev || []).filter(
+        (r) => r?.id !== routerId && r?.name !== routerId && r?.ipAddress !== routerId
+      );
       try {
         localStorage.setItem(STORAGE_KEY_ROUTERS, JSON.stringify(remaining));
         localStorage.setItem(STORAGE_KEY_ROUTERS_INIT, 'true');
+        localStorage.setItem('registered_routers', JSON.stringify(remaining));
       } catch {}
 
-      if (selectedRouterId === routerId) {
+      const isCurrentSelected = selectedRouterId === routerId || !remaining.some((r) => r?.id === selectedRouterId);
+      if (isCurrentSelected) {
         const nextId = remaining.length > 0 ? remaining[0].id : '';
         setSelectedRouterId(nextId);
         try {
-          localStorage.setItem('netpulse_selected_router_id', nextId);
+          if (nextId) {
+            localStorage.setItem('netpulse_selected_router_id', nextId);
+          } else {
+            localStorage.removeItem('netpulse_selected_router_id');
+          }
         } catch {}
+      }
+
+      if (remaining.length === 0) {
+        setSelectedRouterId('');
+        setActiveSessions([]);
+        setRouterInterfaces([]);
+        setRouterError(null);
       }
       return remaining;
     });
