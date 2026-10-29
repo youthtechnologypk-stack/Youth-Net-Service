@@ -1,4 +1,4 @@
-import React, { createContext, useContext, useState, useEffect, ReactNode } from 'react';
+import React, { createContext, useContext, useState, useEffect, useRef, ReactNode } from 'react';
 import {
   Customer,
   InternetPackage,
@@ -59,6 +59,8 @@ interface ISPContextType {
   bandwidthHistory: BandwidthDataPoint[];
   isTrafficStreaming: boolean;
   setIsTrafficStreaming: (val: boolean) => void;
+  activeViewTab: string;
+  setActiveViewTab: (tab: string) => void;
   lastCronMessage: string | null;
   routerError: string | null;
   isSyncingRouter: boolean;
@@ -534,13 +536,36 @@ export const ISPProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
     } catch {}
   };
   const [isTrafficStreaming, setIsTrafficStreaming] = useState<boolean>(true);
+  const [activeViewTab, setActiveViewTab] = useState<string>('noc');
   const [lastCronMessage, setLastCronMessage] = useState<string | null>(null);
+
+  const routersRef = useRef(routers);
+  useEffect(() => {
+    routersRef.current = routers;
+  }, [routers]);
+
+  const activeSessionsRef = useRef(activeSessions);
+  useEffect(() => {
+    activeSessionsRef.current = activeSessions;
+  }, [activeSessions]);
 
   const [routerError, setRouterError] = useState<string | null>(null);
   const [isSyncingRouter, setIsSyncingRouter] = useState<boolean>(false);
 
   // Interfaces inventory for active router (/interface)
   const [routerInterfaces, setRouterInterfaces] = useState<RouterInterface[]>([]);
+
+  const routerInterfacesRef = useRef(routerInterfaces);
+  useEffect(() => {
+    routerInterfacesRef.current = routerInterfaces;
+  }, [routerInterfaces]);
+
+  const activeViewTabRef = useRef(activeViewTab);
+  useEffect(() => {
+    activeViewTabRef.current = activeViewTab;
+  }, [activeViewTab]);
+
+  const lastSessionsPollTimeRef = useRef(0);
 
   // Bandwidth history for real-time live graphs (15 data points, initialized with 0)
   const [bandwidthHistory, setBandwidthHistory] = useState<BandwidthDataPoint[]>(() => {
@@ -654,17 +679,33 @@ export const ISPProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
   };
 
   // Realtime Live Traffic streaming poller using RouterOS v7 REST API over HTTPS (/rest/ppp/active & /rest/interface)
+  // Throttled to 12s with AbortController cleanup to prevent session pile-up on MikroTik
   useEffect(() => {
     if (!isTrafficStreaming || !selectedRouterId) return;
 
     let isCancelled = false;
     let inFlight = false;
+    let abortController: AbortController | null = null;
 
     const pollLiveTraffic = async () => {
+      // 1. If tab/browser is minimized or in background, skip polling to avoid session pile-up
+      if (typeof document !== 'undefined' && document.hidden) {
+        return;
+      }
+
       if (inFlight) return;
       inFlight = true;
+
+      // Abort previous in-flight request if any before dispatching a new one
+      if (abortController) {
+        abortController.abort();
+      }
+      abortController = new AbortController();
+
       try {
-        const targetRouter = routers.find((r) => r.id === selectedRouterId) || routers[0];
+        const targetRouter =
+          routersRef.current.find((r) => r.id === selectedRouterId) ||
+          routersRef.current[0];
         if (!targetRouter) {
           setRouterError(null);
           return;
@@ -672,10 +713,29 @@ export const ISPProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
         const targetPort = targetRouter.port || targetRouter.apiPort || 8729;
         const targetIp = targetRouter.ip || targetRouter.ipAddress || '127.0.0.1';
 
-        const result = await fetchMikrotikLiveTelemetry(targetRouter);
-        if (isCancelled) return;
+        // Check if user is actively viewing a tab/widget with live traffic graphs
+        const isViewingTrafficWidget =
+          activeViewTabRef.current === 'noc' ||
+          activeViewTabRef.current === 'mikrotik';
+
+        // Throttle active PPPoE sessions to poll every 10 seconds minimum
+        const now = Date.now();
+        const shouldPollSessions = now - lastSessionsPollTimeRef.current >= 10000;
+
+        const result = await fetchMikrotikLiveTelemetry(targetRouter, {
+          signal: abortController.signal,
+          pollTraffic: isViewingTrafficWidget,
+          pollSessions: shouldPollSessions,
+          cachedSessions: activeSessionsRef.current,
+          cachedInterfaces: routerInterfacesRef.current,
+        });
+
+        if (isCancelled || abortController.signal.aborted) return;
 
         if (result.success && result.router) {
+          if (shouldPollSessions) {
+            lastSessionsPollTimeRef.current = now;
+          }
           setRouterError(null);
           setRouters((prev) =>
             prev.map((r) =>
@@ -690,22 +750,21 @@ export const ISPProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
             )
           );
 
-          setActiveSessions(result.activeSessions);
+          if (shouldPollSessions) {
+            setActiveSessions(result.activeSessions);
+          }
           if (result.interfaces && result.interfaces.length > 0) {
             setRouterInterfaces(result.interfaces);
           }
 
-          if (result.traffic) {
+          if (result.traffic && isViewingTrafficWidget) {
             const nowStr = new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' });
             setBandwidthHistory((prev) => [
               ...prev.slice(1),
               { time: nowStr, rxMbps: result.traffic!.rxMbps, txMbps: result.traffic!.txMbps },
             ]);
           }
-        } else {
-          // If fetch fails due to CORS, self-signed certificate, or network unreachable:
-          // Show the exact real error banner: "Cannot reach router at {IP}:{PORT} - Check Public IP reachability, SSL cert, or CORS."
-          // DO NOT fallback to fake mock data.
+        } else if (result.error !== 'Aborted') {
           const errorMsg =
             result.error ||
             `Cannot reach router at ${targetIp}:${targetPort} - Check Public IP reachability, SSL cert, or CORS.`;
@@ -716,8 +775,10 @@ export const ISPProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
           setActiveSessions([]);
         }
       } catch (err: any) {
-        if (!isCancelled) {
-          const targetRouter = routers.find((r) => r.id === selectedRouterId) || routers[0];
+        if (!isCancelled && !abortController?.signal.aborted) {
+          const targetRouter =
+            routersRef.current.find((r) => r.id === selectedRouterId) ||
+            routersRef.current[0];
           const targetPort = targetRouter ? (targetRouter.port || targetRouter.apiPort || 8729) : 8729;
           const ip = targetRouter ? (targetRouter.ip || targetRouter.ipAddress) : 'host';
           const errorMsg = `Cannot reach router at ${ip}:${targetPort} - Check Public IP reachability, SSL cert, or CORS.`;
@@ -733,13 +794,18 @@ export const ISPProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
     };
 
     pollLiveTraffic();
-    const interval = setInterval(pollLiveTraffic, 5000);
+    // Throttle polling frequency: 12-second interval (10-15s range)
+    const interval = setInterval(pollLiveTraffic, 12000);
 
     return () => {
       isCancelled = true;
+      if (abortController) {
+        abortController.abort();
+        abortController = null;
+      }
       clearInterval(interval);
     };
-  }, [isTrafficStreaming, selectedRouterId, routers]);
+  }, [isTrafficStreaming, selectedRouterId]);
 
   // Automated 5-Minute Unassigned Complaint Auto-Escalation Scanner
   useEffect(() => {
@@ -2772,6 +2838,8 @@ export const ISPProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
         bandwidthHistory,
         isTrafficStreaming,
         setIsTrafficStreaming,
+        activeViewTab,
+        setActiveViewTab,
         lastCronMessage,
         routerError,
         isSyncingRouter,

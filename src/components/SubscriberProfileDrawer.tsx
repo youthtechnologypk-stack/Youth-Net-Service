@@ -107,7 +107,7 @@ export const SubscriberProfileDrawer: React.FC<SubscriberProfileDrawerProps> = (
     return () => window.removeEventListener('keydown', handleKeyDown);
   }, [isOpen, onClose]);
 
-  // Real-time active interface traffic polling (2-second interval lifecycle)
+  // Real-time active interface traffic polling (throttled 12-second lifecycle with AbortController)
   useEffect(() => {
     if (!isOpen || !username) {
       setLiveTraffic(null);
@@ -116,16 +116,31 @@ export const SubscriberProfileDrawer: React.FC<SubscriberProfileDrawerProps> = (
     }
 
     let isMounted = true;
+    let abortController: AbortController | null = null;
     setIsTrafficPolling(true);
 
     const pollSubscriberTraffic = async () => {
+      if (typeof document !== 'undefined' && document.hidden) return;
+
+      if (abortController) {
+        abortController.abort();
+      }
+      abortController = new AbortController();
+
       try {
         const queryParams = new URLSearchParams({
           username,
           ...(selectedRouterId ? { routerId: selectedRouterId } : {}),
         });
 
-        const res = await fetch(`/api/mikrotik/subscriber-traffic?${queryParams.toString()}`);
+        const res = await fetch(`/api/mikrotik/subscriber-traffic?${queryParams.toString()}`, {
+          headers: {
+            Accept: 'application/json',
+            Connection: 'close',
+            'Cache-Control': 'no-cache',
+          },
+          signal: abortController.signal,
+        });
         if (!res.ok) return;
 
         const data = await res.json();
@@ -146,20 +161,24 @@ export const SubscriberProfileDrawer: React.FC<SubscriberProfileDrawerProps> = (
             lastPolledAt: Date.now(),
           });
         }
-      } catch (err) {
-        // Non-blocking background error
+      } catch {
+        // Non-blocking background error or aborted request
       }
     };
 
     // 1. Immediate initial poll on mount / open
     pollSubscriberTraffic();
 
-    // 2. Continuous 2-second polling interval
-    const intervalId = setInterval(pollSubscriberTraffic, 2000);
+    // 2. Throttled 12-second polling interval (10-15s range)
+    const intervalId = setInterval(pollSubscriberTraffic, 12000);
 
     // 3. Clean up and stop interval as soon as drawer unmounts or closes
     return () => {
       isMounted = false;
+      if (abortController) {
+        abortController.abort();
+        abortController = null;
+      }
       clearInterval(intervalId);
       setIsTrafficPolling(false);
     };
@@ -174,9 +193,16 @@ export const SubscriberProfileDrawer: React.FC<SubscriberProfileDrawerProps> = (
     }
 
     let isMounted = true;
+    const abortController = new AbortController();
     setIsLoadingServerData(true);
 
-    fetch(`/api/subscribers/${encodeURIComponent(username)}/360`)
+    fetch(`/api/subscribers/${encodeURIComponent(username)}/360`, {
+      headers: {
+        Accept: 'application/json',
+        Connection: 'close',
+      },
+      signal: abortController.signal,
+    })
       .then((res) => (res.ok ? res.json() : null))
       .then((data) => {
         if (isMounted && data?.success) {
@@ -184,7 +210,9 @@ export const SubscriberProfileDrawer: React.FC<SubscriberProfileDrawerProps> = (
         }
       })
       .catch((err) => {
-        console.warn('Could not fetch server 360 subscriber data:', err);
+        if (err.name !== 'AbortError') {
+          console.warn('Could not fetch server 360 subscriber data:', err);
+        }
       })
       .finally(() => {
         if (isMounted) setIsLoadingServerData(false);
@@ -192,6 +220,7 @@ export const SubscriberProfileDrawer: React.FC<SubscriberProfileDrawerProps> = (
 
     return () => {
       isMounted = false;
+      abortController.abort();
     };
   }, [isOpen, username]);
 

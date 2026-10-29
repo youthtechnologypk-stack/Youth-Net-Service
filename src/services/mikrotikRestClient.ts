@@ -22,6 +22,15 @@ export interface FetchRouterLiveResult {
   error?: string;
 }
 
+export interface FetchTelemetryOptions {
+  signal?: AbortSignal;
+  pollSessions?: boolean;
+  pollTraffic?: boolean;
+  pollSystem?: boolean;
+  cachedSessions?: ActiveSession[];
+  cachedInterfaces?: RouterInterface[];
+}
+
 /**
  * Direct client-side fetch for MikroTik RouterOS v7 REST API over HTTPS
  * Endpoints:
@@ -30,19 +39,23 @@ export interface FetchRouterLiveResult {
  *   - https://${activeRouter.ip}:${targetPort}/rest/system/resource
  * Uses Basic Authentication with configured credentials.
  * If unreachable or blocked by CORS / Self-signed certificate, returns exact error banner.
+ * Includes Connection: close and Cache-Control headers to prevent MikroTik session leaks.
  * NEVER falls back to fake mock data.
  */
-export async function fetchMikrotikLiveTelemetry(activeRouter: {
-  id?: string;
-  ipAddress?: string;
-  ip?: string;
-  apiPort?: number;
-  port?: number;
-  username: string;
-  password?: string;
-  useSsl?: boolean;
-  wanInterface?: string;
-}): Promise<FetchRouterLiveResult> {
+export async function fetchMikrotikLiveTelemetry(
+  activeRouter: {
+    id?: string;
+    ipAddress?: string;
+    ip?: string;
+    apiPort?: number;
+    port?: number;
+    username: string;
+    password?: string;
+    useSsl?: boolean;
+    wanInterface?: string;
+  },
+  options?: FetchTelemetryOptions
+): Promise<FetchRouterLiveResult> {
   const router = activeRouter;
   const targetPort = activeRouter.port || activeRouter.apiPort || 8729;
   const ip = (activeRouter.ip || activeRouter.ipAddress || '127.0.0.1').trim();
@@ -61,9 +74,13 @@ export async function fetchMikrotikLiveTelemetry(activeRouter: {
     }
   }
 
+  // Include Connection: close and cache headers to terminate MikroTik session immediately and prevent leaks
   const commonHeaders: Record<string, string> = {
     Authorization: authHeader,
     Accept: 'application/json',
+    Connection: 'close',
+    'Cache-Control': 'no-cache, no-store, must-revalidate',
+    Pragma: 'no-cache',
   };
 
   // Determine whether running in production on Netlify or cloud environment
@@ -84,72 +101,89 @@ export async function fetchMikrotikLiveTelemetry(activeRouter: {
     ? `${window.location.origin}/api/mikrotik`
     : `https://${ip}:${targetPort}/rest`;
 
+  if (options?.signal?.aborted) {
+    return {
+      success: false,
+      activeSessions: options.cachedSessions || [],
+      interfaces: options.cachedInterfaces || [],
+      error: 'Aborted',
+    };
+  }
+
   const controller = new AbortController();
   const timeoutId = setTimeout(() => controller.abort(), 7000);
 
+  if (options?.signal) {
+    options.signal.addEventListener('abort', () => controller.abort(), { once: true });
+  }
+
   try {
     // 1. Fetch Live PPPoE Active Sessions (/rest/ppp/active or /api/mikrotik/ppp/active)
-    const sessionsRes = await fetch(`${baseUrl}/ppp/active`, {
-      method: 'GET',
-      headers: commonHeaders,
-      signal: controller.signal,
-    });
-
-    if (!sessionsRes.ok) {
-      const contentType = sessionsRes.headers.get('content-type') || '';
-      if (contentType.includes('text/html')) {
-        throw new Error(`Netlify Proxy upstream returned HTTP ${sessionsRes.status} (verify router public IP/port reachability)`);
-      }
-      throw new Error(`HTTP ${sessionsRes.status}: ${sessionsRes.statusText}`);
-    }
-
-    const contentType = sessionsRes.headers.get('content-type') || '';
-    if (contentType.includes('text/html')) {
-      throw new Error(`Expected JSON but received HTML response from proxy`);
-    }
-
-    const sessionsData = await sessionsRes.json();
-    const rawSessions = Array.isArray(sessionsData) ? sessionsData : [];
-
-    const activeSessions: ActiveSession[] = rawSessions.map((s: any, idx: number) => {
-      const rxRate = s['rx-rate'] ? Number(s['rx-rate']) / 1_000_000 : 0;
-      const txRate = s['tx-rate'] ? Number(s['tx-rate']) / 1_000_000 : 0;
-      const bytesIn = s['bytes-in'] || s['rx-byte'] ? Math.round(Number(s['bytes-in'] || s['rx-byte']) / 1_000_000) : 0;
-      const bytesOut = s['bytes-out'] || s['tx-byte'] ? Math.round(Number(s['bytes-out'] || s['tx-byte']) / 1_000_000) : 0;
-
-      return {
-        id: s['.id'] || s.id || `session-${idx}`,
-        username: s.name || s.user || `user-${idx}`,
-        callerId: s['caller-id'] || s.callerId || '00:00:00:00:00:00',
-        address: s.address || '0.0.0.0',
-        service: 'pppoe',
-        uptime: s.uptime || '0s',
-        rxRateMbps: Number(rxRate.toFixed(2)),
-        txRateMbps: Number(txRate.toFixed(2)),
-        bytesInMb: bytesIn,
-        bytesOutMb: bytesOut,
-        routerId: router.id || '',
-        customerName: s.name || `User ${idx + 1}`,
-        profileName: s.profile || 'default',
-        liveRateFormatted: `↓ ${rxRate.toFixed(1)}M / ↑ ${txRate.toFixed(1)}M`,
-      };
-    });
-
-    // 2. Fetch Live Interfaces (/rest/interface)
-    let interfaces: RouterInterface[] = [];
-    let wanRxMbps = 0;
-    let wanTxMbps = 0;
-
-    try {
-      const ifacesRes = await fetch(`${baseUrl}/interface`, {
+    let activeSessions: ActiveSession[] = options?.cachedSessions || [];
+    if (options?.pollSessions !== false) {
+      const sessionsRes = await fetch(`${baseUrl}/ppp/active`, {
         method: 'GET',
         headers: commonHeaders,
         signal: controller.signal,
       });
 
-      if (ifacesRes.ok) {
-        const ifacesData = await ifacesRes.json();
-        const rawIfaces = Array.isArray(ifacesData) ? ifacesData : [];
+      if (!sessionsRes.ok) {
+        const contentType = sessionsRes.headers.get('content-type') || '';
+        if (contentType.includes('text/html')) {
+          throw new Error(`Netlify Proxy upstream returned HTTP ${sessionsRes.status} (verify router public IP/port reachability)`);
+        }
+        throw new Error(`HTTP ${sessionsRes.status}: ${sessionsRes.statusText}`);
+      }
+
+      const contentType = sessionsRes.headers.get('content-type') || '';
+      if (contentType.includes('text/html')) {
+        throw new Error(`Expected JSON but received HTML response from proxy`);
+      }
+
+      const sessionsData = await sessionsRes.json();
+      const rawSessions = Array.isArray(sessionsData) ? sessionsData : [];
+
+      activeSessions = rawSessions.map((s: any, idx: number) => {
+        const rxRate = s['rx-rate'] ? Number(s['rx-rate']) / 1_000_000 : 0;
+        const txRate = s['tx-rate'] ? Number(s['tx-rate']) / 1_000_000 : 0;
+        const bytesIn = s['bytes-in'] || s['rx-byte'] ? Math.round(Number(s['bytes-in'] || s['rx-byte']) / 1_000_000) : 0;
+        const bytesOut = s['bytes-out'] || s['tx-byte'] ? Math.round(Number(s['bytes-out'] || s['tx-byte']) / 1_000_000) : 0;
+
+        return {
+          id: s['.id'] || s.id || `session-${idx}`,
+          username: s.name || s.user || `user-${idx}`,
+          callerId: s['caller-id'] || s.callerId || '00:00:00:00:00:00',
+          address: s.address || '0.0.0.0',
+          service: 'pppoe',
+          uptime: s.uptime || '0s',
+          rxRateMbps: Number(rxRate.toFixed(2)),
+          txRateMbps: Number(txRate.toFixed(2)),
+          bytesInMb: bytesIn,
+          bytesOutMb: bytesOut,
+          routerId: router.id || '',
+          customerName: s.name || `User ${idx + 1}`,
+          profileName: s.profile || 'default',
+          liveRateFormatted: `↓ ${rxRate.toFixed(1)}M / ↑ ${txRate.toFixed(1)}M`,
+        };
+      });
+    }
+
+    // 2. Fetch Live Interfaces (/rest/interface)
+    let interfaces: RouterInterface[] = options?.cachedInterfaces || [];
+    let wanRxMbps = 0;
+    let wanTxMbps = 0;
+
+    if (options?.pollTraffic !== false) {
+      try {
+        const ifacesRes = await fetch(`${baseUrl}/interface`, {
+          method: 'GET',
+          headers: commonHeaders,
+          signal: controller.signal,
+        });
+
+        if (ifacesRes.ok) {
+          const ifacesData = await ifacesRes.json();
+          const rawIfaces = Array.isArray(ifacesData) ? ifacesData : [];
 
         interfaces = rawIfaces.map((i: any, idx: number) => {
           const isRunning = i.running === true || i.running === 'true';
@@ -186,6 +220,7 @@ export async function fetchMikrotikLiveTelemetry(activeRouter: {
     } catch {
       // Optional interface probe
     }
+  }
 
     // 3. Fetch Live System Resource (/rest/system/resource)
     let cpuLoad = 0;
@@ -244,12 +279,20 @@ export async function fetchMikrotikLiveTelemetry(activeRouter: {
     };
   } catch (err: any) {
     clearTimeout(timeoutId);
+    if (err?.name === 'AbortError' || options?.signal?.aborted) {
+      return {
+        success: false,
+        activeSessions: options?.cachedSessions || [],
+        interfaces: options?.cachedInterfaces || [],
+        error: 'Aborted',
+      };
+    }
     const targetDesc = isNetlify ? `Netlify Proxy (/api/mikrotik -> ${ip}:${targetPort})` : `${ip}:${targetPort}`;
     return {
       success: false,
       error: `Cannot reach router at ${targetDesc} - ${err?.message || 'Check Public IP reachability, SSL cert, or CORS.'}`,
-      activeSessions: [],
-      interfaces: [],
+      activeSessions: options?.cachedSessions || [],
+      interfaces: options?.cachedInterfaces || [],
       router: {
         status: 'unreachable',
       },

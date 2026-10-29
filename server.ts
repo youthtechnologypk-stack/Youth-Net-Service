@@ -1763,6 +1763,9 @@ app.all(['/api/mikrotik/ppp/*', '/api/mikrotik/interface*', '/api/mikrotik/syste
     const authHeader = req.headers['authorization'];
     const fetchHeaders: Record<string, string> = {
       'Accept': (req.headers['accept'] as string) || 'application/json',
+      'Connection': 'close',
+      'Cache-Control': 'no-cache, no-store, must-revalidate',
+      'Pragma': 'no-cache',
     };
     if (authHeader) {
       fetchHeaders['Authorization'] = authHeader as string;
@@ -1775,6 +1778,9 @@ app.all(['/api/mikrotik/ppp/*', '/api/mikrotik/interface*', '/api/mikrotik/syste
       signal: controller.signal,
     });
     clearTimeout(timeoutId);
+    res.setHeader('Connection', 'close');
+    res.setHeader('Cache-Control', 'no-cache, no-store, must-revalidate');
+    res.setHeader('Pragma', 'no-cache');
     res.status(mikrotikRes.status);
     const contentType = mikrotikRes.headers.get('content-type');
     if (contentType) res.setHeader('content-type', contentType);

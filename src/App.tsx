@@ -1,6 +1,6 @@
 import React, { useState, useEffect } from 'react';
 import { CurrencyProvider } from './context/CurrencyContext';
-import { ISPProvider } from './context/ISPContext';
+import { ISPProvider, useISP } from './context/ISPContext';
 import { PermissionProvider } from './context/PermissionContext';
 import { Sidebar } from './components/Sidebar';
 import { Header, ActiveTab } from './components/Header';
@@ -64,6 +64,11 @@ function ISPAppContent() {
     const user = getStoredUser();
     return user ? getLandingTabForRole(user.role) : 'noc';
   });
+
+  const { setActiveViewTab } = useISP();
+  useEffect(() => {
+    setActiveViewTab?.(activeTab);
+  }, [activeTab, setActiveViewTab]);
 
   // Sidebar collapsible state (HIDDEN by default)
   const [isSidebarOpen, setIsSidebarOpen] = useState(false);
