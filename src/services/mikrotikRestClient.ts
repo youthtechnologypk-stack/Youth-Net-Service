@@ -299,3 +299,371 @@ export async function fetchMikrotikLiveTelemetry(
     };
   }
 }
+
+/**
+ * 2. Fetch RouterOS PPPoE Bandwidth Profiles (/rest/ppp/profile)
+ * Resolves profile names like "10M-Unlimited", "default-encryption", etc.
+ */
+export async function fetchMikrotikPppProfiles(
+  activeRouter?: {
+    ipAddress?: string;
+    ip?: string;
+    apiPort?: number;
+    port?: number;
+    username?: string;
+    password?: string;
+  },
+  signal?: AbortSignal
+): Promise<{
+  success: boolean;
+  profiles: Array<{ id: string; name: string; rateLimit?: string }>;
+  error?: string;
+}> {
+  const isBrowser = typeof window !== 'undefined';
+  const targetPort = activeRouter?.port || activeRouter?.apiPort || 8729;
+  const ip = (activeRouter?.ip || activeRouter?.ipAddress || '202.142.186.150').trim();
+  const username = activeRouter?.username?.trim() || 'admin';
+  const password = activeRouter?.password || '';
+
+  let authHeader = '';
+  try {
+    authHeader = 'Basic ' + btoa(`${username}:${password}`);
+  } catch {
+    authHeader = 'Basic ' + btoa('admin:');
+  }
+
+  const isNetlify =
+    isBrowser &&
+    (window.location.hostname.includes('netlify.app') ||
+      window.location.hostname.includes('youthnetw') ||
+      window.location.hostname.includes('netlify') ||
+      (window.location.hostname !== 'localhost' &&
+        window.location.hostname !== '127.0.0.1' &&
+        ip === '202.142.186.150'));
+
+  const baseUrl = isNetlify
+    ? `${window.location.origin}/api/mikrotik`
+    : `https://${ip}:${targetPort}/rest`;
+
+  const commonHeaders: Record<string, string> = {
+    Authorization: authHeader,
+    Accept: 'application/json',
+    Connection: 'close',
+    'Cache-Control': 'no-cache, no-store, must-revalidate',
+    Pragma: 'no-cache',
+  };
+
+  const controller = new AbortController();
+  const timeoutId = setTimeout(() => controller.abort(), 6000);
+  if (signal) {
+    signal.addEventListener('abort', () => controller.abort(), { once: true });
+  }
+
+  try {
+    const res = await fetch(`${baseUrl}/ppp/profile`, {
+      method: 'GET',
+      headers: commonHeaders,
+      signal: controller.signal,
+    });
+    clearTimeout(timeoutId);
+
+    if (!res.ok) {
+      throw new Error(`HTTP ${res.status}: ${res.statusText}`);
+    }
+
+    const data = await res.json();
+    const rawList = Array.isArray(data) ? data : [];
+    const profiles = rawList
+      .map((p: any, idx: number) => ({
+        id: p['.id'] || p.id || `prof-${idx}`,
+        name: p.name || `profile-${idx}`,
+        rateLimit: p['rate-limit'] || p.rateLimit || '',
+      }))
+      .filter((p: any) => p.name);
+
+    return {
+      success: true,
+      profiles,
+    };
+  } catch (err: any) {
+    clearTimeout(timeoutId);
+    return {
+      success: false,
+      profiles: [],
+      error: err.message,
+    };
+  }
+}
+
+/**
+ * 3. Monitor Interface Live Traffic (/rest/interface/monitor-traffic)
+ * Calls POST /api/mikrotik/interface/monitor-traffic with body {"interface": interfaceName, "once": "yes"}
+ */
+export async function monitorInterfaceTraffic(
+  activeRouter: {
+    ipAddress?: string;
+    ip?: string;
+    apiPort?: number;
+    port?: number;
+    username?: string;
+    password?: string;
+    uplinkInterface?: string;
+    wanInterface?: string;
+  },
+  signal?: AbortSignal
+): Promise<{
+  success: boolean;
+  rxMbps: number;
+  txMbps: number;
+  rxBps: number;
+  txBps: number;
+  interfaceName: string;
+  error?: string;
+}> {
+  const isBrowser = typeof window !== 'undefined';
+  const targetPort = activeRouter?.port || activeRouter?.apiPort || 8729;
+  const ip = (activeRouter?.ip || activeRouter?.ipAddress || '202.142.186.150').trim();
+  const username = activeRouter?.username?.trim() || 'admin';
+  const password = activeRouter?.password || '';
+  const ifaceName = activeRouter?.uplinkInterface || activeRouter?.wanInterface || 'WAN3';
+
+  let authHeader = '';
+  try {
+    authHeader = 'Basic ' + btoa(`${username}:${password}`);
+  } catch {
+    authHeader = 'Basic ' + btoa('admin:');
+  }
+
+  const isNetlify =
+    isBrowser &&
+    (window.location.hostname.includes('netlify.app') ||
+      window.location.hostname.includes('youthnetw') ||
+      window.location.hostname.includes('netlify') ||
+      (window.location.hostname !== 'localhost' &&
+        window.location.hostname !== '127.0.0.1' &&
+        ip === '202.142.186.150'));
+
+  const baseUrl = isNetlify
+    ? `${window.location.origin}/api/mikrotik`
+    : `https://${ip}:${targetPort}/rest`;
+
+  const commonHeaders: Record<string, string> = {
+    Authorization: authHeader,
+    Accept: 'application/json',
+    'Content-Type': 'application/json',
+    Connection: 'close',
+    'Cache-Control': 'no-cache, no-store, must-revalidate',
+    Pragma: 'no-cache',
+  };
+
+  const controller = new AbortController();
+  const timeoutId = setTimeout(() => controller.abort(), 4000);
+  if (signal) {
+    signal.addEventListener('abort', () => controller.abort(), { once: true });
+  }
+
+  try {
+    const res = await fetch(`${baseUrl}/interface/monitor-traffic`, {
+      method: 'POST',
+      headers: commonHeaders,
+      body: JSON.stringify({
+        interface: ifaceName,
+        once: 'yes',
+      }),
+      signal: controller.signal,
+    });
+    clearTimeout(timeoutId);
+
+    if (!res.ok) {
+      throw new Error(`HTTP ${res.status}: ${res.statusText}`);
+    }
+
+    const data = await res.json();
+    const item = Array.isArray(data) ? data[0] : data;
+    const rxBps = Number(item?.['rx-bits-per-second'] ?? item?.rxBitsPerSecond ?? 0);
+    const txBps = Number(item?.['tx-bits-per-second'] ?? item?.txBitsPerSecond ?? 0);
+    const rxMbps = Number((rxBps / 1_000_000).toFixed(2));
+    const txMbps = Number((txBps / 1_000_000).toFixed(2));
+
+    return {
+      success: true,
+      rxMbps,
+      txMbps,
+      rxBps,
+      txBps,
+      interfaceName: item?.name || ifaceName,
+    };
+  } catch (err: any) {
+    clearTimeout(timeoutId);
+    return {
+      success: false,
+      rxMbps: 0,
+      txMbps: 0,
+      rxBps: 0,
+      txBps: 0,
+      interfaceName: ifaceName,
+      error: err.message,
+    };
+  }
+}
+
+/**
+ * 4. Provision PPPoE Secret (/rest/ppp/secret/add)
+ * Creation Endpoint: POST /api/mikrotik/ppp/secret/add
+ */
+export async function provisionPppoeSecretRest(
+  activeRouter: {
+    ipAddress?: string;
+    ip?: string;
+    apiPort?: number;
+    port?: number;
+    username?: string;
+    password?: string;
+  },
+  payload: {
+    name: string;
+    password: string;
+    service?: string;
+    profile: string;
+    comment?: string;
+  }
+): Promise<{ success: boolean; data?: any; error?: string }> {
+  const isBrowser = typeof window !== 'undefined';
+  const targetPort = activeRouter?.port || activeRouter?.apiPort || 8729;
+  const ip = (activeRouter?.ip || activeRouter?.ipAddress || '202.142.186.150').trim();
+  const username = activeRouter?.username?.trim() || 'admin';
+  const password = activeRouter?.password || '';
+
+  let authHeader = '';
+  try {
+    authHeader = 'Basic ' + btoa(`${username}:${password}`);
+  } catch {
+    authHeader = 'Basic ' + btoa('admin:');
+  }
+
+  const isNetlify =
+    isBrowser &&
+    (window.location.hostname.includes('netlify.app') ||
+      window.location.hostname.includes('youthnetw') ||
+      window.location.hostname.includes('netlify') ||
+      (window.location.hostname !== 'localhost' &&
+        window.location.hostname !== '127.0.0.1' &&
+        ip === '202.142.186.150'));
+
+  const baseUrl = isNetlify
+    ? `${window.location.origin}/api/mikrotik`
+    : `https://${ip}:${targetPort}/rest`;
+
+  const commonHeaders: Record<string, string> = {
+    Authorization: authHeader,
+    Accept: 'application/json',
+    'Content-Type': 'application/json',
+    Connection: 'close',
+    'Cache-Control': 'no-cache, no-store, must-revalidate',
+    Pragma: 'no-cache',
+  };
+
+  const bodyData = {
+    name: payload.name,
+    password: payload.password,
+    service: payload.service || 'pppoe',
+    profile: payload.profile,
+    comment: payload.comment || 'YouthNet-App',
+  };
+
+  try {
+    let res = await fetch(`${baseUrl}/ppp/secret/add`, {
+      method: 'POST',
+      headers: commonHeaders,
+      body: JSON.stringify(bodyData),
+    });
+
+    if (!res.ok && (res.status === 404 || res.status === 405)) {
+      res = await fetch(`${baseUrl}/ppp/secret`, {
+        method: 'PUT',
+        headers: commonHeaders,
+        body: JSON.stringify(bodyData),
+      });
+    }
+
+    if (!res.ok) {
+      const errText = await res.text().catch(() => '');
+      throw new Error(`Router returned HTTP ${res.status}: ${errText || res.statusText}`);
+    }
+
+    const data = await res.json().catch(() => ({ success: true }));
+    return { success: true, data };
+  } catch (err: any) {
+    return { success: false, error: err.message };
+  }
+}
+
+/**
+ * Fetch PPPoE Secrets (/rest/ppp/secret)
+ */
+export async function fetchMikrotikPppSecrets(
+  activeRouter?: {
+    ipAddress?: string;
+    ip?: string;
+    apiPort?: number;
+    port?: number;
+    username?: string;
+    password?: string;
+  }
+): Promise<{ success: boolean; secrets: any[]; error?: string }> {
+  const isBrowser = typeof window !== 'undefined';
+  const targetPort = activeRouter?.port || activeRouter?.apiPort || 8729;
+  const ip = (activeRouter?.ip || activeRouter?.ipAddress || '202.142.186.150').trim();
+  const username = activeRouter?.username?.trim() || 'admin';
+  const password = activeRouter?.password || '';
+
+  let authHeader = '';
+  try {
+    authHeader = 'Basic ' + btoa(`${username}:${password}`);
+  } catch {
+    authHeader = 'Basic ' + btoa('admin:');
+  }
+
+  const isNetlify =
+    isBrowser &&
+    (window.location.hostname.includes('netlify.app') ||
+      window.location.hostname.includes('youthnetw') ||
+      window.location.hostname.includes('netlify') ||
+      (window.location.hostname !== 'localhost' &&
+        window.location.hostname !== '127.0.0.1' &&
+        ip === '202.142.186.150'));
+
+  const baseUrl = isNetlify
+    ? `${window.location.origin}/api/mikrotik`
+    : `https://${ip}:${targetPort}/rest`;
+
+  const commonHeaders: Record<string, string> = {
+    Authorization: authHeader,
+    Accept: 'application/json',
+    Connection: 'close',
+    'Cache-Control': 'no-cache, no-store, must-revalidate',
+    Pragma: 'no-cache',
+  };
+
+  try {
+    const res = await fetch(`${baseUrl}/ppp/secret`, {
+      method: 'GET',
+      headers: commonHeaders,
+    });
+    if (!res.ok) {
+      throw new Error(`HTTP ${res.status}: ${res.statusText}`);
+    }
+    const data = await res.json();
+    return {
+      success: true,
+      secrets: Array.isArray(data) ? data : [],
+    };
+  } catch (err: any) {
+    return {
+      success: false,
+      secrets: [],
+      error: err.message,
+    };
+  }
+}
+

@@ -8,7 +8,7 @@ interface ProvisionSecretModalProps {
 }
 
 export const ProvisionSecretModal: React.FC<ProvisionSecretModalProps> = ({ isOpen, onClose }) => {
-  const { packages, routers, selectedRouterId, provisionPppoeSecret } = useISP();
+  const { packages, routers, selectedRouterId, provisionPppoeSecret, dynamicPppProfiles } = useISP();
 
   const [name, setName] = useState('');
   const [phone, setPhone] = useState('+92');
@@ -16,8 +16,16 @@ export const ProvisionSecretModal: React.FC<ProvisionSecretModalProps> = ({ isOp
   const [areaNode, setAreaNode] = useState('Sector G-11 (North Zone)');
   const [pppoeUsername, setPppoeUsername] = useState('');
   const [pppoePassword, setPppoePassword] = useState('fiber1234');
-  const [packageId, setPackageId] = useState(packages[1]?.id || packages[0]?.id);
+  const [packageId, setPackageId] = useState(
+    dynamicPppProfiles?.[0]?.name || packages[1]?.id || packages[0]?.id || 'default'
+  );
   const [isSubmitting, setIsSubmitting] = useState(false);
+
+  React.useEffect(() => {
+    if (dynamicPppProfiles && dynamicPppProfiles.length > 0 && !packageId) {
+      setPackageId(dynamicPppProfiles[0].name);
+    }
+  }, [dynamicPppProfiles]);
 
   if (!isOpen) return null;
 
@@ -130,17 +138,25 @@ export const ProvisionSecretModal: React.FC<ProvisionSecretModalProps> = ({ isOp
             </div>
 
             <div>
-              <label className="block text-slate-400 mb-1">Bandwidth Package</label>
+              <label className="block text-slate-400 mb-1">Bandwidth Profile / Package</label>
               <select
                 value={packageId}
                 onChange={(e) => setPackageId(e.target.value)}
-                className="w-full bg-slate-950 border border-slate-700 text-slate-100 p-2 rounded focus:outline-none focus:border-cyan-500"
+                className="w-full bg-slate-950 border border-slate-700 text-slate-100 p-2 rounded focus:outline-none focus:border-cyan-500 font-mono"
               >
-                {packages.map((pkg) => (
-                  <option key={pkg.id} value={pkg.id}>
-                    {pkg.name} (${pkg.priceMonthly}/mo)
-                  </option>
-                ))}
+                {dynamicPppProfiles && dynamicPppProfiles.length > 0 ? (
+                  dynamicPppProfiles.map((prof) => (
+                    <option key={prof.id || prof.name} value={prof.name}>
+                      {prof.name} {prof.rateLimit ? `(${prof.rateLimit})` : ''}
+                    </option>
+                  ))
+                ) : (
+                  packages.map((pkg) => (
+                    <option key={pkg.id} value={pkg.id}>
+                      {pkg.name} (${pkg.priceMonthly}/mo)
+                    </option>
+                  ))
+                )}
               </select>
             </div>
           </div>

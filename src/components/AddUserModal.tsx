@@ -17,6 +17,12 @@ import {
 } from 'lucide-react';
 import { useISP } from '../context/ISPContext';
 import { safeResponseJson } from '../lib/safeFetch';
+import {
+  fetchMikrotikPppProfiles,
+  provisionPppoeSecretRest,
+  fetchMikrotikPppSecrets,
+  fetchMikrotikLiveTelemetry,
+} from '../services/mikrotikRestClient';
 
 interface AddUserModalProps {
   isOpen: boolean;
@@ -33,7 +39,14 @@ interface DynamicProfile {
 }
 
 export const AddUserModal: React.FC<AddUserModalProps> = ({ isOpen, onClose, onSuccess }) => {
-  const { routers, selectedRouterId, packages, fetchCustomersFromDb } = useISP();
+  const {
+    routers,
+    selectedRouterId,
+    packages,
+    fetchCustomersFromDb,
+    syncSelectedRouterNow,
+    dynamicPppProfiles,
+  } = useISP();
 
   const [routerId, setRouterId] = useState(selectedRouterId || (routers[0]?.id || ''));
   const [username, setUsername] = useState('');
@@ -79,6 +92,28 @@ export const AddUserModal: React.FC<AddUserModalProps> = ({ isOpen, onClose, onS
       setProfileError(null);
 
       try {
+        const targetRouter = routers.find((r) => r.id === routerId) || routers[0];
+        // 1. Fetch PPPoE Bandwidth profiles from GET /api/mikrotik/ppp/profile (RouterOS v7)
+        if (targetRouter) {
+          const restResult = await fetchMikrotikPppProfiles(targetRouter);
+          if (restResult.success && Array.isArray(restResult.profiles) && restResult.profiles.length > 0) {
+            setProfiles(restResult.profiles);
+            if (!profile || !restResult.profiles.some((p: any) => p.name === profile)) {
+              setProfile(restResult.profiles[0].name);
+            }
+            return;
+          }
+        }
+
+        // 2. Fallback to dynamicPppProfiles from context if available
+        if (dynamicPppProfiles && dynamicPppProfiles.length > 0) {
+          setProfiles(dynamicPppProfiles);
+          if (!profile || !dynamicPppProfiles.some((p: any) => p.name === profile)) {
+            setProfile(dynamicPppProfiles[0].name);
+          }
+          return;
+        }
+
         const res = await fetch(`/api/mikrotik/profiles?routerId=${encodeURIComponent(routerId)}`);
         const json = await safeResponseJson<any>(res, { success: false, profiles: [] });
 
@@ -98,9 +133,6 @@ export const AddUserModal: React.FC<AddUserModalProps> = ({ isOpen, onClose, onS
           if (fallbackList[0] && !profile) {
             setProfile(fallbackList[0].name);
           }
-          if (json.error) {
-            setProfileError(`Could not query physical router: ${json.error}. Using local carrier profiles.`);
-          }
         }
       } catch (err: any) {
         // Fallback to packages
@@ -119,7 +151,7 @@ export const AddUserModal: React.FC<AddUserModalProps> = ({ isOpen, onClose, onS
     };
 
     loadProfiles();
-  }, [isOpen, routerId, packages]);
+  }, [isOpen, routerId, packages, dynamicPppProfiles]);
 
   if (!isOpen) return null;
 
@@ -143,9 +175,29 @@ export const AddUserModal: React.FC<AddUserModalProps> = ({ isOpen, onClose, onS
     setIsSubmitting(true);
     setSubmissionError(null);
 
-    const comment = `${fullName.trim() || username} | ${phone.trim()} | ${address.trim()}`;
+    const comment = `${fullName.trim() || username} | ${phone.trim()} | ${address.trim()} | YouthNet-App`;
 
     try {
+      // 1. Direct Creation Endpoint: POST /api/mikrotik/ppp/secret/add
+      let restProvisioned = false;
+      if (currentRouter) {
+        try {
+          const restRes = await provisionPppoeSecretRest(currentRouter, {
+            name: username.trim(),
+            password: password.trim(),
+            service: service || 'pppoe',
+            profile: profile || 'default',
+            comment,
+          });
+          if (restRes.success) {
+            restProvisioned = true;
+          }
+        } catch (restErr) {
+          console.warn('REST Secret provision warning:', restErr);
+        }
+      }
+
+      // 2. Persist to database & cache
       const res = await fetch('/api/mikrotik/users', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
@@ -169,10 +221,30 @@ export const AddUserModal: React.FC<AddUserModalProps> = ({ isOpen, onClose, onS
       const data = await safeResponseJson(res);
 
       if (!res.ok || !data.success) {
-        throw new Error(data.error || 'Failed to provision user on MikroTik router.');
+        if (!restProvisioned) {
+          throw new Error(data.error || 'Failed to provision user on MikroTik router.');
+        }
       }
 
-      setSuccessData(data.user);
+      setSuccessData(data.user || {
+        username: username.trim(),
+        password: password.trim(),
+        service,
+        profile,
+        remoteAddress: remoteIp.trim(),
+      });
+
+      // 3. Immediately trigger a re-fetch of /api/mikrotik/ppp/active and /api/mikrotik/ppp/secret
+      if (currentRouter) {
+        Promise.all([
+          fetchMikrotikLiveTelemetry(currentRouter, { pollSessions: true, pollTraffic: false }),
+          fetchMikrotikPppSecrets(currentRouter),
+        ]).catch(() => {});
+      }
+
+      if (syncSelectedRouterNow) {
+        await syncSelectedRouterNow().catch(() => {});
+      }
       if (fetchCustomersFromDb) {
         await fetchCustomersFromDb();
       }

@@ -34,7 +34,13 @@ import { MikrotikRouterOSv7Service } from '../services/mikrotikRouterOSv7';
 import { BillingCronEngine } from '../services/cronBillingEngine';
 import { safeResponseJson } from '../lib/safeFetch';
 import { formatCurrency } from './CurrencyContext';
-import { fetchMikrotikLiveTelemetry } from '../services/mikrotikRestClient';
+import {
+  fetchMikrotikLiveTelemetry,
+  fetchMikrotikPppProfiles,
+  monitorInterfaceTraffic,
+  provisionPppoeSecretRest,
+  fetchMikrotikPppSecrets,
+} from '../services/mikrotikRestClient';
 
 interface BandwidthDataPoint {
   time: string;
@@ -61,6 +67,8 @@ interface ISPContextType {
   setIsTrafficStreaming: (val: boolean) => void;
   activeViewTab: string;
   setActiveViewTab: (tab: string) => void;
+  dynamicPppProfiles: Array<{ id: string; name: string; rateLimit?: string }>;
+  fetchPppProfiles: () => Promise<Array<{ id: string; name: string; rateLimit?: string }>>;
   lastCronMessage: string | null;
   routerError: string | null;
   isSyncingRouter: boolean;
@@ -567,6 +575,29 @@ export const ISPProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
 
   const lastSessionsPollTimeRef = useRef(0);
 
+  // RouterOS PPPoE Bandwidth Profiles loaded from /rest/ppp/profile
+  const [dynamicPppProfiles, setDynamicPppProfiles] = useState<Array<{ id: string; name: string; rateLimit?: string }>>([]);
+
+  const fetchPppProfiles = async (): Promise<Array<{ id: string; name: string; rateLimit?: string }>> => {
+    try {
+      const targetRouter =
+        routersRef.current.find((r) => r.id === selectedRouterId) ||
+        routersRef.current[0];
+      const res = await fetchMikrotikPppProfiles(targetRouter);
+      if (res.success && res.profiles.length > 0) {
+        setDynamicPppProfiles(res.profiles);
+        return res.profiles;
+      }
+    } catch {
+      // Gracefully fall back to local profiles
+    }
+    return dynamicPppProfiles;
+  };
+
+  useEffect(() => {
+    fetchPppProfiles();
+  }, [selectedRouterId]);
+
   // Bandwidth history for real-time live graphs (15 data points, initialized with 0)
   const [bandwidthHistory, setBandwidthHistory] = useState<BandwidthDataPoint[]>(() => {
     const initial: BandwidthDataPoint[] = [];
@@ -807,6 +838,78 @@ export const ISPProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
     };
   }, [isTrafficStreaming, selectedRouterId]);
 
+  // Dedicated 2-Second Interface Monitor-Traffic Poller for live Recharts throughput graph
+  // Uses POST /api/mikrotik/interface/monitor-traffic with body {"interface": activeRouter.uplinkInterface || "WAN3", "once": "yes"}
+  useEffect(() => {
+    if (!isTrafficStreaming || !selectedRouterId) return;
+
+    let isMounted = true;
+    let inFlight = false;
+    let abortController: AbortController | null = null;
+
+    const pollMonitorTraffic = async () => {
+      if (typeof document !== 'undefined' && document.hidden) return;
+      const isViewingTrafficWidget =
+        activeViewTabRef.current === 'noc' ||
+        activeViewTabRef.current === 'mikrotik';
+      if (!isViewingTrafficWidget) return;
+
+      if (inFlight) return;
+      inFlight = true;
+
+      if (abortController) {
+        abortController.abort();
+      }
+      abortController = new AbortController();
+
+      try {
+        const targetRouter =
+          routersRef.current.find((r) => r.id === selectedRouterId) ||
+          routersRef.current[0];
+        if (!targetRouter) return;
+
+        const res = await monitorInterfaceTraffic(targetRouter, abortController.signal);
+        if (!isMounted || abortController.signal.aborted) return;
+
+        if (res.success) {
+          const nowStr = new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' });
+          setBandwidthHistory((prev) => [
+            ...prev.slice(1),
+            { time: nowStr, rxMbps: res.rxMbps, txMbps: res.txMbps },
+          ]);
+          setRouters((prev) =>
+            prev.map((r) =>
+              r.id === selectedRouterId
+                ? {
+                    ...r,
+                    currentWanRxMbps: res.rxMbps,
+                    currentWanTxMbps: res.txMbps,
+                    status: 'online',
+                  }
+                : r
+            )
+          );
+        }
+      } catch {
+        // Non-blocking error
+      } finally {
+        inFlight = false;
+      }
+    };
+
+    pollMonitorTraffic();
+    const interval = setInterval(pollMonitorTraffic, 2000);
+
+    return () => {
+      isMounted = false;
+      if (abortController) {
+        abortController.abort();
+        abortController = null;
+      }
+      clearInterval(interval);
+    };
+  }, [isTrafficStreaming, selectedRouterId]);
+
   // Automated 5-Minute Unassigned Complaint Auto-Escalation Scanner
   useEffect(() => {
     const autoEscalationInterval = setInterval(() => {
@@ -879,18 +982,44 @@ export const ISPProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
     newCustomer: Partial<Customer>,
     initialBalance: number = 0
   ) => {
-    const targetPkg = packages.find((p) => p.id === newCustomer.packageId) || packages[0];
+    const targetPkg = packages.find((p) => p.id === newCustomer.packageId || p.mikrotikProfile === newCustomer.packageId) || packages[0];
     const username = newCustomer.pppoeUsername || `user_${Date.now().toString().slice(-4)}`;
+    const selectedProfile = newCustomer.packageId || targetPkg?.mikrotikProfile || 'default';
+    const customerComment = newCustomer.name ? `${newCustomer.name} | ${newCustomer.phone || ''} | YouthNet-App` : 'YouthNet-App';
 
-    await mikrotikService.createPppoeSecret({
-      name: username,
-      password: newCustomer.pppoePassword || 'pass1234',
-      profile: targetPkg.mikrotikProfile,
-      remoteAddress: newCustomer.assignedIp,
-      comment: `NETPULSE_PROVISIONED_${new Date().toISOString()}`,
-    });
+    const targetRouter =
+      routersRef.current.find((r) => r.id === selectedRouterId) ||
+      routersRef.current[0];
 
-    const basePrice = targetPkg.priceMonthly;
+    // 1. Creation Endpoint: POST /api/mikrotik/ppp/secret/add
+    if (targetRouter) {
+      try {
+        await provisionPppoeSecretRest(targetRouter, {
+          name: username,
+          password: newCustomer.pppoePassword || 'pass1234',
+          service: 'pppoe',
+          profile: selectedProfile,
+          comment: customerComment,
+        });
+      } catch (err) {
+        console.warn('REST Secret provision warning:', err);
+      }
+
+      // 2. Immediate re-fetch of /api/mikrotik/ppp/active and /api/mikrotik/ppp/secret
+      try {
+        const [activeRes] = await Promise.all([
+          fetchMikrotikLiveTelemetry(targetRouter, { pollSessions: true, pollTraffic: false }),
+          fetchMikrotikPppSecrets(targetRouter),
+        ]);
+        if (activeRes.success) {
+          setActiveSessions(activeRes.activeSessions);
+        }
+      } catch (err) {
+        console.warn('Post-provision re-fetch notice:', err);
+      }
+    }
+
+    const basePrice = targetPkg ? targetPkg.priceMonthly : 2500;
     const taxRate = 0.16;
     const taxAmount = Math.round(basePrice * taxRate);
     const totalAmount = basePrice + taxAmount;
@@ -2840,6 +2969,8 @@ export const ISPProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
         setIsTrafficStreaming,
         activeViewTab,
         setActiveViewTab,
+        dynamicPppProfiles,
+        fetchPppProfiles,
         lastCronMessage,
         routerError,
         isSyncingRouter,

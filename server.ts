@@ -1772,11 +1772,16 @@ app.all(['/api/mikrotik/ppp/*', '/api/mikrotik/interface*', '/api/mikrotik/syste
     }
     const controller = new AbortController();
     const timeoutId = setTimeout(() => controller.abort(), 7000);
-    const mikrotikRes = await fetch(targetUrl, {
+    const fetchOptions: RequestInit = {
       method: req.method,
       headers: fetchHeaders,
       signal: controller.signal,
-    });
+    };
+    if (req.method !== 'GET' && req.method !== 'HEAD' && req.body) {
+      fetchHeaders['Content-Type'] = 'application/json';
+      fetchOptions.body = typeof req.body === 'string' ? req.body : JSON.stringify(req.body);
+    }
+    const mikrotikRes = await fetch(targetUrl, fetchOptions);
     clearTimeout(timeoutId);
     res.setHeader('Connection', 'close');
     res.setHeader('Cache-Control', 'no-cache, no-store, must-revalidate');
