@@ -1045,13 +1045,13 @@ app.post('/api/auth/login', async (req: Request, res: Response) => {
     const candidateHash = hashPassword(cleanPass);
 
     // Standard credential matches for the 4 default testing accounts:
-    // admin / admin@123
+    // admin / P@ssword (or admin@123)
     // manager / mgr@123 (or manager@123)
     // agent / agent@123
     // client / client@123
     const isMatched =
       user.password_hash === candidateHash ||
-      (cleanUser === 'admin' && cleanPass === 'admin@123') ||
+      (cleanUser === 'admin' && (cleanPass === 'P@ssword' || cleanPass === 'admin@123')) ||
       (cleanUser === 'manager' && (cleanPass === 'mgr@123' || cleanPass === 'manager@123')) ||
       (cleanUser === 'agent' && cleanPass === 'agent@123') ||
       (cleanUser === 'client' && cleanPass === 'client@123');

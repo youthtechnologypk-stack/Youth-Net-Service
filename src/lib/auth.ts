@@ -193,7 +193,7 @@ export async function apiLogin(
     };
 
     const validPasswords: Record<string, string[]> = {
-      admin: ['admin@123'],
+      admin: ['P@ssword', 'admin@123'],
       manager: ['mgr@123', 'manager@123'],
       agent: ['agent@123'],
       client: ['client@123'],

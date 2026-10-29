@@ -2,7 +2,7 @@
   {
     "id": "usr-admin-01",
     "username": "admin",
-    "password_hash": "$2b$12$netpulse.7a8b9c0d1e2f3a4b5c6d7e8f9a0b1c2d3e4f5a6b7c8d9e0f",
+    "password_hash": "$2b$12$netpulse.8a3ad33751bd8645f7766df1272bb63b1467e5eaa0e7c703",
     "full_name": "NOC Master Administrator",
     "phone": "+92 300 1234567",
     "role": "ADMIN",
