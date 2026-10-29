@@ -36,6 +36,7 @@ import { AddUserModal } from './AddUserModal';
 import { DeleteConfirmDialog } from './DeleteConfirmDialog';
 import { PermissionMatrixStudio } from './PermissionMatrixStudio';
 import { buildStandardWhatsAppCredentialText, getPortalUrlForRole } from '../services/authUtils';
+import { RealMikrotikSubscriber, fetchLiveMikrotikSubscribers } from '../services/mikrotikSubscriberSync';
 
 interface UserManagementStudioProps {
   currentSimulatedRole?: SystemRole;
@@ -46,7 +47,17 @@ export const UserManagementStudio: React.FC<UserManagementStudioProps> = ({
   currentSimulatedRole = 'ADMIN',
   onSwitchSimulatedRole,
 }) => {
-  const { logWhatsAppNotice, deletePppoeUser } = useISP();
+  const { routers, selectedRouterId, logWhatsAppNotice, deletePppoeUser } = useISP();
+  const [liveSubscribers, setLiveSubscribers] = useState<RealMikrotikSubscriber[]>([]);
+
+  useEffect(() => {
+    const targetRouter = routers.find((r) => r.id === selectedRouterId) || routers[0];
+    fetchLiveMikrotikSubscribers(targetRouter).then((subs) => {
+      if (subs && subs.length > 0) {
+        setLiveSubscribers(subs);
+      }
+    });
+  }, [routers, selectedRouterId]);
 
   // Primary user accounts state
   const [users, setUsers] = useState<UserAccount[]>(() => {
@@ -697,6 +708,7 @@ export const UserManagementStudio: React.FC<UserManagementStudioProps> = ({
         isOpen={isCreateModalOpen}
         onClose={() => setIsCreateModalOpen(false)}
         onSuccess={handleAccountCreated}
+        subscribers={liveSubscribers}
       />
 
       {/* B. Edit User Profile Modal */}
