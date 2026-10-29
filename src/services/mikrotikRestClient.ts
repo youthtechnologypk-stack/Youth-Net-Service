@@ -78,7 +78,7 @@ export async function fetchMikrotikLiveTelemetry(activeRouter: {
         ip === '202.142.186.150'));
 
   // When running on Netlify, rewrite request path to same-origin Netlify proxy rewrite
-  // (/api/mikrotik/* -> https://202.142.186.150:8729/rest/:splat 200!)
+  // (/api/mikrotik/* -> http://202.142.186.150:81/rest/:splat 200!)
   // to eliminate browser CORS blocking on RouterOS v7.
   const baseUrl = isNetlify
     ? `${window.location.origin}/api/mikrotik`

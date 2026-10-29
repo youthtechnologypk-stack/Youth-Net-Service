@@ -1758,7 +1758,7 @@ app.get('/api/mikrotik/customers', async (_req: Request, res: Response) => {
  */
 app.all(['/api/mikrotik/ppp/*', '/api/mikrotik/interface*', '/api/mikrotik/system/*'], async (req: Request, res: Response) => {
   const subpath = req.path.replace(/^\/api\/mikrotik\//, '');
-  const targetUrl = `https://202.142.186.150:8729/rest/${subpath}${req.url.includes('?') ? req.url.slice(req.url.indexOf('?')) : ''}`;
+  const targetUrl = `http://202.142.186.150:81/rest/${subpath}${req.url.includes('?') ? req.url.slice(req.url.indexOf('?')) : ''}`;
   try {
     const authHeader = req.headers['authorization'];
     const fetchHeaders: Record<string, string> = {
