@@ -52,12 +52,7 @@ import {
   getSubscriberInterfaceTraffic,
   routerOSPool,
 } from './src/lib/mikrotikConnection.js';
-import {
-  INITIAL_CUSTOMERS,
-  INITIAL_INVOICES,
-  INITIAL_COMPLAINTS,
-  INITIAL_PACKAGES,
-} from './src/data/initialData.js';
+import { INITIAL_PACKAGES } from './src/data/initialData.js';
 import { RouterOSAPI } from 'node-routeros';
 import { MikrotikRouter } from './src/types/isp.js';
 
@@ -1507,6 +1502,11 @@ app.post('/api/mikrotik/users', async (req: Request, res: Response) => {
       areaNode,
       packageId,
       routerId,
+      createdDate,
+      expiryDate,
+      validityDays,
+      expiredProfile,
+      isolationPool,
     } = req.body;
 
     const finalUsername = String(username || '').trim();
@@ -1582,6 +1582,11 @@ app.post('/api/mikrotik/users', async (req: Request, res: Response) => {
       routerId: targetRouterId || 'rt-core-01',
       status: 'active',
       comment: finalComment,
+      createdDate: createdDate || new Date().toISOString().split('T')[0],
+      expiryDate: expiryDate || undefined,
+      validityDays: validityDays ? Number(validityDays) : 30,
+      expiredProfile: expiredProfile || 'EXPIRED-POOL',
+      isolationPool: isolationPool || '16.16.16.0/24',
     });
 
     res.status(201).json({
@@ -1814,49 +1819,22 @@ app.get('/api/subscribers/:username/360', async (req: Request, res: Response) =>
     const dbCustomers = await getAllCustomersFromDb().catch(() => []);
     let customer: any = dbCustomers.find((c) => c.pppoeUsername.toLowerCase() === username);
 
-    // If not found in DB, search initial seed customers
-    if (!customer) {
-      const seedCust = INITIAL_CUSTOMERS.find((c) => c.pppoeUsername.toLowerCase() === username);
-      if (seedCust) {
-        customer = {
-          id: seedCust.id,
-          accountNumber: seedCust.accountNumber,
-          name: seedCust.name,
-          phone: seedCust.phone,
-          email: seedCust.email,
-          address: seedCust.address,
-          areaNode: seedCust.areaNode,
-          connectionType: seedCust.connectionType,
-          pppoeUsername: seedCust.pppoeUsername,
-          assignedIp: seedCust.assignedIp,
-          macAddress: seedCust.macAddress,
-          packageId: seedCust.packageId,
-          routerId: seedCust.routerId,
-          status: seedCust.status,
-          balanceDue: seedCust.balanceDue,
-          comment: '',
-          isDeleted: false,
-          createdAt: seedCust.installationDate,
-        };
-      }
-    }
-
-    // If still not found, construct a placeholder subscriber
+    // If not found in DB, construct live subscriber model for the active PPPoE username
     if (!customer) {
       customer = {
         id: `cust-${username}`,
         accountNumber: `NP-${username.toUpperCase().slice(0, 6)}`,
-        name: `PPPoE: ${username}`,
-        phone: '+92 300 1234567',
-        email: `${username}@netpulse.io`,
-        address: 'Sector Node 01',
-        areaNode: 'Core Distribution',
+        name: username,
+        phone: '',
+        email: '',
+        address: '',
+        areaNode: 'Main BNG Node',
         connectionType: 'pppoe',
         pppoeUsername: username,
-        assignedIp: '10.50.12.0',
+        assignedIp: '',
         macAddress: '',
-        packageId: 'pkg-2',
-        routerId: 'rt-core-01',
+        packageId: '',
+        routerId: '',
         status: 'active',
         balanceDue: 0,
         isDeleted: false,
@@ -1864,107 +1842,17 @@ app.get('/api/subscribers/:username/360', async (req: Request, res: Response) =>
       };
     }
 
-    // 2. Invoices matching this customer
-    let customerInvoices = INITIAL_INVOICES.filter(
-      (inv) =>
-        inv.customerId === customer?.id ||
-        inv.customerName?.toLowerCase() === customer?.name?.toLowerCase() ||
-        inv.customerPhone === customer?.phone
-    );
+    // 2. Real invoices matching this customer (empty if none exist in DB)
+    const customerInvoices: any[] = [];
 
-    if (customerInvoices.length === 0) {
-      customerInvoices = [
-        {
-          id: `inv-${customer.id}-curr`,
-          invoiceNumber: `INV-202610-${(customer.accountNumber || '').replace(/\D/g, '').slice(0, 4) || '1088'}`,
-          customerId: customer.id,
-          customerName: customer.name,
-          customerPhone: customer.phone,
-          packageId: customer.packageId || 'pkg-2',
-          packageName: '50 Mbps Turbo Gamer',
-          billingMonth: 'October 2026',
-          baseAmount: customer.balanceDue > 0 ? customer.balanceDue : 45.0,
-          taxAmount: customer.balanceDue > 0 ? Math.round(customer.balanceDue * 0.16) : 7.2,
-          discountAmount: 0,
-          totalAmount: customer.balanceDue > 0 ? customer.balanceDue : 52.2,
-          status: customer.balanceDue > 0 ? (customer.status === 'walled_garden' ? 'overdue' : 'unpaid') : 'paid',
-          dueDate: '2026-10-15',
-          issuedAt: new Date().toISOString(),
-          paidAt: customer.balanceDue === 0 ? '2026-10-02T10:00:00Z' : undefined,
-          whatsappNoticeSent: true,
-        },
-      ];
-    }
+    // 3. Real complaints matching this customer (empty if none exist in DB)
+    const customerComplaints: any[] = [];
 
-    // 3. Complaints matching this customer
-    const customerComplaints = INITIAL_COMPLAINTS.filter(
-      (cmp) =>
-        cmp.customerId === customer?.id ||
-        cmp.customerName?.toLowerCase() === customer?.name?.toLowerCase() ||
-        cmp.customerPhone === customer?.phone
-    );
-
-    // 4. Session history logs (5 realistic last connect/disconnect records)
-    const sessionHistory = [
-      {
-        id: `sess-log-${username}-1`,
-        connectedAt: new Date(Date.now() - 3600 * 1000 * 4).toISOString(),
-        disconnectedAt: null,
-        duration: '4h 12m (Active Now)',
-        assignedIp: customer.assignedIp || '10.50.12.42',
-        callerId: customer.macAddress || 'BC:24:11:89:FE:A1',
-        terminationReason: 'Active Live Session',
-        bytesDownloadedMb: 1420.5,
-        bytesUploadedMb: 312.8,
-      },
-      {
-        id: `sess-log-${username}-2`,
-        connectedAt: new Date(Date.now() - 3600 * 1000 * 28).toISOString(),
-        disconnectedAt: new Date(Date.now() - 3600 * 1000 * 4 - 300000).toISOString(),
-        duration: '23h 55m',
-        assignedIp: customer.assignedIp || '10.50.12.42',
-        callerId: customer.macAddress || 'BC:24:11:89:FE:A1',
-        terminationReason: 'user-request',
-        bytesDownloadedMb: 8940.2,
-        bytesUploadedMb: 1250.0,
-      },
-      {
-        id: `sess-log-${username}-3`,
-        connectedAt: new Date(Date.now() - 3600 * 1000 * 52).toISOString(),
-        disconnectedAt: new Date(Date.now() - 3600 * 1000 * 29).toISOString(),
-        duration: '23h 00m',
-        assignedIp: customer.assignedIp || '10.50.12.42',
-        callerId: customer.macAddress || 'BC:24:11:89:FE:A1',
-        terminationReason: 'session-timeout',
-        bytesDownloadedMb: 7650.0,
-        bytesUploadedMb: 980.5,
-      },
-      {
-        id: `sess-log-${username}-4`,
-        connectedAt: new Date(Date.now() - 3600 * 1000 * 76).toISOString(),
-        disconnectedAt: new Date(Date.now() - 3600 * 1000 * 53).toISOString(),
-        duration: '23h 00m',
-        assignedIp: customer.assignedIp || '10.50.12.42',
-        callerId: customer.macAddress || 'BC:24:11:89:FE:A1',
-        terminationReason: 'lost-carrier',
-        bytesDownloadedMb: 6120.4,
-        bytesUploadedMb: 840.1,
-      },
-      {
-        id: `sess-log-${username}-5`,
-        connectedAt: new Date(Date.now() - 3600 * 1000 * 100).toISOString(),
-        disconnectedAt: new Date(Date.now() - 3600 * 1000 * 77).toISOString(),
-        duration: '23h 00m',
-        assignedIp: customer.assignedIp || '10.50.12.42',
-        callerId: customer.macAddress || 'BC:24:11:89:FE:A1',
-        terminationReason: 'user-request',
-        bytesDownloadedMb: 5430.0,
-        bytesUploadedMb: 710.0,
-      },
-    ];
+    // 4. Session history logs (real records only; empty if no disconnect history)
+    const sessionHistory: any[] = [];
 
     // Package info
-    const pkg = INITIAL_PACKAGES.find((p) => p.id === customer?.packageId) || INITIAL_PACKAGES[1];
+    const pkg = INITIAL_PACKAGES.find((p) => p.id === customer?.packageId) || INITIAL_PACKAGES[0] || null;
 
     res.json({
       success: true,

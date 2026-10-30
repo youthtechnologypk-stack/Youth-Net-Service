@@ -28,6 +28,9 @@ import {
   ArrowUp,
   Star,
   AlertTriangle,
+  Calendar,
+  Clock,
+  Hourglass,
 } from 'lucide-react';
 import { useISP } from '../context/ISPContext';
 import { useCurrency } from '../context/CurrencyContext';
@@ -40,6 +43,10 @@ import { RouterFleet } from './RouterFleet';
 import { ActiveSessionsTable } from './ActiveSessionsTable';
 import { SubscriberProfileDrawer } from './SubscriberProfileDrawer';
 import { RouterInterfacesTable } from './RouterInterfacesTable';
+import {
+  parseMikrotikComment,
+  calculateExpirationMetrics,
+} from '../services/mikrotikSubscriberSync';
 
 interface MikrotikStudioProps {
   onOpenProvisionModal: () => void;
@@ -67,6 +74,7 @@ export const MikrotikStudio: React.FC<MikrotikStudioProps> = ({
     deletePppoeUser,
     deletePackage,
     refreshRouterHealth,
+    renewSubscriberPackage,
   } = useISP();
   const { formatCurrency, currencySymbol } = useCurrency();
 
@@ -74,6 +82,7 @@ export const MikrotikStudio: React.FC<MikrotikStudioProps> = ({
   const [searchQuery, setSearchQuery] = useState('');
   const [selectedSubscriberUsername, setSelectedSubscriberUsername] = useState<string | null>(null);
   const [isKicking, setIsKicking] = useState<string | null>(null);
+  const [isRenewing, setIsRenewing] = useState<string | null>(null);
   const [testingRouterId, setTestingRouterId] = useState<string | null>(null);
   const [isAddDeviceModalOpen, setIsAddDeviceModalOpen] = useState(false);
   const [isAddUserModalOpen, setIsAddUserModalOpen] = useState(false);
@@ -498,110 +507,176 @@ export const MikrotikStudio: React.FC<MikrotikStudioProps> = ({
             <table className="w-full text-left text-xs font-mono">
               <thead className="bg-slate-950 text-slate-400 uppercase tracking-wider text-[11px] border-b border-slate-800">
                 <tr>
-                  <th className="py-3 px-4">Account & Subscriber</th>
+                  <th className="py-3 px-4">Account &amp; Subscriber</th>
                   <th className="py-3 px-4">PPPoE Username</th>
-                  <th className="py-3 px-4">Area Name</th>
-                  <th className="py-3 px-4">Static IP</th>
+                  <th className="py-3 px-4">Created Date</th>
+                  <th className="py-3 px-4">Expiry Date</th>
+                  <th className="py-3 px-4">Days Remaining</th>
                   <th className="py-3 px-4">State</th>
                   <th className="py-3 px-4">Due Balance</th>
                   <th className="py-3 px-4 text-right">RouterOS State Actions</th>
                 </tr>
               </thead>
               <tbody className="divide-y divide-slate-800 text-slate-300">
-                {filteredCustomers.map((cust) => (
-                  <tr
-                    key={cust.id}
-                    onClick={() => setSelectedSubscriberUsername(cust.pppoeUsername)}
-                    className="hover:bg-slate-800/70 transition cursor-pointer group"
-                    title="Click to open Subscriber 360° Profile"
-                  >
-                    <td className="py-3 px-4">
-                      <div className="font-bold text-slate-100 group-hover:text-cyan-300 transition flex items-center gap-1.5">
-                        <span>{cust.name}</span>
-                        <ExternalLink className="w-3 h-3 opacity-0 group-hover:opacity-100 text-cyan-400 transition" />
-                      </div>
-                      <div className="text-[11px] text-slate-400">{cust.accountNumber}</div>
-                    </td>
-                    <td className="py-3 px-4 text-cyan-300 font-bold">{cust.pppoeUsername}</td>
-                    <td className="py-3 px-4 text-slate-400">{cust.areaNode}</td>
-                    <td className="py-3 px-4 text-slate-300">{cust.assignedIp}</td>
-                    <td className="py-3 px-4 font-sans">
-                      <span
-                        className={`px-2 py-0.5 rounded text-[11px] font-medium capitalize ${
-                          cust.status === 'active'
-                            ? 'bg-emerald-950 text-emerald-300 border border-emerald-800'
-                            : cust.status === 'walled_garden'
-                            ? 'bg-amber-950 text-amber-300 border border-amber-800'
-                            : 'bg-rose-950 text-rose-300 border border-rose-800'
-                        }`}
-                      >
-                        {cust.status.replace('_', ' ')}
-                      </span>
-                    </td>
-                    <td className="py-3 px-4 font-bold text-slate-200">
-                      {formatCurrency(cust.balanceDue)}
-                    </td>
-                    <td className="py-3 px-4 text-right font-sans" onClick={(e) => e.stopPropagation()}>
-                      <div className="flex items-center justify-end gap-1.5">
-                        <button
-                          onClick={() => setSelectedSubscriberUsername(cust.pppoeUsername)}
-                          className="bg-slate-800 hover:bg-slate-700 text-cyan-300 border border-slate-700 px-2 py-1 rounded text-[11px] transition"
-                        >
-                          360° View
-                        </button>
+                {filteredCustomers.map((cust) => {
+                  const parsed = parseMikrotikComment(cust.comment, cust.pppoeUsername);
+                  const createdDate = cust.createdDate || parsed.createdDate || cust.installationDate || '2026-10-30';
+                  const expiryDate = cust.expiryDate || parsed.expiryDate || '2026-11-29';
+                  const metrics = calculateExpirationMetrics(expiryDate);
+                  const validity = cust.validityDays || parsed.validityDays || 30;
+                  const pctRemaining = Math.max(0, Math.min(100, Math.round((metrics.daysRemaining / validity) * 100)));
+                  const isExpired = metrics.isExpired || cust.status === 'walled_garden' || cust.status === 'expired';
 
-                        {cust.status !== 'walled_garden' ? (
-                          <button
-                            onClick={() => toggleCustomerStatus(cust.id, 'walled_garden')}
-                            className="bg-amber-950/80 hover:bg-amber-900 border border-amber-800 text-amber-300 px-2 py-1 rounded text-[11px] transition"
-                            title="Redirect to Walled Garden captive portal"
-                          >
-                            Isolate to Walled Garden
-                          </button>
-                        ) : (
-                          <button
-                            onClick={() => toggleCustomerStatus(cust.id, 'active')}
-                            className="bg-emerald-950/80 hover:bg-emerald-900 border border-emerald-800 text-emerald-300 px-2 py-1 rounded text-[11px] transition"
-                            title="Restore high-speed service"
-                          >
-                            Restore Active
-                          </button>
-                        )}
-
-                        <button
-                          onClick={() =>
-                            toggleCustomerStatus(
-                              cust.id,
-                              cust.status === 'disabled' ? 'active' : 'disabled'
-                            )
-                          }
-                          className={`px-2 py-1 rounded text-[11px] transition border ${
-                            cust.status === 'disabled'
-                              ? 'bg-slate-800 border-slate-700 text-slate-300'
-                              : 'bg-rose-950/60 border-rose-800 text-rose-300'
+                  return (
+                    <tr
+                      key={cust.id}
+                      onClick={() => setSelectedSubscriberUsername(cust.pppoeUsername)}
+                      className="hover:bg-slate-800/70 transition cursor-pointer group"
+                      title="Click to open Subscriber 360° Profile"
+                    >
+                      <td className="py-3 px-4">
+                        <div className="font-bold text-slate-100 group-hover:text-cyan-300 transition flex items-center gap-1.5">
+                          <span>{cust.name}</span>
+                          <ExternalLink className="w-3 h-3 opacity-0 group-hover:opacity-100 text-cyan-400 transition" />
+                        </div>
+                        <div className="text-[11px] text-slate-400">{cust.accountNumber}</div>
+                      </td>
+                      <td className="py-3 px-4 text-cyan-300 font-bold">{cust.pppoeUsername}</td>
+                      <td className="py-3 px-4 text-slate-400 font-mono text-[11px] whitespace-nowrap">
+                        {createdDate}
+                      </td>
+                      <td className="py-3 px-4 font-mono text-[11px] whitespace-nowrap">
+                        <span className={metrics.isExpired ? 'text-rose-400 font-bold' : metrics.daysRemaining <= 5 ? 'text-amber-400 font-bold' : 'text-slate-300'}>
+                          {expiryDate}
+                        </span>
+                      </td>
+                      <td className="py-3 px-4 font-sans whitespace-nowrap">
+                        <div className="space-y-1">
+                          <div className="flex items-center gap-1.5">
+                            <span
+                              className={`px-2 py-0.5 rounded text-[10px] font-bold font-mono inline-flex items-center gap-1 border ${
+                                metrics.isExpired
+                                  ? 'bg-rose-950 text-rose-300 border-rose-800 animate-pulse'
+                                  : metrics.daysRemaining <= 5
+                                  ? 'bg-amber-950 text-amber-300 border border-amber-800'
+                                  : 'bg-emerald-950 text-emerald-300 border border-emerald-800'
+                              }`}
+                            >
+                              <Clock className="w-2.5 h-2.5" />
+                              <span>{metrics.isExpired ? 'Expired' : `${metrics.daysRemaining}d left`}</span>
+                            </span>
+                          </div>
+                          {!metrics.isExpired && (
+                            <div className="w-20 bg-slate-800 h-1 rounded-full overflow-hidden">
+                              <div
+                                className={`h-full transition-all duration-500 ${
+                                  metrics.daysRemaining <= 5 ? 'bg-amber-400' : 'bg-emerald-400'
+                                }`}
+                                style={{ width: `${pctRemaining}%` }}
+                              />
+                            </div>
+                          )}
+                        </div>
+                      </td>
+                      <td className="py-3 px-4 font-sans whitespace-nowrap">
+                        <span
+                          className={`px-2 py-0.5 rounded text-[11px] font-medium capitalize border ${
+                            isExpired
+                              ? 'bg-rose-950 text-rose-300 border-rose-800 font-bold'
+                              : cust.status === 'active'
+                              ? 'bg-emerald-950 text-emerald-300 border border-emerald-800'
+                              : 'bg-slate-800 text-slate-300 border border-slate-700'
                           }`}
                         >
-                          {cust.status === 'disabled' ? 'Enable' : 'Disable'}
-                        </button>
+                          {isExpired ? 'Expired / Walled Garden' : cust.status.replace('_', ' ')}
+                        </span>
+                      </td>
+                      <td className="py-3 px-4 font-bold text-slate-200">
+                        {formatCurrency(cust.balanceDue)}
+                      </td>
+                      <td className="py-3 px-4 text-right font-sans" onClick={(e) => e.stopPropagation()}>
+                        <div className="flex items-center justify-end gap-1.5 flex-wrap">
+                          {/* Manual Renew / Extend Package Action */}
+                          <button
+                            onClick={async () => {
+                              setIsRenewing(cust.pppoeUsername);
+                              try {
+                                const res = await renewSubscriberPackage(cust.pppoeUsername, 30);
+                                setSyncToast({ type: 'success', message: res.message });
+                              } catch (err: any) {
+                                setSyncToast({ type: 'error', message: err.message || 'Renewal failed' });
+                              } finally {
+                                setIsRenewing(null);
+                              }
+                            }}
+                            disabled={isRenewing === cust.pppoeUsername}
+                            className="bg-cyan-950/90 hover:bg-cyan-900 border border-cyan-700 text-cyan-300 px-2 py-1 rounded text-[11px] transition flex items-center gap-1 cursor-pointer font-bold shadow-sm disabled:opacity-50"
+                            title="Extend package validity by +30 Days and restore active profile"
+                          >
+                            <RefreshCw className={`w-3 h-3 text-cyan-400 ${isRenewing === cust.pppoeUsername ? 'animate-spin' : ''}`} />
+                            <span>+ Renew (+30d)</span>
+                          </button>
 
-                        <button
-                          onClick={() => {
-                            setUserToDelete({ username: cust.pppoeUsername, name: cust.name });
-                            setIsDeleteUserDialogOpen(true);
-                          }}
-                          className="px-2 py-1 rounded text-[11px] transition bg-rose-950/80 hover:bg-rose-900 border border-rose-800 text-rose-300 flex items-center gap-1 cursor-pointer"
-                          title="Delete Secret on MikroTik & Terminate Session"
-                        >
-                          <Trash2 className="w-3 h-3 text-rose-400" />
-                          <span>Delete</span>
-                        </button>
-                      </div>
-                    </td>
-                  </tr>
-                ))}
+                          <button
+                            onClick={() => setSelectedSubscriberUsername(cust.pppoeUsername)}
+                            className="bg-slate-800 hover:bg-slate-700 text-cyan-300 border border-slate-700 px-2 py-1 rounded text-[11px] transition"
+                          >
+                            360° View
+                          </button>
+
+                          {cust.status !== 'walled_garden' ? (
+                            <button
+                              onClick={() => toggleCustomerStatus(cust.id, 'walled_garden')}
+                              className="bg-amber-950/80 hover:bg-amber-900 border border-amber-800 text-amber-300 px-2 py-1 rounded text-[11px] transition"
+                              title="Redirect to Walled Garden captive portal"
+                            >
+                              Isolate
+                            </button>
+                          ) : (
+                            <button
+                              onClick={() => toggleCustomerStatus(cust.id, 'active')}
+                              className="bg-emerald-950/80 hover:bg-emerald-900 border border-emerald-800 text-emerald-300 px-2 py-1 rounded text-[11px] transition"
+                              title="Restore high-speed service"
+                            >
+                              Restore
+                            </button>
+                          )}
+
+                          <button
+                            onClick={() =>
+                              toggleCustomerStatus(
+                                cust.id,
+                                cust.status === 'disabled' ? 'active' : 'disabled'
+                              )
+                            }
+                            className={`px-2 py-1 rounded text-[11px] transition border ${
+                              cust.status === 'disabled'
+                                ? 'bg-slate-800 border-slate-700 text-slate-300'
+                                : 'bg-rose-950/60 border-rose-800 text-rose-300'
+                            }`}
+                          >
+                            {cust.status === 'disabled' ? 'Enable' : 'Disable'}
+                          </button>
+
+                          <button
+                            onClick={() => {
+                              setUserToDelete({ username: cust.pppoeUsername, name: cust.name });
+                              setIsDeleteUserDialogOpen(true);
+                            }}
+                            className="px-2 py-1 rounded text-[11px] transition bg-rose-950/80 hover:bg-rose-900 border border-rose-800 text-rose-300 flex items-center gap-1 cursor-pointer"
+                            title="Delete Secret on MikroTik &amp; Terminate Session"
+                          >
+                            <Trash2 className="w-3 h-3 text-rose-400" />
+                            <span>Delete</span>
+                          </button>
+                        </div>
+                      </td>
+                    </tr>
+                  );
+                })}
                 {filteredCustomers.length === 0 && (
                   <tr>
-                    <td colSpan={7} className="py-8 text-center text-slate-400 font-sans">
+                    <td colSpan={8} className="py-8 text-center text-slate-400 font-sans">
                       <div className="space-y-1">
                         <p className="text-slate-300 font-medium">No provisioned PPPoE secrets found on this router.</p>
                         <p className="text-xs text-slate-500">RouterOS /ppp/secret returned 0 subscriber credentials.</p>

@@ -49,17 +49,19 @@ export const UsageAnalytics: React.FC = () => {
   } = useISP();
 
   const [analyticsView, setAnalyticsView] = useState<'interface' | 'subscriber' | 'top_talkers'>('interface');
-  const [selectedInterface, setSelectedInterface] = useState<string>('sfp-sfpplus1');
+  const [selectedInterface, setSelectedInterface] = useState<string>(() => {
+    return routerInterfaces[0]?.name || 'WAN3';
+  });
   const [timeRange, setTimeRange] = useState<'realtime' | '1h' | '24h' | '7d'>('realtime');
   const [searchQuery, setSearchQuery] = useState('');
   const [selectedSubscriberUsername, setSelectedSubscriberUsername] = useState<string>(
-    activeSessions[0]?.username || 'dr_shahzad_g11'
+    activeSessions[0]?.username || ''
   );
 
   // Selected session & matching customer & package
-  const currentSession = activeSessions.find((s) => s.username === selectedSubscriberUsername) || activeSessions[0];
-  const currentCustomer = customers.find((c) => c.pppoeUsername === selectedSubscriberUsername) || customers[0];
-  const currentPackage = packages.find((p) => p.id === currentCustomer?.packageId) || packages[1];
+  const currentSession = activeSessions.find((s) => s.username === selectedSubscriberUsername) || activeSessions[0] || null;
+  const currentCustomer = (currentSession ? customers.find((c) => c.pppoeUsername === currentSession.username) : null) || customers[0] || null;
+  const currentPackage = (currentCustomer?.packageId ? packages.find((p) => p.id === currentCustomer.packageId) : null) || (currentSession?.profileName ? packages.find((p) => p.mikrotikProfile === currentSession.profileName) : null) || packages[0] || null;
 
   // Calculate 95th percentile and peak for interface
   const stats = useMemo(() => {
@@ -76,110 +78,32 @@ export const UsageAnalytics: React.FC = () => {
     return { p95Rx, p95Tx, peakRx, peakTx, currentRx, currentTx };
   }, [bandwidthHistory]);
 
-  // Generate historical data based on timeframe for interface
+  // Real interface chart data derived strictly from live bandwidth telemetry
   const interfaceChartData = useMemo(() => {
-    if (timeRange === 'realtime') {
-      return bandwidthHistory.map((d) => ({
-        time: d.time,
-        rx: d.rxMbps,
-        tx: d.txMbps,
-        total: d.rxMbps + d.txMbps,
-      }));
-    }
+    return bandwidthHistory.map((d) => ({
+      time: d.time,
+      rx: d.rxMbps,
+      tx: d.txMbps,
+      total: d.rxMbps + d.txMbps,
+    }));
+  }, [bandwidthHistory]);
 
-    if (timeRange === '1h') {
-      // 12 points, 5 min intervals
-      const points = [];
-      const now = Date.now();
-      for (let i = 11; i >= 0; i--) {
-        const t = new Date(now - i * 5 * 60 * 1000);
-        const timeLabel = t.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
-        const baseRx = 740 + Math.sin((i / 11) * Math.PI) * 160 + (Math.random() - 0.5) * 40;
-        const baseTx = 320 + Math.sin((i / 11) * Math.PI) * 70 + (Math.random() - 0.5) * 20;
-        points.push({
-          time: timeLabel,
-          rx: Math.round(baseRx),
-          tx: Math.round(baseTx),
-          total: Math.round(baseRx + baseTx),
-        });
-      }
-      return points;
-    }
-
-    if (timeRange === '24h') {
-      // 24 points (hourly)
-      const points = [];
-      const currentHour = new Date().getHours();
-      for (let i = 23; i >= 0; i--) {
-        const hour = (currentHour - i + 24) % 24;
-        const hourLabel = `${String(hour).padStart(2, '0')}:00`;
-        // Typical ISP bell curve: peak between 19:00 - 23:00, trough between 03:00 - 07:00
-        const isPeak = hour >= 19 && hour <= 23;
-        const isTrough = hour >= 3 && hour <= 7;
-        let baseRx = isPeak ? 920 : isTrough ? 280 : 640;
-        let baseTx = isPeak ? 420 : isTrough ? 120 : 280;
-        baseRx += (Math.random() - 0.5) * 60;
-        baseTx += (Math.random() - 0.5) * 30;
-
-        points.push({
-          time: hourLabel,
-          rx: Math.round(baseRx),
-          tx: Math.round(baseTx),
-          total: Math.round(baseRx + baseTx),
-        });
-      }
-      return points;
-    }
-
-    // 7 Days trend
-    const days = ['Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'Sun'];
-    return days.map((day, idx) => {
-      const isWeekend = idx >= 5;
-      const baseRx = isWeekend ? 980 : 790 + idx * 15;
-      const baseTx = isWeekend ? 440 : 350 + idx * 8;
-      return {
-        time: day,
-        rx: Math.round(baseRx),
-        tx: Math.round(baseTx),
-        total: Math.round(baseRx + baseTx),
-      };
-    });
-  }, [bandwidthHistory, timeRange]);
-
-  // Generate historical data for the selected individual PPPoE subscriber
+  // Real data for the selected individual PPPoE subscriber session
   const subscriberChartData = useMemo(() => {
-    const pkgCapRx = currentPackage.downloadSpeedMbps;
-    const pkgCapTx = currentPackage.uploadSpeedMbps;
-    const points = [];
+    if (!currentSession) return [];
+    const pkgCapRx = currentPackage?.downloadSpeedMbps || 50;
+    const nowStr = new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
 
-    // 16 historical minute intervals
-    const now = Date.now();
-    for (let i = 15; i >= 0; i--) {
-      const d = new Date(now - i * 60 * 1000);
-      const timeStr = d.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
-
-      // Generate realistic usage bounded by package cap
-      let rxFactor = 0.4 + Math.sin(i / 2) * 0.35 + (Math.random() - 0.5) * 0.15;
-      if (currentCustomer.status === 'walled_garden') {
-        rxFactor = 0.01;
-      }
-      rxFactor = Math.max(0.02, Math.min(0.98, rxFactor));
-
-      const subRx = Number((pkgCapRx * rxFactor).toFixed(1));
-      const subTx = Number((pkgCapTx * rxFactor * 0.35).toFixed(1));
-      const volumeMb = Number(((subRx + subTx) * 0.12).toFixed(1)); // simulated MB transferred in interval
-
-      points.push({
-        time: timeStr,
-        rxMbps: subRx,
-        txMbps: subTx,
-        volumeMb: volumeMb,
+    return [
+      {
+        time: nowStr,
+        rxMbps: currentSession.rxRateMbps,
+        txMbps: currentSession.txRateMbps,
+        volumeMb: Number(((currentSession.bytesInMb + currentSession.bytesOutMb) || 0).toFixed(1)),
         capRx: pkgCapRx,
-      });
-    }
-
-    return points;
-  }, [currentPackage, currentCustomer]);
+      },
+    ];
+  }, [currentSession, currentPackage]);
 
   // Top Talkers Ranking
   const topTalkersData = useMemo(() => {
@@ -289,14 +213,14 @@ export const UsageAnalytics: React.FC = () => {
     if (active && payload && payload.length) {
       const rx = payload[0]?.value || 0;
       const tx = payload[1]?.value || 0;
-      const cap = currentPackage.downloadSpeedMbps;
+      const cap = currentPackage?.downloadSpeedMbps || 50;
       const pct = Math.round((rx / cap) * 100);
 
       return (
         <div className="bg-slate-950 border border-slate-800 rounded-lg p-3 shadow-xl text-xs font-mono">
           <div className="text-slate-400 font-semibold mb-1 flex items-center justify-between gap-4">
             <span>{label}</span>
-            <span className="text-indigo-400 font-sans">{currentCustomer.name}</span>
+            <span className="text-indigo-400 font-sans">{currentCustomer?.name || currentSession?.username || 'Subscriber'}</span>
           </div>
           <div className="space-y-1">
             <div className="flex items-center justify-between gap-4 text-emerald-400">
@@ -699,9 +623,9 @@ export const UsageAnalytics: React.FC = () => {
             <div className="bg-slate-950/80 p-2.5 rounded-lg border border-slate-800">
               <span className="text-slate-400 block text-[11px]">Subscribed Plan</span>
               <span className="text-white font-bold text-sm block mt-0.5">
-                {currentPackage.downloadSpeedMbps} Mbps
+                {currentPackage?.downloadSpeedMbps || 50} Mbps
               </span>
-              <span className="text-[10px] text-slate-500">{currentPackage.name}</span>
+              <span className="text-[10px] text-slate-500">{currentPackage?.name || 'Standard Plan'}</span>
             </div>
 
             <div className="bg-slate-950/80 p-2.5 rounded-lg border border-slate-800">
@@ -710,7 +634,7 @@ export const UsageAnalytics: React.FC = () => {
                 {currentSession?.rxRateMbps || 0} Mbps
               </span>
               <span className="text-[10px] text-emerald-500/80">
-                {Math.round(((currentSession?.rxRateMbps || 0) / currentPackage.downloadSpeedMbps) * 100)}% of plan
+                {Math.round(((currentSession?.rxRateMbps || 0) / (currentPackage?.downloadSpeedMbps || 50)) * 100)}% of plan
               </span>
             </div>
 
@@ -727,7 +651,7 @@ export const UsageAnalytics: React.FC = () => {
               <span className="text-indigo-300 font-bold text-sm block mt-0.5">
                 {(((currentSession?.bytesInMb || 0) + (currentSession?.bytesOutMb || 0)) / 1024).toFixed(2)} GB
               </span>
-              <span className="text-[10px] text-slate-500">Uptime: {currentSession?.uptime}</span>
+              <span className="text-[10px] text-slate-500">Uptime: {currentSession?.uptime || 'N/A'}</span>
             </div>
           </div>
 
@@ -771,11 +695,11 @@ export const UsageAnalytics: React.FC = () => {
                   wrapperStyle={{ fontSize: '11px', fontFamily: 'monospace', paddingBottom: '8px' }}
                 />
                 <ReferenceLine
-                  y={currentPackage.downloadSpeedMbps}
+                  y={currentPackage?.downloadSpeedMbps || 50}
                   stroke="#f43f5e"
                   strokeDasharray="3 3"
                   label={{
-                    value: `Plan Limit (${currentPackage.downloadSpeedMbps} Mbps)`,
+                    value: `Plan Limit (${currentPackage?.downloadSpeedMbps || 50} Mbps)`,
                     fill: '#fda4af',
                     fontSize: 10,
                     position: 'insideTopLeft',

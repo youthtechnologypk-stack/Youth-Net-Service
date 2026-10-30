@@ -645,7 +645,7 @@ export const CreateAccountModal: React.FC<CreateAccountModalProps> = ({
                                   <span>Querying MikroTik RouterOS...</span>
                                 </span>
                               ) : (
-                                <span>No subscribers found matching &ldquo;{subscriberSearchQuery}&rdquo;</span>
+                                <span>{subscriberSearchQuery ? `No subscribers found matching "${subscriberSearchQuery}"` : 'No subscribers found'}</span>
                               )}
                             </div>
                           )}

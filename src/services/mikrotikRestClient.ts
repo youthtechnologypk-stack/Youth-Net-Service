@@ -375,9 +375,18 @@ export async function fetchMikrotikPppProfiles(
     const rawList = Array.isArray(data) ? data : [];
     const profiles = rawList
       .map((p: any, idx: number) => ({
+        ...p,
         id: p['.id'] || p.id || `prof-${idx}`,
+        '.id': p['.id'] || p.id || `prof-${idx}`,
         name: p.name || `profile-${idx}`,
+        'rate-limit': p['rate-limit'] || p.rateLimit || '',
         rateLimit: p['rate-limit'] || p.rateLimit || '',
+        'local-address': p['local-address'] || p.localAddress || '',
+        localAddress: p['local-address'] || p.localAddress || '',
+        'remote-address': p['remote-address'] || p.remoteAddress || '',
+        remoteAddress: p['remote-address'] || p.remoteAddress || '',
+        'only-one': p['only-one'] !== undefined ? p['only-one'] : p.onlyOne,
+        onlyOne: p['only-one'] !== undefined ? p['only-one'] : p.onlyOne,
       }))
       .filter((p: any) => p.name);
 
@@ -666,4 +675,182 @@ export async function fetchMikrotikPppSecrets(
     };
   }
 }
+
+/**
+ * Update RouterOS PPPoE Secret Profile, Remote-Address, or Comment
+ * Target Endpoint: POST /api/mikrotik/ppp/secret/set (or PATCH /ppp/secret/:id)
+ */
+export async function updateMikrotikPppSecretRest(
+  activeRouter?: {
+    ipAddress?: string;
+    ip?: string;
+    apiPort?: number;
+    port?: number;
+    username?: string;
+    password?: string;
+  },
+  secretIdOrName?: string,
+  updates?: {
+    profile?: string;
+    remoteAddress?: string;
+    comment?: string;
+    disabled?: boolean | string;
+    password?: string;
+  }
+): Promise<{ success: boolean; data?: any; error?: string }> {
+  const isBrowser = typeof window !== 'undefined';
+  const targetPort = activeRouter?.port || activeRouter?.apiPort || 8729;
+  const ip = (activeRouter?.ip || activeRouter?.ipAddress || '202.142.186.150').trim();
+  const username = activeRouter?.username?.trim() || 'admin';
+  const password = activeRouter?.password || '';
+
+  let authHeader = '';
+  try {
+    authHeader = 'Basic ' + btoa(`${username}:${password}`);
+  } catch {
+    authHeader = 'Basic ' + btoa('admin:');
+  }
+
+  const isNetlify =
+    isBrowser &&
+    (window.location.hostname.includes('netlify.app') ||
+      window.location.hostname.includes('youthnetw') ||
+      window.location.hostname.includes('netlify') ||
+      (window.location.hostname !== 'localhost' &&
+        window.location.hostname !== '127.0.0.1' &&
+        ip === '202.142.186.150'));
+
+  const baseUrl = isNetlify
+    ? `${window.location.origin}/api/mikrotik`
+    : `https://${ip}:${targetPort}/rest`;
+
+  const commonHeaders: Record<string, string> = {
+    Authorization: authHeader,
+    Accept: 'application/json',
+    'Content-Type': 'application/json',
+    Connection: 'close',
+    'Cache-Control': 'no-cache, no-store, must-revalidate',
+    Pragma: 'no-cache',
+  };
+
+  const bodyData: Record<string, any> = {};
+  if (secretIdOrName) {
+    bodyData['.id'] = secretIdOrName;
+    bodyData['numbers'] = secretIdOrName;
+  }
+  if (updates?.profile) bodyData['profile'] = updates.profile;
+  if (updates?.remoteAddress) bodyData['remote-address'] = updates.remoteAddress;
+  if (updates?.comment !== undefined) bodyData['comment'] = updates.comment;
+  if (updates?.disabled !== undefined) bodyData['disabled'] = String(updates.disabled);
+  if (updates?.password) bodyData['password'] = updates.password;
+
+  try {
+    // 1. Try POST /ppp/secret/set
+    let res = await fetch(`${baseUrl}/ppp/secret/set`, {
+      method: 'POST',
+      headers: commonHeaders,
+      body: JSON.stringify(bodyData),
+    });
+
+    // 2. Fallback to PATCH /ppp/secret/:id
+    if (!res.ok && (res.status === 404 || res.status === 405)) {
+      const targetPath = secretIdOrName ? `${baseUrl}/ppp/secret/${encodeURIComponent(secretIdOrName)}` : `${baseUrl}/ppp/secret`;
+      res = await fetch(targetPath, {
+        method: 'PATCH',
+        headers: commonHeaders,
+        body: JSON.stringify(bodyData),
+      });
+    }
+
+    if (!res.ok) {
+      const errText = await res.text().catch(() => '');
+      throw new Error(`Router returned HTTP ${res.status}: ${errText || res.statusText}`);
+    }
+
+    const data = await res.json().catch(() => ({ success: true }));
+    return { success: true, data };
+  } catch (err: any) {
+    return { success: false, error: err.message };
+  }
+}
+
+/**
+ * Terminate Active Session so subscriber reconnects into restricted or updated pool
+ * POST /api/mikrotik/ppp/active/remove with { ".id": activeSession[".id"] }
+ */
+export async function disconnectMikrotikActiveSessionRest(
+  activeRouter?: {
+    ipAddress?: string;
+    ip?: string;
+    apiPort?: number;
+    port?: number;
+    username?: string;
+    password?: string;
+  },
+  sessionIdOrName?: string
+): Promise<{ success: boolean; error?: string }> {
+  if (!sessionIdOrName) return { success: false, error: 'Session ID or username required' };
+
+  const isBrowser = typeof window !== 'undefined';
+  const targetPort = activeRouter?.port || activeRouter?.apiPort || 8729;
+  const ip = (activeRouter?.ip || activeRouter?.ipAddress || '202.142.186.150').trim();
+  const username = activeRouter?.username?.trim() || 'admin';
+  const password = activeRouter?.password || '';
+
+  let authHeader = '';
+  try {
+    authHeader = 'Basic ' + btoa(`${username}:${password}`);
+  } catch {
+    authHeader = 'Basic ' + btoa('admin:');
+  }
+
+  const isNetlify =
+    isBrowser &&
+    (window.location.hostname.includes('netlify.app') ||
+      window.location.hostname.includes('youthnetw') ||
+      window.location.hostname.includes('netlify') ||
+      (window.location.hostname !== 'localhost' &&
+        window.location.hostname !== '127.0.0.1' &&
+        ip === '202.142.186.150'));
+
+  const baseUrl = isNetlify
+    ? `${window.location.origin}/api/mikrotik`
+    : `https://${ip}:${targetPort}/rest`;
+
+  const commonHeaders: Record<string, string> = {
+    Authorization: authHeader,
+    Accept: 'application/json',
+    'Content-Type': 'application/json',
+    Connection: 'close',
+    'Cache-Control': 'no-cache, no-store, must-revalidate',
+    Pragma: 'no-cache',
+  };
+
+  try {
+    // 1. Try POST /ppp/active/remove
+    let res = await fetch(`${baseUrl}/ppp/active/remove`, {
+      method: 'POST',
+      headers: commonHeaders,
+      body: JSON.stringify({ '.id': sessionIdOrName, numbers: sessionIdOrName }),
+    });
+
+    // 2. Fallback to DELETE /ppp/active/:id
+    if (!res.ok && (res.status === 404 || res.status === 405)) {
+      res = await fetch(`${baseUrl}/ppp/active/${encodeURIComponent(sessionIdOrName)}`, {
+        method: 'DELETE',
+        headers: commonHeaders,
+      });
+    }
+
+    if (!res.ok) {
+      const errText = await res.text().catch(() => '');
+      throw new Error(`Router returned HTTP ${res.status}: ${errText || res.statusText}`);
+    }
+
+    return { success: true };
+  } catch (err: any) {
+    return { success: false, error: err.message };
+  }
+}
+
 

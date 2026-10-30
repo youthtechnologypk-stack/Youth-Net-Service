@@ -31,6 +31,10 @@ import { useISP } from '../context/ISPContext';
 import { formatCurrency } from '../context/CurrencyContext';
 import { Customer, ActiveSession, InternetPackage, Invoice, ComplaintTicket } from '../types/isp';
 import { getBandwidthUtilization } from './ActiveSessionsTable';
+import {
+  parseMikrotikComment,
+  calculateExpirationMetrics,
+} from '../services/mikrotikSubscriberSync';
 
 export interface SubscriberProfileDrawerProps {
   isOpen: boolean;
@@ -71,6 +75,7 @@ export const SubscriberProfileDrawer: React.FC<SubscriberProfileDrawerProps> = (
     toggleCustomerStatus,
     createInvoice,
     createComplaintTicket,
+    renewSubscriberPackage,
   } = useISP();
 
   const [activeTab, setActiveTab] = useState<'overview' | 'sessions' | 'complaints' | 'billing'>('overview');
@@ -297,72 +302,28 @@ export const SubscriberProfileDrawer: React.FC<SubscriberProfileDrawerProps> = (
 
   // Session history logs
   const sessionLogs: SessionLog[] = useMemo(() => {
-    if (server360Data?.sessionHistory) {
+    if (server360Data?.sessionHistory && Array.isArray(server360Data.sessionHistory) && server360Data.sessionHistory.length > 0) {
       return server360Data.sessionHistory;
     }
 
-    // Default mock history based on live status
-    const ip = liveSession?.address || customer?.assignedIp || '10.50.12.42';
-    const mac = liveSession?.callerId || customer?.macAddress || 'BC:24:11:89:FE:A1';
+    if (liveSession) {
+      return [
+        {
+          id: `sess-live-${liveSession.username}`,
+          connectedAt: new Date().toISOString(),
+          disconnectedAt: null,
+          duration: liveSession.uptime || 'Active Now',
+          assignedIp: liveSession.address || customer?.assignedIp || '',
+          callerId: liveSession.callerId || customer?.macAddress || '',
+          terminationReason: 'Active Live Session',
+          bytesDownloadedMb: liveSession.bytesInMb || 0,
+          bytesUploadedMb: liveSession.bytesOutMb || 0,
+        },
+      ];
+    }
 
-    return [
-      {
-        id: 'log-1',
-        connectedAt: new Date(Date.now() - 3600 * 1000 * 6).toISOString(),
-        disconnectedAt: null,
-        duration: isOnline ? (liveSession?.uptime || '6h 12m') : 'Session Closed',
-        assignedIp: ip,
-        callerId: mac,
-        terminationReason: isOnline ? 'Active Connected' : 'user-request',
-        bytesDownloadedMb: 2450.4,
-        bytesUploadedMb: 420.1,
-      },
-      {
-        id: 'log-2',
-        connectedAt: new Date(Date.now() - 3600 * 1000 * 30).toISOString(),
-        disconnectedAt: new Date(Date.now() - 3600 * 1000 * 7).toISOString(),
-        duration: '23h 00m',
-        assignedIp: ip,
-        callerId: mac,
-        terminationReason: 'session-timeout',
-        bytesDownloadedMb: 8940.0,
-        bytesUploadedMb: 1120.5,
-      },
-      {
-        id: 'log-3',
-        connectedAt: new Date(Date.now() - 3600 * 1000 * 54).toISOString(),
-        disconnectedAt: new Date(Date.now() - 3600 * 1000 * 31).toISOString(),
-        duration: '23h 00m',
-        assignedIp: ip,
-        callerId: mac,
-        terminationReason: 'lost-carrier',
-        bytesDownloadedMb: 7650.0,
-        bytesUploadedMb: 950.0,
-      },
-      {
-        id: 'log-4',
-        connectedAt: new Date(Date.now() - 3600 * 1000 * 78).toISOString(),
-        disconnectedAt: new Date(Date.now() - 3600 * 1000 * 55).toISOString(),
-        duration: '23h 00m',
-        assignedIp: ip,
-        callerId: mac,
-        terminationReason: 'admin-reset',
-        bytesDownloadedMb: 6100.0,
-        bytesUploadedMb: 820.0,
-      },
-      {
-        id: 'log-5',
-        connectedAt: new Date(Date.now() - 3600 * 1000 * 102).toISOString(),
-        disconnectedAt: new Date(Date.now() - 3600 * 1000 * 79).toISOString(),
-        duration: '23h 00m',
-        assignedIp: ip,
-        callerId: mac,
-        terminationReason: 'user-request',
-        bytesDownloadedMb: 5200.0,
-        bytesUploadedMb: 690.0,
-      },
-    ];
-  }, [server360Data, liveSession, customer, isOnline]);
+    return [];
+  }, [server360Data, liveSession, customer]);
 
   // Bandwidth telemetry calculations
   const telemetry = useMemo(() => {
@@ -401,6 +362,50 @@ export const SubscriberProfileDrawer: React.FC<SubscriberProfileDrawerProps> = (
       lastPolledAt: liveTraffic?.lastPolledAt || Date.now(),
     };
   }, [liveTraffic, liveSession, subscriberPackage, isOnline, customer, username]);
+
+  // Subscription Lifecycle Metadata derived from comment or customer record
+  const parsedComment = useMemo(() => {
+    return parseMikrotikComment(customer?.comment, username || undefined);
+  }, [customer?.comment, username]);
+
+  const lifecycleData = useMemo(() => {
+    const createdDate = customer?.createdDate || parsedComment.createdDate || customer?.installationDate || '2026-10-30';
+    const expiryDate = customer?.expiryDate || parsedComment.expiryDate || '2026-11-29';
+    const validityDays = customer?.validityDays || parsedComment.validityDays || 30;
+    const expiredPool = customer?.isolationPool || customer?.expiredProfile || parsedComment.expiredPool || '16.16.16.0/24';
+    const metrics = calculateExpirationMetrics(expiryDate);
+    const pctRemaining = Math.max(0, Math.min(100, Math.round((metrics.daysRemaining / validityDays) * 100)));
+    return {
+      createdDate,
+      expiryDate,
+      validityDays,
+      expiredPool,
+      daysRemaining: metrics.daysRemaining,
+      isExpired: metrics.isExpired || customer?.status === 'walled_garden' || customer?.status === 'expired',
+      pctRemaining,
+    };
+  }, [customer, parsedComment]);
+
+  // Operational Action 0: Renew / Extend Package (+30 Days)
+  const handleRenewPackage = async () => {
+    if (!username) return;
+    setActionLoading('renew');
+    setActionFeedback(null);
+    try {
+      const res = await renewSubscriberPackage(username, 30);
+      setActionFeedback({
+        type: 'success',
+        message: res.message,
+      });
+    } catch (err: any) {
+      setActionFeedback({
+        type: 'error',
+        message: err.message || 'Failed to renew subscriber package.',
+      });
+    } finally {
+      setActionLoading(null);
+    }
+  };
 
   // Copy to clipboard helper
   const handleCopy = (text: string, field: string) => {
@@ -842,6 +847,74 @@ export const SubscriberProfileDrawer: React.FC<SubscriberProfileDrawerProps> = (
                 </div>
               </div>
 
+              {/* CARD: SUBSCRIPTION LIFECYCLE & PACKAGE VALIDITY */}
+              <div className="bg-slate-950 border border-slate-800 rounded-xl p-4 shadow-md space-y-3">
+                <div className="flex items-center justify-between border-b border-slate-800/80 pb-2.5 flex-wrap gap-2">
+                  <div className="flex items-center gap-2">
+                    <Clock className="w-4 h-4 text-amber-400" />
+                    <h3 className="text-xs font-bold text-white uppercase tracking-wider">
+                      Subscription Lifecycle &amp; Expiration Policy
+                    </h3>
+                  </div>
+                  <span
+                    className={`px-2.5 py-0.5 rounded-full text-[10px] font-bold font-mono border ${
+                      lifecycleData.isExpired
+                        ? 'bg-rose-950 text-rose-300 border-rose-800 animate-pulse'
+                        : lifecycleData.daysRemaining <= 5
+                        ? 'bg-amber-950 text-amber-300 border border-amber-800'
+                        : 'bg-emerald-950 text-emerald-300 border border-emerald-800'
+                    }`}
+                  >
+                    {lifecycleData.isExpired ? 'EXPIRED / WALLED GARDEN' : `${lifecycleData.daysRemaining} DAYS REMAINING`}
+                  </span>
+                </div>
+
+                <div className="grid grid-cols-2 sm:grid-cols-4 gap-2.5 text-xs font-mono">
+                  <div className="bg-slate-900/80 p-2.5 rounded-lg border border-slate-800">
+                    <span className="text-[10px] text-slate-400 block mb-0.5">Created Date</span>
+                    <span className="text-slate-200 font-bold">{lifecycleData.createdDate}</span>
+                  </div>
+                  <div className="bg-slate-900/80 p-2.5 rounded-lg border border-slate-800">
+                    <span className="text-[10px] text-slate-400 block mb-0.5">Package Validity</span>
+                    <span className="text-cyan-300 font-bold">{lifecycleData.validityDays} Days</span>
+                  </div>
+                  <div className="bg-slate-900/80 p-2.5 rounded-lg border border-slate-800">
+                    <span className="text-[10px] text-slate-400 block mb-0.5">Expiry Date</span>
+                    <span className={lifecycleData.isExpired ? 'text-rose-400 font-bold' : 'text-amber-300 font-bold'}>
+                      {lifecycleData.expiryDate}
+                    </span>
+                  </div>
+                  <div className="bg-slate-900/80 p-2.5 rounded-lg border border-slate-800">
+                    <span className="text-[10px] text-slate-400 block mb-0.5">Isolation Pool</span>
+                    <span className="text-rose-300 font-bold">{lifecycleData.expiredPool}</span>
+                  </div>
+                </div>
+
+                {/* Progress Bar & Countdown */}
+                <div className="space-y-1 pt-1">
+                  <div className="flex justify-between text-[11px] font-mono text-slate-400">
+                    <span>Package Validity Progress</span>
+                    <span>
+                      {lifecycleData.isExpired
+                        ? 'Expired - Shifted to Walled Garden'
+                        : `${lifecycleData.pctRemaining}% Remaining (${lifecycleData.daysRemaining} days left)`}
+                    </span>
+                  </div>
+                  <div className="w-full bg-slate-900 h-2 rounded-full overflow-hidden border border-slate-800">
+                    <div
+                      className={`h-full transition-all duration-700 ${
+                        lifecycleData.isExpired
+                          ? 'bg-rose-500'
+                          : lifecycleData.daysRemaining <= 5
+                          ? 'bg-amber-400'
+                          : 'bg-emerald-400'
+                      }`}
+                      style={{ width: `${lifecycleData.isExpired ? 100 : lifecycleData.pctRemaining}%` }}
+                    />
+                  </div>
+                </div>
+              </div>
+
               {/* CARD 2: FINANCIAL & BILLING STATUS */}
               <div className="bg-slate-950 border border-slate-800 rounded-xl p-4 shadow-md">
                 <div className="flex items-center justify-between border-b border-slate-800/80 pb-3 mb-3">
@@ -923,7 +996,25 @@ export const SubscriberProfileDrawer: React.FC<SubscriberProfileDrawerProps> = (
                   </h3>
                 </div>
 
-                <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
+                <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-3">
+                  {/* Action 0: Renew / Extend Package */}
+                  <button
+                    onClick={handleRenewPackage}
+                    disabled={actionLoading === 'renew'}
+                    className="p-3 bg-cyan-950/40 hover:bg-cyan-950/70 border border-cyan-800/80 hover:border-cyan-600 rounded-lg text-left transition group disabled:opacity-50 cursor-pointer shadow-md"
+                  >
+                    <div className="flex items-center justify-between text-xs font-bold text-cyan-300 mb-1">
+                      <span>+ Renew (+30 Days)</span>
+                      <RefreshCw className={`w-4 h-4 text-cyan-400 ${actionLoading === 'renew' ? 'animate-spin' : ''}`} />
+                    </div>
+                    <p className="text-[11px] text-slate-300">
+                      Extends validity by 30 days and restores active high-speed RouterOS profile.
+                    </p>
+                    <span className="text-[10px] text-cyan-400 group-hover:text-cyan-200 font-mono mt-2 block font-bold">
+                      {actionLoading === 'renew' ? 'Renewing Account...' : 'Extend +30 Days →'}
+                    </span>
+                  </button>
+
                   {/* Action 1: Force Kick */}
                   <button
                     onClick={handleForceKick}
@@ -1011,7 +1102,14 @@ export const SubscriberProfileDrawer: React.FC<SubscriberProfileDrawerProps> = (
                     </tr>
                   </thead>
                   <tbody className="divide-y divide-slate-800 text-slate-300">
-                    {sessionLogs.map((log) => (
+                    {sessionLogs.length === 0 ? (
+                      <tr>
+                        <td colSpan={5} className="py-8 text-center text-slate-500 font-sans">
+                          No session history recorded for this subscriber yet.
+                        </td>
+                      </tr>
+                    ) : (
+                      sessionLogs.map((log) => (
                       <tr key={log.id} className="hover:bg-slate-900/60 transition">
                         <td className="py-2.5 px-3">
                           <div className="text-slate-200">
@@ -1044,7 +1142,7 @@ export const SubscriberProfileDrawer: React.FC<SubscriberProfileDrawerProps> = (
                           {(log.bytesDownloadedMb / 1024).toFixed(2)} GB ↓ / {(log.bytesUploadedMb / 1024).toFixed(2)} GB ↑
                         </td>
                       </tr>
-                    ))}
+                    )))}
                   </tbody>
                 </table>
               </div>

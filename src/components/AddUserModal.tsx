@@ -14,6 +14,10 @@ import {
   Globe,
   Radio,
   RefreshCw,
+  Calendar,
+  Clock,
+  Hourglass,
+  ShieldAlert,
 } from 'lucide-react';
 import { useISP } from '../context/ISPContext';
 import { safeResponseJson } from '../lib/safeFetch';
@@ -23,6 +27,15 @@ import {
   fetchMikrotikPppSecrets,
   fetchMikrotikLiveTelemetry,
 } from '../services/mikrotikRestClient';
+
+const getTodayFormatted = () => new Date().toISOString().split('T')[0];
+
+const calculateExpiry = (startDateStr: string, days: number): string => {
+  const base = new Date(startDateStr);
+  if (isNaN(base.getTime())) return startDateStr;
+  base.setDate(base.getDate() + Number(days));
+  return base.toISOString().split('T')[0];
+};
 
 interface AddUserModalProps {
   isOpen: boolean;
@@ -58,6 +71,18 @@ export const AddUserModal: React.FC<AddUserModalProps> = ({ isOpen, onClose, onS
   const [phone, setPhone] = useState('+92 ');
   const [address, setAddress] = useState('');
   const [areaNode, setAreaNode] = useState('Sector G-11 (North Zone)');
+
+  // Subscriber Package Lifecycle state
+  const [creationDate, setCreationDate] = useState<string>(getTodayFormatted());
+  const [validityDays, setValidityDays] = useState<number>(30);
+  const [expiryDate, setExpiryDate] = useState<string>(() => calculateExpiry(getTodayFormatted(), 30));
+  const [expiredPool, setExpiredPool] = useState<string>('EXPIRED-POOL');
+  const [isCustomDays, setIsCustomDays] = useState<boolean>(false);
+
+  // Recalculate expiryDate whenever creationDate or validityDays changes
+  useEffect(() => {
+    setExpiryDate(calculateExpiry(creationDate, validityDays));
+  }, [creationDate, validityDays]);
 
   // State for dynamic profiles fetched from MikroTik
   const [profiles, setProfiles] = useState<DynamicProfile[]>([]);
@@ -175,7 +200,16 @@ export const AddUserModal: React.FC<AddUserModalProps> = ({ isOpen, onClose, onS
     setIsSubmitting(true);
     setSubmissionError(null);
 
-    const comment = `${fullName.trim() || username} | ${phone.trim()} | ${address.trim()} | YouthNet-App`;
+    // Persist dates in MikroTik secret safely inside the comment field in JSON format
+    const commentJson = JSON.stringify({
+      created: creationDate,
+      expires: expiryDate,
+      days: validityDays,
+      plan: profile || 'default',
+      phone: phone.trim(),
+      name: fullName.trim() || username.trim(),
+      expiredPool: expiredPool.trim() || '16.16.16.0/24',
+    });
 
     try {
       // 1. Direct Creation Endpoint: POST /api/mikrotik/ppp/secret/add
@@ -187,7 +221,7 @@ export const AddUserModal: React.FC<AddUserModalProps> = ({ isOpen, onClose, onS
             password: password.trim(),
             service: service || 'pppoe',
             profile: profile || 'default',
-            comment,
+            comment: commentJson,
           });
           if (restRes.success) {
             restProvisioned = true;
@@ -209,7 +243,12 @@ export const AddUserModal: React.FC<AddUserModalProps> = ({ isOpen, onClose, onS
           profile: profile || 'default',
           remoteAddress: remoteIp.trim() || undefined,
           remoteIp: remoteIp.trim() || undefined,
-          comment,
+          comment: commentJson,
+          createdDate: creationDate,
+          expiryDate,
+          validityDays,
+          expiredProfile: expiredPool,
+          isolationPool: expiredPool === 'EXPIRED-POOL' ? '16.16.16.0/24' : expiredPool,
           name: fullName.trim() || username.trim(),
           phone: phone.trim(),
           address: address.trim(),
@@ -323,6 +362,22 @@ export const AddUserModal: React.FC<AddUserModalProps> = ({ isOpen, onClose, onS
                 <div className="flex justify-between">
                   <span className="text-slate-400">Target Router:</span>
                   <span className="text-slate-200">{currentRouter?.name} ({currentRouter?.ipAddress})</span>
+                </div>
+                <div className="flex justify-between">
+                  <span className="text-slate-400">Created Date:</span>
+                  <span className="text-slate-200">{creationDate}</span>
+                </div>
+                <div className="flex justify-between">
+                  <span className="text-slate-400">Validity:</span>
+                  <span className="text-cyan-300 font-bold">{validityDays} Days</span>
+                </div>
+                <div className="flex justify-between">
+                  <span className="text-slate-400">Expiry Date:</span>
+                  <span className="text-amber-300 font-bold">{expiryDate}</span>
+                </div>
+                <div className="flex justify-between">
+                  <span className="text-slate-400">Expired Isolation Pool:</span>
+                  <span className="text-rose-300 font-mono">{expiredPool || '16.16.16.0/24'}</span>
                 </div>
                 {successData.remoteAddress && (
                   <div className="flex justify-between">
@@ -466,6 +521,127 @@ export const AddUserModal: React.FC<AddUserModalProps> = ({ isOpen, onClose, onS
                     {profileError}
                   </span>
                 )}
+              </div>
+            </div>
+
+            {/* Package Validity & Expiration Lifecycle Policy */}
+            <div className="bg-slate-950/80 p-3.5 rounded-xl border border-slate-800 space-y-3">
+              <div className="flex items-center justify-between">
+                <span className="text-xs font-semibold text-slate-200 flex items-center gap-1.5">
+                  <Clock className="w-3.5 h-3.5 text-cyan-400" />
+                  <span>Package Validity &amp; Expiration Policy</span>
+                </span>
+                <span className="text-[10px] font-mono px-2 py-0.5 rounded bg-cyan-950 text-cyan-300 border border-cyan-800">
+                  Auto-Shift to Isolation Pool
+                </span>
+              </div>
+
+              <div className="grid grid-cols-1 sm:grid-cols-3 gap-2.5">
+                {/* Field 1: Creation Date */}
+                <div>
+                  <label className="block text-slate-400 mb-1 text-[11px] flex items-center gap-1">
+                    <Calendar className="w-3 h-3 text-cyan-400" />
+                    <span>Creation Date</span>
+                  </label>
+                  <input
+                    type="date"
+                    required
+                    value={creationDate}
+                    onChange={(e) => setCreationDate(e.target.value)}
+                    className="w-full bg-slate-900 border border-slate-700 text-slate-200 font-mono p-2 rounded-lg text-xs focus:outline-none focus:border-cyan-500"
+                  />
+                </div>
+
+                {/* Field 2: Validity / Package Days */}
+                <div>
+                  <label className="block text-slate-400 mb-1 text-[11px] flex items-center gap-1">
+                    <Hourglass className="w-3 h-3 text-amber-400" />
+                    <span>Validity / Days</span>
+                  </label>
+                  {!isCustomDays ? (
+                    <select
+                      value={validityDays}
+                      onChange={(e) => {
+                        const val = e.target.value;
+                        if (val === 'custom') {
+                          setIsCustomDays(true);
+                        } else {
+                          setValidityDays(Number(val));
+                        }
+                      }}
+                      className="w-full bg-slate-900 border border-slate-700 text-slate-200 font-mono p-2 rounded-lg text-xs focus:outline-none focus:border-cyan-500"
+                    >
+                      <option value="30">30 Days (1 Month)</option>
+                      <option value="15">15 Days (Half Month)</option>
+                      <option value="7">7 Days (Trial / Weekly)</option>
+                      <option value="60">60 Days (2 Months)</option>
+                      <option value="90">90 Days (Quarterly)</option>
+                      <option value="365">365 Days (Annual)</option>
+                      <option value="custom">Custom Days...</option>
+                    </select>
+                  ) : (
+                    <div className="flex gap-1">
+                      <input
+                        type="number"
+                        min="1"
+                        max="3650"
+                        value={validityDays}
+                        onChange={(e) => setValidityDays(Math.max(1, parseInt(e.target.value, 10) || 1))}
+                        className="w-full bg-slate-900 border border-slate-700 text-slate-200 font-mono p-2 rounded-lg text-xs focus:outline-none focus:border-cyan-500"
+                      />
+                      <button
+                        type="button"
+                        onClick={() => setIsCustomDays(false)}
+                        className="px-2 py-1 bg-slate-800 hover:bg-slate-700 text-slate-400 hover:text-white rounded text-[10px]"
+                        title="Back to presets"
+                      >
+                        Reset
+                      </button>
+                    </div>
+                  )}
+                </div>
+
+                {/* Field 3: Expiry Date (Auto-calculated) */}
+                <div>
+                  <label className="block text-slate-400 mb-1 text-[11px] flex items-center justify-between">
+                    <span className="flex items-center gap-1">
+                      <Calendar className="w-3 h-3 text-rose-400" />
+                      <span>Expiry Date</span>
+                    </span>
+                    <span className="text-[9px] text-emerald-400 font-mono">Auto</span>
+                  </label>
+                  <input
+                    type="date"
+                    required
+                    value={expiryDate}
+                    onChange={(e) => setExpiryDate(e.target.value)}
+                    className="w-full bg-slate-900 border border-slate-700 text-amber-300 font-bold font-mono p-2 rounded-lg text-xs focus:outline-none focus:border-cyan-500"
+                  />
+                </div>
+              </div>
+
+              {/* Expired Profile / Pool Field */}
+              <div className="pt-1">
+                <label className="block text-slate-400 mb-1 text-[11px] flex items-center justify-between">
+                  <span className="flex items-center gap-1">
+                    <ShieldAlert className="w-3 h-3 text-rose-400" />
+                    <span>Expired Profile / Isolation Pool</span>
+                  </span>
+                  <span className="text-[10px] text-slate-500 font-mono">Shifted on expiration</span>
+                </label>
+                <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
+                  <input
+                    type="text"
+                    value={expiredPool}
+                    onChange={(e) => setExpiredPool(e.target.value)}
+                    placeholder="e.g. EXPIRED-POOL or 16.16.16.0/24"
+                    className="w-full bg-slate-900 border border-slate-700 text-rose-300 font-mono p-2 rounded-lg text-xs focus:outline-none focus:border-cyan-500"
+                  />
+                  <div className="flex items-center gap-1 text-[10px] text-slate-400 bg-slate-900/60 px-2 py-1.5 rounded-lg border border-slate-800">
+                    <span className="w-1.5 h-1.5 rounded-full bg-rose-400 inline-block shrink-0" />
+                    <span>Active session auto-kicked to enforce captive portal / 16.16.16.0/24</span>
+                  </div>
+                </div>
               </div>
             </div>
 

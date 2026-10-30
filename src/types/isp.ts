@@ -58,6 +58,12 @@ export interface Customer {
   balanceDue: number;
   lastPaymentDate?: string;
   ontSignalDbm?: number; // e.g. -19.4 dBm
+  createdDate?: string; // YYYY-MM-DD
+  validityDays?: number; // e.g. 30
+  expiryDate?: string; // YYYY-MM-DD
+  expiredProfile?: string; // default "EXPIRED-POOL" or "walled_garden"
+  isolationPool?: string; // default "16.16.16.0/24"
+  comment?: string;
 }
 
 export interface MikrotikRouter {
@@ -293,6 +299,40 @@ export interface WhatsAppNotificationLog {
   type: 'invoice_generated' | 'payment_reminder' | 'payment_receipt' | 'line_disabled' | 'outage_alert' | 'ticket_update';
   templateName: string;
   messageBody: string;
-  status: 'delivered' | 'sent' | 'failed' | 'queued';
+  status: 'read' | 'delivered' | 'sent' | 'failed' | 'queued';
   timestamp: string;
+}
+
+export interface MikrotikPppProfile {
+  '.id'?: string;
+  id?: string;
+  name: string;
+  'rate-limit'?: string;
+  rateLimit?: string;
+  'local-address'?: string;
+  localAddress?: string;
+  'remote-address'?: string;
+  remoteAddress?: string;
+  'only-one'?: string | boolean;
+  onlyOne?: string | boolean;
+  'dns-server'?: string;
+  comment?: string;
+}
+
+export interface MikrotikPppSecret {
+  '.id'?: string;
+  id?: string;
+  name: string;
+  user?: string;
+  password?: string;
+  profile: string;
+  service?: string;
+  'remote-address'?: string;
+  remoteAddress?: string;
+  'local-address'?: string;
+  localAddress?: string;
+  comment?: string;
+  disabled?: boolean | string;
+  'caller-id'?: string;
+  callerId?: string;
 }

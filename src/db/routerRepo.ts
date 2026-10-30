@@ -669,6 +669,11 @@ export interface CustomerRecord {
   comment?: string;
   isDeleted?: boolean;
   createdAt?: string;
+  createdDate?: string;
+  expiryDate?: string;
+  validityDays?: number;
+  expiredProfile?: string;
+  isolationPool?: string;
 }
 
 function ensureCustomersFile(): CustomerRecord[] {

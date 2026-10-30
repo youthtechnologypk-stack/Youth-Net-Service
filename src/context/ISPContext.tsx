@@ -40,7 +40,14 @@ import {
   monitorInterfaceTraffic,
   provisionPppoeSecretRest,
   fetchMikrotikPppSecrets,
+  updateMikrotikPppSecretRest,
+  disconnectMikrotikActiveSessionRest,
 } from '../services/mikrotikRestClient';
+import { whatsappBusinessService } from '../services/whatsappBusinessService';
+import {
+  parseMikrotikComment,
+  calculateExpirationMetrics,
+} from '../services/mikrotikSubscriberSync';
 
 interface BandwidthDataPoint {
   time: string;
@@ -202,6 +209,9 @@ interface ISPContextType {
   updateOlt: (oltId: string, updated: Partial<VsolOlt>) => void;
   deleteOlt: (oltId: string) => void;
   testOltSnmpConnection: (ipAddress: string, community: string, port: number) => Promise<{ success: boolean; latencyMs: number; sysDescr?: string; message: string }>;
+  // Subscriber Expiration & Lifecycle Management
+  checkAndApplyExpiredSubscribers: () => Promise<{ checked: number; expiredCount: number }>;
+  renewSubscriberPackage: (username: string, additionalDays?: number) => Promise<{ success: boolean; message: string; expiryDate: string }>;
 }
 
 const STORAGE_KEY_ROUTERS = 'registered_routers';
@@ -248,36 +258,106 @@ function getInitialRouters(): MikrotikRouter[] {
   }
 }
 
+const STORAGE_KEY_INVOICES = 'youthnet_invoices';
+const STORAGE_KEY_TICKETS = 'youthnet_tickets';
+const STORAGE_KEY_OUTAGES = 'youthnet_outages';
+const STORAGE_KEY_EXPENSES = 'youthnet_expenses';
+const STORAGE_KEY_CASH_HANDOVERS = 'youthnet_cash_handovers';
+const STORAGE_KEY_SALARY_TX = 'youthnet_salary_transactions';
+
+function getInitialInvoices(): Invoice[] {
+  if (typeof window === 'undefined') return [];
+  try {
+    const raw = localStorage.getItem(STORAGE_KEY_INVOICES);
+    if (raw) {
+      const parsed = JSON.parse(raw);
+      if (Array.isArray(parsed)) return parsed;
+    }
+  } catch {}
+  return [];
+}
+
+function getInitialTickets(): ComplaintTicket[] {
+  if (typeof window === 'undefined') return [];
+  try {
+    const raw = localStorage.getItem(STORAGE_KEY_TICKETS);
+    if (raw) {
+      const parsed = JSON.parse(raw);
+      if (Array.isArray(parsed)) return parsed;
+    }
+  } catch {}
+  return [];
+}
+
+function getInitialOutages(): AreaOutage[] {
+  if (typeof window === 'undefined') return [];
+  try {
+    const raw = localStorage.getItem(STORAGE_KEY_OUTAGES);
+    if (raw) {
+      const parsed = JSON.parse(raw);
+      if (Array.isArray(parsed)) return parsed;
+    }
+  } catch {}
+  return [];
+}
+
+function getInitialExpenses(): IspExpense[] {
+  if (typeof window === 'undefined') return [];
+  try {
+    const raw = localStorage.getItem(STORAGE_KEY_EXPENSES);
+    if (raw) {
+      const parsed = JSON.parse(raw);
+      if (Array.isArray(parsed)) return parsed;
+    }
+  } catch {}
+  return [];
+}
+
+function getInitialCashHandovers(): CashHandover[] {
+  if (typeof window === 'undefined') return [];
+  try {
+    const raw = localStorage.getItem(STORAGE_KEY_CASH_HANDOVERS);
+    if (raw) {
+      const parsed = JSON.parse(raw);
+      if (Array.isArray(parsed)) return parsed;
+    }
+  } catch {}
+  return [];
+}
+
+function getInitialSalaryTransactions(): AgentSalaryTransaction[] {
+  if (typeof window === 'undefined') return [];
+  try {
+    const raw = localStorage.getItem(STORAGE_KEY_SALARY_TX);
+    if (raw) {
+      const parsed = JSON.parse(raw);
+      if (Array.isArray(parsed)) return parsed;
+    }
+  } catch {}
+  return [];
+}
+
 function getInitialCustomers(): Customer[] {
-  if (typeof window === 'undefined') return INITIAL_CUSTOMERS;
+  if (typeof window === 'undefined') return [];
   try {
     const raw = localStorage.getItem(STORAGE_KEY_CUSTOMERS);
-    const isInit = localStorage.getItem(STORAGE_KEY_CUSTOMERS_INIT);
     const deletedRaw = localStorage.getItem(STORAGE_KEY_DELETED_SECRETS) || '[]';
     let deletedUsernames: string[] = [];
     try { deletedUsernames = JSON.parse(deletedRaw); } catch {}
 
-    if (raw !== null || isInit !== null) {
+    if (raw !== null) {
       const parsed = raw ? JSON.parse(raw) : [];
       if (Array.isArray(parsed)) {
         return parsed.filter(
           (c: Customer) =>
             !deletedUsernames.includes((c.pppoeUsername || '').toLowerCase()) &&
             !deletedUsernames.includes(c.id)
-        ); // Respect empty array if all customers were deleted
+        );
       }
-      return [];
     }
-    const seeded = INITIAL_CUSTOMERS.filter(
-      (c) =>
-        !deletedUsernames.includes((c.pppoeUsername || '').toLowerCase()) &&
-        !deletedUsernames.includes(c.id)
-    );
-    localStorage.setItem(STORAGE_KEY_CUSTOMERS, JSON.stringify(seeded));
-    localStorage.setItem(STORAGE_KEY_CUSTOMERS_INIT, 'true');
-    return seeded;
+    return [];
   } catch {
-    return INITIAL_CUSTOMERS;
+    return [];
   }
 }
 
@@ -334,92 +414,97 @@ export const ISPProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
   const [packages, setPackages] = useState<InternetPackage[]>(getInitialPackages);
   const [customers, setCustomers] = useState<Customer[]>(getInitialCustomers);
   const [activeSessions, setActiveSessions] = useState<ActiveSession[]>(() => getInitialActiveSessions());
-  const [invoices, setInvoices] = useState<Invoice[]>(INITIAL_INVOICES);
-  const [complaints, setComplaints] = useState<ComplaintTicket[]>(INITIAL_COMPLAINTS);
+  const [invoices, setInvoices] = useState<Invoice[]>(getInitialInvoices);
+  const [complaints, setComplaints] = useState<ComplaintTicket[]>(getInitialTickets);
   const [agents, setAgents] = useState<FieldAgent[]>(INITIAL_AGENTS);
-  const [outages, setOutages] = useState<AreaOutage[]>(INITIAL_OUTAGES);
-  const [expenses, setExpenses] = useState<IspExpense[]>(INITIAL_EXPENSES);
-  const [whatsAppLogs, setWhatsAppLogs] = useState<WhatsAppNotificationLog[]>(INITIAL_WHATSAPP_LOGS);
+  const [outages, setOutages] = useState<AreaOutage[]>(getInitialOutages);
+  const [expenses, setExpenses] = useState<IspExpense[]>(getInitialExpenses);
+  const [whatsAppLogs, setWhatsAppLogs] = useState<WhatsAppNotificationLog[]>([]);
   const [olts, setOlts] = useState<VsolOlt[]>(INITIAL_OLTS);
   const [onus, setOnus] = useState<OnuDevice[]>(INITIAL_ONUS);
-  const [selectedOltId, setSelectedOltId] = useState<string>(INITIAL_OLTS[0]?.id || '');
-  const [cashHandovers, setCashHandovers] = useState<CashHandover[]>([
-    {
-      id: 'ho-1',
-      handoverNumber: 'HND-202609-842',
-      agentId: 'agent-1',
-      agentName: 'Bilal Khan',
-      amount: 250,
-      receiver: 'Boss / Accounts Desk (Mr. Farhan)',
-      notes: 'Evening sector G-11 collections settlement pending verification',
-      timestamp: new Date().toISOString(),
-      status: 'pending',
-    },
-    {
-      id: 'ho-2',
-      handoverNumber: 'HND-202609-819',
-      agentId: 'agent-2',
-      agentName: 'Tariq Mehmood',
-      amount: 320,
-      receiver: 'Boss / Accounts Desk (Mr. Farhan)',
-      notes: 'Sector I-8 corporate fiber recoveries',
-      timestamp: '2026-09-28T18:00:00.000Z',
-      status: 'confirmed',
-      confirmedBy: 'Boss / Accounts Admin',
-      confirmedAt: '2026-09-28T18:30:00.000Z',
-    },
-  ]);
+  const [selectedOltId, setSelectedOltId] = useState<string>('');
+  const [cashHandovers, setCashHandovers] = useState<CashHandover[]>(getInitialCashHandovers);
+  const [salaryTransactions, setSalaryTransactions] = useState<AgentSalaryTransaction[]>(getInitialSalaryTransactions);
 
-  const [salaryTransactions, setSalaryTransactions] = useState<AgentSalaryTransaction[]>([
-    {
-      id: 'stx-1',
-      transactionNumber: 'SAL-ADV-202609-101',
-      agentId: 'agent-1',
-      agentName: 'Bilal Khan',
-      type: 'advance_disbursed',
-      amount: 150,
-      date: '2026-09-10',
-      paymentMethod: 'cash',
-      notes: 'Advance for motorcycle maintenance and fuel',
-      recordedBy: 'Boss / Accounts Admin',
-    },
-    {
-      id: 'stx-2',
-      transactionNumber: 'SAL-RET-202609-204',
-      agentId: 'agent-1',
-      agentName: 'Bilal Khan',
-      type: 'advance_returned',
-      amount: 50,
-      date: '2026-09-20',
-      paymentMethod: 'salary_deduction',
-      notes: 'Advance return installment from recovery',
-      recordedBy: 'Boss / Accounts Admin',
-    },
-    {
-      id: 'stx-3',
-      transactionNumber: 'SAL-ADV-202609-105',
-      agentId: 'agent-3',
-      agentName: 'Hamza Farooq',
-      type: 'advance_disbursed',
-      amount: 100,
-      date: '2026-09-15',
-      paymentMethod: 'bank_transfer',
-      notes: 'Family emergency advance',
-      recordedBy: 'Boss / Accounts Admin',
-    },
-    {
-      id: 'stx-4',
-      transactionNumber: 'SAL-RET-202609-209',
-      agentId: 'agent-3',
-      agentName: 'Hamza Farooq',
-      type: 'advance_returned',
-      amount: 20,
-      date: '2026-09-25',
-      paymentMethod: 'cash',
-      notes: 'Cash advance partial repayment',
-      recordedBy: 'Boss / Accounts Admin',
-    },
-  ]);
+  // Sync state to localStorage for persistence
+  useEffect(() => {
+    try {
+      localStorage.setItem(STORAGE_KEY_INVOICES, JSON.stringify(invoices));
+    } catch {}
+  }, [invoices]);
+
+  useEffect(() => {
+    try {
+      localStorage.setItem(STORAGE_KEY_TICKETS, JSON.stringify(complaints));
+    } catch {}
+  }, [complaints]);
+
+  useEffect(() => {
+    try {
+      localStorage.setItem(STORAGE_KEY_OUTAGES, JSON.stringify(outages));
+    } catch {}
+  }, [outages]);
+
+  useEffect(() => {
+    try {
+      localStorage.setItem(STORAGE_KEY_EXPENSES, JSON.stringify(expenses));
+    } catch {}
+  }, [expenses]);
+
+  useEffect(() => {
+    try {
+      localStorage.setItem(STORAGE_KEY_CASH_HANDOVERS, JSON.stringify(cashHandovers));
+    } catch {}
+  }, [cashHandovers]);
+
+  useEffect(() => {
+    try {
+      localStorage.setItem(STORAGE_KEY_SALARY_TX, JSON.stringify(salaryTransactions));
+    } catch {}
+  }, [salaryTransactions]);
+
+  // Synchronize simulated WhatsApp Business Cloud API dispatches and webhook status updates
+  useEffect(() => {
+    // Populate with existing audit logs on initial load
+    const existingAudits = whatsappBusinessService.getAuditLogs();
+    if (existingAudits.length > 0) {
+      setWhatsAppLogs(
+        existingAudits.map((a) => ({
+          id: a.id,
+          recipientPhone: a.recipientPhone,
+          recipientName: a.recipientName,
+          type: a.type,
+          templateName: a.templateName,
+          messageBody: a.renderedText,
+          status: a.status,
+          timestamp: a.timestamp,
+        }))
+      );
+    }
+
+    const unsubscribe = whatsappBusinessService.subscribe((record) => {
+      setWhatsAppLogs((prev) => {
+        const index = prev.findIndex((l) => l.id === record.id);
+        const item: WhatsAppNotificationLog = {
+          id: record.id,
+          recipientPhone: record.recipientPhone,
+          recipientName: record.recipientName,
+          type: record.type,
+          templateName: record.templateName,
+          messageBody: record.renderedText,
+          status: record.status,
+          timestamp: record.timestamp,
+        };
+        if (index >= 0) {
+          const next = [...prev];
+          next[index] = item;
+          return next;
+        }
+        return [item, ...prev];
+      });
+    });
+    return unsubscribe;
+  }, []);
   const [selectedRouterId, setSelectedRouterId] = useState<string>(() => {
     try {
       const stored = localStorage.getItem('netpulse_selected_router_id');
@@ -1805,28 +1890,21 @@ export const ISPProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
         await mikrotikService.restoreActiveProfile(cust.pppoeUsername, pkg?.mikrotikProfile || '50M_Turbo_Profile');
       }
 
-      // Generate WhatsApp Payment Confirmation Log
-      const receiptMsg = billingEngine.buildWhatsAppPaymentReceipt(
-        cust.name,
-        receiptNum,
-        targetInvoice.invoiceNumber,
-        amount,
-        targetAgent.name
-      );
-
-      setWhatsAppLogs((prev) => [
-        {
-          id: `wa-rcpt-${Date.now()}`,
-          recipientPhone: cust.phone,
-          recipientName: cust.name,
-          type: 'payment_receipt',
-          templateName: 'isp_payment_confirmation_receipt',
-          messageBody: receiptMsg,
-          status: 'delivered',
-          timestamp: new Date().toISOString(),
-        },
-        ...prev,
-      ]);
+      // Dispatch automated payment receipt via WhatsApp Business Cloud API Service
+      whatsappBusinessService
+        .sendAutomatedPaymentReceipt({
+          customerName: cust.name,
+          customerPhone: cust.phone,
+          invoiceNumber: targetInvoice.invoiceNumber,
+          receiptNumber: receiptNum,
+          amountPaid: amount,
+          paymentMethod: 'Agent Cash Collection',
+          paidDate: new Date().toISOString(),
+          planName: targetInvoice.packageName,
+          pppoeUsername: cust.pppoeUsername,
+          collectorName: targetAgent.name,
+        })
+        .catch((err) => console.warn('WhatsApp Business payment receipt dispatch error:', err));
     }
 
     return { receiptNumber: receiptNum };
@@ -2352,9 +2430,186 @@ export const ISPProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
     setInvoices(updatedInvoices);
     setWhatsAppLogs((prev) => [...notificationLogs, ...prev]);
 
-    const msg = `Overdue Scanner Completed: Scanned ${summary.customersScanned} subscribers. Isolated ${summary.isolatedToWalledGarden} past-due accounts to Walled-Garden and sent WhatsApp suspension alerts.`;
+    // Also scan for expired package validity
+    const expireCheck = await checkAndApplyExpiredSubscribers().catch(() => ({ checked: 0, expiredCount: 0 }));
+
+    const msg = `Overdue Scanner Completed: Scanned ${summary.customersScanned} accounts (${expireCheck.expiredCount} expired packages shifted to EXPIRED-POOL). Isolated ${summary.isolatedToWalledGarden} past-due accounts.`;
     setLastCronMessage(msg);
     return msg;
+  };
+
+  // Auto-expiration check & pool shift logic
+  const checkAndApplyExpiredSubscribers = async (): Promise<{ checked: number; expiredCount: number }> => {
+    const targetRouter = routers.find((r) => r.id === selectedRouterId) || routers[0];
+    let expiredCount = 0;
+    let checked = 0;
+
+    let routerSecrets: any[] = [];
+    if (targetRouter) {
+      try {
+        const secRes = await fetchMikrotikPppSecrets(targetRouter);
+        if (secRes.success && Array.isArray(secRes.secrets)) {
+          routerSecrets = secRes.secrets;
+        }
+      } catch {}
+    }
+
+    const newlyIsolatedUsernames: string[] = [];
+
+    // 1. Scan registered customers
+    for (const cust of customers) {
+      checked++;
+      let expiryStr = cust.expiryDate;
+
+      if (!expiryStr && cust.comment) {
+        const parsed = parseMikrotikComment(cust.comment, cust.pppoeUsername);
+        if (parsed.expiryDate) {
+          expiryStr = parsed.expiryDate;
+        }
+      }
+
+      if (expiryStr) {
+        const metrics = calculateExpirationMetrics(expiryStr);
+        if (metrics.isExpired && cust.status === 'active') {
+          newlyIsolatedUsernames.push(cust.pppoeUsername);
+          expiredCount++;
+
+          if (targetRouter) {
+            const matchingSec = routerSecrets.find(
+              (s) => (s.name || s.user || '').toLowerCase() === cust.pppoeUsername.toLowerCase()
+            );
+            const secretId = matchingSec ? matchingSec['.id'] || matchingSec.id : cust.pppoeUsername;
+
+            // a) Update RouterOS secret profile/remote-address: POST /api/mikrotik/ppp/secret/set
+            await updateMikrotikPppSecretRest(targetRouter, secretId, {
+              profile: 'EXPIRED-POOL',
+              remoteAddress: '16.16.16.0/24',
+            }).catch(() => {});
+
+            // b) Terminate active session so user reconnects into restricted pool: POST /api/mikrotik/ppp/active/remove
+            const activeSess = activeSessions.find(
+              (s) => s.username?.toLowerCase() === cust.pppoeUsername.toLowerCase()
+            );
+            if (activeSess) {
+              await disconnectMikrotikActiveSessionRest(targetRouter, activeSess.id || activeSess.username).catch(() => {});
+            }
+          }
+        }
+      }
+    }
+
+    // 2. Scan RouterOS secrets from router for any users with expired JSON comment
+    for (const sec of routerSecrets) {
+      const uname = String(sec.name || sec.user || '').trim();
+      if (!uname || newlyIsolatedUsernames.includes(uname)) continue;
+      const parsed = parseMikrotikComment(sec.comment, uname);
+      if (parsed.expiryDate) {
+        const metrics = calculateExpirationMetrics(parsed.expiryDate);
+        if (metrics.isExpired && sec.profile !== 'EXPIRED-POOL') {
+          newlyIsolatedUsernames.push(uname);
+          expiredCount++;
+          if (targetRouter) {
+            await updateMikrotikPppSecretRest(targetRouter, sec['.id'] || uname, {
+              profile: 'EXPIRED-POOL',
+              remoteAddress: '16.16.16.0/24',
+            }).catch(() => {});
+
+            const activeSess = activeSessions.find((s) => s.username?.toLowerCase() === uname.toLowerCase());
+            if (activeSess) {
+              await disconnectMikrotikActiveSessionRest(targetRouter, activeSess.id || uname).catch(() => {});
+            }
+          }
+        }
+      }
+    }
+
+    // c) Mark UI badge as "Expired / Walled Garden" in red/orange
+    if (newlyIsolatedUsernames.length > 0) {
+      setCustomers((prev) =>
+        prev.map((c) =>
+          newlyIsolatedUsernames.includes(c.pppoeUsername)
+            ? { ...c, status: 'walled_garden' }
+            : c
+        )
+      );
+    }
+
+    return { checked, expiredCount };
+  };
+
+  // Renew / Extend Subscriber Package (+30 Days or custom)
+  const renewSubscriberPackage = async (
+    username: string,
+    additionalDays: number = 30
+  ): Promise<{ success: boolean; message: string; expiryDate: string }> => {
+    const targetRouter = routers.find((r) => r.id === selectedRouterId) || routers[0];
+    const now = new Date();
+
+    const cust = customers.find((c) => c.pppoeUsername.toLowerCase() === username.toLowerCase());
+    let baseDate = now;
+    if (cust?.expiryDate) {
+      const currentExp = new Date(cust.expiryDate);
+      if (!isNaN(currentExp.getTime()) && currentExp > now) {
+        baseDate = currentExp;
+      }
+    }
+    const newExpDate = new Date(baseDate.getTime() + additionalDays * 24 * 60 * 60 * 1000)
+      .toISOString()
+      .split('T')[0];
+    const createdDate = now.toISOString().split('T')[0];
+    const targetProfile = cust?.package?.mikrotikProfile || 'default';
+
+    const commentJson = JSON.stringify({
+      created: createdDate,
+      expires: newExpDate,
+      days: additionalDays,
+      plan: targetProfile,
+      phone: cust?.phone || '',
+      name: cust?.name || username,
+      expiredPool: '16.16.16.0/24',
+    });
+
+    // 1. Update RouterOS secret (restore regular profile, clear remoteAddress override, update comment)
+    if (targetRouter) {
+      try {
+        await updateMikrotikPppSecretRest(targetRouter, username, {
+          profile: targetProfile,
+          remoteAddress: '',
+          comment: commentJson,
+        });
+
+        // Terminate any active session so subscriber reconnects into restored profile immediately
+        const activeSess = activeSessions.find(
+          (s) => s.username?.toLowerCase() === username.toLowerCase()
+        );
+        if (activeSess) {
+          await disconnectMikrotikActiveSessionRest(targetRouter, activeSess.id || activeSess.username).catch(() => {});
+        }
+      } catch (err) {
+        console.warn('RouterOS renew error:', err);
+      }
+    }
+
+    // 2. Update state and localStorage
+    setCustomers((prev) =>
+      prev.map((c) =>
+        c.pppoeUsername.toLowerCase() === username.toLowerCase()
+          ? {
+              ...c,
+              status: 'active',
+              expiryDate: newExpDate,
+              validityDays: additionalDays,
+              comment: commentJson,
+            }
+          : c
+      )
+    );
+
+    return {
+      success: true,
+      message: `Subscriber @${username} extended by ${additionalDays} days until ${newExpDate}. Profile restored.`,
+      expiryDate: newExpDate,
+    };
   };
 
   // Create new manual or ad-hoc invoice
@@ -2712,6 +2967,8 @@ export const ISPProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
   };
 
   const resolveTicket = (ticketId: string, resolutionNotes: string, proofImageUrl?: string) => {
+    const targetTkt = complaints.find((t) => t.id === ticketId);
+
     setComplaints((prev) =>
       prev.map((t) =>
         t.id === ticketId
@@ -2725,6 +2982,23 @@ export const ISPProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
           : t
       )
     );
+
+    // Dispatch automated ticket resolved alert via WhatsApp Business Cloud API
+    if (targetTkt) {
+      whatsappBusinessService
+        .sendTicketStatusNotification({
+          customerPhone: targetTkt.customerPhone,
+          customerName: targetTkt.customerName,
+          ticketNumber: targetTkt.ticketNumber,
+          title: targetTkt.title,
+          category: targetTkt.category,
+          priority: targetTkt.priority,
+          areaNode: targetTkt.areaNode,
+          status: 'resolved',
+          resolutionNotes,
+        })
+        .catch((err) => console.warn('WhatsApp Ticket resolved alert error:', err));
+    }
   };
 
   const broadcastAreaOutage = (
@@ -2753,19 +3027,21 @@ export const ISPProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
 
     setOutages((prev) => [newOutage, ...prev]);
 
-    // Emit WhatsApp logs for affected users
-    const newLogs: WhatsAppNotificationLog[] = affectedCusts.map((c) => ({
-      id: `wa-outage-${c.id}-${Date.now()}`,
-      recipientPhone: c.phone,
-      recipientName: c.name,
-      type: 'outage_alert',
-      templateName: 'isp_area_outage_broadcast',
-      messageBody: `⚠️ *NETPULSE AREA OUTAGE ALERT*:\nNode ${areaNode} is experiencing service disruption due to: ${cause}. Our fiber restoration team is deployed. ETA: ${estimatedHours} hours.`,
-      status: 'delivered',
-      timestamp: new Date().toISOString(),
-    }));
-
-    setWhatsAppLogs((prev) => [...newLogs, ...prev]);
+    // Dispatch mass automated outage notices via WhatsApp Business Cloud API Service
+    const targets = affectedCusts.length > 0 ? affectedCusts : customers.slice(0, 5);
+    targets.forEach((c) => {
+      whatsappBusinessService
+        .sendAreaOutageNotification({
+          recipientPhone: c.phone,
+          recipientName: c.name,
+          areaNode,
+          incidentTitle: title,
+          cause,
+          severity,
+          estimatedHours,
+        })
+        .catch((err) => console.warn('WhatsApp Outage broadcast dispatch error:', err));
+    });
   };
 
   const updateOutage = (
@@ -2792,18 +3068,19 @@ export const ISPProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
             `⚠️ *YOUTH NET FIBER - OUTAGE STATUS UPDATE*\nNode / Area: *${updated.areaNode}*\nStatus: *${(updated.status || 'investigating').toUpperCase()}*\nETA: ${etaFormatted}\nWork Note: ${updated.workNotes || 'Our fiber optic technicians are actively working to restore connectivity.'}\n_Youth Net NOC Field Ops_`;
 
           const targets = affectedCusts.length > 0 ? affectedCusts : customers.slice(0, 5);
-          const newLogs: WhatsAppNotificationLog[] = targets.map((c) => ({
-            id: `wa-outage-update-${c.id}-${Date.now()}`,
-            recipientPhone: c.phone,
-            recipientName: c.name,
-            type: 'outage_alert',
-            templateName: 'isp_area_outage_update',
-            messageBody: msg,
-            status: 'delivered',
-            timestamp: new Date().toISOString(),
-          }));
-
-          setWhatsAppLogs((wLogs) => [...newLogs, ...wLogs]);
+          targets.forEach((c) => {
+            whatsappBusinessService
+              .sendAreaOutageNotification({
+                recipientPhone: c.phone,
+                recipientName: c.name,
+                areaNode: updated.areaNode,
+                incidentTitle: updated.title,
+                cause: updated.workNotes || msg,
+                severity: updated.severity,
+                estimatedHours: 1,
+              })
+              .catch((err) => console.warn('WhatsApp Outage update alert error:', err));
+          });
         }
 
         return updated;
@@ -2830,22 +3107,23 @@ export const ISPProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
           const affectedCusts = customers.filter(
             (c) => c.areaNode === resolved.areaNode || (resolved.ponPort && c.areaNode.includes(resolved.ponPort))
           );
-          const msg =
-            `🟢 *YOUTH NET FIBER - NETWORK RESTORED*\nAll optical and routing services for node *${resolved.areaNode}* have been successfully cleared and tested.\nResolution: ${resolutionNotes}\nInternet connectivity is fully restored. Thank you for your patience.\n_Youth Net NOC Transmission Team_`;
 
           const targets = affectedCusts.length > 0 ? affectedCusts : customers.slice(0, 5);
-          const newLogs: WhatsAppNotificationLog[] = targets.map((c) => ({
-            id: `wa-outage-resolved-${c.id}-${Date.now()}`,
-            recipientPhone: c.phone,
-            recipientName: c.name,
-            type: 'outage_alert',
-            templateName: 'isp_area_outage_resolved',
-            messageBody: msg,
-            status: 'delivered',
-            timestamp: new Date().toISOString(),
-          }));
-
-          setWhatsAppLogs((wLogs) => [...newLogs, ...wLogs]);
+          targets.forEach((c) => {
+            whatsappBusinessService
+              .sendAreaOutageNotification({
+                recipientPhone: c.phone,
+                recipientName: c.name,
+                areaNode: resolved.areaNode,
+                incidentTitle: resolved.title,
+                cause: resolved.cause,
+                severity: resolved.severity,
+                estimatedHours: 0,
+                isRestored: true,
+                resolutionNotes,
+              })
+              .catch((err) => console.warn('WhatsApp Outage resolved alert error:', err));
+          });
         }
 
         return resolved;
@@ -3025,6 +3303,8 @@ export const ISPProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
         updateOlt,
         deleteOlt,
         testOltSnmpConnection,
+        checkAndApplyExpiredSubscribers,
+        renewSubscriberPackage,
       }}
     >
       {children}

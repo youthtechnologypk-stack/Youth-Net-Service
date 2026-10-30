@@ -1,4 +1,4 @@
-import React from 'react';
+import React, { useState, useEffect } from 'react';
 import {
   Activity,
   Users,
@@ -22,6 +22,7 @@ import { useCurrency } from '../context/CurrencyContext';
 import { ActiveTab } from './Header';
 import { UsageAnalytics } from './UsageAnalytics';
 import { OutageBanner } from './OutageBanner';
+import { fetchMikrotikPppSecrets } from '../services/mikrotikRestClient';
 
 interface NocOverviewProps {
   onNavigateTab: (tab: ActiveTab) => void;
@@ -59,17 +60,40 @@ export const NocOverview: React.FC<NocOverviewProps> = ({
 
   const currentRouter = routers.find((r) => r.id === selectedRouterId) || routers[0];
 
-  const activeCustCount = customers.filter((c) => c.status === 'active').length;
-  const walledGardenCount = customers.filter((c) => c.status === 'walled_garden').length;
-  const totalDueAmount = customers.reduce((sum, c) => sum + c.balanceDue, 0);
+  const [provisionedSecretsCount, setProvisionedSecretsCount] = useState<number>(0);
 
-  const totalMonthlyBilled = invoices
-    .filter((i) => i.billingMonth === 'September 2026')
-    .reduce((sum, i) => sum + i.totalAmount, 0);
+  useEffect(() => {
+    let isMounted = true;
+    if (currentRouter && currentRouter.status === 'online') {
+      fetchMikrotikPppSecrets(currentRouter)
+        .then((res) => {
+          if (isMounted && res.success && Array.isArray(res.secrets)) {
+            setProvisionedSecretsCount(res.secrets.length);
+          }
+        })
+        .catch(() => {});
+    }
+    return () => {
+      isMounted = false;
+    };
+  }, [currentRouter]);
+
+  const activeCount = activeSessions ? activeSessions.length : 0;
+  const totalSecrets =
+    provisionedSecretsCount > 0
+      ? provisionedSecretsCount
+      : customers && customers.length > 0
+      ? customers.length
+      : (currentRouter?.activePppoeCount || 0);
+  const totalDueAmount = invoices
+    .filter((i) => i.status !== 'paid')
+    .reduce((sum, i) => sum + (Number(i.totalAmount) || 0), 0);
+
+  const totalMonthlyBilled = invoices.reduce((sum, i) => sum + (Number(i.totalAmount) || 0), 0);
 
   const totalCollected = invoices
-    .filter((i) => i.status === 'paid' && i.billingMonth === 'September 2026')
-    .reduce((sum, i) => sum + i.totalAmount, 0);
+    .filter((i) => i.status === 'paid')
+    .reduce((sum, i) => sum + (Number(i.totalAmount) || 0), 0);
 
   const urgentComplaints = complaints.filter(
     (c) => (c.priority === 'critical' || c.priority === 'high') && c.status !== 'resolved'
@@ -144,7 +168,7 @@ export const NocOverview: React.FC<NocOverviewProps> = ({
 
       {/* Top 5 Carrier Metric Cards */}
       <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-5 gap-3.5">
-        {/* Card 1: Live Subscriber Fleet */}
+        {/* Card 1: Live Subscriber Fleet - Derived Exclusively from activeSessions */}
         <div className="bg-slate-900/90 border border-slate-800 p-4 rounded-xl relative overflow-hidden">
           <div className="flex items-center justify-between">
             <span className="text-xs font-semibold text-slate-400 uppercase tracking-wider">
@@ -153,21 +177,23 @@ export const NocOverview: React.FC<NocOverviewProps> = ({
             <Users className="w-4 h-4 text-cyan-400" />
           </div>
           <div className="mt-2 flex items-baseline gap-2">
-            <span className="text-2xl font-bold font-mono text-white">{customers.length}</span>
+            <span className="text-2xl font-bold font-mono text-white">{activeCount}</span>
             <span className="text-xs text-emerald-400 font-medium">
-              {activeCustCount} Active Online
+              {activeCount} Active Online
             </span>
           </div>
           <div className="mt-3 flex items-center justify-between text-xs text-slate-400 pt-2 border-t border-slate-800">
-            <span className="flex items-center gap-1 text-amber-400">
-              <span className="w-2 h-2 rounded-full bg-amber-400 inline-block" />
-              {walledGardenCount} in Walled Garden
+            <span className="flex items-center gap-1 text-slate-400">
+              <span className="w-2 h-2 rounded-full bg-emerald-400 inline-block animate-pulse" />
+              {activeCount} Live Sessions
             </span>
-            <span className="font-mono text-slate-400">{activeSessions.length} Live Sessions</span>
+            <span className="font-mono text-cyan-400">
+              {totalSecrets > 0 ? `of ${totalSecrets} Provisioned` : `${activeCount} Online`}
+            </span>
           </div>
         </div>
 
-        {/* Card 2: Core Bandwidth Throughput */}
+        {/* Card 2: Core Bandwidth Throughput - Calculated strictly from real interface throughput */}
         <div className="bg-slate-900/90 border border-slate-800 p-4 rounded-xl relative overflow-hidden">
           <div className="flex items-center justify-between">
             <span className="text-xs font-semibold text-slate-400 uppercase tracking-wider">
@@ -177,8 +203,10 @@ export const NocOverview: React.FC<NocOverviewProps> = ({
           </div>
           <div className="mt-2 flex items-baseline gap-2">
             <span className="text-2xl font-bold font-mono text-white">
-              {(currentWanRx / 1000).toFixed(2)}{' '}
-              <span className="text-xs font-sans text-slate-400">Gbps</span>
+              {currentWanRx >= 1000 ? (currentWanRx / 1000).toFixed(2) : currentWanRx.toFixed(1)}{' '}
+              <span className="text-xs font-sans text-slate-400">
+                {currentWanRx >= 1000 ? 'Gbps' : 'Mbps'}
+              </span>
             </span>
             <span className="text-xs text-emerald-400 font-mono">RX</span>
           </div>
@@ -193,11 +221,11 @@ export const NocOverview: React.FC<NocOverviewProps> = ({
           </div>
         </div>
 
-        {/* Card 3: Monthly Billing & Recovery */}
+        {/* Card 3: Monthly Billing & Recovery - Based on localStorage invoices */}
         <div className="bg-slate-900/90 border border-slate-800 p-4 rounded-xl relative overflow-hidden">
           <div className="flex items-center justify-between">
             <span className="text-xs font-semibold text-slate-400 uppercase tracking-wider">
-              September MRR Recovery
+              Billed Revenue &amp; Recovery
             </span>
             <CreditCard className="w-4 h-4 text-indigo-400" />
           </div>
@@ -206,20 +234,31 @@ export const NocOverview: React.FC<NocOverviewProps> = ({
               {formatCurrency(totalCollected, 0)}
             </span>
             <span className="text-xs text-slate-400 font-mono">
-              of {formatCurrency(totalMonthlyBilled, 0)} billed
+              {invoices.length > 0 ? `of ${formatCurrency(totalMonthlyBilled, 0)} billed` : 'No invoices generated'}
             </span>
           </div>
           <div className="mt-3 flex items-center justify-between text-xs text-slate-400 pt-2 border-t border-slate-800">
-            <span className="text-rose-400 font-medium font-mono">
-              Overdue: {formatCurrency(totalDueAmount, 1)}
-            </span>
-            <span className="text-emerald-400 font-medium">
-              {Math.round((totalCollected / (totalMonthlyBilled || 1)) * 100)}% Collected
-            </span>
+            {invoices.length > 0 ? (
+              <>
+                <span className="text-rose-400 font-medium font-mono">
+                  Overdue: {formatCurrency(totalDueAmount, 1)}
+                </span>
+                <span className="text-emerald-400 font-medium">
+                  {Math.round((totalCollected / (totalMonthlyBilled || 1)) * 100)}% Collected
+                </span>
+              </>
+            ) : (
+              <span
+                onClick={() => onNavigateTab('billing')}
+                className="text-cyan-400 hover:text-cyan-300 cursor-pointer flex items-center gap-1 font-mono"
+              >
+                + Create First Invoice &rarr;
+              </span>
+            )}
           </div>
         </div>
 
-        {/* Card 4: SLA Complaints & Fiber Cuts */}
+        {/* Card 4: SLA Complaints & Fiber Cuts - Based on localStorage tickets */}
         <div className="bg-slate-900/90 border border-slate-800 p-4 rounded-xl relative overflow-hidden">
           <div className="flex items-center justify-between">
             <span className="text-xs font-semibold text-slate-400 uppercase tracking-wider">
@@ -229,14 +268,16 @@ export const NocOverview: React.FC<NocOverviewProps> = ({
           </div>
           <div className="mt-2 flex items-baseline gap-2">
             <span className="text-2xl font-bold font-mono text-white">{complaints.length}</span>
-            <span className="text-xs text-rose-400 font-semibold">
-              {urgentComplaints.length} Critical Fiber/LOS
+            <span className={`text-xs font-semibold ${urgentComplaints.length > 0 ? 'text-rose-400' : 'text-slate-500'}`}>
+              {urgentComplaints.length > 0 ? `${urgentComplaints.length} Critical Fiber/LOS` : '0 Critical Issues'}
             </span>
           </div>
           <div className="mt-3 flex items-center justify-between text-xs text-slate-400 pt-2 border-t border-slate-800">
-            <span className="text-slate-400">Mean SLA: 2.4 hrs</span>
+            <span className="text-slate-400">
+              {complaints.length > 0 ? 'SLA Queues Active' : 'All SLA Queues Clear'}
+            </span>
             <span className="text-cyan-400 cursor-pointer" onClick={() => onNavigateTab('complaints')}>
-              Dispatch &rarr;
+              {complaints.length > 0 ? 'Dispatch &rarr;' : '+ Log Ticket'}
             </span>
           </div>
         </div>
@@ -255,15 +296,13 @@ export const NocOverview: React.FC<NocOverviewProps> = ({
           <div className="mt-2 flex items-baseline gap-2">
             <span className="text-2xl font-bold font-mono text-white">{onus.length}</span>
             <span className="text-xs text-emerald-400 font-medium">
-              {onus.filter((o) => o.opticalQuality === 'good').length} Optimal
+              {onus.length > 0 ? `${onus.filter((o) => o.opticalQuality === 'good').length} Optimal` : 'No OLT Connected'}
             </span>
           </div>
           <div className="mt-3 flex items-center justify-between text-xs text-slate-400 pt-2 border-t border-slate-800">
-            <span className="text-amber-400 font-mono">
-              {onus.filter((o) => o.opticalQuality === 'warning').length} High Attn
-            </span>
-            <span className="text-cyan-400 group-hover:underline">
-              OLT NOC &rarr;
+            <span className="text-slate-400">PON Optical Health</span>
+            <span className="text-cyan-400 group-hover:translate-x-0.5 transition font-mono">
+              {olts.length > 0 ? `${olts.length} OLTs Online` : 'Configure &rarr;'}
             </span>
           </div>
         </div>

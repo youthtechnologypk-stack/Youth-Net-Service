@@ -13,24 +13,92 @@ export interface RealMikrotikSubscriber {
   isActiveNow?: boolean;  // Whether currently in /ppp/active
   uptime?: string;        // Live uptime if connected
   service?: string;       // Service type (pppoe)
+  createdDate?: string;   // YYYY-MM-DD
+  expiryDate?: string;    // YYYY-MM-DD
+  validityDays?: number;  // e.g. 30
+  expiredPool?: string;   // e.g. EXPIRED-POOL or 16.16.16.0/24
+  daysRemaining?: number; // Days until expiration (negative if expired)
+  isExpired?: boolean;    // true if today > expiryDate
+}
+
+/**
+ * Calculates days remaining and expiration status based on expiry date string
+ */
+export function calculateExpirationMetrics(expiryDateStr?: string): {
+  daysRemaining: number;
+  isExpired: boolean;
+  statusLabel: string;
+} {
+  if (!expiryDateStr) {
+    return { daysRemaining: 30, isExpired: false, statusLabel: 'Active' };
+  }
+  const exp = new Date(expiryDateStr);
+  if (isNaN(exp.getTime())) {
+    return { daysRemaining: 30, isExpired: false, statusLabel: 'Active' };
+  }
+  const now = new Date();
+  const expMid = new Date(exp.getFullYear(), exp.getMonth(), exp.getDate()).getTime();
+  const nowMid = new Date(now.getFullYear(), now.getMonth(), now.getDate()).getTime();
+  const diffDays = Math.ceil((expMid - nowMid) / (1000 * 60 * 60 * 24));
+  const isExpired = diffDays <= 0;
+  return {
+    daysRemaining: diffDays,
+    isExpired,
+    statusLabel: isExpired ? 'Expired' : `${diffDays} days left`,
+  };
 }
 
 /**
  * Intelligent comment parser for MikroTik RouterOS PPPoE secrets
  * Handles formats like:
+ * - JSON: '{"created":"2026-10-30","expires":"2026-11-29","plan":"10M","phone":"+923001234567","name":"Asad"}'
  * - "Asad Ullah Khan | +92 300 1234567 | Sector G-11"
  * - "Tariq Mehmood - 03019876543"
  * - "Apex Digital Corp | 03215551234"
  * - "+92 300 1234567"
  * - "YouthNet-App"
  */
-export function parseMikrotikComment(comment?: string, username?: string): { fullName: string; phone: string } {
+export function parseMikrotikComment(comment?: string, username?: string): {
+  fullName: string;
+  phone: string;
+  createdDate?: string;
+  expiryDate?: string;
+  validityDays?: number;
+  expiredPool?: string;
+  plan?: string;
+} {
   if (!comment || comment.trim() === '' || comment.trim() === 'YouthNet-App') {
     const formatted = (username || '')
       .replace(/[._-]/g, ' ')
       .replace(/\b\w/g, (c) => c.toUpperCase())
       .trim();
     return { fullName: formatted || username || 'Subscriber', phone: '+92 ' };
+  }
+
+  const trimmed = comment.trim();
+
+  // 1. JSON Structured Metadata parsing (RouterOS comment JSON)
+  if (trimmed.startsWith('{') && trimmed.endsWith('}')) {
+    try {
+      const obj = JSON.parse(trimmed);
+      const formattedName =
+        obj.name ||
+        (username || '')
+          .replace(/[._-]/g, ' ')
+          .replace(/\b\w/g, (c) => c.toUpperCase())
+          .trim();
+      return {
+        fullName: formattedName || 'Subscriber',
+        phone: obj.phone || '+92 ',
+        createdDate: obj.created || obj.createdDate,
+        expiryDate: obj.expires || obj.expiryDate,
+        validityDays: obj.days || obj.validityDays ? Number(obj.days || obj.validityDays) : undefined,
+        expiredPool: obj.expiredPool || obj.pool,
+        plan: obj.plan,
+      };
+    } catch {
+      // Fall through to regular text parser
+    }
   }
 
   let extractedName = '';
@@ -147,6 +215,8 @@ export async function fetchLiveMikrotikSubscribers(
       const callerId = sec['caller-id'] || sec.callerId || '';
       const profile = sec.profile || 'default';
 
+      const expMetrics = calculateExpirationMetrics(parsed.expiryDate);
+
       map.set(key, {
         id: sec['.id'] || sec.id || `sec-${idx}-${key}`,
         username: uname,
@@ -158,6 +228,12 @@ export async function fetchLiveMikrotikSubscribers(
         fullName: parsed.fullName,
         isActiveNow: false,
         service: sec.service || 'pppoe',
+        createdDate: parsed.createdDate,
+        expiryDate: parsed.expiryDate,
+        validityDays: parsed.validityDays,
+        expiredPool: parsed.expiredPool,
+        daysRemaining: expMetrics.daysRemaining,
+        isExpired: expMetrics.isExpired,
       });
     });
 

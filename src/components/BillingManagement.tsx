@@ -45,6 +45,7 @@ import { AgentSalaryModal, SalaryModalMode } from './AgentSalaryModal';
 import { ReceiveCashHandoverModal } from './ReceiveCashHandoverModal';
 import { AddOrEditAgentModal } from './AddOrEditAgentModal';
 import { RevenueTrendChart } from './RevenueTrendChart';
+import { whatsappBusinessService, WhatsAppAuditRecord } from '../services/whatsappBusinessService';
 
 export interface BillingManagementProps {
   onOpenReceiptModal?: (invoice: Invoice) => void;
@@ -118,6 +119,10 @@ export const BillingManagement: React.FC<BillingManagementProps> = ({
   const [newExpAmount, setNewExpAmount] = useState<string>('');
   const [newExpCategory, setNewExpCategory] = useState<IspExpense['category']>('upstream_transit');
   const [newExpPaidTo, setNewExpPaidTo] = useState<string>('');
+
+  // WhatsApp Business Cloud API inspection & filter state
+  const [selectedAuditRecord, setSelectedAuditRecord] = useState<WhatsAppAuditRecord | null>(null);
+  const [waCategoryFilter, setWaCategoryFilter] = useState<string>('all');
 
   // Customer map for rapid PPPoE lookup
   const customerMap = useMemo(() => {
@@ -383,16 +388,38 @@ export const BillingManagement: React.FC<BillingManagementProps> = ({
       sendWhatsAppReceipt?: boolean;
     }
   ) => {
+    const rcptNumber = `RCPT-${invoice.invoiceNumber.replace('INV-', '')}-${Date.now().toString().slice(-4)}`;
+
     updateInvoice(invoice.id, {
       status: 'paid',
       paidAt: details.paidAt,
       totalAmount: details.amount,
       paymentMethod: details.paymentMethod,
       agentName: details.collectorName,
-      receiptNumber: `RCPT-${invoice.invoiceNumber.replace('INV-', '')}-${Date.now().toString().slice(-4)}`,
+      receiptNumber: rcptNumber,
       whatsappNoticeSent: Boolean(details.sendWhatsAppReceipt),
       whatsappNoticeTimestamp: details.sendWhatsAppReceipt ? new Date().toISOString() : undefined,
     });
+
+    if (details.sendWhatsAppReceipt) {
+      const linkedCust = customerMap.get(invoice.customerId) || customerMap.get(invoice.customerName.toLowerCase());
+      whatsappBusinessService
+        .sendAutomatedPaymentReceipt({
+          customerName: invoice.customerName,
+          customerPhone: invoice.customerPhone || linkedCust?.phone || '+92 300 0000000',
+          invoiceNumber: invoice.invoiceNumber,
+          receiptNumber: rcptNumber,
+          amountPaid: details.amount,
+          paymentMethod: String(details.paymentMethod),
+          paidDate: details.paidAt,
+          planName: invoice.packageName,
+          pppoeUsername: linkedCust?.pppoeUsername,
+          collectorName: details.collectorName,
+          currencySymbol,
+        })
+        .catch((err) => console.warn('WhatsApp Business payment receipt dispatch error:', err));
+    }
+
     setIsRecordPaymentOpen(false);
     setRecordModalInvoice(null);
   };
@@ -1360,38 +1387,164 @@ export const BillingManagement: React.FC<BillingManagementProps> = ({
         </div>
       )}
 
-      {/* TAB 4: WHATSAPP DISPATCH LOGS */}
+      {/* TAB 4: WHATSAPP CLOUD API DISPATCH LOGS */}
       {activeTab === 'whatsapp' && (
-        <div className="bg-slate-900 border border-slate-800 rounded-xl p-5 shadow-lg space-y-4">
-          <div className="flex items-center justify-between">
-            <div>
-              <h3 className="text-base font-bold text-white flex items-center gap-2">
-                <Smartphone className="w-5 h-5 text-emerald-400" />
-                <span>WhatsApp Billing &amp; Payment Receipts Dispatch Log</span>
-              </h3>
-              <p className="text-xs text-slate-400">
-                Audit trail of automated and agent-sent WhatsApp billing notices and PDF receipts.
-              </p>
-            </div>
-          </div>
-
-          <div className="divide-y divide-slate-800 border border-slate-800 rounded-xl overflow-hidden font-mono text-xs">
-            {whatsAppLogs.map((log) => (
-              <div key={log.id} className="p-3 bg-slate-950/60 flex items-center justify-between hover:bg-slate-800/40 transition">
-                <div>
-                  <div className="text-white font-bold font-sans">{log.recipientName} ({log.recipientPhone})</div>
-                  <div className="text-[11px] text-slate-400 mt-0.5 line-clamp-1">{log.messageBody}</div>
-                </div>
-                <div className="text-right shrink-0">
-                  <span className="px-2 py-0.5 rounded text-[10px] font-bold bg-emerald-950 text-emerald-300 border border-emerald-800 uppercase">
-                    {log.status}
+        <div className="bg-slate-900 border border-slate-800 rounded-xl p-5 shadow-lg space-y-5">
+          {/* Top Cloud API Gateway Status Banner */}
+          <div className="bg-gradient-to-r from-emerald-950/80 via-slate-950 to-emerald-950/80 border border-emerald-800/60 rounded-xl p-4 flex flex-col md:flex-row items-start md:items-center justify-between gap-4">
+            <div className="flex items-center gap-3">
+              <div className="p-2.5 bg-emerald-900/60 border border-emerald-700/60 text-emerald-400 rounded-xl">
+                <Smartphone className="w-5 h-5" />
+              </div>
+              <div>
+                <div className="flex items-center gap-2">
+                  <h3 className="text-sm font-bold text-white">Meta WhatsApp Business Cloud API</h3>
+                  <span className="px-2 py-0.5 rounded text-[10px] font-mono font-bold bg-emerald-950 text-emerald-300 border border-emerald-700">
+                    Graph API v19.0 (Simulated)
                   </span>
-                  <span className="text-[10px] text-slate-500 block font-sans mt-0.5">
-                    {formatDateTimeDisplay(log.timestamp)}
+                </div>
+                <div className="flex flex-wrap items-center gap-3 text-[11px] text-slate-400 font-mono mt-1">
+                  <span>WABA ID: <strong className="text-slate-200">394820194820192</strong></span>
+                  <span>•</span>
+                  <span>Phone Number ID: <strong className="text-slate-200">109283749281726</strong></span>
+                  <span>•</span>
+                  <span className="text-emerald-400 flex items-center gap-1 font-semibold">
+                    <span className="w-1.5 h-1.5 rounded-full bg-emerald-400 animate-pulse"></span>
+                    Webhook Webhooks Active
                   </span>
                 </div>
               </div>
-            ))}
+            </div>
+
+            {/* Quick Metrics */}
+            <div className="flex items-center gap-3">
+              <div className="bg-slate-900/80 border border-slate-800 rounded-lg px-3 py-1.5 text-center">
+                <span className="text-[10px] text-slate-400 block">Total Dispatches</span>
+                <span className="text-sm font-bold text-white font-mono">{whatsAppLogs.length}</span>
+              </div>
+              <div className="bg-slate-900/80 border border-slate-800 rounded-lg px-3 py-1.5 text-center">
+                <span className="text-[10px] text-slate-400 block">Read Rate</span>
+                <span className="text-sm font-bold text-cyan-400 font-mono">
+                  {whatsAppLogs.length > 0
+                    ? `${Math.round((whatsAppLogs.filter((l) => l.status === 'read').length / whatsAppLogs.length) * 100)}%`
+                    : '100%'}
+                </span>
+              </div>
+            </div>
+          </div>
+
+          {/* Filter Pills */}
+          <div className="flex items-center justify-between gap-3 flex-wrap">
+            <div className="flex items-center gap-2">
+              <span className="text-xs text-slate-400 font-medium">Filter Workflows:</span>
+              {(['all', 'payment_receipt', 'outage_alert', 'ticket_update'] as const).map((cat) => (
+                <button
+                  key={cat}
+                  onClick={() => setWaCategoryFilter(cat)}
+                  className={`px-2.5 py-1 rounded-lg text-xs font-medium transition cursor-pointer ${
+                    waCategoryFilter === cat
+                      ? 'bg-emerald-600 text-white font-bold'
+                      : 'bg-slate-800 text-slate-300 hover:bg-slate-700'
+                  }`}
+                >
+                  {cat === 'all'
+                    ? 'All Messages'
+                    : cat === 'payment_receipt'
+                    ? 'Payment Receipts'
+                    : cat === 'outage_alert'
+                    ? 'Area Outages'
+                    : 'Ticket SLA Updates'}
+                </button>
+              ))}
+            </div>
+
+            <span className="text-xs text-slate-500 font-mono">
+              Showing {whatsAppLogs.filter((l) => waCategoryFilter === 'all' || l.type === waCategoryFilter).length} logs
+            </span>
+          </div>
+
+          {/* Logs List */}
+          <div className="divide-y divide-slate-800/80 border border-slate-800 rounded-xl overflow-hidden font-sans text-xs">
+            {whatsAppLogs.filter((l) => waCategoryFilter === 'all' || l.type === waCategoryFilter).length === 0 ? (
+              <div className="p-8 text-center text-slate-500">
+                <Smartphone className="w-8 h-8 mx-auto text-slate-600 mb-2 opacity-50" />
+                <p className="text-sm font-medium">No WhatsApp Business API dispatches recorded yet</p>
+                <p className="text-xs text-slate-600 mt-1">
+                  Automated receipts and outage broadcasts will appear here in real-time.
+                </p>
+              </div>
+            ) : (
+              whatsAppLogs
+                .filter((l) => waCategoryFilter === 'all' || l.type === waCategoryFilter)
+                .map((log) => {
+                  const auditRecords = whatsappBusinessService.getAuditLogs();
+                  const matchedAudit = auditRecords.find((a) => a.id === log.id || a.recipientPhone === log.recipientPhone);
+
+                  return (
+                    <div
+                      key={log.id}
+                      className="p-4 bg-slate-950/70 hover:bg-slate-800/40 transition flex flex-col md:flex-row items-start md:items-center justify-between gap-3"
+                    >
+                      <div className="space-y-1.5 flex-1 min-w-0">
+                        <div className="flex items-center gap-2 flex-wrap">
+                          <span className="text-white font-bold text-sm">{log.recipientName}</span>
+                          <span className="text-slate-400 font-mono text-xs">{log.recipientPhone}</span>
+                          <span className="px-2 py-0.5 rounded font-mono text-[10px] font-semibold bg-slate-800 text-slate-300 border border-slate-700">
+                            Template: {log.templateName}
+                          </span>
+                          <span
+                            className={`px-2 py-0.5 rounded text-[10px] font-bold uppercase border ${
+                              log.type === 'payment_receipt'
+                                ? 'bg-emerald-950 text-emerald-300 border-emerald-800'
+                                : log.type === 'outage_alert'
+                                ? 'bg-rose-950 text-rose-300 border-rose-800'
+                                : 'bg-indigo-950 text-indigo-300 border-indigo-800'
+                            }`}
+                          >
+                            {log.type.replace('_', ' ')}
+                          </span>
+                        </div>
+
+                        {/* Preformatted text preview */}
+                        <div className="text-xs text-slate-300 bg-slate-900/90 border border-slate-800/80 p-2.5 rounded-lg whitespace-pre-line line-clamp-3 font-mono text-[11px]">
+                          {log.messageBody}
+                        </div>
+                      </div>
+
+                      <div className="flex md:flex-col items-center md:items-end justify-between w-full md:w-auto gap-2 shrink-0">
+                        <div className="flex items-center gap-1.5">
+                          <span
+                            className={`px-2 py-0.5 rounded text-[10px] font-bold uppercase flex items-center gap-1 border ${
+                              log.status === 'read'
+                                ? 'bg-cyan-950 text-cyan-300 border-cyan-800'
+                                : log.status === 'delivered'
+                                ? 'bg-emerald-950 text-emerald-300 border-emerald-800'
+                                : 'bg-slate-800 text-slate-300 border-slate-700'
+                            }`}
+                          >
+                            {log.status === 'read' ? '✓✓ Read' : log.status === 'delivered' ? '✓✓ Delivered' : '✓ Sent'}
+                          </span>
+                        </div>
+
+                        <span className="text-[10px] text-slate-500 font-mono block">
+                          {formatDateTimeDisplay(log.timestamp)}
+                        </span>
+
+                        {matchedAudit && (
+                          <button
+                            type="button"
+                            onClick={() => setSelectedAuditRecord(matchedAudit)}
+                            className="mt-1 px-2.5 py-1 rounded bg-slate-800 hover:bg-slate-700 text-slate-200 text-[10px] font-mono font-medium flex items-center gap-1 border border-slate-700 cursor-pointer"
+                          >
+                            <Eye className="w-3 h-3 text-emerald-400" />
+                            <span>Inspect Payload</span>
+                          </button>
+                        )}
+                      </div>
+                    </div>
+                  );
+                })
+            )}
           </div>
         </div>
       )}
@@ -1610,6 +1763,106 @@ export const BillingManagement: React.FC<BillingManagementProps> = ({
                 </button>
               </div>
             </form>
+          </div>
+        </div>
+      )}
+
+      {/* MODAL 5: WHATSAPP BUSINESS CLOUD API INSPECT MODAL */}
+      {selectedAuditRecord && (
+        <div className="fixed inset-0 z-50 bg-black/80 backdrop-blur-sm flex items-center justify-center p-4 overflow-y-auto">
+          <div className="bg-slate-900 border border-slate-800 rounded-2xl max-w-2xl w-full p-6 shadow-2xl space-y-4 text-xs font-sans">
+            {/* Modal Header */}
+            <div className="flex items-center justify-between pb-3 border-b border-slate-800">
+              <div className="flex items-center gap-2.5">
+                <div className="p-2 bg-emerald-950 border border-emerald-700/60 rounded-xl text-emerald-400">
+                  <Smartphone className="w-5 h-5" />
+                </div>
+                <div>
+                  <div className="flex items-center gap-2">
+                    <h3 className="text-base font-bold text-white">Meta WhatsApp Cloud API Payload Inspector</h3>
+                    <span className="px-2 py-0.5 rounded font-mono text-[10px] font-bold bg-emerald-950 text-emerald-300 border border-emerald-700">
+                      v19.0
+                    </span>
+                  </div>
+                  <p className="text-slate-400 text-xs mt-0.5 font-mono">
+                    WAMID: <span className="text-slate-200">{selectedAuditRecord.wamid}</span>
+                  </p>
+                </div>
+              </div>
+              <button
+                type="button"
+                onClick={() => setSelectedAuditRecord(null)}
+                className="text-slate-400 hover:text-white p-1 rounded-lg hover:bg-slate-800 cursor-pointer"
+              >
+                <X className="w-5 h-5" />
+              </button>
+            </div>
+
+            {/* HTTP Request Details */}
+            <div className="space-y-3 font-mono text-[11px]">
+              <div>
+                <span className="text-slate-400 text-[10px] uppercase tracking-wider block mb-1">
+                  HTTP Request Target
+                </span>
+                <div className="bg-slate-950 p-2.5 rounded-lg border border-slate-800 text-emerald-400 flex items-center gap-2">
+                  <span className="px-1.5 py-0.5 bg-emerald-900/60 text-emerald-300 text-[10px] font-bold rounded">
+                    POST
+                  </span>
+                  <span>https://graph.facebook.com/v19.0/109283749281726/messages</span>
+                </div>
+              </div>
+
+              {/* JSON Request Payload */}
+              <div>
+                <span className="text-slate-400 text-[10px] uppercase tracking-wider block mb-1">
+                  Request JSON Payload (Template Schema)
+                </span>
+                <div className="bg-slate-950 p-3 rounded-lg border border-slate-800 overflow-x-auto max-h-48 text-slate-300 text-[10px] font-mono leading-relaxed">
+                  <pre>{JSON.stringify(selectedAuditRecord.rawPayload, null, 2)}</pre>
+                </div>
+              </div>
+
+              {/* Cloud API Response */}
+              <div>
+                <span className="text-slate-400 text-[10px] uppercase tracking-wider block mb-1">
+                  Meta Graph API Response (200 OK)
+                </span>
+                <div className="bg-slate-950 p-3 rounded-lg border border-slate-800 overflow-x-auto max-h-36 text-emerald-300 text-[10px] font-mono leading-relaxed">
+                  <pre>{JSON.stringify(selectedAuditRecord.rawResponse, null, 2)}</pre>
+                </div>
+              </div>
+
+              {/* Delivery Callback Timeline */}
+              <div className="bg-slate-950 p-3 rounded-lg border border-slate-800 font-sans">
+                <span className="text-slate-400 text-[10px] uppercase font-mono tracking-wider block mb-2">
+                  Webhook Delivery Status Lifecycle
+                </span>
+                <div className="grid grid-cols-3 gap-2 text-center text-[10px]">
+                  <div className="p-2 rounded bg-slate-900 border border-slate-800">
+                    <span className="text-slate-400 block">HTTP Dispatched</span>
+                    <span className="text-emerald-400 font-bold">✓ Accepted</span>
+                  </div>
+                  <div className="p-2 rounded bg-slate-900 border border-slate-800">
+                    <span className="text-slate-400 block">Carrier Handset</span>
+                    <span className="text-emerald-400 font-bold">✓✓ Delivered</span>
+                  </div>
+                  <div className="p-2 rounded bg-slate-900 border border-slate-800">
+                    <span className="text-slate-400 block">Subscriber Read</span>
+                    <span className="text-cyan-400 font-bold">✓✓ Blue Tick Read</span>
+                  </div>
+                </div>
+              </div>
+            </div>
+
+            <div className="flex justify-end pt-2 border-t border-slate-800">
+              <button
+                type="button"
+                onClick={() => setSelectedAuditRecord(null)}
+                className="px-4 py-1.5 rounded-lg bg-slate-800 hover:bg-slate-700 text-white font-medium text-xs cursor-pointer"
+              >
+                Close Inspector
+              </button>
+            </div>
           </div>
         </div>
       )}

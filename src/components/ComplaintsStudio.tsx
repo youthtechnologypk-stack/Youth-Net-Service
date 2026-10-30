@@ -258,8 +258,29 @@ export const ComplaintsStudio: React.FC<ComplaintsStudioProps> = ({
       </div>
 
       {/* SLA Ticket Cards Grid */}
-      <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-5">
-        {filteredTickets.map((ticket) => {
+      {filteredTickets.length === 0 ? (
+        <div className="bg-slate-900/60 border border-slate-800 rounded-2xl p-12 text-center space-y-4">
+          <div className="w-14 h-14 rounded-2xl bg-slate-950 border border-slate-800 flex items-center justify-center mx-auto text-emerald-400">
+            <CheckCircle2 className="w-7 h-7" />
+          </div>
+          <div className="space-y-1">
+            <h3 className="text-base font-bold text-white">No Active Complaint Tickets</h3>
+            <p className="text-xs text-slate-400 max-w-sm mx-auto">
+              All field fiber and technical subscriber tickets have been resolved.
+            </p>
+          </div>
+          <button
+            type="button"
+            onClick={onOpenTicketModal}
+            className="px-4 py-2 bg-amber-500 hover:bg-amber-400 text-slate-950 font-bold text-xs rounded-xl transition shadow-lg shadow-amber-950/40 inline-flex items-center gap-2 cursor-pointer"
+          >
+            <Plus className="w-4 h-4" />
+            <span>+ Log Complaint Ticket</span>
+          </button>
+        </div>
+      ) : (
+        <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-5">
+          {filteredTickets.map((ticket) => {
           const isResolved = ticket.status === 'resolved';
           const deadline = new Date(ticket.slaDeadline).getTime();
           const isBreached = !isResolved && deadline < now;
@@ -534,7 +555,8 @@ export const ComplaintsStudio: React.FC<ComplaintsStudioProps> = ({
             </div>
           );
         })}
-      </div>
+        </div>
+      )}
 
       {/* Resolution Modal */}
       {selectedTicketForResolve && (

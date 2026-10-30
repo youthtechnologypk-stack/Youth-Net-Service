@@ -305,9 +305,14 @@ export const RecordPaymentModal: React.FC<RecordPaymentModalProps> = ({
             <div className="flex items-center gap-2">
               <Smartphone className="w-4 h-4 text-emerald-400 shrink-0" />
               <div>
-                <span className="font-bold text-white block">WhatsApp Digital Receipt</span>
+                <div className="flex items-center gap-1.5">
+                  <span className="font-bold text-white block">WhatsApp Business Cloud API Receipt</span>
+                  <span className="px-1.5 py-0.2 rounded font-mono text-[9px] font-bold bg-emerald-950 text-emerald-300 border border-emerald-800">
+                    Template v19.0
+                  </span>
+                </div>
                 <span className="text-[10px] text-slate-400">
-                  Send instant payment confirmation to {invoice.customerPhone}
+                  Automated dispatch with WAMID tracking to {invoice.customerPhone || 'Subscriber Phone'}
                 </span>
               </div>
             </div>
