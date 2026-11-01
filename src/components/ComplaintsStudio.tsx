@@ -164,14 +164,24 @@ export const ComplaintsStudio: React.FC<ComplaintsStudioProps> = ({
 
         {/* Outage status ticker */}
         {outages.length > 0 && (
-          <div className="bg-slate-950 p-3 rounded-lg border border-slate-800 flex items-center justify-between text-xs">
+          <div className="bg-slate-950 p-3 rounded-lg border border-slate-800 flex flex-wrap items-center justify-between gap-3 text-xs">
             <div className="flex items-center gap-2.5">
-              <span className="w-2.5 h-2.5 rounded-full bg-rose-500 animate-ping" />
+              <span className="w-2.5 h-2.5 rounded-full bg-rose-500 animate-ping shrink-0" />
               <span className="font-bold text-rose-300">Active Area Node Outage:</span>
               <span className="text-slate-300">{outages[0].title}</span>
               <span className="text-slate-500 font-mono">({outages[0].areaNode})</span>
+              {outages[0].ponPort && (
+                <span className="px-2 py-0.5 rounded bg-rose-950 text-rose-300 border border-rose-800 text-[10px] font-mono">
+                  {outages[0].ponPort}
+                </span>
+              )}
             </div>
             <div className="flex items-center gap-3 font-mono text-xs">
+              {outages[0].linkedTicketIds && outages[0].linkedTicketIds.length > 0 && (
+                <span className="px-2 py-0.5 rounded bg-cyan-950 text-cyan-300 border border-cyan-800 text-[10px]">
+                  {outages[0].linkedTicketIds.length} Linked SLA Tickets
+                </span>
+              )}
               <span className="text-slate-400">
                 Affected: <strong className="text-rose-400">{outages[0].affectedCustomersCount} subscribers</strong>
               </span>
@@ -324,6 +334,12 @@ export const ComplaintsStudio: React.FC<ComplaintsStudioProps> = ({
                         UNASSIGNED (5m SLA)
                       </span>
                     ) : null}
+                    {(ticket.outageId || outages.some((o) => o.linkedTicketIds?.includes(ticket.id) || (o.ponPort && o.ponPort === ticket.ponPort))) && (
+                      <span className="text-[10px] px-2 py-0.5 rounded bg-rose-950 text-rose-300 border border-rose-800 font-mono font-bold flex items-center gap-1">
+                        <Megaphone className="w-2.5 h-2.5 text-rose-400" />
+                        AREA OUTAGE
+                      </span>
+                    )}
                   </div>
 
                   {/* SLA Status Chip */}
@@ -353,9 +369,19 @@ export const ComplaintsStudio: React.FC<ComplaintsStudioProps> = ({
 
                 {/* Subscriber & Location details */}
                 <div className="bg-slate-950 p-2.5 rounded-lg border border-slate-800/80 text-xs font-mono space-y-1">
-                  <div className="text-slate-300 font-bold">{ticket.customerName}</div>
+                  <div className="flex items-center justify-between">
+                    <span className="text-slate-300 font-bold">{ticket.customerName}</span>
+                    {ticket.pppoeUsername && <span className="text-cyan-400 text-[11px]">@{ticket.pppoeUsername}</span>}
+                  </div>
                   <div className="text-slate-400 text-[11px]">{ticket.customerAddress}</div>
-                  <div className="text-cyan-400 text-[11px]">Node: {ticket.areaNode}</div>
+                  <div className="flex items-center justify-between text-[11px]">
+                    <span className="text-cyan-400">Node: {ticket.areaNode}</span>
+                    {(ticket.ponPort || ticket.feederLine) && (
+                      <span className="text-indigo-300 font-mono text-[10px]">
+                        {ticket.ponPort || 'PON-01'} {ticket.feederLine ? `• ${ticket.feederLine}` : ''}
+                      </span>
+                    )}
+                  </div>
                 </div>
 
                 {/* Live VSOL OLT / ONU Optical Signal Telemetry */}

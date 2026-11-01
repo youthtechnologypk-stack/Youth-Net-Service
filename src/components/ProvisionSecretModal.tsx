@@ -29,6 +29,8 @@ export const ProvisionSecretModal: React.FC<ProvisionSecretModalProps> = ({ isOp
   const [pppoeUsername, setPppoeUsername] = useState('');
   const [pppoePassword, setPppoePassword] = useState('fiber1234');
   const [packageId, setPackageId] = useState(defaultProfileName);
+  const [ponPort, setPonPort] = useState('PON-01');
+  const [cnic, setCnic] = useState('');
   const [isSubmitting, setIsSubmitting] = useState(false);
 
   React.useEffect(() => {
@@ -56,6 +58,7 @@ export const ProvisionSecretModal: React.FC<ProvisionSecretModalProps> = ({ isOp
       packageId,
       assignedIp: `10.50.${Math.floor(Math.random() * 40 + 10)}.${Math.floor(Math.random() * 240 + 10)}`,
       macAddress: `00:1E:67:${Math.floor(10 + Math.random() * 89)}:${Math.floor(10 + Math.random() * 89)}:${Math.floor(10 + Math.random() * 89)}`,
+      ...({ cnic, ponPort } as any),
     });
 
     setIsSubmitting(false);
@@ -167,6 +170,35 @@ export const ProvisionSecretModal: React.FC<ProvisionSecretModalProps> = ({ isOp
                     </option>
                   ))
                 )}
+              </select>
+            </div>
+          </div>
+
+          <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+            <div>
+              <label className="block text-slate-400 mb-1">National ID / CNIC (Optional)</label>
+              <input
+                type="text"
+                placeholder="37405-1234567-1"
+                value={cnic}
+                onChange={(e) => setCnic(e.target.value)}
+                className="w-full bg-slate-950 border border-slate-700 text-slate-100 font-mono p-2 rounded focus:outline-none focus:border-cyan-500"
+              />
+            </div>
+
+            <div>
+              <label className="block text-slate-400 mb-1">OLT PON Port</label>
+              <select
+                value={ponPort}
+                onChange={(e) => setPonPort(e.target.value)}
+                className="w-full bg-slate-950 border border-slate-700 text-cyan-300 font-mono p-2 rounded focus:outline-none focus:border-cyan-500"
+              >
+                <option value="PON-01">PON-01 (Feeder 1-16)</option>
+                <option value="PON-02">PON-02 (Feeder 17-32)</option>
+                <option value="PON-03">PON-03 (Feeder 33-48)</option>
+                <option value="PON-04">PON-04 (Feeder 49-64)</option>
+                <option value="PON-05">PON-05 (North Splitter)</option>
+                <option value="PON-06">PON-06 (Commercial Hub)</option>
               </select>
             </div>
           </div>

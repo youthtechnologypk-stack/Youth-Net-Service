@@ -16,6 +16,8 @@ import {
   RouterInterface,
   MikrotikPppProfile,
   MikrotikPppSecret,
+  BillingSubscriber,
+  BillingLedgerEntry,
 } from '../types/isp';
 import { VsolOlt, OnuDevice } from '../types/olt';
 import {
@@ -77,6 +79,12 @@ interface ISPContextType {
   setIsTrafficStreaming: (val: boolean) => void;
   activeViewTab: string;
   setActiveViewTab: (tab: string) => void;
+  setCustomers: React.Dispatch<React.SetStateAction<Customer[]>>;
+  setInvoices: React.Dispatch<React.SetStateAction<Invoice[]>>;
+  setProvisionedSecrets: React.Dispatch<React.SetStateAction<MikrotikPppSecret[]>>;
+  setActiveSessions: React.Dispatch<React.SetStateAction<ActiveSession[]>>;
+  billingSubscribers: BillingSubscriber[];
+  setBillingSubscribers: React.Dispatch<React.SetStateAction<BillingSubscriber[]>>;
   provisionedSecrets: MikrotikPppSecret[];
   bandwidthProfiles: MikrotikPppProfile[];
   dynamicPppProfiles: Array<{ id: string; name: string; rateLimit?: string }>;
@@ -199,7 +207,7 @@ interface ISPContextType {
   autoAssignTicket: (ticketId: string, reason?: string) => Promise<{ agent: FieldAgent; ticket: ComplaintTicket } | null>;
   run5MinComplaintAutoAssignEngine: (forceAllOpen?: boolean) => Promise<{ assignedCount: number; message: string }>;
   resolveTicket: (ticketId: string, resolutionNotes: string, proofImageUrl?: string) => void;
-  broadcastAreaOutage: (areaNode: string, title: string, cause: string, severity: 'minor' | 'major' | 'critical', estimatedHours: number, ponPort?: string) => void;
+  broadcastAreaOutage: (areaNode: string, title: string, cause: string, severity: 'minor' | 'major' | 'critical', estimatedHours: number, ponPort?: string, linkedTicketIds?: string[]) => void;
   updateOutage: (outageId: string, updates: Partial<AreaOutage>, broadcastWhatsApp?: boolean, customMessage?: string) => void;
   resolveOutage: (outageId: string, resolutionNotes?: string, broadcastWhatsApp?: boolean) => void;
   logWhatsAppNotice: (recipientPhone: string, recipientName: string, messageBody: string, templateName?: string) => void;
@@ -430,6 +438,21 @@ export const ISPProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
   const [selectedOltId, setSelectedOltId] = useState<string>('');
   const [cashHandovers, setCashHandovers] = useState<CashHandover[]>(getInitialCashHandovers);
   const [salaryTransactions, setSalaryTransactions] = useState<AgentSalaryTransaction[]>(getInitialSalaryTransactions);
+  const [billingSubscribers, setBillingSubscribers] = useState<BillingSubscriber[]>(() => {
+    if (typeof window === 'undefined') return [];
+    try {
+      const raw = localStorage.getItem('youthnet_billing_subscribers');
+      return raw ? JSON.parse(raw) : [];
+    } catch {
+      return [];
+    }
+  });
+
+  useEffect(() => {
+    try {
+      localStorage.setItem('youthnet_billing_subscribers', JSON.stringify(billingSubscribers));
+    } catch {}
+  }, [billingSubscribers]);
 
   // Sync state to localStorage for persistence
   useEffect(() => {
@@ -1126,94 +1149,184 @@ export const ISPProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
     setActiveSessions((prev) => prev.filter((s) => s.id !== sessionId));
   };
 
-  // Provision new customer & PPPoE Secret
+  // Provision new customer & PPPoE Secret with End-to-End Linkage
   const provisionPppoeSecret = async (
     newCustomer: Partial<Customer>,
     initialBalance: number = 0
   ) => {
     const targetPkg = packages.find((p) => p.id === newCustomer.packageId || p.mikrotikProfile === newCustomer.packageId) || packages[0];
-    const username = newCustomer.pppoeUsername || `user_${Date.now().toString().slice(-4)}`;
+    const username = (newCustomer.pppoeUsername || `user_${Date.now().toString().slice(-4)}`).trim().toLowerCase();
     const selectedProfile = newCustomer.packageId || targetPkg?.mikrotikProfile || 'default';
-    const customerComment = newCustomer.name ? `${newCustomer.name} | ${newCustomer.phone || ''} | YouthNet-App` : 'YouthNet-App';
+    const plainPassword = newCustomer.pppoePassword || 'fiber1234';
+    const fullName = newCustomer.name?.trim() || username;
+    const phone = newCustomer.phone?.trim() || '+92 300 0000000';
+    const address = newCustomer.address?.trim() || 'Sector G-11 Area';
+    const areaNode = newCustomer.areaNode || 'Sector G-11 (North Zone)';
+    const ponPort = (newCustomer as any).ponPort || 'PON-01';
+    const feederLine = (newCustomer as any).feederLine || 'Feeder-North-01';
+    const cnic = (newCustomer as any).cnic || '';
+
+    const now = new Date();
+    const today = now.toISOString().split('T')[0];
+    const validityDays = Number((newCustomer as any).validityDays) || 30;
+    const expDate = new Date(now);
+    expDate.setDate(expDate.getDate() + validityDays);
+    const expiryDate = expDate.toISOString().split('T')[0];
+
+    // 1. Structured comment JSON for MikroTik
+    const commentJson = JSON.stringify({
+      created: today,
+      expires: expiryDate,
+      days: validityDays,
+      plan: selectedProfile,
+      phone,
+      address,
+      cnic,
+      ponPort,
+      name: fullName,
+      expiredPool: '16.16.16.0/24',
+    });
 
     const targetRouter =
       routersRef.current.find((r) => r.id === selectedRouterId) ||
       routersRef.current[0];
 
-    // 1. Creation Endpoint: POST /api/mikrotik/ppp/secret/add
+    // 2. Dispatch to physical MikroTik REST API: POST /api/mikrotik/ppp/secret/add
     if (targetRouter) {
       try {
         await provisionPppoeSecretRest(targetRouter, {
           name: username,
-          password: newCustomer.pppoePassword || 'pass1234',
+          password: plainPassword,
           service: 'pppoe',
           profile: selectedProfile,
-          comment: customerComment,
+          comment: commentJson,
         });
       } catch (err) {
         console.warn('REST Secret provision warning:', err);
       }
-
-      // 2. Immediate re-fetch of /api/mikrotik/ppp/active and /api/mikrotik/ppp/secret
-      try {
-        const [activeRes] = await Promise.all([
-          fetchMikrotikLiveTelemetry(targetRouter, { pollSessions: true, pollTraffic: false }),
-          fetchMikrotikPppSecrets(targetRouter),
-        ]);
-        if (activeRes.success) {
-          setActiveSessions(activeRes.activeSessions);
-        }
-      } catch (err) {
-        console.warn('Post-provision re-fetch notice:', err);
-      }
     }
 
+    // Also persist to backend DB endpoint (/api/mikrotik/users)
+    try {
+      await fetch('/api/mikrotik/users', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          routerId: selectedRouterId,
+          username,
+          password: plainPassword,
+          service: 'pppoe',
+          profile: selectedProfile,
+          remoteAddress: newCustomer.assignedIp || undefined,
+          comment: commentJson,
+          createdDate: today,
+          expiryDate,
+          validityDays,
+          name: fullName,
+          phone,
+          address,
+          areaNode,
+          packageId: targetPkg.id,
+        }),
+      }).catch(() => {});
+    } catch {}
+
+    // 3. Concurrently trigger auto-account creation in portal user repository (youthnet_portal_users & /api/auth/users)
+    const portalUserRecord = {
+      id: `usr-${username}-${Date.now().toString().slice(-4)}`,
+      username,
+      password: plainPassword,
+      fullName,
+      phone,
+      role: 'CLIENT',
+      linkedCustomerId: username,
+      pppoeUsername: username,
+      assignedIp: newCustomer.assignedIp || 'Dynamic',
+      profile: selectedProfile,
+      createdAt: now.toISOString(),
+    };
+
+    try {
+      const rawPortal = localStorage.getItem('youthnet_portal_users');
+      const existingPortal = rawPortal ? JSON.parse(rawPortal) : [];
+      const updatedPortal = [
+        portalUserRecord,
+        ...existingPortal.filter((u: any) => u.username?.toLowerCase() !== username),
+      ];
+      localStorage.setItem('youthnet_portal_users', JSON.stringify(updatedPortal));
+    } catch {}
+
+    try {
+      await fetch('/api/auth/users', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          username,
+          fullName,
+          phone,
+          role: 'CLIENT',
+          password: plainPassword,
+          isActive: true,
+        }),
+      }).catch(() => {});
+    } catch {}
+
+    // 4. Register subscriber automatically into active recurring billing cycle (youthnet_billing_subscribers)
     const basePrice = targetPkg ? targetPkg.priceMonthly : 2500;
     const taxRate = 0.16;
     const taxAmount = Math.round(basePrice * taxRate);
     const totalAmount = basePrice + taxAmount;
-    const now = new Date();
-    const billingMonthName = now.toLocaleString('default', { month: 'long', year: 'numeric' });
-    const dueDate = new Date(now.getFullYear(), now.getMonth(), 10).toISOString().split('T')[0];
-    const accountNum = `NP-CUST-${Math.floor(1100 + Math.random() * 8000)}`;
-    const invoiceNum = `INV-${now.getFullYear()}${String(now.getMonth() + 1).padStart(2, '0')}-${accountNum.slice(-4)}`;
+    const nextMonth = new Date(now.getFullYear(), now.getMonth() + 1, 1);
+    const nextBillingDate = nextMonth.toISOString().split('T')[0];
 
-    const createdCust: Customer = {
-      id: `cust-${Date.now()}`,
-      accountNumber: accountNum,
-      name: newCustomer.name || 'New Subscriber',
-      phone: newCustomer.phone || '+923000000000',
-      email: newCustomer.email || '',
-      address: newCustomer.address || 'Standard Address',
-      areaNode: newCustomer.areaNode || 'Sector G-11 (North Zone)',
-      connectionType: 'pppoe',
-      pppoeUsername: username,
-      assignedIp: newCustomer.assignedIp || `10.50.${Math.floor(Math.random() * 50)}.${Math.floor(Math.random() * 240 + 10)}`,
-      macAddress: newCustomer.macAddress || '44:D9:E7:88:AA:11',
-      packageId: targetPkg.id,
-      routerId: selectedRouterId,
-      status: 'active',
-      installationDate: now.toISOString().split('T')[0],
+    const billingSubscriberRecord: BillingSubscriber = {
+      id: `bill-sub-${username}`,
+      username,
+      fullName,
+      phone,
+      address,
+      areaNode,
+      ponPort,
+      feederLine,
+      cnic,
+      profile: selectedProfile,
+      packagePriceMonthly: basePrice,
       billingDay: 1,
+      nextBillingDate,
+      status: 'active',
+      lastInvoiceNumber: '',
       balanceDue: totalAmount,
-      ontSignalDbm: -19.2,
+      createdAt: now.toISOString(),
     };
 
-    setCustomers((prev) => {
-      const updated = [createdCust, ...prev];
-      try {
-        localStorage.setItem(STORAGE_KEY_CUSTOMERS, JSON.stringify(updated));
-      } catch {}
-      return updated;
-    });
+    setBillingSubscribers((prev) => [
+      billingSubscriberRecord,
+      ...prev.filter((b) => b.username?.toLowerCase() !== username),
+    ]);
 
-    // Automatically generate initial monthly invoice for the new client
+    try {
+      const rawBilling = localStorage.getItem('youthnet_billing_subscribers');
+      const existingBilling = rawBilling ? JSON.parse(rawBilling) : [];
+      const updatedBilling = [
+        billingSubscriberRecord,
+        ...existingBilling.filter((b: any) => b.username?.toLowerCase() !== username),
+      ];
+      localStorage.setItem('youthnet_billing_subscribers', JSON.stringify(updatedBilling));
+    } catch {}
+
+    // 5. Generate first initial invoice automatically (INV-[MONTH]-[USERNAME])
+    const monthStr = now.toLocaleString('en-US', { month: 'short' }).toUpperCase();
+    const yearStr = now.getFullYear();
+    const invoiceNum = `INV-${monthStr}${yearStr}-${username.toUpperCase()}`;
+    const dueDate = new Date(now.getFullYear(), now.getMonth(), 10).toISOString().split('T')[0];
+    const billingMonthName = now.toLocaleString('default', { month: 'long', year: 'numeric' });
+
     const newAutoInvoice: Invoice = {
-      id: `inv-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`,
+      id: `inv-${Date.now()}-${username}`,
       invoiceNumber: invoiceNum,
-      customerId: createdCust.id,
-      customerName: createdCust.name,
-      customerPhone: createdCust.phone,
+      customerId: `cust-${username}`,
+      customerName: fullName,
+      customerPhone: phone,
       packageId: targetPkg.id,
       packageName: targetPkg.name,
       billingMonth: billingMonthName,
@@ -1228,9 +1341,93 @@ export const ISPProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
       whatsappNoticeTimestamp: now.toISOString(),
     };
 
-    setInvoices((prev) => [newAutoInvoice, ...prev]);
+    billingSubscriberRecord.lastInvoiceNumber = invoiceNum;
+    setInvoices((prev) => [newAutoInvoice, ...prev.filter((i) => i.invoiceNumber !== invoiceNum)]);
 
-    // Auto-generate welcome & initial billing WhatsApp log
+    // 6. Record into Ledger History (youthnet_billing_ledger)
+    const ledgerEntry: BillingLedgerEntry = {
+      id: `led-${Date.now()}-${username}`,
+      date: today,
+      subscriberUsername: username,
+      subscriberName: fullName,
+      type: 'invoice_issued',
+      referenceNumber: invoiceNum,
+      description: `Initial Connection & Monthly Broadband Package Invoice (${targetPkg.name || selectedProfile})`,
+      debit: totalAmount,
+      credit: 0,
+      balanceAfter: totalAmount,
+      recordedBy: 'Automated Provisioning Engine',
+    };
+
+    try {
+      const rawLedger = localStorage.getItem('youthnet_billing_ledger');
+      const existingLedger = rawLedger ? JSON.parse(rawLedger) : [];
+      localStorage.setItem('youthnet_billing_ledger', JSON.stringify([ledgerEntry, ...existingLedger]));
+    } catch {}
+
+    // 7. Update Customer State & LocalStorage
+    const createdCust: Customer = {
+      id: `cust-${username}`,
+      accountNumber: `NP-${username.toUpperCase().slice(0, 6)}`,
+      name: fullName,
+      phone,
+      email: `${username}@youthnet.pk`,
+      address,
+      areaNode,
+      connectionType: 'pppoe',
+      pppoeUsername: username,
+      assignedIp: newCustomer.assignedIp || `10.50.${Math.floor(Math.random() * 50)}.${Math.floor(Math.random() * 240 + 10)}`,
+      macAddress: newCustomer.macAddress || '44:D9:E7:88:AA:11',
+      packageId: targetPkg.id,
+      routerId: selectedRouterId,
+      status: 'active',
+      installationDate: today,
+      billingDay: 1,
+      balanceDue: totalAmount,
+      ontSignalDbm: -19.2,
+      createdDate: today,
+      expiryDate,
+      validityDays,
+    };
+
+    setCustomers((prev) => {
+      const updated = [createdCust, ...prev.filter((c) => c.pppoeUsername?.toLowerCase() !== username)];
+      try {
+        localStorage.setItem(STORAGE_KEY_CUSTOMERS, JSON.stringify(updated));
+      } catch {}
+      return updated;
+    });
+
+    // 8. Update provisionedSecrets directly in state for immediate table rendering
+    const newSecretRecord: MikrotikPppSecret = {
+      '.id': `*new_${username}`,
+      name: username,
+      service: 'pppoe',
+      profile: selectedProfile,
+      comment: commentJson,
+      disabled: 'false',
+      'remote-address': createdCust.assignedIp,
+    };
+
+    setProvisionedSecrets((prev) => [
+      newSecretRecord,
+      ...prev.filter((s) => (s.name || '').toLowerCase() !== username),
+    ]);
+
+    // 9. Re-fetch /api/mikrotik/ppp/secret & telemetry immediately
+    if (targetRouter) {
+      Promise.all([
+        fetchMikrotikLiveTelemetry(targetRouter, { pollSessions: true, pollTraffic: false }),
+        fetchMikrotikPppSecrets(targetRouter),
+      ])
+        .then(([activeRes, secRes]) => {
+          if (activeRes.success) setActiveSessions(activeRes.activeSessions);
+          if (secRes.success && Array.isArray(secRes.secrets)) setProvisionedSecrets(secRes.secrets);
+        })
+        .catch(() => {});
+    }
+
+    // 10. Auto-generate welcome & initial billing WhatsApp log
     const welcomeWaMsg =
       `🔔 *YOUTH NET SERVICE - WELCOME & INITIAL INVOICE*\n\n` +
       `Dear *${createdCust.name}*,\n` +
@@ -1257,7 +1454,7 @@ export const ISPProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
       ...prev,
     ]);
 
-    // Add into active sessions
+    // Add placeholder active session
     setActiveSessions((prev) => [
       {
         id: `*NEW_${Math.floor(Math.random() * 900)}`,
@@ -3070,9 +3267,13 @@ export const ISPProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
     title: string,
     cause: string,
     severity: 'minor' | 'major' | 'critical',
-    estimatedHours: number
+    estimatedHours: number,
+    ponPort?: string,
+    linkedTicketIds?: string[]
   ) => {
-    const affectedCusts = customers.filter((c) => c.areaNode === areaNode);
+    const affectedCusts = customers.filter(
+      (c) => c.areaNode === areaNode || (ponPort && ((c as any).ponPort === ponPort || c.areaNode?.includes(ponPort)))
+    );
     const count = affectedCusts.length || 18;
 
     const newOutage: AreaOutage = {
@@ -3087,9 +3288,18 @@ export const ISPProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
       status: 'investigating',
       broadcastSentToWhatsAppCount: count,
       routerId: selectedRouterId,
+      ponPort,
+      linkedTicketIds,
     };
 
     setOutages((prev) => [newOutage, ...prev]);
+
+    // Tag linked tickets with this outage ID
+    if (linkedTicketIds && linkedTicketIds.length > 0) {
+      setComplaints((prev) =>
+        prev.map((t) => (linkedTicketIds.includes(t.id) ? { ...t, outageId: newOutage.id } : t))
+      );
+    }
 
     // Dispatch mass automated outage notices via WhatsApp Business Cloud API Service
     const targets = affectedCusts.length > 0 ? affectedCusts : customers.slice(0, 5);
@@ -3311,6 +3521,12 @@ export const ISPProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
         setIsTrafficStreaming,
         activeViewTab,
         setActiveViewTab,
+        setCustomers,
+        setInvoices,
+        setProvisionedSecrets,
+        setActiveSessions,
+        billingSubscribers,
+        setBillingSubscribers,
         provisionedSecrets,
         bandwidthProfiles,
         dynamicPppProfiles,

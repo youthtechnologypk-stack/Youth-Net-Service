@@ -32,7 +32,8 @@ import {
   Eye,
   Check,
 } from 'lucide-react';
-import { Invoice, PaymentMethod, InvoiceStatus, IspExpense, FieldAgent } from '../types/isp';
+import { Invoice, PaymentMethod, InvoiceStatus, IspExpense, FieldAgent, BillingSubscriber, BillingLedgerEntry } from '../types/isp';
+import { getStoredBillingLedger } from '../hooks/useSubscribers';
 import { useISP } from '../context/ISPContext';
 import { useCurrency } from '../context/CurrencyContext';
 import { getStoredUser } from '../lib/auth';
@@ -63,6 +64,8 @@ export const BillingManagement: React.FC<BillingManagementProps> = ({
   const {
     invoices,
     customers,
+    packages,
+    billingSubscribers,
     agents,
     expenses,
     cashHandovers,
@@ -81,8 +84,10 @@ export const BillingManagement: React.FC<BillingManagementProps> = ({
   const role = currentRole || activeUser?.role || 'ADMIN';
   const isAdmin = role === 'ADMIN';
 
-  // Sub-tabs
-  const [activeTab, setActiveTab] = useState<'invoices' | 'agents' | 'expenses' | 'whatsapp'>('invoices');
+  // Sub-tabs: Invoices, Recurring MRR, Ledger History, Agents, Expenses, WhatsApp
+  const [activeTab, setActiveTab] = useState<'invoices' | 'recurring' | 'ledger' | 'agents' | 'expenses' | 'whatsapp'>('invoices');
+  const [recurringSearch, setRecurringSearch] = useState<string>('');
+  const [ledgerSearch, setLedgerSearch] = useState<string>('');
 
   // Filter states
   const [filterStatus, setFilterStatus] = useState<string>('all'); // 'all' | 'unpaid' | 'paid' | 'overdue'
@@ -214,6 +219,80 @@ export const BillingManagement: React.FC<BillingManagementProps> = ({
       allCount: invoices.length,
     };
   }, [invoices]);
+
+  // Unified MRR Subscribers (merging youthnet_billing_subscribers and registered customers)
+  const mrrSubscribers = useMemo(() => {
+    const list: BillingSubscriber[] = [];
+    const seen = new Set<string>();
+
+    (billingSubscribers || []).forEach((b) => {
+      const u = (b.username || '').toLowerCase();
+      if (!u || seen.has(u)) return;
+      seen.add(u);
+      list.push(b);
+    });
+
+    (customers || []).forEach((c) => {
+      const u = (c.pppoeUsername || c.name || c.id).toLowerCase();
+      if (!u || seen.has(u)) return;
+      seen.add(u);
+      const pkg = packages?.find((p) => p.id === c.packageId || p.mikrotikProfile === c.packageId);
+      list.push({
+        id: `bill-${u}`,
+        username: c.pppoeUsername || u,
+        fullName: c.name || u,
+        phone: c.phone || '',
+        address: c.address || '',
+        areaNode: c.areaNode || 'General',
+        ponPort: (c as any).ponPort || 'PON-01',
+        feederLine: (c as any).feederLine || 'Feeder-North-01',
+        cnic: (c as any).cnic || '',
+        profile: pkg?.mikrotikProfile || 'default',
+        packagePriceMonthly: pkg?.priceMonthly || 2500,
+        billingDay: 1,
+        nextBillingDate: '2026-12-01',
+        status: 'active',
+        lastInvoiceNumber: `INV-NOV2026-${u.toUpperCase()}`,
+        balanceDue: c.balanceDue || 0,
+        createdAt: c.installationDate || '2026-10-30',
+      });
+    });
+
+    return list;
+  }, [billingSubscribers, customers, packages]);
+
+  const totalMRR = useMemo(() => {
+    return mrrSubscribers.reduce((sum, s) => sum + (s.packagePriceMonthly || 0), 0);
+  }, [mrrSubscribers]);
+
+  const ledgerEntries = useMemo(() => {
+    return getStoredBillingLedger();
+  }, [invoices, activeTab]);
+
+  const filteredMrrSubscribers = useMemo(() => {
+    if (!recurringSearch.trim()) return mrrSubscribers;
+    const q = recurringSearch.toLowerCase();
+    return mrrSubscribers.filter(
+      (s) =>
+        s.username.toLowerCase().includes(q) ||
+        s.fullName.toLowerCase().includes(q) ||
+        s.phone.toLowerCase().includes(q) ||
+        s.profile.toLowerCase().includes(q) ||
+        s.ponPort?.toLowerCase().includes(q)
+    );
+  }, [mrrSubscribers, recurringSearch]);
+
+  const filteredLedgerEntries = useMemo(() => {
+    if (!ledgerSearch.trim()) return ledgerEntries;
+    const q = ledgerSearch.toLowerCase();
+    return ledgerEntries.filter(
+      (l) =>
+        l.subscriberUsername.toLowerCase().includes(q) ||
+        l.subscriberName.toLowerCase().includes(q) ||
+        l.referenceNumber.toLowerCase().includes(q) ||
+        l.description.toLowerCase().includes(q)
+    );
+  }, [ledgerEntries, ledgerSearch]);
 
   // Filtered invoices according to all active criteria
   const filteredInvoices = useMemo(() => {
@@ -634,13 +713,51 @@ export const BillingManagement: React.FC<BillingManagementProps> = ({
             }`}
           >
             <CreditCard className="w-4 h-4" />
-            <span>Billing Ledger &amp; Invoices</span>
+            <span>Billing Invoices</span>
             <span
               className={`text-[10px] px-1.5 py-0.2 rounded-full font-mono ${
                 activeTab === 'invoices' ? 'bg-cyan-950 text-cyan-200' : 'bg-slate-800 text-slate-400'
               }`}
             >
               {invoices.length}
+            </span>
+          </button>
+
+          <button
+            onClick={() => setActiveTab('recurring')}
+            className={`px-3.5 py-2 rounded-lg text-xs font-semibold flex items-center gap-2 transition ${
+              activeTab === 'recurring'
+                ? 'bg-cyan-600 text-slate-950 font-bold shadow-md'
+                : 'text-slate-400 hover:text-slate-200 hover:bg-slate-800'
+            }`}
+          >
+            <TrendingUp className="w-4 h-4" />
+            <span>Recurring MRR Subscribers</span>
+            <span
+              className={`text-[10px] px-1.5 py-0.2 rounded-full font-mono ${
+                activeTab === 'recurring' ? 'bg-cyan-950 text-cyan-200' : 'bg-slate-800 text-slate-400'
+              }`}
+            >
+              {mrrSubscribers.length}
+            </span>
+          </button>
+
+          <button
+            onClick={() => setActiveTab('ledger')}
+            className={`px-3.5 py-2 rounded-lg text-xs font-semibold flex items-center gap-2 transition ${
+              activeTab === 'ledger'
+                ? 'bg-cyan-600 text-slate-950 font-bold shadow-md'
+                : 'text-slate-400 hover:text-slate-200 hover:bg-slate-800'
+            }`}
+          >
+            <Layers className="w-4 h-4" />
+            <span>Ledger History</span>
+            <span
+              className={`text-[10px] px-1.5 py-0.2 rounded-full font-mono ${
+                activeTab === 'ledger' ? 'bg-cyan-950 text-cyan-200' : 'bg-slate-800 text-slate-400'
+              }`}
+            >
+              {ledgerEntries.length}
             </span>
           </button>
 
@@ -1224,6 +1341,326 @@ export const BillingManagement: React.FC<BillingManagementProps> = ({
                   <strong className="text-cyan-400">
                     {formatCurrency(filteredInvoices.reduce((sum, i) => sum + i.totalAmount, 0))}
                   </strong>
+                </span>
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* TAB: RECURRING SUBSCRIBERS & MONTHLY RECURRING REVENUE (MRR) */}
+      {activeTab === 'recurring' && (
+        <div className="space-y-5 animate-fade-in">
+          {/* Top MRR Metric Summary Cards */}
+          <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
+            <div className="bg-slate-900 border border-slate-800 p-4 rounded-xl shadow-lg relative overflow-hidden">
+              <div className="flex items-center justify-between text-slate-400 text-xs font-mono uppercase">
+                <span className="flex items-center gap-1.5">
+                  <TrendingUp className="w-3.5 h-3.5 text-cyan-400" />
+                  <span>Monthly Recurring Revenue (MRR)</span>
+                </span>
+                <span className="px-2 py-0.5 rounded-full bg-cyan-950 text-cyan-300 border border-cyan-800 text-[10px] font-bold">
+                  Live
+                </span>
+              </div>
+              <div className="mt-2 text-2xl font-bold font-mono text-cyan-400 tracking-tight">
+                {formatCurrency(totalMRR)}
+              </div>
+              <p className="mt-1 text-[11px] text-slate-500 font-sans">
+                Projected gross revenue from active recurring subscribers
+              </p>
+            </div>
+
+            <div className="bg-slate-900 border border-slate-800 p-4 rounded-xl shadow-lg relative overflow-hidden">
+              <div className="flex items-center justify-between text-slate-400 text-xs font-mono uppercase">
+                <span className="flex items-center gap-1.5">
+                  <Users className="w-3.5 h-3.5 text-emerald-400" />
+                  <span>Enrolled In MRR Cycle</span>
+                </span>
+                <span className="px-2 py-0.5 rounded-full bg-emerald-950 text-emerald-300 border border-emerald-800 text-[10px] font-bold">
+                  {mrrSubscribers.length} Accounts
+                </span>
+              </div>
+              <div className="mt-2 text-2xl font-bold font-mono text-emerald-400 tracking-tight">
+                {mrrSubscribers.length}
+              </div>
+              <p className="mt-1 text-[11px] text-slate-500 font-sans">
+                Subscribers billed automatically on 1st of each calendar month
+              </p>
+            </div>
+
+            <div className="bg-slate-900 border border-slate-800 p-4 rounded-xl shadow-lg relative overflow-hidden">
+              <div className="flex items-center justify-between text-slate-400 text-xs font-mono uppercase">
+                <span className="flex items-center gap-1.5">
+                  <DollarSign className="w-3.5 h-3.5 text-amber-400" />
+                  <span>Average Revenue Per User (ARPU)</span>
+                </span>
+              </div>
+              <div className="mt-2 text-2xl font-bold font-mono text-amber-400 tracking-tight">
+                {formatCurrency(mrrSubscribers.length > 0 ? Math.round(totalMRR / mrrSubscribers.length) : 0)}
+              </div>
+              <p className="mt-1 text-[11px] text-slate-500 font-sans">
+                Average monthly billing package across customer base
+              </p>
+            </div>
+
+            <div className="bg-slate-900 border border-slate-800 p-4 rounded-xl shadow-lg relative overflow-hidden">
+              <div className="flex items-center justify-between text-slate-400 text-xs font-mono uppercase">
+                <span className="flex items-center gap-1.5">
+                  <Calendar className="w-3.5 h-3.5 text-indigo-400" />
+                  <span>Next Automated CRON Cycle</span>
+                </span>
+              </div>
+              <div className="mt-2 text-xl font-bold font-mono text-indigo-300 tracking-tight">
+                1st of Next Month
+              </div>
+              <p className="mt-1 text-[11px] text-slate-500 font-sans">
+                Auto-generates <code className="text-cyan-400">INV-[MONTH]-[USER]</code> &amp; sends WhatsApp notice
+              </p>
+            </div>
+          </div>
+
+          {/* Search Toolbar */}
+          <div className="bg-slate-900 border border-slate-800 rounded-xl p-4 shadow-lg flex flex-col sm:flex-row items-center justify-between gap-3">
+            <div className="relative w-full sm:w-96">
+              <Search className="w-4 h-4 text-slate-400 absolute left-3 top-1/2 -translate-y-1/2" />
+              <input
+                type="text"
+                placeholder="Search by username, full name, phone, plan, or PON port..."
+                value={recurringSearch}
+                onChange={(e) => setRecurringSearch(e.target.value)}
+                className="w-full bg-slate-950 border border-slate-800 text-slate-100 pl-9 pr-4 py-2 rounded-lg text-xs font-mono focus:outline-none focus:border-cyan-500"
+              />
+            </div>
+            <div className="text-xs text-slate-400 font-mono self-end sm:self-auto">
+              Active Recurring Records: <strong className="text-cyan-300 font-bold">{filteredMrrSubscribers.length}</strong>
+            </div>
+          </div>
+
+          {/* Table */}
+          <div className="bg-slate-900 border border-slate-800 rounded-xl overflow-hidden shadow-lg">
+            <div className="overflow-x-auto">
+              <table className="w-full text-left text-xs font-mono">
+                <thead className="bg-slate-950 text-slate-400 uppercase tracking-wider text-[11px] border-b border-slate-800">
+                  <tr>
+                    <th className="py-3 px-4">Subscriber</th>
+                    <th className="py-3 px-4">Bandwidth Plan</th>
+                    <th className="py-3 px-4">PON / Feeder</th>
+                    <th className="py-3 px-4">Billing Day</th>
+                    <th className="py-3 px-4">Next Billing Date</th>
+                    <th className="py-3 px-4">Last Invoice</th>
+                    <th className="py-3 px-4 text-right">Monthly MRR</th>
+                    <th className="py-3 px-4 text-center">Status</th>
+                  </tr>
+                </thead>
+                <tbody className="divide-y divide-slate-800 text-slate-300">
+                  {filteredMrrSubscribers.length === 0 ? (
+                    <tr>
+                      <td colSpan={8} className="py-12 text-center text-slate-500">
+                        No recurring subscribers found matching query.
+                      </td>
+                    </tr>
+                  ) : (
+                    filteredMrrSubscribers.map((sub) => (
+                      <tr key={sub.id} className="hover:bg-slate-800/50 transition">
+                        <td className="py-3 px-4">
+                          <div className="font-bold text-white flex items-center gap-1.5">
+                            <span className="text-cyan-400 font-mono">@{sub.username}</span>
+                          </div>
+                          <div className="text-[11px] text-slate-400 font-sans">{sub.fullName}</div>
+                          {sub.phone && <div className="text-[10px] text-slate-500">{sub.phone}</div>}
+                        </td>
+                        <td className="py-3 px-4">
+                          <span className="px-2 py-0.5 rounded bg-slate-950 border border-slate-800 text-slate-200 font-mono text-[11px]">
+                            {sub.profile}
+                          </span>
+                        </td>
+                        <td className="py-3 px-4">
+                          <div className="text-indigo-300 font-mono text-[11px]">{sub.ponPort || 'PON-01'}</div>
+                          {sub.feederLine && <div className="text-slate-500 text-[10px]">{sub.feederLine}</div>}
+                        </td>
+                        <td className="py-3 px-4 text-slate-300 font-mono">
+                          Day {sub.billingDay || 1}
+                        </td>
+                        <td className="py-3 px-4 text-amber-300 font-mono">
+                          {sub.nextBillingDate || '2026-12-01'}
+                        </td>
+                        <td className="py-3 px-4 font-mono text-[11px]">
+                          {sub.lastInvoiceNumber ? (
+                            <span className="text-cyan-400">{sub.lastInvoiceNumber}</span>
+                          ) : (
+                            <span className="text-slate-500">-</span>
+                          )}
+                        </td>
+                        <td className="py-3 px-4 text-right font-bold text-emerald-400 font-mono">
+                          {formatCurrency(sub.packagePriceMonthly)}
+                        </td>
+                        <td className="py-3 px-4 text-center">
+                          <span className="px-2 py-0.5 rounded-full bg-emerald-950 text-emerald-300 border border-emerald-800 text-[10px] font-bold">
+                            RECURRING
+                          </span>
+                        </td>
+                      </tr>
+                    ))
+                  )}
+                </tbody>
+              </table>
+            </div>
+            <div className="bg-slate-950 p-3 border-t border-slate-800 flex items-center justify-between text-xs text-slate-400 font-mono">
+              <div>
+                Showing <strong className="text-white">{filteredMrrSubscribers.length}</strong> of{' '}
+                <strong className="text-white">{mrrSubscribers.length}</strong> subscribers
+              </div>
+              <div>
+                Total Monthly Recurring Revenue:{' '}
+                <strong className="text-cyan-400 font-bold">{formatCurrency(totalMRR)}/month</strong>
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* TAB: SUBSCRIBER LEDGER HISTORY */}
+      {activeTab === 'ledger' && (
+        <div className="space-y-5 animate-fade-in">
+          {/* Top Ledger Stats */}
+          <div className="grid grid-cols-1 sm:grid-cols-3 gap-4">
+            <div className="bg-slate-900 border border-slate-800 p-4 rounded-xl shadow-lg">
+              <span className="text-slate-400 text-xs font-mono uppercase flex items-center gap-1.5">
+                <Layers className="w-3.5 h-3.5 text-cyan-400" />
+                <span>Total Ledger Transactions</span>
+              </span>
+              <div className="mt-2 text-2xl font-bold font-mono text-cyan-400">
+                {ledgerEntries.length} Records
+              </div>
+              <p className="mt-1 text-[11px] text-slate-500 font-sans">
+                Audit trail recorded in youthnet_billing_ledger
+              </p>
+            </div>
+
+            <div className="bg-slate-900 border border-slate-800 p-4 rounded-xl shadow-lg">
+              <span className="text-slate-400 text-xs font-mono uppercase flex items-center gap-1.5">
+                <Clock className="w-3.5 h-3.5 text-amber-400" />
+                <span>Total Debits / Invoiced</span>
+              </span>
+              <div className="mt-2 text-2xl font-bold font-mono text-amber-400">
+                {formatCurrency(ledgerEntries.reduce((s, e) => s + (e.debit || 0), 0))}
+              </div>
+              <p className="mt-1 text-[11px] text-slate-500 font-sans">
+                Gross receivables billed across all customer accounts
+              </p>
+            </div>
+
+            <div className="bg-slate-900 border border-slate-800 p-4 rounded-xl shadow-lg">
+              <span className="text-slate-400 text-xs font-mono uppercase flex items-center gap-1.5">
+                <CheckCircle2 className="w-3.5 h-3.5 text-emerald-400" />
+                <span>Total Credits / Payments</span>
+              </span>
+              <div className="mt-2 text-2xl font-bold font-mono text-emerald-400">
+                {formatCurrency(ledgerEntries.reduce((s, e) => s + (e.credit || 0), 0))}
+              </div>
+              <p className="mt-1 text-[11px] text-slate-500 font-sans">
+                Verified collections and payment credits received
+              </p>
+            </div>
+          </div>
+
+          {/* Search Toolbar */}
+          <div className="bg-slate-900 border border-slate-800 rounded-xl p-4 shadow-lg flex flex-col sm:flex-row items-center justify-between gap-3">
+            <div className="relative w-full sm:w-96">
+              <Search className="w-4 h-4 text-slate-400 absolute left-3 top-1/2 -translate-y-1/2" />
+              <input
+                type="text"
+                placeholder="Search ledger by subscriber, reference #, description..."
+                value={ledgerSearch}
+                onChange={(e) => setLedgerSearch(e.target.value)}
+                className="w-full bg-slate-950 border border-slate-800 text-slate-100 pl-9 pr-4 py-2 rounded-lg text-xs font-mono focus:outline-none focus:border-cyan-500"
+              />
+            </div>
+            <div className="text-xs text-slate-400 font-mono self-end sm:self-auto">
+              Transactions: <strong className="text-cyan-300 font-bold">{filteredLedgerEntries.length}</strong>
+            </div>
+          </div>
+
+          {/* Table */}
+          <div className="bg-slate-900 border border-slate-800 rounded-xl overflow-hidden shadow-lg">
+            <div className="overflow-x-auto">
+              <table className="w-full text-left text-xs font-mono">
+                <thead className="bg-slate-950 text-slate-400 uppercase tracking-wider text-[11px] border-b border-slate-800">
+                  <tr>
+                    <th className="py-3 px-4">Date</th>
+                    <th className="py-3 px-4">Subscriber</th>
+                    <th className="py-3 px-4">Transaction Type</th>
+                    <th className="py-3 px-4">Reference #</th>
+                    <th className="py-3 px-4">Description</th>
+                    <th className="py-3 px-4 text-right">Debit (+)</th>
+                    <th className="py-3 px-4 text-right">Credit (-)</th>
+                    <th className="py-3 px-4 text-right">Balance</th>
+                    <th className="py-3 px-4">Recorded By</th>
+                  </tr>
+                </thead>
+                <tbody className="divide-y divide-slate-800 text-slate-300">
+                  {filteredLedgerEntries.length === 0 ? (
+                    <tr>
+                      <td colSpan={9} className="py-12 text-center text-slate-500">
+                        No ledger transactions recorded yet. When a subscriber is provisioned or an invoice is generated, ledger entries will appear here.
+                      </td>
+                    </tr>
+                  ) : (
+                    filteredLedgerEntries.map((entry) => (
+                      <tr key={entry.id} className="hover:bg-slate-800/50 transition">
+                        <td className="py-3 px-4 text-slate-400 font-mono whitespace-nowrap">
+                          {entry.date}
+                        </td>
+                        <td className="py-3 px-4">
+                          <span className="text-cyan-400 font-bold font-mono">@{entry.subscriberUsername}</span>
+                          <div className="text-[11px] text-slate-400 font-sans">{entry.subscriberName}</div>
+                        </td>
+                        <td className="py-3 px-4">
+                          <span className={`px-2 py-0.5 rounded text-[10px] font-bold uppercase ${
+                            entry.type === 'invoice_issued'
+                              ? 'bg-amber-950 text-amber-300 border border-amber-800'
+                              : entry.type === 'payment_received' || entry.type === 'advance_collected'
+                              ? 'bg-emerald-950 text-emerald-300 border border-emerald-800'
+                              : 'bg-slate-800 text-slate-300'
+                          }`}>
+                            {entry.type.replace('_', ' ')}
+                          </span>
+                        </td>
+                        <td className="py-3 px-4 font-mono font-bold text-white whitespace-nowrap">
+                          {entry.referenceNumber}
+                        </td>
+                        <td className="py-3 px-4 font-sans text-slate-300 max-w-xs truncate">
+                          {entry.description}
+                        </td>
+                        <td className="py-3 px-4 text-right font-bold text-amber-400 font-mono">
+                          {entry.debit > 0 ? formatCurrency(entry.debit) : '-'}
+                        </td>
+                        <td className="py-3 px-4 text-right font-bold text-emerald-400 font-mono">
+                          {entry.credit > 0 ? formatCurrency(entry.credit) : '-'}
+                        </td>
+                        <td className="py-3 px-4 text-right font-bold text-cyan-300 font-mono">
+                          {formatCurrency(entry.balanceAfter)}
+                        </td>
+                        <td className="py-3 px-4 text-slate-400 text-[11px] whitespace-nowrap">
+                          {entry.recordedBy}
+                        </td>
+                      </tr>
+                    ))
+                  )}
+                </tbody>
+              </table>
+            </div>
+            <div className="bg-slate-950 p-3 border-t border-slate-800 flex items-center justify-between text-xs text-slate-400 font-mono">
+              <div>
+                Showing <strong className="text-white">{filteredLedgerEntries.length}</strong> ledger records
+              </div>
+              <div className="flex items-center gap-4">
+                <span>
+                  Total Debits: <strong className="text-amber-400">{formatCurrency(ledgerEntries.reduce((s, e) => s + (e.debit || 0), 0))}</strong>
+                </span>
+                <span>
+                  Total Credits: <strong className="text-emerald-400">{formatCurrency(ledgerEntries.reduce((s, e) => s + (e.credit || 0), 0))}</strong>
                 </span>
               </div>
             </div>

@@ -60,7 +60,12 @@ export function calculateExpirationMetrics(expiryDateStr?: string): {
  */
 export function parseMikrotikComment(comment?: string, username?: string): {
   fullName: string;
+  name?: string;
   phone: string;
+  address?: string;
+  cnic?: string;
+  ponPort?: string;
+  feederLine?: string;
   createdDate?: string;
   expiryDate?: string;
   validityDays?: number;
@@ -72,7 +77,7 @@ export function parseMikrotikComment(comment?: string, username?: string): {
       .replace(/[._-]/g, ' ')
       .replace(/\b\w/g, (c) => c.toUpperCase())
       .trim();
-    return { fullName: formatted || username || 'Subscriber', phone: '+92 ' };
+    return { fullName: formatted || username || 'Subscriber', name: formatted || username || 'Subscriber', phone: '+92 ' };
   }
 
   const trimmed = comment.trim();
@@ -83,13 +88,19 @@ export function parseMikrotikComment(comment?: string, username?: string): {
       const obj = JSON.parse(trimmed);
       const formattedName =
         obj.name ||
+        obj.fullName ||
         (username || '')
           .replace(/[._-]/g, ' ')
           .replace(/\b\w/g, (c) => c.toUpperCase())
           .trim();
       return {
         fullName: formattedName || 'Subscriber',
+        name: formattedName || 'Subscriber',
         phone: obj.phone || '+92 ',
+        address: obj.address,
+        cnic: obj.cnic,
+        ponPort: obj.ponPort,
+        feederLine: obj.feederLine,
         createdDate: obj.created || obj.createdDate,
         expiryDate: obj.expires || obj.expiryDate,
         validityDays: obj.days || obj.validityDays ? Number(obj.days || obj.validityDays) : undefined,

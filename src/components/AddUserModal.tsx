@@ -20,6 +20,7 @@ import {
   ShieldAlert,
 } from 'lucide-react';
 import { useISP } from '../context/ISPContext';
+import { useSubscribers } from '../hooks/useSubscribers';
 import { safeResponseJson } from '../lib/safeFetch';
 import {
   fetchMikrotikPppProfiles,
@@ -61,6 +62,7 @@ export const AddUserModal: React.FC<AddUserModalProps> = ({ isOpen, onClose, onS
     dynamicPppProfiles,
     bandwidthProfiles,
   } = useISP();
+  const { provisionSubscriber } = useSubscribers();
 
   const [routerId, setRouterId] = useState(selectedRouterId || (routers[0]?.id || ''));
   const [username, setUsername] = useState('');
@@ -72,6 +74,9 @@ export const AddUserModal: React.FC<AddUserModalProps> = ({ isOpen, onClose, onS
   const [phone, setPhone] = useState('+92 ');
   const [address, setAddress] = useState('');
   const [areaNode, setAreaNode] = useState('Sector G-11 (North Zone)');
+  const [ponPort, setPonPort] = useState('PON-01');
+  const [feederLine, setFeederLine] = useState('Feeder-North-01');
+  const [cnic, setCnic] = useState('');
 
   // Subscriber Package Lifecycle state
   const [creationDate, setCreationDate] = useState<string>(getTodayFormatted());
@@ -219,86 +224,39 @@ export const AddUserModal: React.FC<AddUserModalProps> = ({ isOpen, onClose, onS
     setIsSubmitting(true);
     setSubmissionError(null);
 
-    // Persist dates in MikroTik secret safely inside the comment field in JSON format
-    const commentJson = JSON.stringify({
-      created: creationDate,
-      expires: expiryDate,
-      days: validityDays,
-      plan: profile || 'default',
-      phone: phone.trim(),
-      name: fullName.trim() || username.trim(),
-      expiredPool: expiredPool.trim() || '16.16.16.0/24',
-    });
-
     try {
-      // 1. Direct Creation Endpoint: POST /api/mikrotik/ppp/secret/add
-      let restProvisioned = false;
-      if (currentRouter) {
-        try {
-          const restRes = await provisionPppoeSecretRest(currentRouter, {
-            name: username.trim(),
-            password: password.trim(),
-            service: service || 'pppoe',
-            profile: profile || 'default',
-            comment: commentJson,
-          });
-          if (restRes.success) {
-            restProvisioned = true;
-          }
-        } catch (restErr) {
-          console.warn('REST Secret provision warning:', restErr);
-        }
-      }
-
-      // 2. Persist to database & cache
-      const res = await fetch('/api/mikrotik/users', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          routerId,
-          username: username.trim(),
-          password: password.trim(),
-          service,
-          profile: profile || 'default',
-          remoteAddress: remoteIp.trim() || undefined,
-          remoteIp: remoteIp.trim() || undefined,
-          comment: commentJson,
-          createdDate: creationDate,
-          expiryDate,
-          validityDays,
-          expiredProfile: expiredPool,
-          isolationPool: expiredPool === 'EXPIRED-POOL' ? '16.16.16.0/24' : expiredPool,
-          name: fullName.trim() || username.trim(),
-          phone: phone.trim(),
-          address: address.trim(),
-          areaNode,
-          packageId: packages.find((p) => p.mikrotikProfile === profile)?.id,
-        }),
+      const res = await provisionSubscriber({
+        username: username.trim(),
+        password: password.trim(),
+        fullName: fullName.trim() || username.trim(),
+        phone: phone.trim(),
+        address: address.trim(),
+        areaNode,
+        ponPort,
+        feederLine,
+        cnic: cnic.trim(),
+        profile: profile || 'default',
+        service: service || 'pppoe',
+        remoteIp: remoteIp.trim() || undefined,
+        creationDate,
+        validityDays,
+        expiryDate,
+        expiredPool,
+        routerId,
+        sendWhatsApp: true,
       });
 
-      const data = await safeResponseJson(res);
-
-      if (!res.ok || !data.success) {
-        if (!restProvisioned) {
-          throw new Error(data.error || 'Failed to provision user on MikroTik router.');
-        }
-      }
-
-      setSuccessData(data.user || {
+      setSuccessData({
         username: username.trim(),
         password: password.trim(),
         service,
         profile,
         remoteAddress: remoteIp.trim(),
+        invoiceNumber: res.invoice?.invoiceNumber,
+        invoiceAmount: res.invoice?.totalAmount,
+        portalAccountCreated: true,
+        recurringBilled: true,
       });
-
-      // 3. Immediately trigger a re-fetch of /api/mikrotik/ppp/active and /api/mikrotik/ppp/secret
-      if (currentRouter) {
-        Promise.all([
-          fetchMikrotikLiveTelemetry(currentRouter, { pollSessions: true, pollTraffic: false }),
-          fetchMikrotikPppSecrets(currentRouter),
-        ]).catch(() => {});
-      }
 
       if (syncSelectedRouterNow) {
         await syncSelectedRouterNow().catch(() => {});
@@ -307,7 +265,7 @@ export const AddUserModal: React.FC<AddUserModalProps> = ({ isOpen, onClose, onS
         await fetchCustomersFromDb();
       }
       if (onSuccess) {
-        onSuccess(data);
+        onSuccess(res);
       }
     } catch (err: any) {
       setSubmissionError(err.message || 'An unexpected error occurred during provisioning.');
@@ -404,10 +362,28 @@ export const AddUserModal: React.FC<AddUserModalProps> = ({ isOpen, onClose, onS
                     <span className="text-indigo-300">{successData.remoteAddress}</span>
                   </div>
                 )}
+                {successData.invoiceNumber && (
+                  <div className="flex justify-between border-t border-slate-800/80 pt-1 mt-1">
+                    <span className="text-slate-400">First Monthly Invoice:</span>
+                    <span className="text-emerald-300 font-bold">{successData.invoiceNumber}</span>
+                  </div>
+                )}
+                <div className="flex justify-between">
+                  <span className="text-slate-400">Portal Client Profile:</span>
+                  <span className="text-cyan-300 font-bold">Auto-Created &amp; Linked (@{successData.username})</span>
+                </div>
+                <div className="flex justify-between">
+                  <span className="text-slate-400">Recurring Billing:</span>
+                  <span className="text-emerald-300">Enrolled (1st of Month Cycle)</span>
+                </div>
+                <div className="flex justify-between">
+                  <span className="text-slate-400">Optical Infrastructure:</span>
+                  <span className="text-indigo-300 font-mono">{ponPort} &bull; {feederLine}</span>
+                </div>
               </div>
 
               <p className="text-[11px] text-emerald-300/80">
-                Record committed to physical MikroTik <code className="bg-emerald-950 px-1 py-0.5 rounded font-mono">/ppp secret add</code> and synchronized to PostgreSQL <code className="bg-emerald-950 px-1 py-0.5 rounded font-mono">customers</code> table.
+                Record committed to physical MikroTik <code className="bg-emerald-950 px-1 py-0.5 rounded font-mono">/ppp secret add</code>, auto-enrolled in recurring MRR billing, and portal credentials issued.
               </p>
             </div>
           )}
@@ -740,6 +716,49 @@ export const AddUserModal: React.FC<AddUserModalProps> = ({ isOpen, onClose, onS
                     <option value="Sector F-11 (West Zone)">Sector F-11 (West Zone)</option>
                     <option value="Sector G-10 (South Zone)">Sector G-10 (South Zone)</option>
                   </select>
+                </div>
+              </div>
+
+              {/* CNIC and Optical Linkage */}
+              <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
+                <div>
+                  <label className="block text-slate-400 mb-1">National ID / CNIC</label>
+                  <input
+                    type="text"
+                    placeholder="37405-1234567-1"
+                    value={cnic}
+                    onChange={(e) => setCnic(e.target.value)}
+                    className="w-full bg-slate-950 border border-slate-700 text-slate-100 font-mono p-2 rounded-lg focus:outline-none focus:border-cyan-500"
+                  />
+                </div>
+
+                <div>
+                  <label className="block text-slate-400 mb-1">OLT PON Port</label>
+                  <select
+                    value={ponPort}
+                    onChange={(e) => setPonPort(e.target.value)}
+                    className="w-full bg-slate-950 border border-slate-700 text-cyan-300 font-mono p-2 rounded-lg focus:outline-none focus:border-cyan-500"
+                  >
+                    <option value="PON-01">PON-01 (Feeder 1-16)</option>
+                    <option value="PON-02">PON-02 (Feeder 17-32)</option>
+                    <option value="PON-03">PON-03 (Feeder 33-48)</option>
+                    <option value="PON-04">PON-04 (Feeder 49-64)</option>
+                    <option value="PON-05">PON-05 (North Splitter)</option>
+                    <option value="PON-06">PON-06 (Commercial Hub)</option>
+                    <option value="PON-07">PON-07 (West Sector)</option>
+                    <option value="PON-08">PON-08 (Backup Ring)</option>
+                  </select>
+                </div>
+
+                <div>
+                  <label className="block text-slate-400 mb-1">Feeder Line Cable</label>
+                  <input
+                    type="text"
+                    placeholder="e.g. Feeder-North-01"
+                    value={feederLine}
+                    onChange={(e) => setFeederLine(e.target.value)}
+                    className="w-full bg-slate-950 border border-slate-700 text-slate-100 font-mono p-2 rounded-lg focus:outline-none focus:border-cyan-500"
+                  />
                 </div>
               </div>
             </div>

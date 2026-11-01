@@ -197,6 +197,11 @@ export interface ComplaintTicket {
   customerPhone: string;
   customerAddress: string;
   areaNode: string;
+  ponPort?: string;
+  feederLine?: string;
+  outageId?: string;
+  pppoeUsername?: string;
+  assignedIp?: string;
   category: TicketCategory;
   priority: TicketPriority;
   status: TicketStatus;
@@ -276,8 +281,45 @@ export interface AreaOutage {
   broadcastSentToWhatsAppCount: number;
   routerId: string;
   ponPort?: string;
+  feederLine?: string;
+  linkedTicketIds?: string[];
   workNotes?: string;
   resolvedAt?: string;
+}
+
+export interface BillingSubscriber {
+  id: string;
+  username: string;
+  fullName: string;
+  phone: string;
+  address: string;
+  areaNode: string;
+  ponPort?: string;
+  feederLine?: string;
+  cnic?: string;
+  profile: string;
+  packagePriceMonthly: number;
+  billingDay: number;
+  nextBillingDate: string;
+  status: 'active' | 'walled_garden' | 'disabled' | 'expired';
+  lastInvoiceNumber?: string;
+  balanceDue: number;
+  createdAt: string;
+}
+
+export interface BillingLedgerEntry {
+  id: string;
+  date: string;
+  subscriberUsername: string;
+  subscriberName: string;
+  type: 'invoice_issued' | 'payment_received' | 'adjustment' | 'advance_collected';
+  referenceNumber: string;
+  description: string;
+  debit: number;
+  credit: number;
+  balanceAfter: number;
+  paymentMethod?: string;
+  recordedBy?: string;
 }
 
 export interface IspExpense {
