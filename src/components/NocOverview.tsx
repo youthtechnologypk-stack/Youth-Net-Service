@@ -43,6 +43,8 @@ export const NocOverview: React.FC<NocOverviewProps> = ({
     setSelectedRouterId,
     customers,
     activeSessions,
+    provisionedSecrets,
+    bandwidthProfiles,
     invoices,
     complaints,
     outages,
@@ -79,12 +81,15 @@ export const NocOverview: React.FC<NocOverviewProps> = ({
   }, [currentRouter]);
 
   const activeCount = activeSessions ? activeSessions.length : 0;
-  const totalSecrets =
-    provisionedSecretsCount > 0
+  const totalSubscribersCount =
+    provisionedSecrets && provisionedSecrets.length > 0
+      ? provisionedSecrets.length
+      : provisionedSecretsCount > 0
       ? provisionedSecretsCount
       : customers && customers.length > 0
       ? customers.length
-      : (currentRouter?.activePppoeCount || 0);
+      : activeCount;
+  const offlineCount = Math.max(0, totalSubscribersCount - activeCount);
   const totalDueAmount = invoices
     .filter((i) => i.status !== 'paid')
     .reduce((sum, i) => sum + (Number(i.totalAmount) || 0), 0);
@@ -168,7 +173,7 @@ export const NocOverview: React.FC<NocOverviewProps> = ({
 
       {/* Top 5 Carrier Metric Cards */}
       <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-5 gap-3.5">
-        {/* Card 1: Live Subscriber Fleet - Derived Exclusively from activeSessions */}
+        {/* Card 1: PPPoE Subscribers - Primary: Total Registered Secrets, Subtext: Active Online & Offline */}
         <div className="bg-slate-900/90 border border-slate-800 p-4 rounded-xl relative overflow-hidden">
           <div className="flex items-center justify-between">
             <span className="text-xs font-semibold text-slate-400 uppercase tracking-wider">
@@ -177,7 +182,7 @@ export const NocOverview: React.FC<NocOverviewProps> = ({
             <Users className="w-4 h-4 text-cyan-400" />
           </div>
           <div className="mt-2 flex items-baseline gap-2">
-            <span className="text-2xl font-bold font-mono text-white">{activeCount}</span>
+            <span className="text-2xl font-bold font-mono text-white">{totalSubscribersCount}</span>
             <span className="text-xs text-emerald-400 font-medium">
               {activeCount} Active Online
             </span>
@@ -185,10 +190,10 @@ export const NocOverview: React.FC<NocOverviewProps> = ({
           <div className="mt-3 flex items-center justify-between text-xs text-slate-400 pt-2 border-t border-slate-800">
             <span className="flex items-center gap-1 text-slate-400">
               <span className="w-2 h-2 rounded-full bg-emerald-400 inline-block animate-pulse" />
-              {activeCount} Live Sessions
+              {activeCount} Online
             </span>
-            <span className="font-mono text-cyan-400">
-              {totalSecrets > 0 ? `of ${totalSecrets} Provisioned` : `${activeCount} Online`}
+            <span className="font-mono text-amber-400/90">
+              {offlineCount} Offline
             </span>
           </div>
         </div>

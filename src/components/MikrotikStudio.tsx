@@ -34,7 +34,7 @@ import {
 } from 'lucide-react';
 import { useISP } from '../context/ISPContext';
 import { useCurrency } from '../context/CurrencyContext';
-import { CustomerStatus, InternetPackage, MikrotikRouter } from '../types/isp';
+import { CustomerStatus, InternetPackage, MikrotikRouter, MikrotikPppProfile, MikrotikPppSecret } from '../types/isp';
 import { AddMikrotikDeviceModal } from './AddMikrotikDeviceModal';
 import { AddBandwidthProfileModal } from './AddBandwidthProfileModal';
 import { AddUserModal } from './AddUserModal';
@@ -65,6 +65,8 @@ export const MikrotikStudio: React.FC<MikrotikStudioProps> = ({
     routerInterfaces,
     customers,
     packages,
+    provisionedSecrets,
+    bandwidthProfiles,
     routerError,
     isSyncingRouter,
     syncSelectedRouterNow,
@@ -138,6 +140,33 @@ export const MikrotikStudio: React.FC<MikrotikStudioProps> = ({
   }, [syncToast]);
 
   const currentRouter = routers.find((r) => r.id === selectedRouterId) || routers[0];
+
+  const hasLiveSecrets = Boolean(provisionedSecrets && provisionedSecrets.length > 0);
+  const displaySecretsCount = hasLiveSecrets ? provisionedSecrets.length : customers.length;
+
+  const hasLiveProfiles = Boolean(bandwidthProfiles && bandwidthProfiles.length > 0);
+  const displayProfilesCount = hasLiveProfiles ? bandwidthProfiles.length : packages.length;
+
+  const filteredSecrets = (hasLiveSecrets ? provisionedSecrets : []).filter((s) => {
+    const q = searchQuery.toLowerCase();
+    return (
+      (s.name && s.name.toLowerCase().includes(q)) ||
+      (s.profile && s.profile.toLowerCase().includes(q)) ||
+      (s['remote-address'] && s['remote-address'].toLowerCase().includes(q)) ||
+      (s.service && s.service.toLowerCase().includes(q)) ||
+      (s.comment && s.comment.toLowerCase().includes(q))
+    );
+  });
+
+  const filteredDynamicProfiles = (hasLiveProfiles ? bandwidthProfiles : []).filter((p) => {
+    const q = searchQuery.toLowerCase();
+    return (
+      (p.name && p.name.toLowerCase().includes(q)) ||
+      (p['rate-limit'] && p['rate-limit'].toLowerCase().includes(q)) ||
+      (p['remote-address'] && p['remote-address'].toLowerCase().includes(q)) ||
+      (p['local-address'] && p['local-address'].toLowerCase().includes(q))
+    );
+  });
 
   const filteredSessions = activeSessions.filter(
     (s) =>
@@ -407,7 +436,7 @@ export const MikrotikStudio: React.FC<MikrotikStudioProps> = ({
             }`}
           >
             <Layers className="w-3.5 h-3.5" />
-            Provisioned Secrets ({customers.length})
+            Provisioned Secrets ({displaySecretsCount})
           </button>
 
           <button
@@ -419,7 +448,7 @@ export const MikrotikStudio: React.FC<MikrotikStudioProps> = ({
             }`}
           >
             <Sliders className="w-3.5 h-3.5" />
-            Bandwidth Profiles ({packages.length})
+            Bandwidth Profiles ({displayProfilesCount})
           </button>
 
           <button
@@ -507,176 +536,318 @@ export const MikrotikStudio: React.FC<MikrotikStudioProps> = ({
             <table className="w-full text-left text-xs font-mono">
               <thead className="bg-slate-950 text-slate-400 uppercase tracking-wider text-[11px] border-b border-slate-800">
                 <tr>
-                  <th className="py-3 px-4">Account &amp; Subscriber</th>
-                  <th className="py-3 px-4">PPPoE Username</th>
-                  <th className="py-3 px-4">Created Date</th>
-                  <th className="py-3 px-4">Expiry Date</th>
-                  <th className="py-3 px-4">Days Remaining</th>
-                  <th className="py-3 px-4">State</th>
-                  <th className="py-3 px-4">Due Balance</th>
+                  <th className="py-3 px-4">Username &amp; Account</th>
+                  <th className="py-3 px-4">Bandwidth Profile</th>
+                  <th className="py-3 px-4">Assigned Remote IP</th>
+                  <th className="py-3 px-4">Service</th>
+                  <th className="py-3 px-4">Status</th>
+                  <th className="py-3 px-4">Created / Expiry</th>
                   <th className="py-3 px-4 text-right">RouterOS State Actions</th>
                 </tr>
               </thead>
               <tbody className="divide-y divide-slate-800 text-slate-300">
-                {filteredCustomers.map((cust) => {
-                  const parsed = parseMikrotikComment(cust.comment, cust.pppoeUsername);
-                  const createdDate = cust.createdDate || parsed.createdDate || cust.installationDate || '2026-10-30';
-                  const expiryDate = cust.expiryDate || parsed.expiryDate || '2026-11-29';
-                  const metrics = calculateExpirationMetrics(expiryDate);
-                  const validity = cust.validityDays || parsed.validityDays || 30;
-                  const pctRemaining = Math.max(0, Math.min(100, Math.round((metrics.daysRemaining / validity) * 100)));
-                  const isExpired = metrics.isExpired || cust.status === 'walled_garden' || cust.status === 'expired';
+                {hasLiveSecrets
+                  ? filteredSecrets.map((secret) => {
+                      const username = secret.name;
+                      const isOnline = activeSessions.some(
+                        (s) => s.username?.toLowerCase() === username?.toLowerCase()
+                      );
+                      const liveSession = activeSessions.find(
+                        (s) => s.username?.toLowerCase() === username?.toLowerCase()
+                      );
+                      const linkedCust = customers.find(
+                        (c) => c.pppoeUsername?.toLowerCase() === username?.toLowerCase()
+                      );
+                      const parsed = parseMikrotikComment(secret.comment, username);
+                      const createdDate = parsed.createdDate || linkedCust?.createdDate || '2026-10-30';
+                      const expiryDate = parsed.expiryDate || linkedCust?.expiryDate || '2026-11-29';
+                      const metrics = calculateExpirationMetrics(expiryDate);
+                      const validity = parsed.validityDays || linkedCust?.validityDays || 30;
+                      const pctRemaining = Math.max(0, Math.min(100, Math.round((metrics.daysRemaining / validity) * 100)));
+                      const isExpired = metrics.isExpired || linkedCust?.status === 'walled_garden' || secret.profile?.toLowerCase().includes('expired');
+                      const isDisabled = secret.disabled === true || secret.disabled === 'true' || linkedCust?.status === 'disabled';
+                      const remoteIp = secret['remote-address'] || liveSession?.address || linkedCust?.assignedIp || 'Dynamic';
+                      const service = secret.service || 'pppoe';
 
-                  return (
-                    <tr
-                      key={cust.id}
-                      onClick={() => setSelectedSubscriberUsername(cust.pppoeUsername)}
-                      className="hover:bg-slate-800/70 transition cursor-pointer group"
-                      title="Click to open Subscriber 360° Profile"
-                    >
-                      <td className="py-3 px-4">
-                        <div className="font-bold text-slate-100 group-hover:text-cyan-300 transition flex items-center gap-1.5">
-                          <span>{cust.name}</span>
-                          <ExternalLink className="w-3 h-3 opacity-0 group-hover:opacity-100 text-cyan-400 transition" />
-                        </div>
-                        <div className="text-[11px] text-slate-400">{cust.accountNumber}</div>
-                      </td>
-                      <td className="py-3 px-4 text-cyan-300 font-bold">{cust.pppoeUsername}</td>
-                      <td className="py-3 px-4 text-slate-400 font-mono text-[11px] whitespace-nowrap">
-                        {createdDate}
-                      </td>
-                      <td className="py-3 px-4 font-mono text-[11px] whitespace-nowrap">
-                        <span className={metrics.isExpired ? 'text-rose-400 font-bold' : metrics.daysRemaining <= 5 ? 'text-amber-400 font-bold' : 'text-slate-300'}>
-                          {expiryDate}
-                        </span>
-                      </td>
-                      <td className="py-3 px-4 font-sans whitespace-nowrap">
-                        <div className="space-y-1">
-                          <div className="flex items-center gap-1.5">
-                            <span
-                              className={`px-2 py-0.5 rounded text-[10px] font-bold font-mono inline-flex items-center gap-1 border ${
-                                metrics.isExpired
-                                  ? 'bg-rose-950 text-rose-300 border-rose-800 animate-pulse'
-                                  : metrics.daysRemaining <= 5
-                                  ? 'bg-amber-950 text-amber-300 border border-amber-800'
-                                  : 'bg-emerald-950 text-emerald-300 border border-emerald-800'
-                              }`}
-                            >
-                              <Clock className="w-2.5 h-2.5" />
-                              <span>{metrics.isExpired ? 'Expired' : `${metrics.daysRemaining}d left`}</span>
-                            </span>
-                          </div>
-                          {!metrics.isExpired && (
-                            <div className="w-20 bg-slate-800 h-1 rounded-full overflow-hidden">
-                              <div
-                                className={`h-full transition-all duration-500 ${
-                                  metrics.daysRemaining <= 5 ? 'bg-amber-400' : 'bg-emerald-400'
-                                }`}
-                                style={{ width: `${pctRemaining}%` }}
-                              />
-                            </div>
-                          )}
-                        </div>
-                      </td>
-                      <td className="py-3 px-4 font-sans whitespace-nowrap">
-                        <span
-                          className={`px-2 py-0.5 rounded text-[11px] font-medium capitalize border ${
-                            isExpired
-                              ? 'bg-rose-950 text-rose-300 border-rose-800 font-bold'
-                              : cust.status === 'active'
-                              ? 'bg-emerald-950 text-emerald-300 border border-emerald-800'
-                              : 'bg-slate-800 text-slate-300 border border-slate-700'
-                          }`}
+                      return (
+                        <tr
+                          key={secret['.id'] || username}
+                          onClick={() => setSelectedSubscriberUsername(username)}
+                          className="hover:bg-slate-800/70 transition cursor-pointer group"
+                          title="Click to open Subscriber 360° Profile"
                         >
-                          {isExpired ? 'Expired / Walled Garden' : cust.status.replace('_', ' ')}
-                        </span>
-                      </td>
-                      <td className="py-3 px-4 font-bold text-slate-200">
-                        {formatCurrency(cust.balanceDue)}
-                      </td>
-                      <td className="py-3 px-4 text-right font-sans" onClick={(e) => e.stopPropagation()}>
-                        <div className="flex items-center justify-end gap-1.5 flex-wrap">
-                          {/* Manual Renew / Extend Package Action */}
-                          <button
-                            onClick={async () => {
-                              setIsRenewing(cust.pppoeUsername);
-                              try {
-                                const res = await renewSubscriberPackage(cust.pppoeUsername, 30);
-                                setSyncToast({ type: 'success', message: res.message });
-                              } catch (err: any) {
-                                setSyncToast({ type: 'error', message: err.message || 'Renewal failed' });
-                              } finally {
-                                setIsRenewing(null);
-                              }
-                            }}
-                            disabled={isRenewing === cust.pppoeUsername}
-                            className="bg-cyan-950/90 hover:bg-cyan-900 border border-cyan-700 text-cyan-300 px-2 py-1 rounded text-[11px] transition flex items-center gap-1 cursor-pointer font-bold shadow-sm disabled:opacity-50"
-                            title="Extend package validity by +30 Days and restore active profile"
-                          >
-                            <RefreshCw className={`w-3 h-3 text-cyan-400 ${isRenewing === cust.pppoeUsername ? 'animate-spin' : ''}`} />
-                            <span>+ Renew (+30d)</span>
-                          </button>
+                          <td className="py-3 px-4">
+                            <div className="font-bold text-slate-100 group-hover:text-cyan-300 transition flex items-center gap-1.5">
+                              <span className="text-cyan-300 font-mono font-bold">{username}</span>
+                              <ExternalLink className="w-3 h-3 opacity-0 group-hover:opacity-100 text-cyan-400 transition" />
+                            </div>
+                            <div className="text-[11px] text-slate-400">
+                              {linkedCust?.name ? `${linkedCust.name} (${linkedCust.accountNumber})` : parsed.phone || 'RouterOS Secret'}
+                            </div>
+                          </td>
+                          <td className="py-3 px-4">
+                            <span className="px-2 py-0.5 rounded bg-slate-800 text-cyan-300 border border-slate-700 font-mono">
+                              {secret.profile || 'default'}
+                            </span>
+                          </td>
+                          <td className="py-3 px-4 font-mono text-emerald-400">
+                            {remoteIp}
+                          </td>
+                          <td className="py-3 px-4">
+                            <span className="px-2 py-0.5 rounded bg-slate-950 text-slate-300 border border-slate-800 uppercase text-[10px] font-mono">
+                              {service}
+                            </span>
+                          </td>
+                          <td className="py-3 px-4">
+                            {isOnline ? (
+                              <span className="px-2 py-0.5 rounded text-[10px] font-bold font-mono inline-flex items-center gap-1.5 bg-emerald-950 text-emerald-300 border border-emerald-800 shadow-sm">
+                                <span className="w-1.5 h-1.5 rounded-full bg-emerald-400 animate-pulse" />
+                                ONLINE
+                              </span>
+                            ) : isDisabled ? (
+                              <span className="px-2 py-0.5 rounded text-[10px] font-bold font-mono inline-flex items-center gap-1.5 bg-rose-950 text-rose-300 border border-rose-800">
+                                DISABLED
+                              </span>
+                            ) : (
+                              <span className="px-2 py-0.5 rounded text-[10px] font-bold font-mono inline-flex items-center gap-1.5 bg-slate-800 text-slate-400 border border-slate-700">
+                                OFFLINE
+                              </span>
+                            )}
+                          </td>
+                          <td className="py-3 px-4 font-sans whitespace-nowrap">
+                            <div className="space-y-1">
+                              <div className="flex items-center gap-1.5">
+                                <span
+                                  className={`px-2 py-0.5 rounded text-[10px] font-bold font-mono inline-flex items-center gap-1 border ${
+                                    isExpired
+                                      ? 'bg-rose-950 text-rose-300 border-rose-800 animate-pulse'
+                                      : metrics.daysRemaining <= 5
+                                      ? 'bg-amber-950 text-amber-300 border border-amber-800'
+                                      : 'bg-emerald-950 text-emerald-300 border border-emerald-800'
+                                  }`}
+                                >
+                                  <Clock className="w-2.5 h-2.5" />
+                                  <span>{isExpired ? 'Expired' : `${metrics.daysRemaining}d left`}</span>
+                                </span>
+                                <span className="text-[10px] text-slate-400 font-mono">
+                                  {expiryDate}
+                                </span>
+                              </div>
+                              {!isExpired && (
+                                <div className="w-20 bg-slate-800 h-1 rounded-full overflow-hidden">
+                                  <div
+                                    className={`h-full transition-all duration-500 ${
+                                      metrics.daysRemaining <= 5 ? 'bg-amber-400' : 'bg-emerald-400'
+                                    }`}
+                                    style={{ width: `${pctRemaining}%` }}
+                                  />
+                                </div>
+                              )}
+                            </div>
+                          </td>
+                          <td className="py-3 px-4 text-right font-sans" onClick={(e) => e.stopPropagation()}>
+                            <div className="flex items-center justify-end gap-1.5 flex-wrap">
+                              <button
+                                onClick={async () => {
+                                  setIsRenewing(username);
+                                  try {
+                                    const res = await renewSubscriberPackage(username, 30);
+                                    setSyncToast({ type: 'success', message: res.message });
+                                  } catch (err: any) {
+                                    setSyncToast({ type: 'error', message: err.message || 'Renewal failed' });
+                                  } finally {
+                                    setIsRenewing(null);
+                                  }
+                                }}
+                                disabled={isRenewing === username}
+                                className="bg-cyan-950/90 hover:bg-cyan-900 border border-cyan-700 text-cyan-300 px-2 py-1 rounded text-[11px] transition flex items-center gap-1 cursor-pointer font-bold shadow-sm disabled:opacity-50"
+                                title="Extend package validity by +30 Days"
+                              >
+                                <RefreshCw className={`w-3 h-3 text-cyan-400 ${isRenewing === username ? 'animate-spin' : ''}`} />
+                                <span>+ Renew</span>
+                              </button>
 
-                          <button
-                            onClick={() => setSelectedSubscriberUsername(cust.pppoeUsername)}
-                            className="bg-slate-800 hover:bg-slate-700 text-cyan-300 border border-slate-700 px-2 py-1 rounded text-[11px] transition"
-                          >
-                            360° View
-                          </button>
+                              <button
+                                onClick={() => setSelectedSubscriberUsername(username)}
+                                className="bg-slate-800 hover:bg-slate-700 text-cyan-300 border border-slate-700 px-2 py-1 rounded text-[11px] transition cursor-pointer"
+                              >
+                                360° View
+                              </button>
 
-                          {cust.status !== 'walled_garden' ? (
-                            <button
-                              onClick={() => toggleCustomerStatus(cust.id, 'walled_garden')}
-                              className="bg-amber-950/80 hover:bg-amber-900 border border-amber-800 text-amber-300 px-2 py-1 rounded text-[11px] transition"
-                              title="Redirect to Walled Garden captive portal"
-                            >
-                              Isolate
-                            </button>
-                          ) : (
-                            <button
-                              onClick={() => toggleCustomerStatus(cust.id, 'active')}
-                              className="bg-emerald-950/80 hover:bg-emerald-900 border border-emerald-800 text-emerald-300 px-2 py-1 rounded text-[11px] transition"
-                              title="Restore high-speed service"
-                            >
-                              Restore
-                            </button>
-                          )}
+                              {linkedCust && (
+                                <button
+                                  onClick={() =>
+                                    toggleCustomerStatus(
+                                      linkedCust.id,
+                                      linkedCust.status === 'disabled' ? 'active' : 'disabled'
+                                    )
+                                  }
+                                  className={`px-2 py-1 rounded text-[11px] transition border cursor-pointer ${
+                                    linkedCust.status === 'disabled'
+                                      ? 'bg-slate-800 border-slate-700 text-slate-300'
+                                      : 'bg-rose-950/60 border-rose-800 text-rose-300'
+                                  }`}
+                                >
+                                  {linkedCust.status === 'disabled' ? 'Enable' : 'Disable'}
+                                </button>
+                              )}
 
-                          <button
-                            onClick={() =>
-                              toggleCustomerStatus(
-                                cust.id,
-                                cust.status === 'disabled' ? 'active' : 'disabled'
-                              )
-                            }
-                            className={`px-2 py-1 rounded text-[11px] transition border ${
-                              cust.status === 'disabled'
-                                ? 'bg-slate-800 border-slate-700 text-slate-300'
-                                : 'bg-rose-950/60 border-rose-800 text-rose-300'
-                            }`}
-                          >
-                            {cust.status === 'disabled' ? 'Enable' : 'Disable'}
-                          </button>
+                              <button
+                                onClick={() => {
+                                  setUserToDelete({ username, name: linkedCust?.name || username });
+                                  setIsDeleteUserDialogOpen(true);
+                                }}
+                                className="px-2 py-1 rounded text-[11px] transition bg-rose-950/80 hover:bg-rose-900 border border-rose-800 text-rose-300 flex items-center gap-1 cursor-pointer"
+                                title="Delete Secret on MikroTik & Terminate Session"
+                              >
+                                <Trash2 className="w-3 h-3 text-rose-400" />
+                                <span>Delete</span>
+                              </button>
+                            </div>
+                          </td>
+                        </tr>
+                      );
+                    })
+                  : filteredCustomers.map((cust) => {
+                      const username = cust.pppoeUsername;
+                      const isOnline = activeSessions.some(
+                        (s) => s.username?.toLowerCase() === username?.toLowerCase()
+                      );
+                      const parsed = parseMikrotikComment(cust.comment, username);
+                      const createdDate = cust.createdDate || parsed.createdDate || cust.installationDate || '2026-10-30';
+                      const expiryDate = cust.expiryDate || parsed.expiryDate || '2026-11-29';
+                      const metrics = calculateExpirationMetrics(expiryDate);
+                      const validity = cust.validityDays || parsed.validityDays || 30;
+                      const pctRemaining = Math.max(0, Math.min(100, Math.round((metrics.daysRemaining / validity) * 100)));
+                      const isExpired = metrics.isExpired || cust.status === 'walled_garden' || cust.status === 'expired';
 
-                          <button
-                            onClick={() => {
-                              setUserToDelete({ username: cust.pppoeUsername, name: cust.name });
-                              setIsDeleteUserDialogOpen(true);
-                            }}
-                            className="px-2 py-1 rounded text-[11px] transition bg-rose-950/80 hover:bg-rose-900 border border-rose-800 text-rose-300 flex items-center gap-1 cursor-pointer"
-                            title="Delete Secret on MikroTik &amp; Terminate Session"
-                          >
-                            <Trash2 className="w-3 h-3 text-rose-400" />
-                            <span>Delete</span>
-                          </button>
-                        </div>
-                      </td>
-                    </tr>
-                  );
-                })}
-                {filteredCustomers.length === 0 && (
+                      return (
+                        <tr
+                          key={cust.id}
+                          onClick={() => setSelectedSubscriberUsername(username)}
+                          className="hover:bg-slate-800/70 transition cursor-pointer group"
+                          title="Click to open Subscriber 360° Profile"
+                        >
+                          <td className="py-3 px-4">
+                            <div className="font-bold text-slate-100 group-hover:text-cyan-300 transition flex items-center gap-1.5">
+                              <span className="text-cyan-300 font-mono font-bold">{username}</span>
+                              <ExternalLink className="w-3 h-3 opacity-0 group-hover:opacity-100 text-cyan-400 transition" />
+                            </div>
+                            <div className="text-[11px] text-slate-400">{cust.name} ({cust.accountNumber})</div>
+                          </td>
+                          <td className="py-3 px-4">
+                            <span className="px-2 py-0.5 rounded bg-slate-800 text-cyan-300 border border-slate-700 font-mono">
+                              {packages.find((p) => p.id === cust.packageId)?.mikrotikProfile || 'default'}
+                            </span>
+                          </td>
+                          <td className="py-3 px-4 font-mono text-emerald-400">
+                            {cust.assignedIp || 'Dynamic'}
+                          </td>
+                          <td className="py-3 px-4">
+                            <span className="px-2 py-0.5 rounded bg-slate-950 text-slate-300 border border-slate-800 uppercase text-[10px] font-mono">
+                              PPPOE
+                            </span>
+                          </td>
+                          <td className="py-3 px-4">
+                            {isOnline ? (
+                              <span className="px-2 py-0.5 rounded text-[10px] font-bold font-mono inline-flex items-center gap-1.5 bg-emerald-950 text-emerald-300 border border-emerald-800 shadow-sm">
+                                <span className="w-1.5 h-1.5 rounded-full bg-emerald-400 animate-pulse" />
+                                ONLINE
+                              </span>
+                            ) : cust.status === 'disabled' ? (
+                              <span className="px-2 py-0.5 rounded text-[10px] font-bold font-mono inline-flex items-center gap-1.5 bg-rose-950 text-rose-300 border border-rose-800">
+                                DISABLED
+                              </span>
+                            ) : (
+                              <span className="px-2 py-0.5 rounded text-[10px] font-bold font-mono inline-flex items-center gap-1.5 bg-slate-800 text-slate-400 border border-slate-700">
+                                OFFLINE
+                              </span>
+                            )}
+                          </td>
+                          <td className="py-3 px-4 font-sans whitespace-nowrap">
+                            <div className="space-y-1">
+                              <div className="flex items-center gap-1.5">
+                                <span
+                                  className={`px-2 py-0.5 rounded text-[10px] font-bold font-mono inline-flex items-center gap-1 border ${
+                                    isExpired
+                                      ? 'bg-rose-950 text-rose-300 border-rose-800 animate-pulse'
+                                      : metrics.daysRemaining <= 5
+                                      ? 'bg-amber-950 text-amber-300 border border-amber-800'
+                                      : 'bg-emerald-950 text-emerald-300 border border-emerald-800'
+                                  }`}
+                                >
+                                  <Clock className="w-2.5 h-2.5" />
+                                  <span>{isExpired ? 'Expired' : `${metrics.daysRemaining}d left`}</span>
+                                </span>
+                                <span className="text-[10px] text-slate-400 font-mono">
+                                  {expiryDate}
+                                </span>
+                              </div>
+                            </div>
+                          </td>
+                          <td className="py-3 px-4 text-right font-sans" onClick={(e) => e.stopPropagation()}>
+                            <div className="flex items-center justify-end gap-1.5 flex-wrap">
+                              <button
+                                onClick={async () => {
+                                  setIsRenewing(username);
+                                  try {
+                                    const res = await renewSubscriberPackage(username, 30);
+                                    setSyncToast({ type: 'success', message: res.message });
+                                  } catch (err: any) {
+                                    setSyncToast({ type: 'error', message: err.message || 'Renewal failed' });
+                                  } finally {
+                                    setIsRenewing(null);
+                                  }
+                                }}
+                                disabled={isRenewing === username}
+                                className="bg-cyan-950/90 hover:bg-cyan-900 border border-cyan-700 text-cyan-300 px-2 py-1 rounded text-[11px] transition flex items-center gap-1 cursor-pointer font-bold shadow-sm disabled:opacity-50"
+                              >
+                                <RefreshCw className={`w-3 h-3 text-cyan-400 ${isRenewing === username ? 'animate-spin' : ''}`} />
+                                <span>+ Renew</span>
+                              </button>
+
+                              <button
+                                onClick={() => setSelectedSubscriberUsername(username)}
+                                className="bg-slate-800 hover:bg-slate-700 text-cyan-300 border border-slate-700 px-2 py-1 rounded text-[11px] transition"
+                              >
+                                360° View
+                              </button>
+
+                              <button
+                                onClick={() =>
+                                  toggleCustomerStatus(
+                                    cust.id,
+                                    cust.status === 'disabled' ? 'active' : 'disabled'
+                                  )
+                                }
+                                className={`px-2 py-1 rounded text-[11px] transition border ${
+                                  cust.status === 'disabled'
+                                    ? 'bg-slate-800 border-slate-700 text-slate-300'
+                                    : 'bg-rose-950/60 border-rose-800 text-rose-300'
+                                }`}
+                              >
+                                {cust.status === 'disabled' ? 'Enable' : 'Disable'}
+                              </button>
+
+                              <button
+                                onClick={() => {
+                                  setUserToDelete({ username: cust.pppoeUsername, name: cust.name });
+                                  setIsDeleteUserDialogOpen(true);
+                                }}
+                                className="px-2 py-1 rounded text-[11px] transition bg-rose-950/80 hover:bg-rose-900 border border-rose-800 text-rose-300 flex items-center gap-1 cursor-pointer"
+                                title="Delete Secret on MikroTik & Terminate Session"
+                              >
+                                <Trash2 className="w-3 h-3 text-rose-400" />
+                                <span>Delete</span>
+                              </button>
+                            </div>
+                          </td>
+                        </tr>
+                      );
+                    })}
+                {(hasLiveSecrets ? filteredSecrets.length === 0 : filteredCustomers.length === 0) && (
                   <tr>
-                    <td colSpan={8} className="py-8 text-center text-slate-400 font-sans">
+                    <td colSpan={7} className="py-8 text-center text-slate-400 font-sans">
                       <div className="space-y-1">
                         <p className="text-slate-300 font-medium">No provisioned PPPoE secrets found on this router.</p>
                         <p className="text-xs text-slate-500">RouterOS /ppp/secret returned 0 subscriber credentials.</p>
@@ -698,9 +869,9 @@ export const MikrotikStudio: React.FC<MikrotikStudioProps> = ({
             <div>
               <div className="flex items-center gap-2">
                 <h3 className="text-sm font-bold text-white flex items-center gap-2">
-                  <span>Carrier Bandwidth Profiles</span>
+                  <span>Carrier Bandwidth Profiles (/ppp/profile)</span>
                   <span className="text-[10px] px-2 py-0.5 rounded bg-cyan-950 text-cyan-300 border border-cyan-800 font-mono">
-                    {packages.length} Profiles Live
+                    {displayProfilesCount} Profiles Live
                   </span>
                   <span className="text-[10px] px-2 py-0.5 rounded bg-emerald-950 text-emerald-300 border border-emerald-800 font-mono">
                     RouterOS v7 Synced
@@ -708,7 +879,7 @@ export const MikrotikStudio: React.FC<MikrotikStudioProps> = ({
                 </h3>
               </div>
               <p className="text-xs text-slate-400 mt-0.5">
-                Define upload/download rate limits, burst parameters, and monthly tariffs pushed directly to MikroTik <code className="text-cyan-400 font-mono">/ppp/profile</code> and <code className="text-cyan-400 font-mono">/queue/simple</code>.
+                Upload/download rate limits, burst parameters, and pool definitions fetched directly from MikroTik <code className="text-cyan-400 font-mono">/ppp/profile</code>.
               </p>
             </div>
 
@@ -722,6 +893,121 @@ export const MikrotikStudio: React.FC<MikrotikStudioProps> = ({
               <Plus className="w-4 h-4" />
               <span>+ Add Bandwidth Profile</span>
             </button>
+          </div>
+
+          {/* RouterOS /ppp/profile Active Table */}
+          <div className="bg-slate-900 border border-slate-800 rounded-xl overflow-hidden shadow-lg">
+            <div className="p-4 border-b border-slate-800 flex items-center justify-between">
+              <div>
+                <h4 className="text-xs font-bold text-white uppercase tracking-wider font-mono">
+                  RouterOS /ppp/profile Active Table
+                </h4>
+                <p className="text-[11px] text-slate-400">
+                  Live bandwidth profiles provisioned directly on MikroTik BNG
+                </p>
+              </div>
+            </div>
+            <div className="overflow-x-auto">
+              <table className="w-full text-left text-xs font-mono">
+                <thead className="bg-slate-950 text-slate-400 uppercase tracking-wider text-[11px] border-b border-slate-800">
+                  <tr>
+                    <th className="py-3 px-4">Profile Name</th>
+                    <th className="py-3 px-4">Rate Limit / RX-TX</th>
+                    <th className="py-3 px-4">Local Address</th>
+                    <th className="py-3 px-4">Remote Address / Pool</th>
+                    <th className="py-3 px-4">Only-One</th>
+                    <th className="py-3 px-4 text-right">Actions</th>
+                  </tr>
+                </thead>
+                <tbody className="divide-y divide-slate-800 text-slate-300">
+                  {(hasLiveProfiles
+                    ? filteredDynamicProfiles
+                    : packages.map((pkg) => ({
+                        '.id': pkg.id,
+                        name: pkg.mikrotikProfile,
+                        'rate-limit': `${pkg.uploadSpeedMbps}M/${pkg.downloadSpeedMbps}M`,
+                        'local-address': pkg.localAddress || '192.168.8.1',
+                        'remote-address': pkg.remoteAddressPool || 'pppoe-pool-default',
+                        'only-one': 'yes',
+                      }))
+                  ).map((prof) => {
+                    const rateLimit = prof['rate-limit'] || 'Unlimited';
+                    const localAddr = prof['local-address'] || '-';
+                    const remoteAddr = prof['remote-address'] || '-';
+                    const onlyOne = prof['only-one'] ? String(prof['only-one']) : 'default';
+                    const isDefault = prof.name === 'default' || prof.name === 'default-encryption';
+
+                    return (
+                      <tr key={prof['.id'] || prof.name} className="hover:bg-slate-800/60 transition">
+                        <td className="py-3 px-4">
+                          <div className="flex items-center gap-2">
+                            <span className="font-bold text-cyan-300">{prof.name}</span>
+                            {isDefault && (
+                              <span className="text-[9px] px-1.5 py-0.5 rounded bg-cyan-950 text-cyan-300 border border-cyan-800 font-mono">
+                                DEFAULT
+                              </span>
+                            )}
+                          </div>
+                        </td>
+                        <td className="py-3 px-4 font-mono font-bold text-emerald-300">
+                          {rateLimit}
+                        </td>
+                        <td className="py-3 px-4 font-mono text-slate-300">
+                          {localAddr}
+                        </td>
+                        <td className="py-3 px-4 font-mono text-slate-300">
+                          {remoteAddr}
+                        </td>
+                        <td className="py-3 px-4 font-mono">
+                          <span
+                            className={`px-2 py-0.5 rounded text-[10px] border ${
+                              onlyOne === 'yes' || onlyOne === 'true'
+                                ? 'bg-emerald-950 text-emerald-300 border-emerald-800'
+                                : 'bg-slate-800 text-slate-400 border-slate-700'
+                            }`}
+                          >
+                            {onlyOne}
+                          </span>
+                        </td>
+                        <td className="py-3 px-4 text-right font-sans">
+                          <div className="flex items-center justify-end gap-1.5">
+                            <button
+                              onClick={() => {
+                                const cli = `/ppp profile print where name="${prof.name}"`;
+                                navigator.clipboard.writeText(cli);
+                                setSyncToast({
+                                  type: 'success',
+                                  message: `Copied RouterOS CLI query for profile ${prof.name}`,
+                                });
+                              }}
+                              className="px-2 py-1 rounded text-[11px] transition bg-slate-800 hover:bg-slate-700 text-slate-300 border border-slate-700 flex items-center gap-1 cursor-pointer"
+                              title="Copy CLI query"
+                            >
+                              <Copy className="w-3 h-3 text-cyan-400" />
+                              <span>CLI</span>
+                            </button>
+                          </div>
+                        </td>
+                      </tr>
+                    );
+                  })}
+                  {(hasLiveProfiles ? filteredDynamicProfiles.length === 0 : packages.length === 0) && (
+                    <tr>
+                      <td colSpan={6} className="py-8 text-center text-slate-400 font-sans">
+                        No bandwidth profiles found matching your search.
+                      </td>
+                    </tr>
+                  )}
+                </tbody>
+              </table>
+            </div>
+          </div>
+
+          {/* Commercial Tariffs & Subscription Packages Section Header */}
+          <div className="pt-2">
+            <h4 className="text-xs font-bold text-slate-400 uppercase tracking-wider font-mono mb-2">
+              Commercial Subscription Tariffs &amp; Packages
+            </h4>
           </div>
 
           {/* Profiles Grid */}

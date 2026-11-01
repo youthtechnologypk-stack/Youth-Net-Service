@@ -663,9 +663,23 @@ export async function fetchMikrotikPppSecrets(
       throw new Error(`HTTP ${res.status}: ${res.statusText}`);
     }
     const data = await res.json();
+    const rawList = Array.isArray(data) ? data : [];
+    const secrets = rawList.map((s: any, idx: number) => ({
+      ...s,
+      '.id': s['.id'] || s.id || `sec-${idx}`,
+      id: s['.id'] || s.id || `sec-${idx}`,
+      name: s.name || s.user || `user-${idx}`,
+      profile: s.profile || 'default',
+      'remote-address': s['remote-address'] || s.remoteAddress || 'Dynamic',
+      remoteAddress: s['remote-address'] || s.remoteAddress || 'Dynamic',
+      service: s.service || 'pppoe',
+      comment: s.comment || '',
+      disabled: s.disabled === true || s.disabled === 'true',
+    }));
+
     return {
       success: true,
-      secrets: Array.isArray(data) ? data : [],
+      secrets,
     };
   } catch (err: any) {
     return {

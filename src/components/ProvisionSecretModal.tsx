@@ -8,7 +8,19 @@ interface ProvisionSecretModalProps {
 }
 
 export const ProvisionSecretModal: React.FC<ProvisionSecretModalProps> = ({ isOpen, onClose }) => {
-  const { packages, routers, selectedRouterId, provisionPppoeSecret, dynamicPppProfiles } = useISP();
+  const { packages, routers, selectedRouterId, provisionPppoeSecret, dynamicPppProfiles, bandwidthProfiles } = useISP();
+
+  const availableProfiles = bandwidthProfiles && bandwidthProfiles.length > 0
+    ? bandwidthProfiles
+    : dynamicPppProfiles && dynamicPppProfiles.length > 0
+    ? dynamicPppProfiles
+    : [];
+
+  const defaultProfileName =
+    availableProfiles.find((p) => p.name === 'default' || p.name === 'default-encryption')?.name ||
+    availableProfiles[0]?.name ||
+    packages[0]?.mikrotikProfile ||
+    'default';
 
   const [name, setName] = useState('');
   const [phone, setPhone] = useState('+92');
@@ -16,16 +28,14 @@ export const ProvisionSecretModal: React.FC<ProvisionSecretModalProps> = ({ isOp
   const [areaNode, setAreaNode] = useState('Sector G-11 (North Zone)');
   const [pppoeUsername, setPppoeUsername] = useState('');
   const [pppoePassword, setPppoePassword] = useState('fiber1234');
-  const [packageId, setPackageId] = useState(
-    dynamicPppProfiles?.[0]?.name || packages[1]?.id || packages[0]?.id || 'default'
-  );
+  const [packageId, setPackageId] = useState(defaultProfileName);
   const [isSubmitting, setIsSubmitting] = useState(false);
 
   React.useEffect(() => {
-    if (dynamicPppProfiles && dynamicPppProfiles.length > 0 && !packageId) {
-      setPackageId(dynamicPppProfiles[0].name);
+    if (availableProfiles.length > 0 && (!packageId || packageId === 'default')) {
+      setPackageId(defaultProfileName);
     }
-  }, [dynamicPppProfiles]);
+  }, [availableProfiles, defaultProfileName]);
 
   if (!isOpen) return null;
 
@@ -144,16 +154,16 @@ export const ProvisionSecretModal: React.FC<ProvisionSecretModalProps> = ({ isOp
                 onChange={(e) => setPackageId(e.target.value)}
                 className="w-full bg-slate-950 border border-slate-700 text-slate-100 p-2 rounded focus:outline-none focus:border-cyan-500 font-mono"
               >
-                {dynamicPppProfiles && dynamicPppProfiles.length > 0 ? (
-                  dynamicPppProfiles.map((prof) => (
-                    <option key={prof.id || prof.name} value={prof.name}>
-                      {prof.name} {prof.rateLimit ? `(${prof.rateLimit})` : ''}
+                {availableProfiles.length > 0 ? (
+                  availableProfiles.map((p: any) => (
+                    <option key={p['.id'] || p.id || p.name} value={p.name}>
+                      {p.name} {(p['rate-limit'] || p.rateLimit) ? `(${p['rate-limit'] || p.rateLimit})` : ''}
                     </option>
                   ))
                 ) : (
                   packages.map((pkg) => (
-                    <option key={pkg.id} value={pkg.id}>
-                      {pkg.name} (${pkg.priceMonthly}/mo)
+                    <option key={pkg.id} value={pkg.mikrotikProfile || pkg.name}>
+                      {pkg.name} ({pkg.downloadSpeedMbps}M/{pkg.uploadSpeedMbps}M)
                     </option>
                   ))
                 )}

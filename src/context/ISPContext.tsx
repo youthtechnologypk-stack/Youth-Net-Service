@@ -14,6 +14,8 @@ import {
   WhatsAppNotificationLog,
   CustomerStatus,
   RouterInterface,
+  MikrotikPppProfile,
+  MikrotikPppSecret,
 } from '../types/isp';
 import { VsolOlt, OnuDevice } from '../types/olt';
 import {
@@ -42,6 +44,7 @@ import {
   fetchMikrotikPppSecrets,
   updateMikrotikPppSecretRest,
   disconnectMikrotikActiveSessionRest,
+  FetchRouterLiveResult,
 } from '../services/mikrotikRestClient';
 import { whatsappBusinessService } from '../services/whatsappBusinessService';
 import {
@@ -74,6 +77,8 @@ interface ISPContextType {
   setIsTrafficStreaming: (val: boolean) => void;
   activeViewTab: string;
   setActiveViewTab: (tab: string) => void;
+  provisionedSecrets: MikrotikPppSecret[];
+  bandwidthProfiles: MikrotikPppProfile[];
   dynamicPppProfiles: Array<{ id: string; name: string; rateLimit?: string }>;
   fetchPppProfiles: () => Promise<Array<{ id: string; name: string; rateLimit?: string }>>;
   lastCronMessage: string | null;
@@ -660,7 +665,11 @@ export const ISPProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
 
   const lastSessionsPollTimeRef = useRef(0);
 
+  // RouterOS PPPoE Total Provisioned Secrets loaded from /rest/ppp/secret
+  const [provisionedSecrets, setProvisionedSecrets] = useState<MikrotikPppSecret[]>([]);
+
   // RouterOS PPPoE Bandwidth Profiles loaded from /rest/ppp/profile
+  const [bandwidthProfiles, setBandwidthProfiles] = useState<MikrotikPppProfile[]>([]);
   const [dynamicPppProfiles, setDynamicPppProfiles] = useState<Array<{ id: string; name: string; rateLimit?: string }>>([]);
 
   const fetchPppProfiles = async (): Promise<Array<{ id: string; name: string; rateLimit?: string }>> => {
@@ -670,6 +679,7 @@ export const ISPProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
         routersRef.current[0];
       const res = await fetchMikrotikPppProfiles(targetRouter);
       if (res.success && res.profiles.length > 0) {
+        setBandwidthProfiles(res.profiles);
         setDynamicPppProfiles(res.profiles);
         return res.profiles;
       }
@@ -724,43 +734,84 @@ export const ISPProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
     setRouterError(null);
 
     try {
-      const result = await fetchMikrotikLiveTelemetry(targetRouter);
+      // 1. Parallel Fetching: Active Sessions, Total Provisioned Secrets, and Bandwidth Profiles concurrently using Promise.all
+      const [telemetryResult, secretsResult, profilesResult] = await Promise.all([
+        fetchMikrotikLiveTelemetry(targetRouter).catch(
+          (err): FetchRouterLiveResult => ({
+            success: false,
+            activeSessions: [],
+            interfaces: [],
+            error: err.message,
+          })
+        ),
+        fetchMikrotikPppSecrets(targetRouter).catch((err) => ({
+          success: false,
+          secrets: [],
+          error: err.message,
+        })),
+        fetchMikrotikPppProfiles(targetRouter).catch((err) => ({
+          success: false,
+          profiles: [],
+          error: err.message,
+        })),
+      ]);
 
-      if (result.success && result.router) {
+      if (secretsResult.success && Array.isArray(secretsResult.secrets)) {
+        setProvisionedSecrets(secretsResult.secrets);
+      }
+
+      if (profilesResult.success && Array.isArray(profilesResult.profiles)) {
+        setBandwidthProfiles(profilesResult.profiles);
+        setDynamicPppProfiles(profilesResult.profiles);
+      }
+
+      if (telemetryResult.success && telemetryResult.router) {
         setRouterError(null);
         setRouters((prev) =>
           prev.map((r) =>
             r.id === selectedRouterId
               ? {
                   ...r,
-                  ...result.router,
+                  ...telemetryResult.router,
                   status: 'online',
-                  activePppoeCount: result.activeSessions.length,
+                  activePppoeCount: telemetryResult.activeSessions.length,
                 }
               : r
           )
         );
 
-        setActiveSessions(result.activeSessions);
-        setRouterInterfaces(result.interfaces);
+        setActiveSessions(telemetryResult.activeSessions);
+        setRouterInterfaces(telemetryResult.interfaces);
 
-        if (result.traffic) {
+        if (telemetryResult.traffic) {
           const nowStr = new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' });
           setBandwidthHistory((prev) => [
             ...prev.slice(1),
-            { time: nowStr, rxMbps: result.traffic!.rxMbps, txMbps: result.traffic!.txMbps },
+            { time: nowStr, rxMbps: telemetryResult.traffic!.rxMbps, txMbps: telemetryResult.traffic!.txMbps },
           ]);
         }
 
+        const secCount = secretsResult.success && secretsResult.secrets.length > 0
+          ? secretsResult.secrets.length
+          : customers.length;
+
         return {
           success: true,
-          activeCount: result.activeSessions.length,
-          secretsCount: customers.length,
-          message: `Live data synchronized from RouterOS v7 REST API (${result.activeSessions.length} active sessions, ${result.interfaces.length} interfaces)`,
+          activeCount: telemetryResult.activeSessions.length,
+          secretsCount: secCount,
+          message: `Live data synchronized from RouterOS v7 REST API (${telemetryResult.activeSessions.length} active sessions, ${secCount} secrets, ${profilesResult.profiles?.length || 0} profiles)`,
+        };
+      } else if (secretsResult.success && secretsResult.secrets.length > 0) {
+        setRouterError(null);
+        return {
+          success: true,
+          activeCount: telemetryResult.activeSessions?.length || 0,
+          secretsCount: secretsResult.secrets.length,
+          message: `Synchronized ${secretsResult.secrets.length} secrets and ${profilesResult.profiles?.length || 0} profiles from RouterOS REST API`,
         };
       } else {
         const errorMsg =
-          result.error ||
+          telemetryResult.error ||
           `Cannot reach router at ${targetIp}:${targetPort} - Check Public IP reachability, SSL cert, or CORS.`;
         setRouterError(errorMsg);
         setRouters((prev) =>
@@ -851,6 +902,19 @@ export const ISPProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
         if (result.success && result.router) {
           if (shouldPollSessions) {
             lastSessionsPollTimeRef.current = now;
+            // Also refresh provisioned secrets and bandwidth profiles in background concurrently
+            Promise.all([
+              fetchMikrotikPppSecrets(targetRouter).catch(() => ({ success: false, secrets: [] })),
+              fetchMikrotikPppProfiles(targetRouter).catch(() => ({ success: false, profiles: [] })),
+            ]).then(([secRes, profRes]) => {
+              if (secRes.success && Array.isArray(secRes.secrets) && secRes.secrets.length > 0) {
+                setProvisionedSecrets(secRes.secrets);
+              }
+              if (profRes.success && Array.isArray(profRes.profiles) && profRes.profiles.length > 0) {
+                setBandwidthProfiles(profRes.profiles);
+                setDynamicPppProfiles(profRes.profiles);
+              }
+            }).catch(() => {});
           }
           setRouterError(null);
           setRouters((prev) =>
@@ -3247,6 +3311,8 @@ export const ISPProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
         setIsTrafficStreaming,
         activeViewTab,
         setActiveViewTab,
+        provisionedSecrets,
+        bandwidthProfiles,
         dynamicPppProfiles,
         fetchPppProfiles,
         lastCronMessage,

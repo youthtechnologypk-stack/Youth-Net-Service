@@ -59,6 +59,7 @@ export const AddUserModal: React.FC<AddUserModalProps> = ({ isOpen, onClose, onS
     fetchCustomersFromDb,
     syncSelectedRouterNow,
     dynamicPppProfiles,
+    bandwidthProfiles,
   } = useISP();
 
   const [routerId, setRouterId] = useState(selectedRouterId || (routers[0]?.id || ''));
@@ -117,24 +118,42 @@ export const AddUserModal: React.FC<AddUserModalProps> = ({ isOpen, onClose, onS
       setProfileError(null);
 
       try {
+        // 1. Check live bandwidth profiles in context first
+        if (bandwidthProfiles && bandwidthProfiles.length > 0) {
+          setProfiles(bandwidthProfiles as any);
+          const defaultProf =
+            bandwidthProfiles.find((p) => p.name === 'default' || p.name === 'default-encryption')?.name ||
+            bandwidthProfiles[0].name;
+          if (!profile || !bandwidthProfiles.some((p: any) => p.name === profile)) {
+            setProfile(defaultProf);
+          }
+          return;
+        }
+
         const targetRouter = routers.find((r) => r.id === routerId) || routers[0];
-        // 1. Fetch PPPoE Bandwidth profiles from GET /api/mikrotik/ppp/profile (RouterOS v7)
+        // 2. Fetch PPPoE Bandwidth profiles from GET /api/mikrotik/ppp/profile (RouterOS v7)
         if (targetRouter) {
           const restResult = await fetchMikrotikPppProfiles(targetRouter);
           if (restResult.success && Array.isArray(restResult.profiles) && restResult.profiles.length > 0) {
             setProfiles(restResult.profiles);
+            const defaultProf =
+              restResult.profiles.find((p: any) => p.name === 'default' || p.name === 'default-encryption')?.name ||
+              restResult.profiles[0].name;
             if (!profile || !restResult.profiles.some((p: any) => p.name === profile)) {
-              setProfile(restResult.profiles[0].name);
+              setProfile(defaultProf);
             }
             return;
           }
         }
 
-        // 2. Fallback to dynamicPppProfiles from context if available
+        // 3. Fallback to dynamicPppProfiles from context if available
         if (dynamicPppProfiles && dynamicPppProfiles.length > 0) {
           setProfiles(dynamicPppProfiles);
+          const defaultProf =
+            dynamicPppProfiles.find((p) => p.name === 'default' || p.name === 'default-encryption')?.name ||
+            dynamicPppProfiles[0].name;
           if (!profile || !dynamicPppProfiles.some((p: any) => p.name === profile)) {
-            setProfile(dynamicPppProfiles[0].name);
+            setProfile(defaultProf);
           }
           return;
         }
@@ -510,9 +529,9 @@ export const AddUserModal: React.FC<AddUserModalProps> = ({ isOpen, onClose, onS
                   required
                   className="w-full bg-slate-950 border border-slate-700 text-slate-100 p-2.5 rounded-lg font-mono focus:outline-none focus:border-cyan-500"
                 >
-                  {profiles.map((p) => (
-                    <option key={p.id} value={p.name}>
-                      {p.name} {p.rateLimit ? `(${p.rateLimit})` : ''}
+                  {profiles.map((p: any) => (
+                    <option key={p['.id'] || p.id || p.name} value={p.name}>
+                      {p.name} {(p['rate-limit'] || p.rateLimit) ? `(${p['rate-limit'] || p.rateLimit})` : ''}
                     </option>
                   ))}
                 </select>
