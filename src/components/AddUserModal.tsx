@@ -28,6 +28,13 @@ import {
   fetchMikrotikPppSecrets,
   fetchMikrotikLiveTelemetry,
 } from '../services/mikrotikRestClient';
+import {
+  formatRouterOSSchedule,
+  calculateRemainingTime,
+  parseMikrotikComment,
+} from '../services/mikrotikSubscriberSync';
+
+export type ValidityPreset = '2_hours' | '1_day' | '3_days' | '7_days' | '1_month' | 'custom';
 
 const getTodayFormatted = () => new Date().toISOString().split('T')[0];
 
@@ -78,17 +85,76 @@ export const AddUserModal: React.FC<AddUserModalProps> = ({ isOpen, onClose, onS
   const [feederLine, setFeederLine] = useState('Feeder-North-01');
   const [cnic, setCnic] = useState('');
 
-  // Subscriber Package Lifecycle state
+  // Subscriber Package Lifecycle state with Router-Level Auto-Expiration
   const [creationDate, setCreationDate] = useState<string>(getTodayFormatted());
-  const [validityDays, setValidityDays] = useState<number>(30);
-  const [expiryDate, setExpiryDate] = useState<string>(() => calculateExpiry(getTodayFormatted(), 30));
+  const [validityPreset, setValidityPreset] = useState<ValidityPreset>('1_month');
+  const [customDateTime, setCustomDateTime] = useState<string>(() => {
+    const d = new Date(Date.now() + 30 * 24 * 60 * 60 * 1000);
+    const yyyy = d.getFullYear();
+    const mm = String(d.getMonth() + 1).padStart(2, '0');
+    const dd = String(d.getDate()).padStart(2, '0');
+    const hh = String(d.getHours()).padStart(2, '0');
+    const min = String(d.getMinutes()).padStart(2, '0');
+    return `${yyyy}-${mm}-${dd}T${hh}:${min}`;
+  });
   const [expiredPool, setExpiredPool] = useState<string>('EXPIRED-POOL');
-  const [isCustomDays, setIsCustomDays] = useState<boolean>(false);
+  const [schedulerWarning, setSchedulerWarning] = useState<string | null>(null);
 
-  // Recalculate expiryDate whenever creationDate or validityDays changes
-  useEffect(() => {
-    setExpiryDate(calculateExpiry(creationDate, validityDays));
-  }, [creationDate, validityDays]);
+  // Compute exact target expiry Date object based on selected preset or custom datetime
+  const targetExpiryDateObj = React.useMemo(() => {
+    if (validityPreset === '2_hours') {
+      return new Date(Date.now() + 2 * 60 * 60 * 1000);
+    }
+    if (validityPreset === '1_day') {
+      return new Date(Date.now() + 24 * 60 * 60 * 1000);
+    }
+    if (validityPreset === '3_days') {
+      return new Date(Date.now() + 3 * 24 * 60 * 60 * 1000);
+    }
+    if (validityPreset === '7_days') {
+      return new Date(Date.now() + 7 * 24 * 60 * 60 * 1000);
+    }
+    if (validityPreset === '1_month') {
+      return new Date(Date.now() + 30 * 24 * 60 * 60 * 1000);
+    }
+    if (validityPreset === 'custom') {
+      const parsed = new Date(customDateTime);
+      return isNaN(parsed.getTime()) ? new Date(Date.now() + 30 * 24 * 60 * 60 * 1000) : parsed;
+    }
+    return new Date(Date.now() + 30 * 24 * 60 * 60 * 1000);
+  }, [validityPreset, customDateTime]);
+
+  // Accurate RouterOS v7 scheduler timing
+  const scheduleInfo = React.useMemo(() => {
+    return formatRouterOSSchedule(targetExpiryDateObj);
+  }, [targetExpiryDateObj]);
+
+  // Live remaining countdown info
+  const remainingInfo = React.useMemo(() => {
+    return calculateRemainingTime(targetExpiryDateObj);
+  }, [targetExpiryDateObj]);
+
+  // Human-readable validity label for storage
+  const computedValidityLabel = React.useMemo(() => {
+    switch (validityPreset) {
+      case '2_hours': return '2 Hours';
+      case '1_day': return '1 Day';
+      case '3_days': return '3 Days';
+      case '7_days': return '7 Days';
+      case '1_month': return '1 Month (30 Days)';
+      case 'custom': return `Custom (${scheduleInfo.readable})`;
+      default: return '1 Month';
+    }
+  }, [validityPreset, scheduleInfo]);
+
+  // Computed validity days for legacy compatibility
+  const validityDays = React.useMemo(() => {
+    if (validityPreset === '1_month') return 30;
+    const diffDays = Math.round((targetExpiryDateObj.getTime() - Date.now()) / (1000 * 60 * 60 * 24));
+    return Math.max(1, diffDays);
+  }, [validityPreset, targetExpiryDateObj]);
+
+  const expiryDate = scheduleInfo.readable.split(' ')[0];
 
   // State for dynamic profiles fetched from MikroTik
   const [profiles, setProfiles] = useState<DynamicProfile[]>([]);
@@ -223,6 +289,7 @@ export const AddUserModal: React.FC<AddUserModalProps> = ({ isOpen, onClose, onS
 
     setIsSubmitting(true);
     setSubmissionError(null);
+    setSchedulerWarning(null);
 
     try {
       const res = await provisionSubscriber({
@@ -240,11 +307,18 @@ export const AddUserModal: React.FC<AddUserModalProps> = ({ isOpen, onClose, onS
         remoteIp: remoteIp.trim() || undefined,
         creationDate,
         validityDays,
-        expiryDate,
+        validityPreset,
+        validityLabel: computedValidityLabel,
+        targetExpiryDate: targetExpiryDateObj,
+        expiryDate: scheduleInfo.startDate,
         expiredPool,
         routerId,
         sendWhatsApp: true,
       });
+
+      if (res.schedulerWarning) {
+        setSchedulerWarning(res.schedulerWarning);
+      }
 
       setSuccessData({
         username: username.trim(),
@@ -256,6 +330,12 @@ export const AddUserModal: React.FC<AddUserModalProps> = ({ isOpen, onClose, onS
         invoiceAmount: res.invoice?.totalAmount,
         portalAccountCreated: true,
         recurringBilled: true,
+        schedulerRegistered: res.schedulerRegistered,
+        schedulerWarning: res.schedulerWarning,
+        expiryDateReadable: scheduleInfo.readable,
+        scheduleStartDate: scheduleInfo.startDate,
+        scheduleStartTime: scheduleInfo.startTime,
+        validityLabel: computedValidityLabel,
       });
 
       if (syncSelectedRouterNow) {
@@ -346,11 +426,17 @@ export const AddUserModal: React.FC<AddUserModalProps> = ({ isOpen, onClose, onS
                 </div>
                 <div className="flex justify-between">
                   <span className="text-slate-400">Validity:</span>
-                  <span className="text-cyan-300 font-bold">{validityDays} Days</span>
+                  <span className="text-cyan-300 font-bold">{successData.validityLabel || `${validityDays} Days`}</span>
                 </div>
                 <div className="flex justify-between">
-                  <span className="text-slate-400">Expiry Date:</span>
-                  <span className="text-amber-300 font-bold">{expiryDate}</span>
+                  <span className="text-slate-400">Expiry Date &amp; Time:</span>
+                  <span className="text-amber-300 font-bold">{successData.expiryDateReadable || expiryDate}</span>
+                </div>
+                <div className="flex justify-between">
+                  <span className="text-slate-400">RouterOS Auto-Expiry:</span>
+                  <span className={successData.schedulerRegistered ? "text-emerald-300 font-bold" : "text-amber-400 font-bold"}>
+                    {successData.schedulerRegistered ? `Active (/system/scheduler exp-${successData.username})` : 'Registered on Secret comment'}
+                  </span>
                 </div>
                 <div className="flex justify-between">
                   <span className="text-slate-400">Expired Isolation Pool:</span>
@@ -397,6 +483,20 @@ export const AddUserModal: React.FC<AddUserModalProps> = ({ isOpen, onClose, onS
                 <p className="text-rose-300 font-mono text-[11px] mt-0.5">{submissionError}</p>
                 <p className="text-rose-400/80 text-[10px] mt-1">
                   Ensure the router is reachable, the credentials are valid, and the username is not already registered in <code className="bg-rose-900/40 px-1 rounded">/ppp secret</code>.
+                </p>
+              </div>
+            </div>
+          )}
+
+          {/* Non-Blocking Scheduler Warning Banner */}
+          {schedulerWarning && (
+            <div className="p-3.5 bg-amber-950/80 border border-amber-700 rounded-xl flex items-start gap-3 text-xs text-amber-200 animate-fade-in">
+              <AlertTriangle className="w-4 h-4 text-amber-400 shrink-0 mt-0.5" />
+              <div>
+                <strong className="text-white block">RouterOS Scheduler Notice:</strong>
+                <p className="text-amber-300 font-mono text-[11px] mt-0.5">{schedulerWarning}</p>
+                <p className="text-amber-400/80 text-[10px] mt-1">
+                  The user was successfully created in <code className="bg-amber-900/40 px-1 rounded">/ppp/secret</code>. Expiration dates are safely stored on the router and handled by system sync.
                 </p>
               </div>
             </div>
@@ -519,103 +619,139 @@ export const AddUserModal: React.FC<AddUserModalProps> = ({ isOpen, onClose, onS
               </div>
             </div>
 
-            {/* Package Validity & Expiration Lifecycle Policy */}
+            {/* Package Validity & Router-Level Auto-Expiration */}
             <div className="bg-slate-950/80 p-3.5 rounded-xl border border-slate-800 space-y-3">
               <div className="flex items-center justify-between">
                 <span className="text-xs font-semibold text-slate-200 flex items-center gap-1.5">
                   <Clock className="w-3.5 h-3.5 text-cyan-400" />
-                  <span>Package Validity &amp; Expiration Policy</span>
+                  <span>Package Validity &amp; Router-Level Auto-Expiration</span>
                 </span>
                 <span className="text-[10px] font-mono px-2 py-0.5 rounded bg-cyan-950 text-cyan-300 border border-cyan-800">
-                  Auto-Shift to Isolation Pool
+                  /system/scheduler Automation
                 </span>
               </div>
 
-              <div className="grid grid-cols-1 sm:grid-cols-3 gap-2.5">
-                {/* Field 1: Creation Date */}
-                <div>
-                  <label className="block text-slate-400 mb-1 text-[11px] flex items-center gap-1">
-                    <Calendar className="w-3 h-3 text-cyan-400" />
-                    <span>Creation Date</span>
-                  </label>
-                  <input
-                    type="date"
-                    required
-                    value={creationDate}
-                    onChange={(e) => setCreationDate(e.target.value)}
-                    className="w-full bg-slate-900 border border-slate-700 text-slate-200 font-mono p-2 rounded-lg text-xs focus:outline-none focus:border-cyan-500"
-                  />
-                </div>
+              {/* Creation Date */}
+              <div>
+                <label className="block text-slate-400 mb-1 text-[11px] flex items-center gap-1">
+                  <Calendar className="w-3 h-3 text-cyan-400" />
+                  <span>Creation Date</span>
+                </label>
+                <input
+                  type="date"
+                  required
+                  value={creationDate}
+                  onChange={(e) => setCreationDate(e.target.value)}
+                  className="w-full bg-slate-900 border border-slate-700 text-slate-200 font-mono p-2 rounded-lg text-xs focus:outline-none focus:border-cyan-500"
+                />
+              </div>
 
-                {/* Field 2: Validity / Package Days */}
-                <div>
-                  <label className="block text-slate-400 mb-1 text-[11px] flex items-center gap-1">
+              {/* 6 Validity Presets */}
+              <div>
+                <label className="block text-slate-400 mb-1.5 text-[11px] flex items-center justify-between">
+                  <span className="flex items-center gap-1">
                     <Hourglass className="w-3 h-3 text-amber-400" />
-                    <span>Validity / Days</span>
-                  </label>
-                  {!isCustomDays ? (
-                    <select
-                      value={validityDays}
-                      onChange={(e) => {
-                        const val = e.target.value;
-                        if (val === 'custom') {
-                          setIsCustomDays(true);
-                        } else {
-                          setValidityDays(Number(val));
-                        }
-                      }}
-                      className="w-full bg-slate-900 border border-slate-700 text-slate-200 font-mono p-2 rounded-lg text-xs focus:outline-none focus:border-cyan-500"
-                    >
-                      <option value="30">30 Days (1 Month)</option>
-                      <option value="15">15 Days (Half Month)</option>
-                      <option value="7">7 Days (Trial / Weekly)</option>
-                      <option value="60">60 Days (2 Months)</option>
-                      <option value="90">90 Days (Quarterly)</option>
-                      <option value="365">365 Days (Annual)</option>
-                      <option value="custom">Custom Days...</option>
-                    </select>
-                  ) : (
-                    <div className="flex gap-1">
-                      <input
-                        type="number"
-                        min="1"
-                        max="3650"
-                        value={validityDays}
-                        onChange={(e) => setValidityDays(Math.max(1, parseInt(e.target.value, 10) || 1))}
-                        className="w-full bg-slate-900 border border-slate-700 text-slate-200 font-mono p-2 rounded-lg text-xs focus:outline-none focus:border-cyan-500"
-                      />
+                    <span>Package Validity Preset</span>
+                  </span>
+                  <span className="text-[10px] text-cyan-400 font-mono">
+                    {computedValidityLabel}
+                  </span>
+                </label>
+
+                <div className="grid grid-cols-2 sm:grid-cols-3 gap-2">
+                  {[
+                    { key: '2_hours', label: '2 Hours', hint: '+2 Hours' },
+                    { key: '1_day', label: '1 Day', hint: '+24 Hours' },
+                    { key: '3_days', label: '3 Days', hint: '+3 Days' },
+                    { key: '7_days', label: '7 Days', hint: '+7 Days' },
+                    { key: '1_month', label: '1 Month', hint: '+30 Days (Standard)' },
+                    { key: 'custom', label: 'Custom Date & Time', hint: 'Pick exact date/time' },
+                  ].map((preset) => {
+                    const isSelected = validityPreset === preset.key;
+                    return (
                       <button
                         type="button"
-                        onClick={() => setIsCustomDays(false)}
-                        className="px-2 py-1 bg-slate-800 hover:bg-slate-700 text-slate-400 hover:text-white rounded text-[10px]"
-                        title="Back to presets"
+                        key={preset.key}
+                        onClick={() => setValidityPreset(preset.key as ValidityPreset)}
+                        className={`p-2 rounded-lg border text-left transition cursor-pointer ${
+                          isSelected
+                            ? 'bg-cyan-950/90 border-cyan-500 text-white shadow-md shadow-cyan-950/50 ring-1 ring-cyan-500/50'
+                            : 'bg-slate-900 border-slate-800 text-slate-400 hover:text-slate-200 hover:border-slate-700'
+                        }`}
                       >
-                        Reset
+                        <div className="font-bold text-xs flex items-center justify-between">
+                          <span>{preset.label}</span>
+                          {isSelected && (
+                            <span className="w-1.5 h-1.5 rounded-full bg-cyan-400 animate-pulse" />
+                          )}
+                        </div>
+                        <div className="text-[10px] text-slate-500 mt-0.5">{preset.hint}</div>
                       </button>
-                    </div>
-                  )}
-                </div>
-
-                {/* Field 3: Expiry Date (Auto-calculated) */}
-                <div>
-                  <label className="block text-slate-400 mb-1 text-[11px] flex items-center justify-between">
-                    <span className="flex items-center gap-1">
-                      <Calendar className="w-3 h-3 text-rose-400" />
-                      <span>Expiry Date</span>
-                    </span>
-                    <span className="text-[9px] text-emerald-400 font-mono">Auto</span>
-                  </label>
-                  <input
-                    type="date"
-                    required
-                    value={expiryDate}
-                    onChange={(e) => setExpiryDate(e.target.value)}
-                    className="w-full bg-slate-900 border border-slate-700 text-amber-300 font-bold font-mono p-2 rounded-lg text-xs focus:outline-none focus:border-cyan-500"
-                  />
+                    );
+                  })}
                 </div>
               </div>
 
-              {/* Expired Profile / Pool Field */}
+              {/* Custom Date & Time Picker */}
+              {validityPreset === 'custom' && (
+                <div className="bg-slate-900/90 p-3 rounded-lg border border-cyan-800/80 space-y-1.5 animate-fade-in">
+                  <label className="block text-slate-200 text-[11px] font-semibold flex items-center justify-between">
+                    <span className="flex items-center gap-1.5">
+                      <Calendar className="w-3.5 h-3.5 text-cyan-400" />
+                      <span>Custom Expiry Date &amp; Time (Future)</span>
+                    </span>
+                    <span className="text-[10px] text-cyan-400 font-mono">24-hr format</span>
+                  </label>
+                  <input
+                    type="datetime-local"
+                    required
+                    value={customDateTime}
+                    onChange={(e) => setCustomDateTime(e.target.value)}
+                    className="w-full bg-slate-950 border border-slate-700 text-cyan-300 font-mono p-2 rounded-lg text-xs focus:outline-none focus:border-cyan-500"
+                  />
+                  <p className="text-[10px] text-slate-400">
+                    RouterOS scheduler will execute exactly at this local date and time.
+                  </p>
+                </div>
+              )}
+
+              {/* Live Preview Badge */}
+              <div className="bg-slate-900/90 rounded-lg p-3 border border-slate-800 space-y-2">
+                <div className="flex items-center justify-between flex-wrap gap-2">
+                  <div className="flex items-center gap-2">
+                    <Clock className="w-4 h-4 text-cyan-400 shrink-0" />
+                    <span className="text-slate-300 font-medium text-xs">
+                      Expires on: <span className="text-amber-300 font-bold font-mono">{scheduleInfo.readable}</span>
+                    </span>
+                  </div>
+                  <span className={`px-2 py-0.5 rounded text-[10px] font-bold font-mono border ${remainingInfo.badgeClass}`}>
+                    ({remainingInfo.remainingText})
+                  </span>
+                </div>
+
+                {/* RouterOS v7 Scheduler Parameters Preview */}
+                <div className="bg-slate-950 p-2 rounded border border-slate-800/80 font-mono text-[10px] space-y-1 text-slate-400">
+                  <div className="flex items-center justify-between text-slate-300">
+                    <span className="text-slate-500">Scheduled Trigger:</span>
+                    <span className="text-cyan-400">/system/scheduler add</span>
+                  </div>
+                  <div className="grid grid-cols-2 gap-2 text-[10px]">
+                    <div>
+                      <span className="text-slate-500">start-date:</span>{' '}
+                      <span className="text-emerald-400 font-bold">{scheduleInfo.startDate}</span>
+                    </div>
+                    <div>
+                      <span className="text-slate-500">start-time:</span>{' '}
+                      <span className="text-emerald-400 font-bold">{scheduleInfo.startTime}</span>
+                    </div>
+                  </div>
+                  <div className="truncate text-slate-400 text-[9px] pt-1 border-t border-slate-800">
+                    <span className="text-slate-500">on-event:</span> /ppp secret set profile=&quot;expired_profile&quot;; /ppp active remove ...
+                  </div>
+                </div>
+              </div>
+
+              {/* Expired Profile / Isolation Pool Field */}
               <div className="pt-1">
                 <label className="block text-slate-400 mb-1 text-[11px] flex items-center justify-between">
                   <span className="flex items-center gap-1">

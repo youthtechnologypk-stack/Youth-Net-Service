@@ -381,6 +381,7 @@ export const SubscriberProfileDrawer: React.FC<SubscriberProfileDrawerProps> = (
       validityDays,
       expiredPool,
       daysRemaining: metrics.daysRemaining,
+      remainingText: metrics.remainingText,
       isExpired: metrics.isExpired || customer?.status === 'walled_garden' || customer?.status === 'expired',
       pctRemaining,
     };
@@ -865,7 +866,7 @@ export const SubscriberProfileDrawer: React.FC<SubscriberProfileDrawerProps> = (
                         : 'bg-emerald-950 text-emerald-300 border border-emerald-800'
                     }`}
                   >
-                    {lifecycleData.isExpired ? 'EXPIRED / WALLED GARDEN' : `${lifecycleData.daysRemaining} DAYS REMAINING`}
+                    {lifecycleData.isExpired ? 'EXPIRED / RESTRICTED' : (lifecycleData.remainingText || `${lifecycleData.daysRemaining} DAYS REMAINING`).toUpperCase()}
                   </span>
                 </div>
 

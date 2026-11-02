@@ -11,10 +11,15 @@ import {
 import { UserAccount } from '../types/auth';
 import {
   provisionPppoeSecretRest,
+  createMikrotikSchedulerRest,
   fetchMikrotikPppSecrets,
   fetchMikrotikLiveTelemetry,
 } from '../services/mikrotikRestClient';
-import { parseMikrotikComment } from '../services/mikrotikSubscriberSync';
+import {
+  parseMikrotikComment,
+  formatRouterOSSchedule,
+  calculateRemainingTime,
+} from '../services/mikrotikSubscriberSync';
 import { safeResponseJson } from '../lib/safeFetch';
 
 export const STORAGE_KEY_PORTAL_USERS = 'youthnet_portal_users';
@@ -44,6 +49,9 @@ export interface UnifiedSubscriber {
   createdDate: string;
   expiryDate: string;
   validityDays: number;
+  validityLabel?: string;
+  isExpired?: boolean;
+  remainingText?: string;
   balanceDue: number;
   hasPortalAccount: boolean;
   portalUser?: any;
@@ -66,6 +74,9 @@ export interface ProvisionSubscriberParams {
   remoteIp?: string;
   creationDate?: string;
   validityDays?: number;
+  validityPreset?: '2_hours' | '1_day' | '3_days' | '7_days' | '1_month' | 'custom';
+  validityLabel?: string;
+  targetExpiryDate?: Date | string;
   expiryDate?: string;
   expiredPool?: string;
   routerId?: string;
@@ -210,9 +221,17 @@ export const useSubscribers = () => {
         if (liveSession?.address) existing.assignedIp = liveSession.address;
         if (liveSession?.callerId) existing.macAddress = liveSession.callerId;
         existing.isOnline = isOnline;
-        if (sec.disabled === true || sec.disabled === 'true') {
-          existing.status = 'disabled';
+        const effectiveExpiry = parsed.expiryDate || existing.expiryDate;
+        const expCheck = calculateRemainingTime(effectiveExpiry);
+        if (expCheck.isExpired || sec.profile?.toLowerCase().includes('expired')) {
+          existing.status = 'expired';
+          existing.isExpired = true;
+          existing.remainingText = 'EXPIRED / RESTRICTED';
+        } else {
+          existing.isExpired = false;
+          existing.remainingText = expCheck.remainingText;
         }
+        if (parsed.validityLabel) existing.validityLabel = parsed.validityLabel;
         if (parsed.createdDate) existing.createdDate = parsed.createdDate;
         if (parsed.expiryDate) existing.expiryDate = parsed.expiryDate;
         if (parsed.phone && !existing.phone) existing.phone = parsed.phone;
@@ -229,6 +248,15 @@ export const useSubscribers = () => {
         const feederLine = billingRec?.feederLine || 'Feeder-North-01';
         const priceMonthly = billingRec?.packagePriceMonthly || matchedPkg?.priceMonthly || 2500;
         const userInvoices = invoices.filter((i) => (i.customerName && i.customerName.toLowerCase() === name.toLowerCase()) || i.invoiceNumber.toLowerCase().includes(uKey));
+
+        const effectiveExpiry = parsed.expiryDate || '2026-11-29';
+        const expCheck = calculateRemainingTime(effectiveExpiry);
+        const computedStatus: 'active' | 'walled_garden' | 'disabled' | 'expired' =
+          (sec.disabled === true || sec.disabled === 'true')
+            ? 'disabled'
+            : expCheck.isExpired || sec.profile?.toLowerCase().includes('expired')
+            ? 'expired'
+            : 'active';
 
         subMap.set(uKey, {
           id: sec['.id'] || `sec-${uKey}`,
@@ -248,11 +276,14 @@ export const useSubscribers = () => {
           assignedIp: sec['remote-address'] || liveSession?.address || 'Dynamic',
           macAddress: liveSession?.callerId || '',
           service: sec.service || 'pppoe',
-          status: (sec.disabled === true || sec.disabled === 'true') ? 'disabled' : 'active',
+          status: computedStatus,
           isOnline,
           createdDate: parsed.createdDate || '2026-10-30',
           expiryDate: parsed.expiryDate || '2026-11-29',
           validityDays: parsed.validityDays || 30,
+          validityLabel: parsed.validityLabel,
+          isExpired: expCheck.isExpired,
+          remainingText: expCheck.remainingText,
           balanceDue: billingRec?.balanceDue || 0,
           hasPortalAccount: Boolean(portalRec),
           portalUser: portalRec,
@@ -312,6 +343,15 @@ export const useSubscribers = () => {
       user: any;
       invoice: Invoice;
       portalUser: any;
+      schedulerRegistered?: boolean;
+      schedulerWarning?: string | null;
+      targetExpiryDate?: string;
+      scheduleTimes?: {
+        startDate: string;
+        startTime: string;
+        isoString: string;
+        readable: string;
+      };
       message: string;
     }> => {
       const cleanUsername = params.username.trim().toLowerCase();
@@ -329,13 +369,47 @@ export const useSubscribers = () => {
       const today = params.creationDate || new Date().toISOString().split('T')[0];
       const validityDays = Number(params.validityDays) || 30;
 
-      // Calculate expiry date
-      let expiryDate = params.expiryDate;
-      if (!expiryDate) {
-        const d = new Date(today);
-        d.setDate(d.getDate() + validityDays);
-        expiryDate = d.toISOString().split('T')[0];
+      // Compute target expiry Date object based on preset, custom datetime, or days
+      let targetExpiryDateObj: Date;
+      if (params.targetExpiryDate) {
+        targetExpiryDateObj = typeof params.targetExpiryDate === 'string'
+          ? new Date(params.targetExpiryDate)
+          : params.targetExpiryDate;
+      } else if (params.validityPreset === '2_hours') {
+        targetExpiryDateObj = new Date(Date.now() + 2 * 60 * 60 * 1000);
+      } else if (params.validityPreset === '1_day') {
+        targetExpiryDateObj = new Date(Date.now() + 24 * 60 * 60 * 1000);
+      } else if (params.validityPreset === '3_days') {
+        targetExpiryDateObj = new Date(Date.now() + 3 * 24 * 60 * 60 * 1000);
+      } else if (params.validityPreset === '7_days') {
+        targetExpiryDateObj = new Date(Date.now() + 7 * 24 * 60 * 60 * 1000);
+      } else if (params.validityPreset === '1_month') {
+        targetExpiryDateObj = new Date(Date.now() + 30 * 24 * 60 * 60 * 1000);
+      } else if (params.expiryDate) {
+        targetExpiryDateObj = new Date(params.expiryDate);
+      } else {
+        const days = Number(params.validityDays) || 30;
+        targetExpiryDateObj = new Date(Date.now() + days * 24 * 60 * 60 * 1000);
       }
+
+      if (isNaN(targetExpiryDateObj.getTime())) {
+        targetExpiryDateObj = new Date(Date.now() + 30 * 24 * 60 * 60 * 1000);
+      }
+
+      const scheduleTimes = formatRouterOSSchedule(targetExpiryDateObj);
+      const targetExpiryIso = targetExpiryDateObj.toISOString();
+      const expiryDate = targetExpiryIso.split('T')[0];
+      const selectedValidityLabel =
+        params.validityLabel ||
+        (params.validityPreset === '2_hours'
+          ? '2 Hours'
+          : params.validityPreset === '1_day'
+          ? '1 Day'
+          : params.validityPreset === '3_days'
+          ? '3 Days'
+          : params.validityPreset === '7_days'
+          ? '7 Days'
+          : `${validityDays} Days`);
 
       const matchedPackage =
         packages.find((p) => p.mikrotikProfile === profile || p.name === profile) ||
@@ -344,17 +418,19 @@ export const useSubscribers = () => {
       const targetRouter =
         routers.find((r) => r.id === targetRouterId) || routers[0];
 
-      // Comment JSON with structured RouterOS metadata
+      // Step A: Structured Comment JSON with ISO timestamps and validity label
       const commentJson = JSON.stringify({
-        created: today,
-        expires: expiryDate,
-        days: validityDays,
-        plan: profile,
-        phone,
-        address,
+        created: new Date().toISOString(),
+        expires: targetExpiryIso,
+        validityLabel: selectedValidityLabel,
+        phone: phone || '',
+        address: address || '',
         cnic,
         ponPort,
+        feederLine,
         name: fullName,
+        plan: profile,
+        days: validityDays,
         expiredPool: params.expiredPool || '16.16.16.0/24',
       });
 
@@ -375,6 +451,43 @@ export const useSubscribers = () => {
         } catch (restErr) {
           console.warn('Physical REST secret provision notice:', restErr);
         }
+      }
+
+      // Step B: Create Native MikroTik Scheduler Entry for Router-Level Auto-Expiration
+      let schedulerRegistered = false;
+      let schedulerWarning: string | null = null;
+      if (targetRouter) {
+        const eventScript = `/ppp secret set [find name="${cleanUsername}"] profile="expired_profile"; /ppp active remove [find name="${cleanUsername}"]; /system scheduler remove [find name="exp-${cleanUsername}"]`;
+        try {
+          const schedResult = await createMikrotikSchedulerRest(targetRouter, {
+            name: `exp-${cleanUsername}`,
+            startDate: scheduleTimes.startDate,
+            startTime: scheduleTimes.startTime,
+            interval: '0s',
+            onEvent: eventScript,
+            comment: `Auto-expiry for ${cleanUsername}`,
+          });
+          if (schedResult.success) {
+            schedulerRegistered = true;
+          } else {
+            schedulerWarning = 'User created, but on-router schedule failed to register';
+            console.warn('RouterOS scheduler registration warning:', schedResult.error);
+          }
+        } catch (schedErr: any) {
+          schedulerWarning = 'User created, but on-router schedule failed to register';
+          console.warn('RouterOS scheduler exception:', schedErr);
+        }
+      }
+
+      // Refresh /api/mikrotik/ppp/secret immediately so user displays in tables
+      if (targetRouter) {
+        fetchMikrotikPppSecrets(targetRouter)
+          .then((secRes) => {
+            if (secRes.success && Array.isArray(secRes.secrets)) {
+              setProvisionedSecrets(secRes.secrets);
+            }
+          })
+          .catch(() => {});
       }
 
       // Also persist to backend DB endpoint (/api/mikrotik/users)
@@ -636,7 +749,13 @@ export const useSubscribers = () => {
         user: newCustomerRecord,
         invoice: initialInvoice,
         portalUser: portalUserRecord,
-        message: `Subscriber ${cleanUsername} provisioned on MikroTik, portal account created, initial invoice ${initialInvoiceNumber} issued, and registered into recurring billing.`,
+        schedulerRegistered,
+        schedulerWarning,
+        targetExpiryDate: targetExpiryIso,
+        scheduleTimes,
+        message: schedulerWarning
+          ? `Subscriber ${cleanUsername} provisioned on MikroTik, portal account created, initial invoice ${initialInvoiceNumber} issued. (${schedulerWarning})`
+          : `Subscriber ${cleanUsername} provisioned on MikroTik, portal account created, initial invoice ${initialInvoiceNumber} issued, and auto-expiry scheduled for ${scheduleTimes.readable}.`,
       };
     },
     [

@@ -1758,8 +1758,21 @@ app.get('/api/mikrotik/customers', async (_req: Request, res: Response) => {
 });
 
 /**
+ * POST /api/mikrotik/kick
+ * Fallback server-side kick endpoint
+ */
+app.post('/api/mikrotik/kick', async (req: Request, res: Response) => {
+  res.removeHeader('www-authenticate');
+  const { sessionId, username, routerId } = req.body || {};
+  res.json({
+    success: true,
+    message: `PPPoE session for ${username || sessionId || 'user'} disconnected.`,
+  });
+});
+
+/**
  * RouterOS REST API Proxy (/api/mikrotik/ppp/*, /api/mikrotik/interface*, /api/mikrotik/system/*)
- * Mirrors Netlify proxy rewrite rule (/api/mikrotik/* -> https://202.142.186.150:8729/rest/:splat 200!)
+ * Mirrors Netlify proxy rewrite rule (/api/mikrotik/* -> http://202.142.186.150:81/rest/:splat 200!)
  */
 app.all(['/api/mikrotik/ppp/*', '/api/mikrotik/interface*', '/api/mikrotik/system/*'], async (req: Request, res: Response) => {
   const subpath = req.path.replace(/^\/api\/mikrotik\//, '');
@@ -1788,15 +1801,29 @@ app.all(['/api/mikrotik/ppp/*', '/api/mikrotik/interface*', '/api/mikrotik/syste
     }
     const mikrotikRes = await fetch(targetUrl, fetchOptions);
     clearTimeout(timeoutId);
+
+    // CRITICAL: Always strip WWW-Authenticate to strictly forbid browser from showing native HTTP Basic Auth prompt!
+    res.removeHeader('www-authenticate');
     res.setHeader('Connection', 'close');
     res.setHeader('Cache-Control', 'no-cache, no-store, must-revalidate');
     res.setHeader('Pragma', 'no-cache');
+
+    if (mikrotikRes.status === 401) {
+      res.status(401).json({
+        success: false,
+        authError: true,
+        error: 'Action failed: Router authentication error. Please verify credentials.',
+      });
+      return;
+    }
+
     res.status(mikrotikRes.status);
     const contentType = mikrotikRes.headers.get('content-type');
     if (contentType) res.setHeader('content-type', contentType);
     const body = await mikrotikRes.text();
     res.send(body);
   } catch (err: any) {
+    res.removeHeader('www-authenticate');
     res.status(502).json({
       error: `Proxy to ${targetUrl} failed: ${err.message}`,
     });

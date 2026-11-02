@@ -32,6 +32,133 @@ export interface FetchTelemetryOptions {
 }
 
 /**
+ * Resolves credentials from passed router object or localStorage ('registered_routers')
+ */
+export function getStoredRouterAuth(activeRouter?: {
+  id?: string;
+  username?: string;
+  password?: string;
+}): { username: string; password: string; authHeader: string } {
+  let username = activeRouter?.username?.trim() || '';
+  let password = activeRouter?.password || '';
+
+  if (typeof window !== 'undefined' && (!username || !password)) {
+    try {
+      const raw = localStorage.getItem('registered_routers');
+      if (raw) {
+        const routers = JSON.parse(raw);
+        if (Array.isArray(routers) && routers.length > 0) {
+          const match = activeRouter?.id
+            ? routers.find((r: any) => r.id === activeRouter.id)
+            : routers[0];
+          const r = match || routers[0];
+          if (!username) username = r.username || 'admin';
+          if (!password) password = r.password || '';
+        }
+      }
+    } catch {}
+  }
+
+  if (!username) username = 'admin';
+
+  let authHeader = '';
+  try {
+    authHeader = 'Basic ' + btoa(`${username}:${password}`);
+  } catch {
+    try {
+      authHeader = 'Basic ' + btoa(unescape(encodeURIComponent(`${username}:${password}`)));
+    } catch {
+      authHeader = 'Basic ' + btoa('admin:');
+    }
+  }
+
+  return { username, password, authHeader };
+}
+
+/**
+ * Returns the base URL for RouterOS REST API:
+ * In browser: always uses `/api/mikrotik` to avoid CORS and self-signed cert issues
+ * On server / node: uses `https://${ip}:${port}/rest`
+ */
+export function getMikrotikRestBaseUrl(activeRouter?: {
+  ip?: string;
+  ipAddress?: string;
+  port?: number;
+  apiPort?: number;
+}): string {
+  if (typeof window !== 'undefined') {
+    return `${window.location.origin}/api/mikrotik`;
+  }
+  const ip = (activeRouter?.ip || activeRouter?.ipAddress || '202.142.186.150').trim();
+  const targetPort = activeRouter?.port || activeRouter?.apiPort || 8729;
+  return `https://${ip}:${targetPort}/rest`;
+}
+
+/**
+ * Custom event dispatcher to broadcast auth error toast in UI
+ */
+export function notifyRouterAuthError(customMessage?: string) {
+  const msg = customMessage || 'Action failed: Router authentication error. Please verify credentials.';
+  if (typeof window !== 'undefined') {
+    window.dispatchEvent(
+      new CustomEvent('mikrotik_auth_error', {
+        detail: { message: msg },
+      })
+    );
+  }
+}
+
+/**
+ * Safe fetch wrapper that:
+ * 1. Attaches Authorization: Basic btoa(user:pass)
+ * 2. Explicitly sets credentials: 'omit' to SUPPRESS the browser native HTTP Basic Auth prompt on HTTP 401
+ * 3. Catches HTTP 401 programmatically and triggers user-friendly UI toast notification
+ */
+export async function safeMikrotikFetch(
+  url: string,
+  init: RequestInit = {},
+  activeRouter?: { id?: string; username?: string; password?: string }
+): Promise<Response> {
+  const auth = getStoredRouterAuth(activeRouter);
+
+  const incomingHeaders = (init.headers as Record<string, string>) || {};
+  const headers: Record<string, string> = {
+    Authorization: auth.authHeader,
+    Accept: 'application/json',
+    Connection: 'close',
+    'Cache-Control': 'no-cache, no-store, must-revalidate',
+    Pragma: 'no-cache',
+    ...incomingHeaders,
+  };
+
+  if (init.method && init.method !== 'GET' && init.method !== 'HEAD' && !headers['Content-Type']) {
+    headers['Content-Type'] = 'application/json';
+  }
+
+  const fetchInit: RequestInit = {
+    ...init,
+    headers,
+    // CRITICAL: 'omit' prevents modern browsers (Chrome, Safari, Firefox) from showing the native HTTP Basic Auth modal on 401!
+    credentials: 'omit',
+  };
+
+  let res: Response;
+  try {
+    res = await fetch(url, fetchInit);
+  } catch (err: any) {
+    console.warn(`[SafeMikrotikFetch] Network error for ${url}:`, err);
+    throw err;
+  }
+
+  if (res.status === 401) {
+    console.warn(`[SafeMikrotikFetch] HTTP 401 on ${url} - suppressed browser modal`);
+    notifyRouterAuthError('Action failed: Router authentication error. Please verify credentials.');
+  }
+
+  return res;
+}
+
+/**
  * Direct client-side fetch for MikroTik RouterOS v7 REST API over HTTPS
  * Endpoints:
  *   - https://${activeRouter.ip}:${targetPort}/rest/ppp/active
@@ -85,21 +212,7 @@ export async function fetchMikrotikLiveTelemetry(
 
   // Determine whether running in production on Netlify or cloud environment
   const isBrowser = typeof window !== 'undefined';
-  const isNetlify =
-    isBrowser &&
-    (window.location.hostname.includes('netlify.app') ||
-      window.location.hostname.includes('youthnetw') ||
-      window.location.hostname.includes('netlify') ||
-      (window.location.hostname !== 'localhost' &&
-        window.location.hostname !== '127.0.0.1' &&
-        ip === '202.142.186.150'));
-
-  // When running on Netlify, rewrite request path to same-origin Netlify proxy rewrite
-  // (/api/mikrotik/* -> http://202.142.186.150:81/rest/:splat 200!)
-  // to eliminate browser CORS blocking on RouterOS v7.
-  const baseUrl = isNetlify
-    ? `${window.location.origin}/api/mikrotik`
-    : `https://${ip}:${targetPort}/rest`;
+  const baseUrl = getMikrotikRestBaseUrl(activeRouter);
 
   if (options?.signal?.aborted) {
     return {
@@ -121,11 +234,23 @@ export async function fetchMikrotikLiveTelemetry(
     // 1. Fetch Live PPPoE Active Sessions (/rest/ppp/active or /api/mikrotik/ppp/active)
     let activeSessions: ActiveSession[] = options?.cachedSessions || [];
     if (options?.pollSessions !== false) {
-      const sessionsRes = await fetch(`${baseUrl}/ppp/active`, {
-        method: 'GET',
-        headers: commonHeaders,
-        signal: controller.signal,
-      });
+      const sessionsRes = await safeMikrotikFetch(
+        `${baseUrl}/ppp/active`,
+        {
+          method: 'GET',
+          signal: controller.signal,
+        },
+        activeRouter
+      );
+
+      if (sessionsRes.status === 401) {
+        return {
+          success: false,
+          activeSessions: options?.cachedSessions || [],
+          interfaces: options?.cachedInterfaces || [],
+          error: 'Action failed: Router authentication error. Please verify credentials.',
+        };
+      }
 
       if (!sessionsRes.ok) {
         const contentType = sessionsRes.headers.get('content-type') || '';
@@ -175,11 +300,14 @@ export async function fetchMikrotikLiveTelemetry(
 
     if (options?.pollTraffic !== false) {
       try {
-        const ifacesRes = await fetch(`${baseUrl}/interface`, {
-          method: 'GET',
-          headers: commonHeaders,
-          signal: controller.signal,
-        });
+        const ifacesRes = await safeMikrotikFetch(
+          `${baseUrl}/interface`,
+          {
+            method: 'GET',
+            signal: controller.signal,
+          },
+          activeRouter
+        );
 
         if (ifacesRes.ok) {
           const ifacesData = await ifacesRes.json();
@@ -231,11 +359,14 @@ export async function fetchMikrotikLiveTelemetry(
     let model = 'MikroTik';
 
     try {
-      const resRes = await fetch(`${baseUrl}/system/resource`, {
-        method: 'GET',
-        headers: commonHeaders,
-        signal: controller.signal,
-      });
+      const resRes = await safeMikrotikFetch(
+        `${baseUrl}/system/resource`,
+        {
+          method: 'GET',
+          signal: controller.signal,
+        },
+        activeRouter
+      );
 
       if (resRes.ok) {
         const resData = await resRes.json();
@@ -287,7 +418,8 @@ export async function fetchMikrotikLiveTelemetry(
         error: 'Aborted',
       };
     }
-    const targetDesc = isNetlify ? `Netlify Proxy (/api/mikrotik -> ${ip}:${targetPort})` : `${ip}:${targetPort}`;
+    const isNetlifyHost = typeof window !== 'undefined' && window.location.hostname.includes('netlify.app');
+    const targetDesc = isNetlifyHost ? `Netlify Proxy (/api/mikrotik -> ${ip}:${targetPort})` : `${ip}:${targetPort}`;
     return {
       success: false,
       error: `Cannot reach router at ${targetDesc} - ${err?.message || 'Check Public IP reachability, SSL cert, or CORS.'}`,
@@ -320,38 +452,7 @@ export async function fetchMikrotikPppProfiles(
   error?: string;
 }> {
   const isBrowser = typeof window !== 'undefined';
-  const targetPort = activeRouter?.port || activeRouter?.apiPort || 8729;
-  const ip = (activeRouter?.ip || activeRouter?.ipAddress || '202.142.186.150').trim();
-  const username = activeRouter?.username?.trim() || 'admin';
-  const password = activeRouter?.password || '';
-
-  let authHeader = '';
-  try {
-    authHeader = 'Basic ' + btoa(`${username}:${password}`);
-  } catch {
-    authHeader = 'Basic ' + btoa('admin:');
-  }
-
-  const isNetlify =
-    isBrowser &&
-    (window.location.hostname.includes('netlify.app') ||
-      window.location.hostname.includes('youthnetw') ||
-      window.location.hostname.includes('netlify') ||
-      (window.location.hostname !== 'localhost' &&
-        window.location.hostname !== '127.0.0.1' &&
-        ip === '202.142.186.150'));
-
-  const baseUrl = isNetlify
-    ? `${window.location.origin}/api/mikrotik`
-    : `https://${ip}:${targetPort}/rest`;
-
-  const commonHeaders: Record<string, string> = {
-    Authorization: authHeader,
-    Accept: 'application/json',
-    Connection: 'close',
-    'Cache-Control': 'no-cache, no-store, must-revalidate',
-    Pragma: 'no-cache',
-  };
+  const baseUrl = getMikrotikRestBaseUrl(activeRouter);
 
   const controller = new AbortController();
   const timeoutId = setTimeout(() => controller.abort(), 6000);
@@ -360,12 +461,23 @@ export async function fetchMikrotikPppProfiles(
   }
 
   try {
-    const res = await fetch(`${baseUrl}/ppp/profile`, {
-      method: 'GET',
-      headers: commonHeaders,
-      signal: controller.signal,
-    });
+    const res = await safeMikrotikFetch(
+      `${baseUrl}/ppp/profile`,
+      {
+        method: 'GET',
+        signal: controller.signal,
+      },
+      activeRouter
+    );
     clearTimeout(timeoutId);
+
+    if (res.status === 401) {
+      return {
+        success: false,
+        profiles: [],
+        error: 'Action failed: Router authentication error. Please verify credentials.',
+      };
+    }
 
     if (!res.ok) {
       throw new Error(`HTTP ${res.status}: ${res.statusText}`);
@@ -540,37 +652,7 @@ export async function provisionPppoeSecretRest(
   const isBrowser = typeof window !== 'undefined';
   const targetPort = activeRouter?.port || activeRouter?.apiPort || 8729;
   const ip = (activeRouter?.ip || activeRouter?.ipAddress || '202.142.186.150').trim();
-  const username = activeRouter?.username?.trim() || 'admin';
-  const password = activeRouter?.password || '';
-
-  let authHeader = '';
-  try {
-    authHeader = 'Basic ' + btoa(`${username}:${password}`);
-  } catch {
-    authHeader = 'Basic ' + btoa('admin:');
-  }
-
-  const isNetlify =
-    isBrowser &&
-    (window.location.hostname.includes('netlify.app') ||
-      window.location.hostname.includes('youthnetw') ||
-      window.location.hostname.includes('netlify') ||
-      (window.location.hostname !== 'localhost' &&
-        window.location.hostname !== '127.0.0.1' &&
-        ip === '202.142.186.150'));
-
-  const baseUrl = isNetlify
-    ? `${window.location.origin}/api/mikrotik`
-    : `https://${ip}:${targetPort}/rest`;
-
-  const commonHeaders: Record<string, string> = {
-    Authorization: authHeader,
-    Accept: 'application/json',
-    'Content-Type': 'application/json',
-    Connection: 'close',
-    'Cache-Control': 'no-cache, no-store, must-revalidate',
-    Pragma: 'no-cache',
-  };
+  const baseUrl = getMikrotikRestBaseUrl(activeRouter);
 
   const bodyData = {
     name: payload.name,
@@ -581,23 +663,116 @@ export async function provisionPppoeSecretRest(
   };
 
   try {
-    let res = await fetch(`${baseUrl}/ppp/secret/add`, {
-      method: 'POST',
-      headers: commonHeaders,
-      body: JSON.stringify(bodyData),
-    });
+    let res = await safeMikrotikFetch(
+      `${baseUrl}/ppp/secret/add`,
+      {
+        method: 'POST',
+        body: JSON.stringify(bodyData),
+      },
+      activeRouter
+    );
+
+    if (res.status === 401) {
+      return {
+        success: false,
+        error: 'Action failed: Router authentication error. Please verify credentials.',
+      };
+    }
 
     if (!res.ok && (res.status === 404 || res.status === 405)) {
-      res = await fetch(`${baseUrl}/ppp/secret`, {
-        method: 'PUT',
-        headers: commonHeaders,
-        body: JSON.stringify(bodyData),
-      });
+      res = await safeMikrotikFetch(
+        `${baseUrl}/ppp/secret`,
+        {
+          method: 'PUT',
+          body: JSON.stringify(bodyData),
+        },
+        activeRouter
+      );
     }
 
     if (!res.ok) {
       const errText = await res.text().catch(() => '');
-      throw new Error(`Router returned HTTP ${res.status}: ${errText || res.statusText}`);
+      return {
+        success: false,
+        error: `Router returned HTTP ${res.status}: ${errText || res.statusText}`,
+      };
+    }
+
+    const data = await res.json().catch(() => ({ success: true }));
+    return { success: true, data };
+  } catch (err: any) {
+    return { success: false, error: err.message };
+  }
+}
+
+/**
+ * 4.1 Create Native RouterOS Scheduler Entry (/rest/system/scheduler/add)
+ * For automatic disconnection & profile shift upon expiry
+ */
+export async function createMikrotikSchedulerRest(
+  activeRouter: {
+    ipAddress?: string;
+    ip?: string;
+    apiPort?: number;
+    port?: number;
+    username?: string;
+    password?: string;
+  },
+  payload: {
+    name: string;
+    startDate: string;
+    startTime: string;
+    interval?: string;
+    onEvent: string;
+    comment?: string;
+  }
+): Promise<{ success: boolean; data?: any; error?: string }> {
+  const isBrowser = typeof window !== 'undefined';
+  const baseUrl = getMikrotikRestBaseUrl(activeRouter);
+
+  const bodyData = {
+    name: payload.name,
+    'start-date': payload.startDate,
+    'start-time': payload.startTime,
+    interval: payload.interval || '0s',
+    'on-event': payload.onEvent,
+    comment: payload.comment || `Auto-expiry for ${payload.name}`,
+  };
+
+  try {
+    let res = await safeMikrotikFetch(
+      `${baseUrl}/system/scheduler/add`,
+      {
+        method: 'POST',
+        body: JSON.stringify(bodyData),
+      },
+      activeRouter
+    );
+
+    if (res.status === 401) {
+      return {
+        success: false,
+        error: 'Action failed: Router authentication error. Please verify credentials.',
+      };
+    }
+
+    if (!res.ok && (res.status === 404 || res.status === 405)) {
+      res = await safeMikrotikFetch(
+        `${baseUrl}/system/scheduler`,
+        {
+          method: 'PUT',
+          body: JSON.stringify(bodyData),
+        },
+        activeRouter
+      );
+    }
+
+    if (!res.ok) {
+      const errText = await res.text().catch(() => '');
+      return {
+        success: false,
+        error: `Router returned HTTP ${res.status}: ${errText || res.statusText}`,
+      };
     }
 
     const data = await res.json().catch(() => ({ success: true }));
@@ -623,42 +798,21 @@ export async function fetchMikrotikPppSecrets(
   const isBrowser = typeof window !== 'undefined';
   const targetPort = activeRouter?.port || activeRouter?.apiPort || 8729;
   const ip = (activeRouter?.ip || activeRouter?.ipAddress || '202.142.186.150').trim();
-  const username = activeRouter?.username?.trim() || 'admin';
-  const password = activeRouter?.password || '';
-
-  let authHeader = '';
-  try {
-    authHeader = 'Basic ' + btoa(`${username}:${password}`);
-  } catch {
-    authHeader = 'Basic ' + btoa('admin:');
-  }
-
-  const isNetlify =
-    isBrowser &&
-    (window.location.hostname.includes('netlify.app') ||
-      window.location.hostname.includes('youthnetw') ||
-      window.location.hostname.includes('netlify') ||
-      (window.location.hostname !== 'localhost' &&
-        window.location.hostname !== '127.0.0.1' &&
-        ip === '202.142.186.150'));
-
-  const baseUrl = isNetlify
-    ? `${window.location.origin}/api/mikrotik`
-    : `https://${ip}:${targetPort}/rest`;
-
-  const commonHeaders: Record<string, string> = {
-    Authorization: authHeader,
-    Accept: 'application/json',
-    Connection: 'close',
-    'Cache-Control': 'no-cache, no-store, must-revalidate',
-    Pragma: 'no-cache',
-  };
+  const baseUrl = getMikrotikRestBaseUrl(activeRouter);
 
   try {
-    const res = await fetch(`${baseUrl}/ppp/secret`, {
+    const res = await safeMikrotikFetch(`${baseUrl}/ppp/secret`, {
       method: 'GET',
-      headers: commonHeaders,
-    });
+    }, activeRouter);
+
+    if (res.status === 401) {
+      return {
+        success: false,
+        secrets: [],
+        error: 'Action failed: Router authentication error. Please verify credentials.',
+      };
+    }
+
     if (!res.ok) {
       throw new Error(`HTTP ${res.status}: ${res.statusText}`);
     }
@@ -712,40 +866,7 @@ export async function updateMikrotikPppSecretRest(
     password?: string;
   }
 ): Promise<{ success: boolean; data?: any; error?: string }> {
-  const isBrowser = typeof window !== 'undefined';
-  const targetPort = activeRouter?.port || activeRouter?.apiPort || 8729;
-  const ip = (activeRouter?.ip || activeRouter?.ipAddress || '202.142.186.150').trim();
-  const username = activeRouter?.username?.trim() || 'admin';
-  const password = activeRouter?.password || '';
-
-  let authHeader = '';
-  try {
-    authHeader = 'Basic ' + btoa(`${username}:${password}`);
-  } catch {
-    authHeader = 'Basic ' + btoa('admin:');
-  }
-
-  const isNetlify =
-    isBrowser &&
-    (window.location.hostname.includes('netlify.app') ||
-      window.location.hostname.includes('youthnetw') ||
-      window.location.hostname.includes('netlify') ||
-      (window.location.hostname !== 'localhost' &&
-        window.location.hostname !== '127.0.0.1' &&
-        ip === '202.142.186.150'));
-
-  const baseUrl = isNetlify
-    ? `${window.location.origin}/api/mikrotik`
-    : `https://${ip}:${targetPort}/rest`;
-
-  const commonHeaders: Record<string, string> = {
-    Authorization: authHeader,
-    Accept: 'application/json',
-    'Content-Type': 'application/json',
-    Connection: 'close',
-    'Cache-Control': 'no-cache, no-store, must-revalidate',
-    Pragma: 'no-cache',
-  };
+  const baseUrl = getMikrotikRestBaseUrl(activeRouter);
 
   const bodyData: Record<string, any> = {};
   if (secretIdOrName) {
@@ -760,25 +881,41 @@ export async function updateMikrotikPppSecretRest(
 
   try {
     // 1. Try POST /ppp/secret/set
-    let res = await fetch(`${baseUrl}/ppp/secret/set`, {
-      method: 'POST',
-      headers: commonHeaders,
-      body: JSON.stringify(bodyData),
-    });
+    let res = await safeMikrotikFetch(
+      `${baseUrl}/ppp/secret/set`,
+      {
+        method: 'POST',
+        body: JSON.stringify(bodyData),
+      },
+      activeRouter
+    );
+
+    if (res.status === 401) {
+      return {
+        success: false,
+        error: 'Action failed: Router authentication error. Please verify credentials.',
+      };
+    }
 
     // 2. Fallback to PATCH /ppp/secret/:id
     if (!res.ok && (res.status === 404 || res.status === 405)) {
       const targetPath = secretIdOrName ? `${baseUrl}/ppp/secret/${encodeURIComponent(secretIdOrName)}` : `${baseUrl}/ppp/secret`;
-      res = await fetch(targetPath, {
-        method: 'PATCH',
-        headers: commonHeaders,
-        body: JSON.stringify(bodyData),
-      });
+      res = await safeMikrotikFetch(
+        targetPath,
+        {
+          method: 'PATCH',
+          body: JSON.stringify(bodyData),
+        },
+        activeRouter
+      );
     }
 
     if (!res.ok) {
       const errText = await res.text().catch(() => '');
-      throw new Error(`Router returned HTTP ${res.status}: ${errText || res.statusText}`);
+      return {
+        success: false,
+        error: `Router returned HTTP ${res.status}: ${errText || res.statusText}`,
+      };
     }
 
     const data = await res.json().catch(() => ({ success: true }));
@@ -790,10 +927,11 @@ export async function updateMikrotikPppSecretRest(
 
 /**
  * Terminate Active Session so subscriber reconnects into restricted or updated pool
- * POST /api/mikrotik/ppp/active/remove with { ".id": activeSession[".id"] }
+ * POST /api/mikrotik/ppp/active/remove with { ".id": activeSession[".id"], "numbers": activeSession[".id"] }
  */
 export async function disconnectMikrotikActiveSessionRest(
   activeRouter?: {
+    id?: string;
     ipAddress?: string;
     ip?: string;
     apiPort?: number;
@@ -805,55 +943,127 @@ export async function disconnectMikrotikActiveSessionRest(
 ): Promise<{ success: boolean; error?: string }> {
   if (!sessionIdOrName) return { success: false, error: 'Session ID or username required' };
 
-  const isBrowser = typeof window !== 'undefined';
-  const targetPort = activeRouter?.port || activeRouter?.apiPort || 8729;
-  const ip = (activeRouter?.ip || activeRouter?.ipAddress || '202.142.186.150').trim();
-  const username = activeRouter?.username?.trim() || 'admin';
-  const password = activeRouter?.password || '';
-
-  let authHeader = '';
-  try {
-    authHeader = 'Basic ' + btoa(`${username}:${password}`);
-  } catch {
-    authHeader = 'Basic ' + btoa('admin:');
-  }
-
-  const isNetlify =
-    isBrowser &&
-    (window.location.hostname.includes('netlify.app') ||
-      window.location.hostname.includes('youthnetw') ||
-      window.location.hostname.includes('netlify') ||
-      (window.location.hostname !== 'localhost' &&
-        window.location.hostname !== '127.0.0.1' &&
-        ip === '202.142.186.150'));
-
-  const baseUrl = isNetlify
-    ? `${window.location.origin}/api/mikrotik`
-    : `https://${ip}:${targetPort}/rest`;
-
-  const commonHeaders: Record<string, string> = {
-    Authorization: authHeader,
-    Accept: 'application/json',
-    'Content-Type': 'application/json',
-    Connection: 'close',
-    'Cache-Control': 'no-cache, no-store, must-revalidate',
-    Pragma: 'no-cache',
-  };
+  const baseUrl = getMikrotikRestBaseUrl(activeRouter);
 
   try {
     // 1. Try POST /ppp/active/remove
-    let res = await fetch(`${baseUrl}/ppp/active/remove`, {
-      method: 'POST',
-      headers: commonHeaders,
-      body: JSON.stringify({ '.id': sessionIdOrName, numbers: sessionIdOrName }),
-    });
+    const res = await safeMikrotikFetch(
+      `${baseUrl}/ppp/active/remove`,
+      {
+        method: 'POST',
+        body: JSON.stringify({
+          '.id': sessionIdOrName,
+          numbers: sessionIdOrName,
+        }),
+      },
+      activeRouter
+    );
+
+    if (res.status === 401) {
+      return {
+        success: false,
+        error: 'Action failed: Router authentication error. Please verify credentials.',
+      };
+    }
 
     // 2. Fallback to DELETE /ppp/active/:id
     if (!res.ok && (res.status === 404 || res.status === 405)) {
-      res = await fetch(`${baseUrl}/ppp/active/${encodeURIComponent(sessionIdOrName)}`, {
-        method: 'DELETE',
-        headers: commonHeaders,
-      });
+      const fallbackRes = await safeMikrotikFetch(
+        `${baseUrl}/ppp/active/${encodeURIComponent(sessionIdOrName)}`,
+        {
+          method: 'DELETE',
+        },
+        activeRouter
+      );
+
+      if (fallbackRes.status === 401) {
+        return {
+          success: false,
+          error: 'Action failed: Router authentication error. Please verify credentials.',
+        };
+      }
+
+      if (!fallbackRes.ok) {
+        const errText = await fallbackRes.text().catch(() => '');
+        throw new Error(`Router returned HTTP ${fallbackRes.status}: ${errText || fallbackRes.statusText}`);
+      }
+      return { success: true };
+    }
+
+    if (!res.ok) {
+      const errText = await res.text().catch(() => '');
+      throw new Error(`Router returned HTTP ${res.status}: ${errText || res.statusText}`);
+    }
+
+    return { success: true };
+  } catch (err: any) {
+    return { success: false, error: err.message };
+  }
+}
+
+/**
+ * Remove PPPoE Secret directly from RouterOS REST API
+ * POST /api/mikrotik/ppp/secret/remove with { ".id": secretId, "numbers": secretId }
+ */
+export async function removeMikrotikPppSecretRest(
+  activeRouter?: {
+    id?: string;
+    ipAddress?: string;
+    ip?: string;
+    apiPort?: number;
+    port?: number;
+    username?: string;
+    password?: string;
+  },
+  secretIdOrName?: string
+): Promise<{ success: boolean; error?: string }> {
+  if (!secretIdOrName) return { success: false, error: 'Secret ID or username required' };
+
+  const baseUrl = getMikrotikRestBaseUrl(activeRouter);
+
+  try {
+    // 1. Try POST /ppp/secret/remove
+    const res = await safeMikrotikFetch(
+      `${baseUrl}/ppp/secret/remove`,
+      {
+        method: 'POST',
+        body: JSON.stringify({
+          '.id': secretIdOrName,
+          numbers: secretIdOrName,
+        }),
+      },
+      activeRouter
+    );
+
+    if (res.status === 401) {
+      return {
+        success: false,
+        error: 'Action failed: Router authentication error. Please verify credentials.',
+      };
+    }
+
+    // 2. Fallback to DELETE /ppp/secret/:id
+    if (!res.ok && (res.status === 404 || res.status === 405)) {
+      const fallbackRes = await safeMikrotikFetch(
+        `${baseUrl}/ppp/secret/${encodeURIComponent(secretIdOrName)}`,
+        {
+          method: 'DELETE',
+        },
+        activeRouter
+      );
+
+      if (fallbackRes.status === 401) {
+        return {
+          success: false,
+          error: 'Action failed: Router authentication error. Please verify credentials.',
+        };
+      }
+
+      if (!fallbackRes.ok) {
+        const errText = await fallbackRes.text().catch(() => '');
+        throw new Error(`Router returned HTTP ${fallbackRes.status}: ${errText || fallbackRes.statusText}`);
+      }
+      return { success: true };
     }
 
     if (!res.ok) {

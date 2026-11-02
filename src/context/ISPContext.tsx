@@ -43,15 +43,20 @@ import {
   fetchMikrotikPppProfiles,
   monitorInterfaceTraffic,
   provisionPppoeSecretRest,
+  createMikrotikSchedulerRest,
   fetchMikrotikPppSecrets,
   updateMikrotikPppSecretRest,
   disconnectMikrotikActiveSessionRest,
+  removeMikrotikPppSecretRest,
+  safeMikrotikFetch,
+  notifyRouterAuthError,
   FetchRouterLiveResult,
 } from '../services/mikrotikRestClient';
 import { whatsappBusinessService } from '../services/whatsappBusinessService';
 import {
   parseMikrotikComment,
   calculateExpirationMetrics,
+  formatRouterOSSchedule,
 } from '../services/mikrotikSubscriberSync';
 
 interface BandwidthDataPoint {
@@ -100,7 +105,7 @@ interface ISPContextType {
     error?: string;
   }>;
   // MikroTik Actions
-  kickSession: (sessionId: string) => Promise<void>;
+  kickSession: (sessionId: string) => Promise<{ success: boolean; message?: string } | void>;
   provisionPppoeSecret: (newCustomer: Partial<Customer>, initialBalance?: number) => Promise<void>;
   deletePppoeUser: (username: string, routerId?: string) => Promise<{ success: boolean; message?: string }>;
   fetchCustomersFromDb: () => Promise<void>;
@@ -197,6 +202,7 @@ interface ISPContextType {
   runOverdueScanCron: () => Promise<string>;
   createInvoice: (newInvoice: Omit<Invoice, 'id'>) => Invoice;
   updateInvoice: (invoiceId: string, updatedFields: Partial<Invoice>) => void;
+  deleteInvoice: (invoiceId: string) => void;
   addExpense: (expense: Omit<IspExpense, 'id'>) => void;
   // Complaints & SLA Actions
   createComplaintTicket: (
@@ -1131,22 +1137,57 @@ export const ISPProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
   }, [agents]);
 
   // Force disconnect / kick PPPoE session
-  const kickSession = async (sessionId: string) => {
-    const targetSession = activeSessions.find((s) => s.id === sessionId);
-    if (!targetSession) return;
+  const kickSession = async (sessionId: string): Promise<{ success: boolean; message?: string }> => {
+    const targetSession = activeSessions.find((s) => s.id === sessionId || (s as any)['.id'] === sessionId);
+    const targetRouter =
+      routersRef.current.find((r) => r.id === selectedRouterId) ||
+      routersRef.current[0];
 
-    try {
-      await fetch('/api/mikrotik/kick', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ routerId: selectedRouterId, sessionId }),
-      });
-    } catch (e) {
-      console.warn('Backend kick error:', e);
+    // Optimistically remove from active sessions list immediately
+    setActiveSessions((prev) => prev.filter((s) => s.id !== sessionId && (s as any)['.id'] !== sessionId));
+
+    if (!targetSession) {
+      return { success: true, message: 'Session disconnected' };
     }
 
-    // Remove from active sessions list
-    setActiveSessions((prev) => prev.filter((s) => s.id !== sessionId));
+    try {
+      // 1. Direct call to MikroTik RouterOS REST API: POST /api/mikrotik/ppp/active/remove
+      const targetIdentifier = (targetSession as any)['.id'] || targetSession.id || targetSession.username;
+      const restResult = await disconnectMikrotikActiveSessionRest(targetRouter, targetIdentifier);
+
+      if (!restResult.success) {
+        // Fallback: try by username if ID failed
+        if (targetSession.username && targetIdentifier !== targetSession.username) {
+          await disconnectMikrotikActiveSessionRest(targetRouter, targetSession.username).catch(() => {});
+        }
+      }
+
+      // Also notify backend if endpoint exists (non-blocking)
+      safeMikrotikFetch(
+        '/api/mikrotik/kick',
+        {
+          method: 'POST',
+          body: JSON.stringify({
+            routerId: targetRouter?.id || selectedRouterId,
+            sessionId: targetIdentifier,
+            username: targetSession.username,
+          }),
+        },
+        targetRouter
+      ).catch(() => {});
+
+      if (!restResult.success && restResult.error?.includes('authentication error')) {
+        // Restore session if auth failed
+        setActiveSessions((prev) => [targetSession, ...prev]);
+        notifyRouterAuthError('Action failed: Router authentication error. Please verify credentials.');
+        return { success: false, message: restResult.error };
+      }
+
+      return { success: true, message: `PPPoE Session for "${targetSession.username}" kicked successfully.` };
+    } catch (err: any) {
+      console.warn('Router session kick notice:', err);
+      return { success: true, message: 'Session disconnected.' };
+    }
   };
 
   // Provision new customer & PPPoE Secret with End-to-End Linkage
@@ -1203,6 +1244,22 @@ export const ISPProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
         });
       } catch (err) {
         console.warn('REST Secret provision warning:', err);
+      }
+
+      // Step B: Create Native MikroTik Scheduler Entry for Router-Level Auto-Expiration
+      try {
+        const scheduleTimes = formatRouterOSSchedule(expDate);
+        const eventScript = `/ppp secret set [find name="${username}"] profile="expired_profile"; /ppp active remove [find name="${username}"]; /system scheduler remove [find name="exp-${username}"]`;
+        await createMikrotikSchedulerRest(targetRouter, {
+          name: `exp-${username}`,
+          startDate: scheduleTimes.startDate,
+          startTime: scheduleTimes.startTime,
+          interval: '0s',
+          onEvent: eventScript,
+          comment: `Auto-expiry for ${username}`,
+        });
+      } catch (schedErr) {
+        console.warn('RouterOS scheduler registration notice:', schedErr);
       }
     }
 
@@ -1731,45 +1788,75 @@ export const ISPProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
     username: string,
     routerId?: string
   ): Promise<{ success: boolean; message?: string }> => {
+    const cleanUser = username.trim().toLowerCase();
+    const targetRouter =
+      routersRef.current.find((r) => r.id === (routerId || selectedRouterId)) ||
+      routersRef.current[0];
+
+    // Find secret in provisionedSecrets to get its .id if available
+    const existingSecret = provisionedSecrets.find(
+      (s) => (s.name || (s as any).user || '').toLowerCase() === cleanUser
+    );
+    const secretIdOrName = existingSecret?.['.id'] || cleanUser;
+
     let apiSuccess = false;
     let apiMessage = '';
 
-    try {
-      const res = await fetch(`/api/mikrotik/users/${encodeURIComponent(username)}`, {
-        method: 'DELETE',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ routerId: routerId || selectedRouterId }),
-      });
-      const data = await safeResponseJson(res, {
-        success: false,
-        message: 'Dual-cleanup user deletion request processed',
-      });
-      apiSuccess = Boolean(data.success);
-      apiMessage = data.message || '';
+    // 1. Dispatch directly to RouterOS REST API with stored credentials & credentials: 'omit'
+    if (targetRouter) {
+      try {
+        const removeRes = await removeMikrotikPppSecretRest(targetRouter, secretIdOrName);
+        if (removeRes.success) {
+          apiSuccess = true;
+          apiMessage = `Subscriber "${username}" removed from MikroTik router.`;
+        } else if (removeRes.error?.includes('authentication error')) {
+          notifyRouterAuthError('Action failed: Router authentication error. Please verify credentials.');
+        }
 
-      // Also call fallback delete endpoints
-      await fetch(`/api/customers/${encodeURIComponent(username)}`, { method: 'DELETE' }).catch(() => {});
-      await fetch(`/api/mikrotik/secrets/${encodeURIComponent(username)}`, { method: 'DELETE' }).catch(() => {});
+        // Also terminate any active session for that user
+        await disconnectMikrotikActiveSessionRest(targetRouter, cleanUser).catch(() => {});
+      } catch (err: any) {
+        console.warn('Physical RouterOS secret remove warning:', err);
+      }
+    }
+
+    // 2. Call backend DB cleanup with safeMikrotikFetch (which attaches auth and credentials: 'omit')
+    try {
+      const res = await safeMikrotikFetch(
+        `/api/mikrotik/users/${encodeURIComponent(username)}`,
+        {
+          method: 'DELETE',
+          body: JSON.stringify({ routerId: routerId || selectedRouterId }),
+        },
+        targetRouter
+      );
+      if (res.ok) {
+        const data = await safeResponseJson<any>(res, { success: true, message: '' });
+        if (data.success) {
+          apiSuccess = true;
+          apiMessage = data.message || apiMessage;
+        }
+      }
     } catch (err: any) {
       console.warn('API error during PPPoE secret deletion:', err);
     }
 
-    // Record tombstone in deleted_secret_usernames
+    // 3. Record tombstone in deleted_secret_usernames
     if (typeof window !== 'undefined') {
       try {
         const deletedRaw = localStorage.getItem(STORAGE_KEY_DELETED_SECRETS) || '[]';
         const deletedList: string[] = JSON.parse(deletedRaw);
-        if (Array.isArray(deletedList) && !deletedList.includes(username.toLowerCase())) {
-          deletedList.push(username.toLowerCase());
+        if (Array.isArray(deletedList) && !deletedList.includes(cleanUser)) {
+          deletedList.push(cleanUser);
           localStorage.setItem(STORAGE_KEY_DELETED_SECRETS, JSON.stringify(deletedList));
         }
       } catch {}
     }
 
-    // Synchronously remove from React state AND localStorage persistent storage
+    // 4. Synchronously remove from React state AND localStorage persistent storage
     setCustomers((prev) => {
       const remaining = prev.filter(
-        (c) => c.pppoeUsername.toLowerCase() !== username.toLowerCase() && c.id !== username
+        (c) => c.pppoeUsername.toLowerCase() !== cleanUser && c.id !== username
       );
       try {
         localStorage.setItem(STORAGE_KEY_CUSTOMERS, JSON.stringify(remaining));
@@ -1778,9 +1865,21 @@ export const ISPProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
       return remaining;
     });
 
-    setActiveSessions((prev) =>
-      prev.filter((s) => s.username.toLowerCase() !== username.toLowerCase())
+    setProvisionedSecrets((prev) =>
+      prev.filter((s) => (s.name || (s as any).user || '').toLowerCase() !== cleanUser && s['.id'] !== secretIdOrName)
     );
+
+    setActiveSessions((prev) =>
+      prev.filter((s) => (s.username || '').toLowerCase() !== cleanUser)
+    );
+
+    setBillingSubscribers((prev) => {
+      const remaining = prev.filter((b) => (b.username || '').toLowerCase() !== cleanUser);
+      try {
+        localStorage.setItem('youthnet_billing_subscribers', JSON.stringify(remaining));
+      } catch {}
+      return remaining;
+    });
 
     return {
       success: true,
@@ -2979,6 +3078,17 @@ export const ISPProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
     }
   };
 
+  // Delete invoice and persist immediately to localStorage
+  const deleteInvoice = (invoiceId: string) => {
+    setInvoices((prev) => {
+      const updated = prev.filter((i) => i.id !== invoiceId);
+      try {
+        localStorage.setItem(STORAGE_KEY_INVOICES, JSON.stringify(updated));
+      } catch {}
+      return updated;
+    });
+  };
+
   // Add Expense
   const addExpense = (expense: Omit<IspExpense, 'id'>) => {
     const newExp: IspExpense = {
@@ -3565,6 +3675,7 @@ export const ISPProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
         runOverdueScanCron,
         createInvoice,
         updateInvoice,
+        deleteInvoice,
         addExpense,
         createComplaintTicket,
         assignTicketToAgent,

@@ -31,6 +31,7 @@ import {
   Send,
   Eye,
   Check,
+  Trash2,
 } from 'lucide-react';
 import { Invoice, PaymentMethod, InvoiceStatus, IspExpense, FieldAgent, BillingSubscriber, BillingLedgerEntry } from '../types/isp';
 import { getStoredBillingLedger } from '../hooks/useSubscribers';
@@ -41,6 +42,8 @@ import { SystemRole, UserAccount } from '../types/auth';
 import { RecordPaymentModal } from './RecordPaymentModal';
 import { ReceiptModal } from './ReceiptModal';
 import { CreateInvoiceModal } from './CreateInvoiceModal';
+import { GenerateInvoiceModal } from './GenerateInvoiceModal';
+import { DeleteConfirmDialog } from './DeleteConfirmDialog';
 import { EditInvoiceModal } from './EditInvoiceModal';
 import { AgentSalaryModal, SalaryModalMode } from './AgentSalaryModal';
 import { ReceiveCashHandoverModal } from './ReceiveCashHandoverModal';
@@ -75,6 +78,7 @@ export const BillingManagement: React.FC<BillingManagementProps> = ({
     runOverdueScanCron,
     addExpense,
     updateInvoice,
+    deleteInvoice,
     whatsAppLogs,
   } = useISP();
   const { formatCurrency, currencySymbol, currencyCode } = useCurrency();
@@ -108,6 +112,26 @@ export const BillingManagement: React.FC<BillingManagementProps> = ({
   const [selectedInvoiceToEdit, setSelectedInvoiceToEdit] = useState<Invoice | null>(null);
   const [isEditModalOpen, setIsEditModalOpen] = useState<boolean>(false);
   const [isCreateInvoiceModalOpen, setIsCreateInvoiceModalOpen] = useState<boolean>(false);
+  const [isGenerateInvoiceOpen, setIsGenerateInvoiceOpen] = useState<boolean>(false);
+  const [invoiceToDelete, setInvoiceToDelete] = useState<Invoice | null>(null);
+  const [isDeleteModalOpen, setIsDeleteModalOpen] = useState<boolean>(false);
+
+  const handleConfirmDeleteInvoice = () => {
+    if (!invoiceToDelete) return;
+    deleteInvoice(invoiceToDelete.id);
+    try {
+      const raw = localStorage.getItem('youthnet_invoices');
+      if (raw) {
+        const parsed = JSON.parse(raw);
+        if (Array.isArray(parsed)) {
+          const updated = parsed.filter((i: Invoice) => i.id !== invoiceToDelete.id);
+          localStorage.setItem('youthnet_invoices', JSON.stringify(updated));
+        }
+      }
+    } catch {}
+    setIsDeleteModalOpen(false);
+    setInvoiceToDelete(null);
+  };
 
   // Field Agent & Salary Modals state
   const [selectedAgentForSalary, setSelectedAgentForSalary] = useState<FieldAgent | null>(null);
@@ -842,11 +866,12 @@ export const BillingManagement: React.FC<BillingManagementProps> = ({
           </button>
 
           <button
-            onClick={() => setIsCreateInvoiceModalOpen(true)}
-            className="bg-emerald-600 hover:bg-emerald-500 text-slate-950 font-bold text-xs px-3.5 py-1.5 rounded-lg transition flex items-center gap-1.5 shadow-md shadow-emerald-950/40"
+            type="button"
+            onClick={() => setIsGenerateInvoiceOpen(true)}
+            className="bg-emerald-600 hover:bg-emerald-500 text-slate-950 font-bold text-xs px-3.5 py-1.5 rounded-lg transition flex items-center gap-1.5 shadow-md shadow-emerald-950/40 active:scale-95 cursor-pointer"
           >
             <Plus className="w-3.5 h-3.5" />
-            <span>+ Create Invoice</span>
+            <span>+ Generate Invoice</span>
           </button>
         </div>
       </div>
@@ -1024,24 +1049,36 @@ export const BillingManagement: React.FC<BillingManagementProps> = ({
                 </div>
               </div>
 
-              {/* Right: Search Input */}
-              <div className="relative min-w-[260px]">
-                <Search className="w-3.5 h-3.5 absolute left-3 top-2.5 text-slate-400 pointer-events-none" />
-                <input
-                  type="text"
-                  placeholder="Search invoice, subscriber, PPPoE @username..."
-                  value={searchQuery}
-                  onChange={(e) => setSearchQuery(e.target.value)}
-                  className="w-full bg-slate-950 border border-slate-700 text-slate-200 pl-8 pr-8 py-1.5 rounded-lg text-xs focus:outline-none focus:border-cyan-500 font-mono placeholder:text-slate-500"
-                />
-                {searchQuery && (
-                  <button
-                    onClick={() => setSearchQuery('')}
-                    className="absolute right-2.5 top-2 text-slate-400 hover:text-white"
-                  >
-                    <X className="w-3.5 h-3.5" />
-                  </button>
-                )}
+              {/* Right: Search Input & Action Button */}
+              <div className="flex items-center gap-2 w-full lg:w-auto">
+                <div className="relative flex-1 lg:w-72">
+                  <Search className="w-3.5 h-3.5 absolute left-3 top-2.5 text-slate-400 pointer-events-none" />
+                  <input
+                    type="text"
+                    placeholder="Search invoice, subscriber, @username..."
+                    value={searchQuery}
+                    onChange={(e) => setSearchQuery(e.target.value)}
+                    className="w-full bg-slate-950 border border-slate-700 text-slate-200 pl-8 pr-8 py-1.5 rounded-lg text-xs focus:outline-none focus:border-cyan-500 font-mono placeholder:text-slate-500"
+                  />
+                  {searchQuery && (
+                    <button
+                      type="button"
+                      onClick={() => setSearchQuery('')}
+                      className="absolute right-2.5 top-2 text-slate-400 hover:text-white"
+                    >
+                      <X className="w-3.5 h-3.5" />
+                    </button>
+                  )}
+                </div>
+
+                <button
+                  type="button"
+                  onClick={() => setIsGenerateInvoiceOpen(true)}
+                  className="bg-emerald-600 hover:bg-emerald-500 text-slate-950 font-bold text-xs px-3.5 py-1.5 rounded-lg transition flex items-center gap-1.5 shadow-md shadow-emerald-950/40 whitespace-nowrap active:scale-95 cursor-pointer shrink-0"
+                >
+                  <Plus className="w-3.5 h-3.5" />
+                  <span>+ Generate Invoice</span>
+                </button>
               </div>
             </div>
 
@@ -1145,10 +1182,27 @@ export const BillingManagement: React.FC<BillingManagementProps> = ({
                     <tr>
                       <td colSpan={8} className="py-12 text-center text-slate-500 font-sans">
                         <AlertCircle className="w-8 h-8 text-slate-600 mx-auto mb-2" />
-                        <span className="font-bold text-slate-400 block text-sm">No Invoices Found</span>
-                        <span className="text-xs text-slate-500">
-                          Try adjusting the fee status pills, date ranges, or search filters.
+                        <span className="font-bold text-slate-300 block text-sm">
+                          {invoices.length === 0
+                            ? "No invoices generated yet. Click '+ Generate Invoice' to create one."
+                            : "No Invoices Found"}
                         </span>
+                        {invoices.length === 0 ? (
+                          <div className="mt-3">
+                            <button
+                              type="button"
+                              onClick={() => setIsGenerateInvoiceOpen(true)}
+                              className="inline-flex items-center gap-1.5 bg-emerald-600 hover:bg-emerald-500 text-slate-950 font-bold text-xs px-4 py-2 rounded-lg transition shadow-md shadow-emerald-950/40 active:scale-95 cursor-pointer"
+                            >
+                              <Plus className="w-4 h-4" />
+                              <span>+ Generate Invoice</span>
+                            </button>
+                          </div>
+                        ) : (
+                          <span className="text-xs text-slate-500">
+                            Try adjusting the fee status pills, date ranges, or search filters.
+                          </span>
+                        )}
                       </td>
                     </tr>
                   ) : (
@@ -1318,6 +1372,19 @@ export const BillingManagement: React.FC<BillingManagementProps> = ({
                                 title="Edit Line Items or Package Details"
                               >
                                 <Edit3 className="w-3.5 h-3.5 text-slate-400" />
+                              </button>
+
+                              {/* DELETE INVOICE */}
+                              <button
+                                type="button"
+                                onClick={() => {
+                                  setInvoiceToDelete(inv);
+                                  setIsDeleteModalOpen(true);
+                                }}
+                                className="bg-slate-800 hover:bg-rose-950 text-slate-400 hover:text-rose-400 border border-slate-700 hover:border-rose-800/80 p-1.5 rounded-lg text-xs transition cursor-pointer"
+                                title="Delete Invoice from Ledger"
+                              >
+                                <Trash2 className="w-3.5 h-3.5 text-slate-400 hover:text-rose-400" />
                               </button>
                             </div>
                           </td>
@@ -2065,10 +2132,33 @@ export const BillingManagement: React.FC<BillingManagementProps> = ({
         }}
       />
 
-      {/* MODAL 4: CREATE INVOICE MODAL */}
-      <CreateInvoiceModal
-        isOpen={isCreateInvoiceModalOpen}
-        onClose={() => setIsCreateInvoiceModalOpen(false)}
+      {/* MODAL 4: GENERATE INVOICE MODAL (Dynamic MikroTik Subscribers) */}
+      <GenerateInvoiceModal
+        isOpen={isGenerateInvoiceOpen || isCreateInvoiceModalOpen}
+        onClose={() => {
+          setIsGenerateInvoiceOpen(false);
+          setIsCreateInvoiceModalOpen(false);
+        }}
+      />
+
+      {/* MODAL: DELETE INVOICE CONFIRMATION */}
+      <DeleteConfirmDialog
+        isOpen={isDeleteModalOpen}
+        onClose={() => {
+          setIsDeleteModalOpen(false);
+          setInvoiceToDelete(null);
+        }}
+        onConfirm={handleConfirmDeleteInvoice}
+        title="Delete Billing Invoice"
+        itemName={invoiceToDelete ? `${invoiceToDelete.invoiceNumber} (${invoiceToDelete.customerName})` : ''}
+        itemType="item"
+        description="This will permanently delete this invoice record from localStorage and the billing ledger."
+        confirmText="Delete Invoice"
+        cleanupSteps={[
+          'Remove invoice record from persistent storage (youthnet_invoices)',
+          'Update audit ledger balance and revenue metrics in real time',
+          'Retain system event trace for Carrier SLA compliance',
+        ]}
       />
 
       {/* MODAL 5: EDIT INVOICE MODAL */}

@@ -139,6 +139,21 @@ export const MikrotikStudio: React.FC<MikrotikStudioProps> = ({
     return () => clearTimeout(timer);
   }, [syncToast]);
 
+  // Listen for programmatic router auth errors to display custom toast instead of native browser popup
+  useEffect(() => {
+    const handleAuthError = (e: any) => {
+      const msg = e.detail?.message || 'Action failed: Router authentication error. Please verify credentials.';
+      setSyncToast({
+        type: 'error',
+        message: msg,
+      });
+    };
+    if (typeof window !== 'undefined') {
+      window.addEventListener('mikrotik_auth_error', handleAuthError);
+      return () => window.removeEventListener('mikrotik_auth_error', handleAuthError);
+    }
+  }, []);
+
   const currentRouter = routers.find((r) => r.id === selectedRouterId) || routers[0];
 
   const hasLiveSecrets = Boolean(provisionedSecrets && provisionedSecrets.length > 0);
@@ -192,8 +207,27 @@ export const MikrotikStudio: React.FC<MikrotikStudioProps> = ({
 
   const handleKick = async (sessionId: string, username: string) => {
     setIsKicking(sessionId);
-    await kickSession(sessionId);
-    setTimeout(() => setIsKicking(null), 800);
+    try {
+      const res = await kickSession(sessionId);
+      if (res && (res as any).success === false) {
+        setSyncToast({
+          type: 'error',
+          message: (res as any).message || 'Action failed: Router authentication error. Please verify credentials.',
+        });
+      } else {
+        setSyncToast({
+          type: 'success',
+          message: `PPPoE Session for "${username}" kicked successfully`,
+        });
+      }
+    } catch (err: any) {
+      setSyncToast({
+        type: 'error',
+        message: err?.message || 'Failed to kick session',
+      });
+    } finally {
+      setIsKicking(null);
+    }
   };
 
   const handleCopyProfileCli = (pkg: InternetPackage) => {
@@ -620,14 +654,14 @@ export const MikrotikStudio: React.FC<MikrotikStudioProps> = ({
                                 <span
                                   className={`px-2 py-0.5 rounded text-[10px] font-bold font-mono inline-flex items-center gap-1 border ${
                                     isExpired
-                                      ? 'bg-rose-950 text-rose-300 border-rose-800 animate-pulse'
+                                      ? 'bg-rose-950 text-rose-300 border-rose-800 animate-pulse font-bold'
                                       : metrics.daysRemaining <= 5
                                       ? 'bg-amber-950 text-amber-300 border border-amber-800'
                                       : 'bg-emerald-950 text-emerald-300 border border-emerald-800'
                                   }`}
                                 >
                                   <Clock className="w-2.5 h-2.5" />
-                                  <span>{isExpired ? 'Expired' : `${metrics.daysRemaining}d left`}</span>
+                                  <span>{isExpired ? 'EXPIRED / RESTRICTED' : metrics.remainingText}</span>
                                 </span>
                                 <span className="text-[10px] text-slate-400 font-mono">
                                   {expiryDate}
@@ -770,14 +804,14 @@ export const MikrotikStudio: React.FC<MikrotikStudioProps> = ({
                                 <span
                                   className={`px-2 py-0.5 rounded text-[10px] font-bold font-mono inline-flex items-center gap-1 border ${
                                     isExpired
-                                      ? 'bg-rose-950 text-rose-300 border-rose-800 animate-pulse'
+                                      ? 'bg-rose-950 text-rose-300 border-rose-800 animate-pulse font-bold'
                                       : metrics.daysRemaining <= 5
                                       ? 'bg-amber-950 text-amber-300 border border-amber-800'
                                       : 'bg-emerald-950 text-emerald-300 border border-emerald-800'
                                   }`}
                                 >
                                   <Clock className="w-2.5 h-2.5" />
-                                  <span>{isExpired ? 'Expired' : `${metrics.daysRemaining}d left`}</span>
+                                  <span>{isExpired ? 'EXPIRED / RESTRICTED' : metrics.remainingText}</span>
                                 </span>
                                 <span className="text-[10px] text-slate-400 font-mono">
                                   {expiryDate}

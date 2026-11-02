@@ -16,6 +16,7 @@ import {
   Download,
   Upload,
   Trash2,
+  Loader2,
 } from 'lucide-react';
 import { ActiveSession, InternetPackage } from '../types/isp';
 
@@ -529,10 +530,17 @@ export const ActiveSessionsTable: React.FC<ActiveSessionsTableProps> = ({
                         <button
                           onClick={() => onKickSession(session.id, session.username)}
                           disabled={isKickingId === session.id}
-                          className="bg-rose-950/80 hover:bg-rose-900 border border-rose-800/80 text-rose-300 hover:text-white px-2.5 py-1 rounded text-[11px] font-sans font-medium transition disabled:opacity-50 cursor-pointer"
+                          className="bg-rose-950/80 hover:bg-rose-900 border border-rose-800/80 text-rose-300 hover:text-white px-2.5 py-1 rounded text-[11px] font-sans font-medium transition disabled:opacity-50 cursor-pointer inline-flex items-center gap-1.5"
                           title="Force disconnect / kick session"
                         >
-                          {isKickingId === session.id ? 'Kicking...' : 'Kick'}
+                          {isKickingId === session.id ? (
+                            <>
+                              <Loader2 className="w-3 h-3 animate-spin text-rose-300" />
+                              <span>Kicking...</span>
+                            </>
+                          ) : (
+                            'Kick'
+                          )}
                         </button>
                       )}
 

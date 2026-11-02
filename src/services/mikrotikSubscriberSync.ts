@@ -22,29 +22,128 @@ export interface RealMikrotikSubscriber {
 }
 
 /**
+ * Formats a Date object for RouterOS v7 scheduler:
+ * - Target Date Format: "mmm/dd/yyyy" (e.g. "nov/02/2026")
+ * - Target Time Format: "HH:MM:SS" (e.g. "14:30:00")
+ */
+export function formatRouterOSSchedule(dateObj: Date): {
+  startDate: string;
+  startTime: string;
+  isoString: string;
+  readable: string;
+} {
+  const months = ['jan', 'feb', 'mar', 'apr', 'may', 'jun', 'jul', 'aug', 'sep', 'oct', 'nov', 'dec'];
+  const mmm = months[dateObj.getMonth()];
+  const dd = String(dateObj.getDate()).padStart(2, '0');
+  const yyyy = dateObj.getFullYear();
+  const HH = String(dateObj.getHours()).padStart(2, '0');
+  const MM = String(dateObj.getMinutes()).padStart(2, '0');
+  const SS = String(dateObj.getSeconds()).padStart(2, '0');
+
+  const startDate = `${mmm}/${dd}/${yyyy}`;
+  const startTime = `${HH}:${MM}:${SS}`;
+  const readable = `${yyyy}-${String(dateObj.getMonth() + 1).padStart(2, '0')}-${dd} ${startTime}`;
+
+  return {
+    startDate,
+    startTime,
+    isoString: dateObj.toISOString(),
+    readable,
+  };
+}
+
+/**
+ * Accurately calculates remaining time countdown or expired restricted state
+ */
+export function calculateRemainingTime(expiryDateInput?: string | Date): {
+  isExpired: boolean;
+  statusLabel: string;
+  remainingText: string;
+  badgeClass: string;
+} {
+  if (!expiryDateInput) {
+    return {
+      isExpired: false,
+      statusLabel: 'Active',
+      remainingText: 'No Expiry Set',
+      badgeClass: 'bg-emerald-950 text-emerald-300 border border-emerald-800',
+    };
+  }
+
+  const exp = typeof expiryDateInput === 'string' ? new Date(expiryDateInput) : expiryDateInput;
+  if (isNaN(exp.getTime())) {
+    return {
+      isExpired: false,
+      statusLabel: 'Active',
+      remainingText: 'Active',
+      badgeClass: 'bg-emerald-950 text-emerald-300 border border-emerald-800',
+    };
+  }
+
+  const now = new Date();
+  const diffMs = exp.getTime() - now.getTime();
+
+  if (diffMs <= 0) {
+    return {
+      isExpired: true,
+      statusLabel: 'EXPIRED / RESTRICTED',
+      remainingText: 'Expired',
+      badgeClass: 'bg-rose-950 text-rose-300 border border-rose-800 font-bold',
+    };
+  }
+
+  const totalSecs = Math.floor(diffMs / 1000);
+  const totalMins = Math.floor(totalSecs / 60);
+  const totalHours = Math.floor(totalMins / 60);
+  const totalDays = Math.floor(totalHours / 24);
+
+  let remainingText = '';
+  if (totalDays > 0) {
+    const remHours = totalHours % 24;
+    remainingText = remHours > 0 ? `${totalDays}d ${remHours}h remaining` : `${totalDays} days remaining`;
+  } else if (totalHours > 0) {
+    const remMins = totalMins % 60;
+    remainingText = remMins > 0 ? `${totalHours}h ${remMins}m remaining` : `${totalHours}h remaining`;
+  } else if (totalMins > 0) {
+    remainingText = `${totalMins}m remaining`;
+  } else {
+    remainingText = `${totalSecs}s remaining`;
+  }
+
+  return {
+    isExpired: false,
+    statusLabel: remainingText,
+    remainingText,
+    badgeClass:
+      totalHours < 6
+        ? 'bg-amber-950 text-amber-300 border border-amber-800'
+        : 'bg-emerald-950 text-emerald-300 border border-emerald-800',
+  };
+}
+
+/**
  * Calculates days remaining and expiration status based on expiry date string
  */
 export function calculateExpirationMetrics(expiryDateStr?: string): {
   daysRemaining: number;
   isExpired: boolean;
   statusLabel: string;
+  remainingText: string;
+  badgeClass: string;
 } {
-  if (!expiryDateStr) {
-    return { daysRemaining: 30, isExpired: false, statusLabel: 'Active' };
-  }
-  const exp = new Date(expiryDateStr);
-  if (isNaN(exp.getTime())) {
-    return { daysRemaining: 30, isExpired: false, statusLabel: 'Active' };
-  }
+  const timeInfo = calculateRemainingTime(expiryDateStr);
+  const exp = expiryDateStr ? new Date(expiryDateStr) : null;
   const now = new Date();
-  const expMid = new Date(exp.getFullYear(), exp.getMonth(), exp.getDate()).getTime();
-  const nowMid = new Date(now.getFullYear(), now.getMonth(), now.getDate()).getTime();
-  const diffDays = Math.ceil((expMid - nowMid) / (1000 * 60 * 60 * 24));
-  const isExpired = diffDays <= 0;
+  let diffDays = 30;
+  if (exp && !isNaN(exp.getTime())) {
+    diffDays = Math.ceil((exp.getTime() - now.getTime()) / (1000 * 60 * 60 * 24));
+  }
   return {
     daysRemaining: diffDays,
-    isExpired,
-    statusLabel: isExpired ? 'Expired' : `${diffDays} days left`,
+    isExpired: timeInfo.isExpired,
+    statusLabel: timeInfo.statusLabel,
+    remainingText: timeInfo.remainingText,
+    badgeClass: timeInfo.badgeClass,
   };
 }
 
@@ -69,6 +168,7 @@ export function parseMikrotikComment(comment?: string, username?: string): {
   createdDate?: string;
   expiryDate?: string;
   validityDays?: number;
+  validityLabel?: string;
   expiredPool?: string;
   plan?: string;
 } {
@@ -104,6 +204,7 @@ export function parseMikrotikComment(comment?: string, username?: string): {
         createdDate: obj.created || obj.createdDate,
         expiryDate: obj.expires || obj.expiryDate,
         validityDays: obj.days || obj.validityDays ? Number(obj.days || obj.validityDays) : undefined,
+        validityLabel: obj.validityLabel,
         expiredPool: obj.expiredPool || obj.pool,
         plan: obj.plan,
       };
