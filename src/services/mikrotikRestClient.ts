@@ -128,6 +128,7 @@ export async function safeMikrotikFetch(
     Connection: 'close',
     'Cache-Control': 'no-cache, no-store, must-revalidate',
     Pragma: 'no-cache',
+    Expires: '0',
     ...incomingHeaders,
   };
 
@@ -274,8 +275,10 @@ export async function fetchMikrotikLiveTelemetry(
         const bytesIn = s['bytes-in'] || s['rx-byte'] ? Math.round(Number(s['bytes-in'] || s['rx-byte']) / 1_000_000) : 0;
         const bytesOut = s['bytes-out'] || s['tx-byte'] ? Math.round(Number(s['bytes-out'] || s['tx-byte']) / 1_000_000) : 0;
 
+        const internalId = s['.id'] || s.id || `session-${idx}`;
         return {
-          id: s['.id'] || s.id || `session-${idx}`,
+          id: internalId,
+          '.id': s['.id'] || internalId,
           username: s.name || s.user || `user-${idx}`,
           callerId: s['caller-id'] || s.callerId || '00:00:00:00:00:00',
           address: s.address || '0.0.0.0',
@@ -428,6 +431,113 @@ export async function fetchMikrotikLiveTelemetry(
       router: {
         status: 'unreachable',
       },
+    };
+  }
+}
+
+/**
+ * 1.1 Direct Fetch for Live PPPoE Active Sessions (/api/mikrotik/ppp/active)
+ * Uses strict anti-caching headers and Authorization: Basic credentials.
+ * Returns fresh ActiveSession[] array with raw uptime and RouterOS .id.
+ */
+export async function fetchMikrotikActiveSessions(
+  activeRouter?: {
+    id?: string;
+    ipAddress?: string;
+    ip?: string;
+    apiPort?: number;
+    port?: number;
+    username?: string;
+    password?: string;
+  },
+  signal?: AbortSignal
+): Promise<{ success: boolean; activeSessions: ActiveSession[]; error?: string }> {
+  const baseUrl = getMikrotikRestBaseUrl(activeRouter);
+  const auth = getStoredRouterAuth(activeRouter);
+
+  try {
+    const res = await safeMikrotikFetch(
+      `${baseUrl}/ppp/active`,
+      {
+        method: 'GET',
+        headers: {
+          'Cache-Control': 'no-cache, no-store, must-revalidate',
+          'Pragma': 'no-cache',
+          'Expires': '0',
+          'Authorization': auth.authHeader,
+        },
+        signal,
+      },
+      activeRouter
+    );
+
+    if (res.status === 401) {
+      return {
+        success: false,
+        activeSessions: [],
+        error: 'Action failed: Router authentication error. Please verify credentials.',
+      };
+    }
+
+    if (!res.ok) {
+      const errText = await res.text().catch(() => '');
+      return {
+        success: false,
+        activeSessions: [],
+        error: `Router returned HTTP ${res.status}: ${errText || res.statusText}`,
+      };
+    }
+
+    const contentType = res.headers.get('content-type') || '';
+    if (contentType.includes('text/html')) {
+      return {
+        success: false,
+        activeSessions: [],
+        error: 'Expected JSON but received HTML response from proxy',
+      };
+    }
+
+    const data = await res.json();
+    const rawSessions = Array.isArray(data) ? data : [];
+
+    const activeSessions: ActiveSession[] = rawSessions.map((s: any, idx: number) => {
+      const rxRate = s['rx-rate'] ? Number(s['rx-rate']) / 1_000_000 : 0;
+      const txRate = s['tx-rate'] ? Number(s['tx-rate']) / 1_000_000 : 0;
+      const bytesIn = s['bytes-in'] || s['rx-byte'] ? Math.round(Number(s['bytes-in'] || s['rx-byte']) / 1_000_000) : 0;
+      const bytesOut = s['bytes-out'] || s['tx-byte'] ? Math.round(Number(s['bytes-out'] || s['tx-byte']) / 1_000_000) : 0;
+      const internalId = s['.id'] || s.id || `*${idx + 1}`;
+
+      return {
+        id: internalId,
+        '.id': s['.id'] || internalId,
+        username: s.name || s.user || `user-${idx}`,
+        callerId: s['caller-id'] || s.callerId || '00:00:00:00:00:00',
+        address: s.address || '0.0.0.0',
+        service: 'pppoe',
+        uptime: s.uptime || '0s',
+        rxRateMbps: Number(rxRate.toFixed(2)),
+        txRateMbps: Number(txRate.toFixed(2)),
+        bytesInMb: bytesIn,
+        bytesOutMb: bytesOut,
+        routerId: activeRouter?.id || '',
+        customerName: s.name || s.user || `User ${idx + 1}`,
+        profileName: s.profile || 'default',
+        liveRateFormatted: `↓ ${rxRate.toFixed(1)}M / ↑ ${txRate.toFixed(1)}M`,
+      };
+    });
+
+    return {
+      success: true,
+      activeSessions,
+    };
+  } catch (err: any) {
+    if (signal?.aborted || err?.name === 'AbortError') {
+      return { success: false, activeSessions: [], error: 'Aborted' };
+    }
+    return {
+      success: false,
+      activeSessions: [],
+      error: err.message || 'Failed to fetch active sessions',
     };
   }
 }
@@ -946,14 +1056,13 @@ export async function disconnectMikrotikActiveSessionRest(
   const baseUrl = getMikrotikRestBaseUrl(activeRouter);
 
   try {
-    // 1. Try POST /ppp/active/remove
+    // 1. RouterOS v7 strictly expects: { ".id": session[".id"] }
     const res = await safeMikrotikFetch(
       `${baseUrl}/ppp/active/remove`,
       {
         method: 'POST',
         body: JSON.stringify({
           '.id': sessionIdOrName,
-          numbers: sessionIdOrName,
         }),
       },
       activeRouter

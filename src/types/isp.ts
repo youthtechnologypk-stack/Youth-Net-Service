@@ -94,6 +94,7 @@ export interface MikrotikRouter {
 
 export interface ActiveSession {
   id: string;
+  '.id'?: string;
   username: string;
   callerId: string; // MAC address
   address: string; // IP

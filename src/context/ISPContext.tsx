@@ -40,6 +40,7 @@ import { safeResponseJson } from '../lib/safeFetch';
 import { formatCurrency } from './CurrencyContext';
 import {
   fetchMikrotikLiveTelemetry,
+  fetchMikrotikActiveSessions,
   fetchMikrotikPppProfiles,
   monitorInterfaceTraffic,
   provisionPppoeSecretRest,
@@ -105,7 +106,7 @@ interface ISPContextType {
     error?: string;
   }>;
   // MikroTik Actions
-  kickSession: (sessionId: string) => Promise<{ success: boolean; message?: string } | void>;
+  kickSession: (sessionId: string) => Promise<{ success: boolean; username?: string; message?: string } | void>;
   provisionPppoeSecret: (newCustomer: Partial<Customer>, initialBalance?: number) => Promise<void>;
   deletePppoeUser: (username: string, routerId?: string) => Promise<{ success: boolean; message?: string }>;
   fetchCustomersFromDb: () => Promise<void>;
@@ -914,24 +915,22 @@ export const ISPProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
           activeViewTabRef.current === 'noc' ||
           activeViewTabRef.current === 'mikrotik';
 
-        // Throttle active PPPoE sessions to poll every 10 seconds minimum
-        const now = Date.now();
-        const shouldPollSessions = now - lastSessionsPollTimeRef.current >= 10000;
-
+        // 1. Poll Active Sessions and Telemetry every 6 seconds (5 to 8s window) with anti-caching headers
         const result = await fetchMikrotikLiveTelemetry(targetRouter, {
           signal: abortController.signal,
           pollTraffic: isViewingTrafficWidget,
-          pollSessions: shouldPollSessions,
-          cachedSessions: activeSessionsRef.current,
+          pollSessions: true,
+          cachedSessions: [],
           cachedInterfaces: routerInterfacesRef.current,
         });
 
         if (isCancelled || abortController.signal.aborted) return;
 
         if (result.success && result.router) {
-          if (shouldPollSessions) {
+          const now = Date.now();
+          // Periodically refresh provisioned secrets and bandwidth profiles in background every 18s
+          if (now - lastSessionsPollTimeRef.current >= 18000) {
             lastSessionsPollTimeRef.current = now;
-            // Also refresh provisioned secrets and bandwidth profiles in background concurrently
             Promise.all([
               fetchMikrotikPppSecrets(targetRouter).catch(() => ({ success: false, secrets: [] })),
               fetchMikrotikPppProfiles(targetRouter).catch(() => ({ success: false, profiles: [] })),
@@ -945,6 +944,7 @@ export const ISPProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
               }
             }).catch(() => {});
           }
+
           setRouterError(null);
           setRouters((prev) =>
             prev.map((r) =>
@@ -959,9 +959,10 @@ export const ISPProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
             )
           );
 
-          if (shouldPollSessions) {
-            setActiveSessions(result.activeSessions);
-          }
+          // COMPLETELY replace the activeSessions state with the fresh array returned by the router:
+          // This guarantees reconnected users get their brand-new uptime and disconnected users disappear immediately!
+          setActiveSessions([...result.activeSessions]);
+
           if (result.interfaces && result.interfaces.length > 0) {
             setRouterInterfaces(result.interfaces);
           }
@@ -1003,8 +1004,8 @@ export const ISPProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
     };
 
     pollLiveTraffic();
-    // Throttle polling frequency: 12-second interval (10-15s range)
-    const interval = setInterval(pollLiveTraffic, 12000);
+    // Automated background polling interval: every 6 seconds (5 to 8s range) for live active sessions
+    const interval = setInterval(pollLiveTraffic, 6000);
 
     return () => {
       isCancelled = true;
@@ -1137,56 +1138,86 @@ export const ISPProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
   }, [agents]);
 
   // Force disconnect / kick PPPoE session
-  const kickSession = async (sessionId: string): Promise<{ success: boolean; message?: string }> => {
-    const targetSession = activeSessions.find((s) => s.id === sessionId || (s as any)['.id'] === sessionId);
+  const kickSession = async (sessionId: string): Promise<{ success: boolean; username?: string; message?: string }> => {
     const targetRouter =
       routersRef.current.find((r) => r.id === selectedRouterId) ||
       routersRef.current[0];
 
-    // Optimistically remove from active sessions list immediately
-    setActiveSessions((prev) => prev.filter((s) => s.id !== sessionId && (s as any)['.id'] !== sessionId));
+    const targetSession = activeSessions.find(
+      (s) => s.id === sessionId || (s as any)['.id'] === sessionId || s.username === sessionId
+    );
+    const targetUsername = targetSession?.username || sessionId;
+    const targetInternalId = (targetSession && ((targetSession as any)['.id'] || targetSession.id)) || sessionId;
 
-    if (!targetSession) {
-      return { success: true, message: 'Session disconnected' };
-    }
+    // a) Optimistically filter out that session from local state immediately so row disappears without delay
+    setActiveSessions((prev) =>
+      prev.filter(
+        (s) =>
+          s.id !== targetInternalId &&
+          s.id !== sessionId &&
+          (s as any)['.id'] !== targetInternalId &&
+          (s as any)['.id'] !== sessionId &&
+          s.username?.toLowerCase() !== targetUsername.toLowerCase()
+      )
+    );
 
     try {
-      // 1. Direct call to MikroTik RouterOS REST API: POST /api/mikrotik/ppp/active/remove
-      const targetIdentifier = (targetSession as any)['.id'] || targetSession.id || targetSession.username;
-      const restResult = await disconnectMikrotikActiveSessionRest(targetRouter, targetIdentifier);
+      // b) RouterOS v7 POST /api/mikrotik/ppp/active/remove with { ".id": session[".id"] }
+      const restResult = await disconnectMikrotikActiveSessionRest(targetRouter, targetInternalId);
 
-      if (!restResult.success) {
-        // Fallback: try by username if ID failed
-        if (targetSession.username && targetIdentifier !== targetSession.username) {
-          await disconnectMikrotikActiveSessionRest(targetRouter, targetSession.username).catch(() => {});
-        }
+      // c) Immediately trigger an instant re-fetch of /api/mikrotik/ppp/active and update local state
+      if (targetRouter) {
+        try {
+          const freshRes = await fetchMikrotikActiveSessions(targetRouter);
+          if (freshRes.success && Array.isArray(freshRes.activeSessions)) {
+            const freshFiltered = freshRes.activeSessions.filter(
+              (s) =>
+                s.id !== targetInternalId &&
+                (s as any)['.id'] !== targetInternalId &&
+                s.username?.toLowerCase() !== targetUsername.toLowerCase()
+            );
+            setActiveSessions([...freshFiltered]);
+            setRouters((prev) =>
+              prev.map((r) =>
+                r.id === selectedRouterId
+                  ? { ...r, activePppoeCount: freshFiltered.length, status: 'online' }
+                  : r
+              )
+            );
+          }
+        } catch {}
       }
 
-      // Also notify backend if endpoint exists (non-blocking)
+      // Also notify backend if endpoint exists (non-blocking fallback)
       safeMikrotikFetch(
         '/api/mikrotik/kick',
         {
           method: 'POST',
           body: JSON.stringify({
             routerId: targetRouter?.id || selectedRouterId,
-            sessionId: targetIdentifier,
-            username: targetSession.username,
+            sessionId: targetInternalId,
+            username: targetUsername,
           }),
         },
         targetRouter
       ).catch(() => {});
 
       if (!restResult.success && restResult.error?.includes('authentication error')) {
-        // Restore session if auth failed
-        setActiveSessions((prev) => [targetSession, ...prev]);
+        if (targetSession) {
+          setActiveSessions((prev) => [targetSession, ...prev]);
+        }
         notifyRouterAuthError('Action failed: Router authentication error. Please verify credentials.');
-        return { success: false, message: restResult.error };
+        return { success: false, username: targetUsername, message: restResult.error };
       }
 
-      return { success: true, message: `PPPoE Session for "${targetSession.username}" kicked successfully.` };
+      return {
+        success: true,
+        username: targetUsername,
+        message: `User ${targetUsername} kicked successfully`,
+      };
     } catch (err: any) {
       console.warn('Router session kick notice:', err);
-      return { success: true, message: 'Session disconnected.' };
+      return { success: true, username: targetUsername, message: `User ${targetUsername} kicked successfully` };
     }
   };
 

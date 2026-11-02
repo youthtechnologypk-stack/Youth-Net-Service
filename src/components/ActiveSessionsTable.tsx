@@ -461,8 +461,11 @@ export const ActiveSessionsTable: React.FC<ActiveSessionsTableProps> = ({
                   </td>
 
                   {/* Uptime */}
-                  <td className="py-3 px-4 text-slate-400 text-[11px]">
-                    {session.uptime}
+                  <td className="py-3 px-4 text-slate-300 font-mono text-[11px]">
+                    <div className="flex items-center gap-1.5" title={`Raw MikroTik RouterOS Uptime: ${session.uptime || '0s'}`}>
+                      <Clock className="w-3 h-3 text-cyan-400/80 shrink-0" />
+                      <span>{session.uptime || '0s'}</span>
+                    </div>
                   </td>
 
                   {/* Live Rate (RX / TX) */}
@@ -528,12 +531,12 @@ export const ActiveSessionsTable: React.FC<ActiveSessionsTableProps> = ({
 
                       {onKickSession && (
                         <button
-                          onClick={() => onKickSession(session.id, session.username)}
-                          disabled={isKickingId === session.id}
+                          onClick={() => onKickSession(session['.id'] || session.id, session.username)}
+                          disabled={isKickingId === session.id || isKickingId === (session as any)['.id'] || isKickingId === session.username}
                           className="bg-rose-950/80 hover:bg-rose-900 border border-rose-800/80 text-rose-300 hover:text-white px-2.5 py-1 rounded text-[11px] font-sans font-medium transition disabled:opacity-50 cursor-pointer inline-flex items-center gap-1.5"
                           title="Force disconnect / kick session"
                         >
-                          {isKickingId === session.id ? (
+                          {isKickingId === session.id || isKickingId === (session as any)['.id'] || isKickingId === session.username ? (
                             <>
                               <Loader2 className="w-3 h-3 animate-spin text-rose-300" />
                               <span>Kicking...</span>

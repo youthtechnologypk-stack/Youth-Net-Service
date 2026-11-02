@@ -217,7 +217,7 @@ export const MikrotikStudio: React.FC<MikrotikStudioProps> = ({
       } else {
         setSyncToast({
           type: 'success',
-          message: `PPPoE Session for "${username}" kicked successfully`,
+          message: `User ${username} kicked successfully`,
         });
       }
     } catch (err: any) {
