@@ -35,6 +35,7 @@ import {
   parseMikrotikComment,
   calculateExpirationMetrics,
 } from '../services/mikrotikSubscriberSync';
+import { apiClient } from '../services/apiClient';
 
 export interface SubscriberProfileDrawerProps {
   isOpen: boolean;
@@ -138,17 +139,12 @@ export const SubscriberProfileDrawer: React.FC<SubscriberProfileDrawerProps> = (
           ...(selectedRouterId ? { routerId: selectedRouterId } : {}),
         });
 
-        const res = await fetch(`/api/mikrotik/subscriber-traffic?${queryParams.toString()}`, {
-          headers: {
-            Accept: 'application/json',
-            Connection: 'close',
-            'Cache-Control': 'no-cache',
-          },
+        const res = await apiClient.get<any>(`/subscriber-traffic?${queryParams.toString()}`, {
           signal: abortController.signal,
         });
-        if (!res.ok) return;
+        if (!res.success || !res.data) return;
 
-        const data = await res.json();
+        const data = res.data;
         if (isMounted && data && data.success !== false) {
           const rx = Number(data.downloadRateMbps ?? data.rxMbps ?? 0);
           const tx = Number(data.uploadRateMbps ?? data.txMbps ?? 0);

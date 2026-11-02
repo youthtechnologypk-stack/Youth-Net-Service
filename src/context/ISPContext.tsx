@@ -39,6 +39,18 @@ import { BillingCronEngine } from '../services/cronBillingEngine';
 import { safeResponseJson } from '../lib/safeFetch';
 import { formatCurrency } from './CurrencyContext';
 import {
+  apiClient,
+  getActiveSessions,
+  getProvisionedSecrets,
+  getBandwidthProfiles,
+  kickSession as apiKickSession,
+  createSecret,
+  createScheduler,
+  removeSecret,
+  updateSecret,
+  notifyAuthError,
+} from '../services/apiClient';
+import {
   fetchMikrotikLiveTelemetry,
   fetchMikrotikActiveSessions,
   fetchMikrotikPppProfiles,
@@ -1296,9 +1308,8 @@ export const ISPProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
 
     // Also persist to backend DB endpoint (/api/mikrotik/users)
     try {
-      await fetch('/api/mikrotik/users', {
+      await safeMikrotikFetch('/api/mikrotik/users', {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
           routerId: selectedRouterId,
           username,
@@ -1713,9 +1724,8 @@ export const ISPProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
 
     // 1. Await backend deletion
     try {
-      const res1 = await fetch(`/api/mikrotik/routers/${encodeURIComponent(routerId)}`, {
+      const res1 = await safeMikrotikFetch(`/api/mikrotik/routers/${encodeURIComponent(routerId)}`, {
         method: 'DELETE',
-        headers: { 'Content-Type': 'application/json' },
       });
       const data1 = await safeResponseJson<any>(res1, { success: false });
       if (data1.success) {
@@ -1784,9 +1794,8 @@ export const ISPProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
   ): Promise<{ success: boolean; router?: MikrotikRouter; message?: string }> => {
     let updatedRouter = updates;
     try {
-      const res = await fetch(`/api/mikrotik/routers/${encodeURIComponent(routerId)}`, {
+      const res = await safeMikrotikFetch(`/api/mikrotik/routers/${encodeURIComponent(routerId)}`, {
         method: 'PUT',
-        headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(updates),
       });
       const data = await safeResponseJson<any>(res, { success: false });
@@ -1921,7 +1930,7 @@ export const ISPProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
   // Fetch persisted customers from database without resurrecting deleted records
   const fetchCustomersFromDb = async (): Promise<void> => {
     try {
-      const res = await fetch('/api/mikrotik/customers');
+      const res = await safeMikrotikFetch('/api/mikrotik/customers');
       const data = await safeResponseJson<any>(res, { success: false, customers: null });
       if (data.success && Array.isArray(data.customers)) {
         const deletedRaw = typeof window !== 'undefined' ? localStorage.getItem(STORAGE_KEY_DELETED_SECRETS) || '[]' : '[]';
@@ -2024,22 +2033,19 @@ export const ISPProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
     try {
       let res: Response;
       try {
-        res = await fetch('/api/mikrotik/test', {
+        res = await safeMikrotikFetch('/api/mikrotik/test', {
           method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify(params),
         });
         if (res.status === 404) {
-          res = await fetch('/api/routers/test', {
+          res = await safeMikrotikFetch('/api/routers/test', {
             method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify(params),
           });
         }
       } catch {
-        res = await fetch('/api/routers/test', {
+        res = await safeMikrotikFetch('/api/routers/test', {
           method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify(params),
         });
       }
@@ -2187,7 +2193,7 @@ export const ISPProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
     try {
       const res = await fetch(`/api/packages/${encodeURIComponent(id)}`, { method: 'DELETE' });
       await safeResponseJson(res);
-      await fetch(`/api/mikrotik/profiles/${encodeURIComponent(id)}`, { method: 'DELETE' }).catch(() => {});
+      await safeMikrotikFetch(`/api/mikrotik/profiles/${encodeURIComponent(id)}`, { method: 'DELETE' }).catch(() => {});
     } catch (err) {
       console.warn('API error deleting package:', err);
     }

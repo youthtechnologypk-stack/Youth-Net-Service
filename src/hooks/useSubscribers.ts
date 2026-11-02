@@ -10,10 +10,17 @@ import {
 } from '../types/isp';
 import { UserAccount } from '../types/auth';
 import {
+  createSecret,
+  createScheduler,
+  getProvisionedSecrets,
+  getActiveSessions,
+} from '../services/apiClient';
+import {
   provisionPppoeSecretRest,
   createMikrotikSchedulerRest,
   fetchMikrotikPppSecrets,
   fetchMikrotikLiveTelemetry,
+  safeMikrotikFetch,
 } from '../services/mikrotikRestClient';
 import {
   parseMikrotikComment,
@@ -438,13 +445,13 @@ export const useSubscribers = () => {
       let restProvisioned = false;
       if (targetRouter) {
         try {
-          const restResult = await provisionPppoeSecretRest(targetRouter, {
+          const restResult = await createSecret({
             name: cleanUsername,
             password: plainPassword,
             service,
             profile,
             comment: commentJson,
-          });
+          }, targetRouter);
           if (restResult.success) {
             restProvisioned = true;
           }
@@ -459,14 +466,14 @@ export const useSubscribers = () => {
       if (targetRouter) {
         const eventScript = `/ppp secret set [find name="${cleanUsername}"] profile="expired_profile"; /ppp active remove [find name="${cleanUsername}"]; /system scheduler remove [find name="exp-${cleanUsername}"]`;
         try {
-          const schedResult = await createMikrotikSchedulerRest(targetRouter, {
+          const schedResult = await createScheduler({
             name: `exp-${cleanUsername}`,
             startDate: scheduleTimes.startDate,
             startTime: scheduleTimes.startTime,
             interval: '0s',
             onEvent: eventScript,
             comment: `Auto-expiry for ${cleanUsername}`,
-          });
+          }, targetRouter);
           if (schedResult.success) {
             schedulerRegistered = true;
           } else {
@@ -481,7 +488,7 @@ export const useSubscribers = () => {
 
       // Refresh /api/mikrotik/ppp/secret immediately so user displays in tables
       if (targetRouter) {
-        fetchMikrotikPppSecrets(targetRouter)
+        getProvisionedSecrets(targetRouter)
           .then((secRes) => {
             if (secRes.success && Array.isArray(secRes.secrets)) {
               setProvisionedSecrets(secRes.secrets);
@@ -492,9 +499,8 @@ export const useSubscribers = () => {
 
       // Also persist to backend DB endpoint (/api/mikrotik/users)
       try {
-        await fetch('/api/mikrotik/users', {
+        await safeMikrotikFetch('/api/mikrotik/users', {
           method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({
             routerId: targetRouterId,
             username: cleanUsername,

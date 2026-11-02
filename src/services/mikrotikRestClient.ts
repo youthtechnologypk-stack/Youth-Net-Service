@@ -1,4 +1,26 @@
-import { ActiveSession, RouterInterface, MikrotikRouter } from '../types/isp';
+import {
+  ActiveSession,
+  RouterInterface,
+  MikrotikRouter,
+  MikrotikPppSecret,
+  MikrotikPppProfile,
+} from '../types/isp';
+import {
+  apiClient,
+  getActiveSessions,
+  getProvisionedSecrets,
+  getBandwidthProfiles,
+  kickSession,
+  createSecret,
+  createScheduler,
+  removeSecret,
+  updateSecret,
+  monitorInterfaceTrafficRest,
+  getActiveRouterAuth,
+  getBaseUrl,
+  notifyAuthError,
+  RouterAuthInfo,
+} from './apiClient';
 
 export interface FetchRouterLiveResult {
   success: boolean;
@@ -32,94 +54,29 @@ export interface FetchTelemetryOptions {
 }
 
 /**
- * Resolves credentials from passed router object or localStorage ('registered_routers')
+ * Re-export credentials helper for backward compatibility
  */
-export function getStoredRouterAuth(activeRouter?: {
-  id?: string;
-  username?: string;
-  password?: string;
-}): { username: string; password: string; authHeader: string } {
-  let username = activeRouter?.username?.trim() || '';
-  let password = activeRouter?.password || '';
-
-  if (typeof window !== 'undefined' && (!username || !password)) {
-    try {
-      const raw = localStorage.getItem('registered_routers');
-      if (raw) {
-        const routers = JSON.parse(raw);
-        if (Array.isArray(routers) && routers.length > 0) {
-          const match = activeRouter?.id
-            ? routers.find((r: any) => r.id === activeRouter.id)
-            : routers[0];
-          const r = match || routers[0];
-          if (!username) username = r.username || 'admin';
-          if (!password) password = r.password || '';
-        }
-      }
-    } catch {}
-  }
-
-  if (!username) username = 'admin';
-
-  let authHeader = '';
-  try {
-    authHeader = 'Basic ' + btoa(`${username}:${password}`);
-  } catch {
-    try {
-      authHeader = 'Basic ' + btoa(unescape(encodeURIComponent(`${username}:${password}`)));
-    } catch {
-      authHeader = 'Basic ' + btoa('admin:');
-    }
-  }
-
-  return { username, password, authHeader };
-}
+export const getStoredRouterAuth = getActiveRouterAuth;
 
 /**
- * Returns the base URL for RouterOS REST API:
- * In browser: always uses `/api/mikrotik` to avoid CORS and self-signed cert issues
- * On server / node: uses `https://${ip}:${port}/rest`
+ * Re-export base URL helper for backward compatibility
  */
-export function getMikrotikRestBaseUrl(activeRouter?: {
-  ip?: string;
-  ipAddress?: string;
-  port?: number;
-  apiPort?: number;
-}): string {
-  if (typeof window !== 'undefined') {
-    return `${window.location.origin}/api/mikrotik`;
-  }
-  const ip = (activeRouter?.ip || activeRouter?.ipAddress || '202.142.186.150').trim();
-  const targetPort = activeRouter?.port || activeRouter?.apiPort || 8729;
-  return `https://${ip}:${targetPort}/rest`;
-}
+export const getMikrotikRestBaseUrl = getBaseUrl;
 
 /**
- * Custom event dispatcher to broadcast auth error toast in UI
+ * Re-export auth error notification
  */
-export function notifyRouterAuthError(customMessage?: string) {
-  const msg = customMessage || 'Action failed: Router authentication error. Please verify credentials.';
-  if (typeof window !== 'undefined') {
-    window.dispatchEvent(
-      new CustomEvent('mikrotik_auth_error', {
-        detail: { message: msg },
-      })
-    );
-  }
-}
+export const notifyRouterAuthError = notifyAuthError;
 
 /**
- * Safe fetch wrapper that:
- * 1. Attaches Authorization: Basic btoa(user:pass)
- * 2. Explicitly sets credentials: 'omit' to SUPPRESS the browser native HTTP Basic Auth prompt on HTTP 401
- * 3. Catches HTTP 401 programmatically and triggers user-friendly UI toast notification
+ * Safe fetch wrapper with auth header injection and credentials: 'omit'
  */
 export async function safeMikrotikFetch(
   url: string,
   init: RequestInit = {},
-  activeRouter?: { id?: string; username?: string; password?: string }
+  activeRouter?: RouterAuthInfo
 ): Promise<Response> {
-  const auth = getStoredRouterAuth(activeRouter);
+  const auth = getActiveRouterAuth(activeRouter);
 
   const incomingHeaders = (init.headers as Record<string, string>) || {};
   const headers: Record<string, string> = {
@@ -139,7 +96,6 @@ export async function safeMikrotikFetch(
   const fetchInit: RequestInit = {
     ...init,
     headers,
-    // CRITICAL: 'omit' prevents modern browsers (Chrome, Safari, Firefox) from showing the native HTTP Basic Auth modal on 401!
     credentials: 'omit',
   };
 
@@ -152,23 +108,15 @@ export async function safeMikrotikFetch(
   }
 
   if (res.status === 401) {
-    console.warn(`[SafeMikrotikFetch] HTTP 401 on ${url} - suppressed browser modal`);
-    notifyRouterAuthError('Action failed: Router authentication error. Please verify credentials.');
+    notifyAuthError('Action failed: Router authentication error. Please verify credentials.');
   }
 
   return res;
 }
 
 /**
- * Direct client-side fetch for MikroTik RouterOS v7 REST API over HTTPS
- * Endpoints:
- *   - https://${activeRouter.ip}:${targetPort}/rest/ppp/active
- *   - https://${activeRouter.ip}:${targetPort}/rest/interface
- *   - https://${activeRouter.ip}:${targetPort}/rest/system/resource
- * Uses Basic Authentication with configured credentials.
- * If unreachable or blocked by CORS / Self-signed certificate, returns exact error banner.
- * Includes Connection: close and Cache-Control headers to prevent MikroTik session leaks.
- * NEVER falls back to fake mock data.
+ * Direct client-side fetch for MikroTik RouterOS v7 Live Telemetry
+ * Utilizes centralized apiClient with request/response interceptors
  */
 export async function fetchMikrotikLiveTelemetry(
   activeRouter: {
@@ -187,173 +135,74 @@ export async function fetchMikrotikLiveTelemetry(
   const router = activeRouter;
   const targetPort = activeRouter.port || activeRouter.apiPort || 8729;
   const ip = (activeRouter.ip || activeRouter.ipAddress || '127.0.0.1').trim();
-  const username = activeRouter.username?.trim() || 'admin';
-  const password = activeRouter.password || '';
-
-  // Forward Basic Auth headers directly in the request
-  let authHeader = '';
-  try {
-    authHeader = 'Basic ' + btoa(`${username}:${password}`);
-  } catch {
-    try {
-      authHeader = 'Basic ' + btoa(unescape(encodeURIComponent(`${username}:${password}`)));
-    } catch {
-      authHeader = 'Basic ' + btoa('admin:');
-    }
-  }
-
-  // Include Connection: close and cache headers to terminate MikroTik session immediately and prevent leaks
-  const commonHeaders: Record<string, string> = {
-    Authorization: authHeader,
-    Accept: 'application/json',
-    Connection: 'close',
-    'Cache-Control': 'no-cache, no-store, must-revalidate',
-    Pragma: 'no-cache',
-  };
-
-  // Determine whether running in production on Netlify or cloud environment
-  const isBrowser = typeof window !== 'undefined';
-  const baseUrl = getMikrotikRestBaseUrl(activeRouter);
-
-  if (options?.signal?.aborted) {
-    return {
-      success: false,
-      activeSessions: options.cachedSessions || [],
-      interfaces: options.cachedInterfaces || [],
-      error: 'Aborted',
-    };
-  }
-
-  const controller = new AbortController();
-  const timeoutId = setTimeout(() => controller.abort(), 7000);
-
-  if (options?.signal) {
-    options.signal.addEventListener('abort', () => controller.abort(), { once: true });
-  }
 
   try {
-    // 1. Fetch Live PPPoE Active Sessions (/rest/ppp/active or /api/mikrotik/ppp/active)
-    let activeSessions: ActiveSession[] = options?.cachedSessions || [];
-    if (options?.pollSessions !== false) {
-      const sessionsRes = await safeMikrotikFetch(
-        `${baseUrl}/ppp/active`,
-        {
-          method: 'GET',
-          signal: controller.signal,
-        },
-        activeRouter
-      );
+    const sessionsPromise: Promise<{ success: boolean; activeSessions: ActiveSession[]; error?: string }> =
+      options?.pollSessions !== false
+        ? getActiveSessions(activeRouter, options?.signal)
+        : Promise.resolve({ success: true, activeSessions: options?.cachedSessions || [], error: undefined });
 
-      if (sessionsRes.status === 401) {
-        return {
-          success: false,
-          activeSessions: options?.cachedSessions || [],
-          interfaces: options?.cachedInterfaces || [],
-          error: 'Action failed: Router authentication error. Please verify credentials.',
-        };
-      }
+    const ifacesPromise = options?.pollTraffic !== false
+      ? apiClient.get<any[]>('/interface', { router: activeRouter, signal: options?.signal, timeoutMs: 5000 })
+      : Promise.resolve({ success: true, data: options?.cachedInterfaces || [] });
 
-      if (!sessionsRes.ok) {
-        const contentType = sessionsRes.headers.get('content-type') || '';
-        if (contentType.includes('text/html')) {
-          throw new Error(`Netlify Proxy upstream returned HTTP ${sessionsRes.status} (verify router public IP/port reachability)`);
-        }
-        throw new Error(`HTTP ${sessionsRes.status}: ${sessionsRes.statusText}`);
-      }
+    const resourcePromise = apiClient.get<any>('/system/resource', { router: activeRouter, signal: options?.signal, timeoutMs: 5000 });
 
-      const contentType = sessionsRes.headers.get('content-type') || '';
-      if (contentType.includes('text/html')) {
-        throw new Error(`Expected JSON but received HTML response from proxy`);
-      }
+    const [sessionsRes, ifacesRes, resRes] = await Promise.all([
+      sessionsPromise,
+      ifacesPromise,
+      resourcePromise,
+    ]);
 
-      const sessionsData = await sessionsRes.json();
-      const rawSessions = Array.isArray(sessionsData) ? sessionsData : [];
-
-      activeSessions = rawSessions.map((s: any, idx: number) => {
-        const rxRate = s['rx-rate'] ? Number(s['rx-rate']) / 1_000_000 : 0;
-        const txRate = s['tx-rate'] ? Number(s['tx-rate']) / 1_000_000 : 0;
-        const bytesIn = s['bytes-in'] || s['rx-byte'] ? Math.round(Number(s['bytes-in'] || s['rx-byte']) / 1_000_000) : 0;
-        const bytesOut = s['bytes-out'] || s['tx-byte'] ? Math.round(Number(s['bytes-out'] || s['tx-byte']) / 1_000_000) : 0;
-
-        const internalId = s['.id'] || s.id || `session-${idx}`;
-        return {
-          id: internalId,
-          '.id': s['.id'] || internalId,
-          username: s.name || s.user || `user-${idx}`,
-          callerId: s['caller-id'] || s.callerId || '00:00:00:00:00:00',
-          address: s.address || '0.0.0.0',
-          service: 'pppoe',
-          uptime: s.uptime || '0s',
-          rxRateMbps: Number(rxRate.toFixed(2)),
-          txRateMbps: Number(txRate.toFixed(2)),
-          bytesInMb: bytesIn,
-          bytesOutMb: bytesOut,
-          routerId: router.id || '',
-          customerName: s.name || `User ${idx + 1}`,
-          profileName: s.profile || 'default',
-          liveRateFormatted: `↓ ${rxRate.toFixed(1)}M / ↑ ${txRate.toFixed(1)}M`,
-        };
-      });
+    if (!sessionsRes.success && sessionsRes.error?.includes('authentication error')) {
+      return {
+        success: false,
+        activeSessions: options?.cachedSessions || [],
+        interfaces: options?.cachedInterfaces || [],
+        error: 'Action failed: Router authentication error. Please verify credentials.',
+      };
     }
 
-    // 2. Fetch Live Interfaces (/rest/interface)
+    const activeSessions = sessionsRes.success ? sessionsRes.activeSessions : (options?.cachedSessions || []);
+
     let interfaces: RouterInterface[] = options?.cachedInterfaces || [];
     let wanRxMbps = 0;
     let wanTxMbps = 0;
 
-    if (options?.pollTraffic !== false) {
-      try {
-        const ifacesRes = await safeMikrotikFetch(
-          `${baseUrl}/interface`,
-          {
-            method: 'GET',
-            signal: controller.signal,
-          },
-          activeRouter
-        );
+    if (ifacesRes.success && Array.isArray(ifacesRes.data)) {
+      interfaces = ifacesRes.data.map((i: any, idx: number) => {
+        const isRunning = i.running === true || i.running === 'true';
+        const isDisabled = i.disabled === true || i.disabled === 'true';
+        const rxRate = i['rx-rate'] ? Number(i['rx-rate']) / 1_000_000 : 0;
+        const txRate = i['tx-rate'] ? Number(i['tx-rate']) / 1_000_000 : 0;
 
-        if (ifacesRes.ok) {
-          const ifacesData = await ifacesRes.json();
-          const rawIfaces = Array.isArray(ifacesData) ? ifacesData : [];
+        if (i.name === router.wanInterface || idx === 0) {
+          wanRxMbps = rxRate;
+          wanTxMbps = txRate;
+        }
 
-        interfaces = rawIfaces.map((i: any, idx: number) => {
-          const isRunning = i.running === true || i.running === 'true';
-          const isDisabled = i.disabled === true || i.disabled === 'true';
-          const rxRate = i['rx-rate'] ? Number(i['rx-rate']) / 1_000_000 : 0;
-          const txRate = i['tx-rate'] ? Number(i['tx-rate']) / 1_000_000 : 0;
-
-          if (i.name === router.wanInterface || idx === 0) {
-            wanRxMbps = rxRate;
-            wanTxMbps = txRate;
-          }
-
-          return {
-            id: i['.id'] || i.id || `if-${idx}`,
-            name: i.name || `ether${idx + 1}`,
-            type: i.type || 'ether',
-            status: isRunning ? 'running' : isDisabled ? 'disabled' : 'link_down',
-            running: isRunning,
-            disabled: isDisabled,
-            comment: i.comment || '',
-            macAddress: i['mac-address'] || '00:00:00:00:00:00',
-            mtu: Number(i.mtu) || 1500,
-            actualMtu: Number(i['actual-mtu']) || 1500,
-            linkSpeed: i.type === 'sfp-sfpplus' ? '10Gbps' : '1Gbps',
-            fullDuplex: true,
-            rxBytes: Number(i['rx-byte']) || 0,
-            txBytes: Number(i['tx-byte']) || 0,
-            rxRateMbps: Number(rxRate.toFixed(2)),
-            txRateMbps: Number(txRate.toFixed(2)),
-            routerId: router.id || '',
-          };
-        });
-      }
-    } catch {
-      // Optional interface probe
+        return {
+          id: i['.id'] || i.id || `if-${idx}`,
+          name: i.name || `ether${idx + 1}`,
+          type: i.type || 'ether',
+          status: isRunning ? 'running' : isDisabled ? 'disabled' : 'link_down',
+          running: isRunning,
+          disabled: isDisabled,
+          comment: i.comment || '',
+          macAddress: i['mac-address'] || '00:00:00:00:00:00',
+          mtu: Number(i.mtu) || 1500,
+          actualMtu: Number(i['actual-mtu']) || 1500,
+          linkSpeed: i.type === 'sfp-sfpplus' ? '10Gbps' : '1Gbps',
+          fullDuplex: true,
+          rxBytes: Number(i['rx-byte']) || 0,
+          txBytes: Number(i['tx-byte']) || 0,
+          rxRateMbps: Number(rxRate.toFixed(2)),
+          txRateMbps: Number(txRate.toFixed(2)),
+          routerId: router.id || '',
+        };
+      });
     }
-  }
 
-    // 3. Fetch Live System Resource (/rest/system/resource)
     let cpuLoad = 0;
     let memoryUsageMb = 0;
     let totalMemoryMb = 0;
@@ -361,35 +210,19 @@ export async function fetchMikrotikLiveTelemetry(
     let version = 'RouterOS v7';
     let model = 'MikroTik';
 
-    try {
-      const resRes = await safeMikrotikFetch(
-        `${baseUrl}/system/resource`,
-        {
-          method: 'GET',
-          signal: controller.signal,
-        },
-        activeRouter
-      );
-
-      if (resRes.ok) {
-        const resData = await resRes.json();
-        const r = Array.isArray(resData) ? resData[0] : resData;
-        if (r) {
-          cpuLoad = Number(r['cpu-load']) || 0;
-          const freeMem = Number(r['free-memory']) || 0;
-          const totalMem = Number(r['total-memory']) || 0;
-          totalMemoryMb = Math.round(totalMem / (1024 * 1024));
-          memoryUsageMb = Math.round((totalMem - freeMem) / (1024 * 1024));
-          uptime = r.uptime || '0s';
-          version = r.version ? `RouterOS ${r.version}` : 'RouterOS v7';
-          model = r['board-name'] || 'MikroTik';
-        }
+    if (resRes.success && resRes.data) {
+      const r = Array.isArray(resRes.data) ? resRes.data[0] : resRes.data;
+      if (r) {
+        cpuLoad = Number(r['cpu-load']) || 0;
+        const freeMem = Number(r['free-memory']) || 0;
+        const totalMem = Number(r['total-memory']) || 0;
+        totalMemoryMb = Math.round(totalMem / (1024 * 1024));
+        memoryUsageMb = Math.round((totalMem - freeMem) / (1024 * 1024));
+        uptime = r.uptime || '0s';
+        version = r.version ? `RouterOS ${r.version}` : 'RouterOS v7';
+        model = r['board-name'] || 'MikroTik';
       }
-    } catch {
-      // Optional resource probe
     }
-
-    clearTimeout(timeoutId);
 
     return {
       success: true,
@@ -412,7 +245,6 @@ export async function fetchMikrotikLiveTelemetry(
       },
     };
   } catch (err: any) {
-    clearTimeout(timeoutId);
     if (err?.name === 'AbortError' || options?.signal?.aborted) {
       return {
         success: false,
@@ -436,398 +268,56 @@ export async function fetchMikrotikLiveTelemetry(
 }
 
 /**
- * 1.1 Direct Fetch for Live PPPoE Active Sessions (/api/mikrotik/ppp/active)
- * Uses strict anti-caching headers and Authorization: Basic credentials.
- * Returns fresh ActiveSession[] array with raw uptime and RouterOS .id.
+ * 1. Fetch Live PPPoE Active Sessions (/api/mikrotik/ppp/active)
  */
 export async function fetchMikrotikActiveSessions(
-  activeRouter?: {
-    id?: string;
-    ipAddress?: string;
-    ip?: string;
-    apiPort?: number;
-    port?: number;
-    username?: string;
-    password?: string;
-  },
+  activeRouter?: RouterAuthInfo,
   signal?: AbortSignal
 ): Promise<{ success: boolean; activeSessions: ActiveSession[]; error?: string }> {
-  const baseUrl = getMikrotikRestBaseUrl(activeRouter);
-  const auth = getStoredRouterAuth(activeRouter);
-
-  try {
-    const res = await safeMikrotikFetch(
-      `${baseUrl}/ppp/active`,
-      {
-        method: 'GET',
-        headers: {
-          'Cache-Control': 'no-cache, no-store, must-revalidate',
-          'Pragma': 'no-cache',
-          'Expires': '0',
-          'Authorization': auth.authHeader,
-        },
-        signal,
-      },
-      activeRouter
-    );
-
-    if (res.status === 401) {
-      return {
-        success: false,
-        activeSessions: [],
-        error: 'Action failed: Router authentication error. Please verify credentials.',
-      };
-    }
-
-    if (!res.ok) {
-      const errText = await res.text().catch(() => '');
-      return {
-        success: false,
-        activeSessions: [],
-        error: `Router returned HTTP ${res.status}: ${errText || res.statusText}`,
-      };
-    }
-
-    const contentType = res.headers.get('content-type') || '';
-    if (contentType.includes('text/html')) {
-      return {
-        success: false,
-        activeSessions: [],
-        error: 'Expected JSON but received HTML response from proxy',
-      };
-    }
-
-    const data = await res.json();
-    const rawSessions = Array.isArray(data) ? data : [];
-
-    const activeSessions: ActiveSession[] = rawSessions.map((s: any, idx: number) => {
-      const rxRate = s['rx-rate'] ? Number(s['rx-rate']) / 1_000_000 : 0;
-      const txRate = s['tx-rate'] ? Number(s['tx-rate']) / 1_000_000 : 0;
-      const bytesIn = s['bytes-in'] || s['rx-byte'] ? Math.round(Number(s['bytes-in'] || s['rx-byte']) / 1_000_000) : 0;
-      const bytesOut = s['bytes-out'] || s['tx-byte'] ? Math.round(Number(s['bytes-out'] || s['tx-byte']) / 1_000_000) : 0;
-      const internalId = s['.id'] || s.id || `*${idx + 1}`;
-
-      return {
-        id: internalId,
-        '.id': s['.id'] || internalId,
-        username: s.name || s.user || `user-${idx}`,
-        callerId: s['caller-id'] || s.callerId || '00:00:00:00:00:00',
-        address: s.address || '0.0.0.0',
-        service: 'pppoe',
-        uptime: s.uptime || '0s',
-        rxRateMbps: Number(rxRate.toFixed(2)),
-        txRateMbps: Number(txRate.toFixed(2)),
-        bytesInMb: bytesIn,
-        bytesOutMb: bytesOut,
-        routerId: activeRouter?.id || '',
-        customerName: s.name || s.user || `User ${idx + 1}`,
-        profileName: s.profile || 'default',
-        liveRateFormatted: `↓ ${rxRate.toFixed(1)}M / ↑ ${txRate.toFixed(1)}M`,
-      };
-    });
-
-    return {
-      success: true,
-      activeSessions,
-    };
-  } catch (err: any) {
-    if (signal?.aborted || err?.name === 'AbortError') {
-      return { success: false, activeSessions: [], error: 'Aborted' };
-    }
-    return {
-      success: false,
-      activeSessions: [],
-      error: err.message || 'Failed to fetch active sessions',
-    };
-  }
+  return getActiveSessions(activeRouter, signal);
 }
 
 /**
  * 2. Fetch RouterOS PPPoE Bandwidth Profiles (/rest/ppp/profile)
- * Resolves profile names like "10M-Unlimited", "default-encryption", etc.
  */
 export async function fetchMikrotikPppProfiles(
-  activeRouter?: {
-    ipAddress?: string;
-    ip?: string;
-    apiPort?: number;
-    port?: number;
-    username?: string;
-    password?: string;
-  },
+  activeRouter?: RouterAuthInfo,
   signal?: AbortSignal
 ): Promise<{
   success: boolean;
   profiles: Array<{ id: string; name: string; rateLimit?: string }>;
   error?: string;
 }> {
-  const isBrowser = typeof window !== 'undefined';
-  const baseUrl = getMikrotikRestBaseUrl(activeRouter);
-
-  const controller = new AbortController();
-  const timeoutId = setTimeout(() => controller.abort(), 6000);
-  if (signal) {
-    signal.addEventListener('abort', () => controller.abort(), { once: true });
-  }
-
-  try {
-    const res = await safeMikrotikFetch(
-      `${baseUrl}/ppp/profile`,
-      {
-        method: 'GET',
-        signal: controller.signal,
-      },
-      activeRouter
-    );
-    clearTimeout(timeoutId);
-
-    if (res.status === 401) {
-      return {
-        success: false,
-        profiles: [],
-        error: 'Action failed: Router authentication error. Please verify credentials.',
-      };
-    }
-
-    if (!res.ok) {
-      throw new Error(`HTTP ${res.status}: ${res.statusText}`);
-    }
-
-    const data = await res.json();
-    const rawList = Array.isArray(data) ? data : [];
-    const profiles = rawList
-      .map((p: any, idx: number) => ({
-        ...p,
-        id: p['.id'] || p.id || `prof-${idx}`,
-        '.id': p['.id'] || p.id || `prof-${idx}`,
-        name: p.name || `profile-${idx}`,
-        'rate-limit': p['rate-limit'] || p.rateLimit || '',
-        rateLimit: p['rate-limit'] || p.rateLimit || '',
-        'local-address': p['local-address'] || p.localAddress || '',
-        localAddress: p['local-address'] || p.localAddress || '',
-        'remote-address': p['remote-address'] || p.remoteAddress || '',
-        remoteAddress: p['remote-address'] || p.remoteAddress || '',
-        'only-one': p['only-one'] !== undefined ? p['only-one'] : p.onlyOne,
-        onlyOne: p['only-one'] !== undefined ? p['only-one'] : p.onlyOne,
-      }))
-      .filter((p: any) => p.name);
-
-    return {
-      success: true,
-      profiles,
-    };
-  } catch (err: any) {
-    clearTimeout(timeoutId);
-    return {
-      success: false,
-      profiles: [],
-      error: err.message,
-    };
-  }
-}
-
-/**
- * 3. Monitor Interface Live Traffic (/rest/interface/monitor-traffic)
- * Calls POST /api/mikrotik/interface/monitor-traffic with body {"interface": interfaceName, "once": "yes"}
- */
-export async function monitorInterfaceTraffic(
-  activeRouter: {
-    ipAddress?: string;
-    ip?: string;
-    apiPort?: number;
-    port?: number;
-    username?: string;
-    password?: string;
-    uplinkInterface?: string;
-    wanInterface?: string;
-  },
-  signal?: AbortSignal
-): Promise<{
-  success: boolean;
-  rxMbps: number;
-  txMbps: number;
-  rxBps: number;
-  txBps: number;
-  interfaceName: string;
-  error?: string;
-}> {
-  const isBrowser = typeof window !== 'undefined';
-  const targetPort = activeRouter?.port || activeRouter?.apiPort || 8729;
-  const ip = (activeRouter?.ip || activeRouter?.ipAddress || '202.142.186.150').trim();
-  const username = activeRouter?.username?.trim() || 'admin';
-  const password = activeRouter?.password || '';
-  const ifaceName = activeRouter?.uplinkInterface || activeRouter?.wanInterface || 'WAN3';
-
-  let authHeader = '';
-  try {
-    authHeader = 'Basic ' + btoa(`${username}:${password}`);
-  } catch {
-    authHeader = 'Basic ' + btoa('admin:');
-  }
-
-  const isNetlify =
-    isBrowser &&
-    (window.location.hostname.includes('netlify.app') ||
-      window.location.hostname.includes('youthnetw') ||
-      window.location.hostname.includes('netlify') ||
-      (window.location.hostname !== 'localhost' &&
-        window.location.hostname !== '127.0.0.1' &&
-        ip === '202.142.186.150'));
-
-  const baseUrl = isNetlify
-    ? `${window.location.origin}/api/mikrotik`
-    : `https://${ip}:${targetPort}/rest`;
-
-  const commonHeaders: Record<string, string> = {
-    Authorization: authHeader,
-    Accept: 'application/json',
-    'Content-Type': 'application/json',
-    Connection: 'close',
-    'Cache-Control': 'no-cache, no-store, must-revalidate',
-    Pragma: 'no-cache',
+  const result = await getBandwidthProfiles(activeRouter, signal);
+  return {
+    success: result.success,
+    profiles: result.profiles,
+    error: result.error,
   };
-
-  const controller = new AbortController();
-  const timeoutId = setTimeout(() => controller.abort(), 4000);
-  if (signal) {
-    signal.addEventListener('abort', () => controller.abort(), { once: true });
-  }
-
-  try {
-    const res = await fetch(`${baseUrl}/interface/monitor-traffic`, {
-      method: 'POST',
-      headers: commonHeaders,
-      body: JSON.stringify({
-        interface: ifaceName,
-        once: 'yes',
-      }),
-      signal: controller.signal,
-    });
-    clearTimeout(timeoutId);
-
-    if (!res.ok) {
-      throw new Error(`HTTP ${res.status}: ${res.statusText}`);
-    }
-
-    const data = await res.json();
-    const item = Array.isArray(data) ? data[0] : data;
-    const rxBps = Number(item?.['rx-bits-per-second'] ?? item?.rxBitsPerSecond ?? 0);
-    const txBps = Number(item?.['tx-bits-per-second'] ?? item?.txBitsPerSecond ?? 0);
-    const rxMbps = Number((rxBps / 1_000_000).toFixed(2));
-    const txMbps = Number((txBps / 1_000_000).toFixed(2));
-
-    return {
-      success: true,
-      rxMbps,
-      txMbps,
-      rxBps,
-      txBps,
-      interfaceName: item?.name || ifaceName,
-    };
-  } catch (err: any) {
-    clearTimeout(timeoutId);
-    return {
-      success: false,
-      rxMbps: 0,
-      txMbps: 0,
-      rxBps: 0,
-      txBps: 0,
-      interfaceName: ifaceName,
-      error: err.message,
-    };
-  }
 }
 
 /**
- * 4. Provision PPPoE Secret (/rest/ppp/secret/add)
- * Creation Endpoint: POST /api/mikrotik/ppp/secret/add
+ * 3. Provision new PPPoE Secret (/rest/ppp/secret/add)
  */
 export async function provisionPppoeSecretRest(
-  activeRouter: {
-    ipAddress?: string;
-    ip?: string;
-    apiPort?: number;
-    port?: number;
-    username?: string;
-    password?: string;
-  },
+  activeRouter: RouterAuthInfo,
   payload: {
     name: string;
     password: string;
     service?: string;
-    profile: string;
+    profile?: string;
     comment?: string;
+    remoteAddress?: string;
   }
 ): Promise<{ success: boolean; data?: any; error?: string }> {
-  const isBrowser = typeof window !== 'undefined';
-  const targetPort = activeRouter?.port || activeRouter?.apiPort || 8729;
-  const ip = (activeRouter?.ip || activeRouter?.ipAddress || '202.142.186.150').trim();
-  const baseUrl = getMikrotikRestBaseUrl(activeRouter);
-
-  const bodyData = {
-    name: payload.name,
-    password: payload.password,
-    service: payload.service || 'pppoe',
-    profile: payload.profile,
-    comment: payload.comment || 'YouthNet-App',
-  };
-
-  try {
-    let res = await safeMikrotikFetch(
-      `${baseUrl}/ppp/secret/add`,
-      {
-        method: 'POST',
-        body: JSON.stringify(bodyData),
-      },
-      activeRouter
-    );
-
-    if (res.status === 401) {
-      return {
-        success: false,
-        error: 'Action failed: Router authentication error. Please verify credentials.',
-      };
-    }
-
-    if (!res.ok && (res.status === 404 || res.status === 405)) {
-      res = await safeMikrotikFetch(
-        `${baseUrl}/ppp/secret`,
-        {
-          method: 'PUT',
-          body: JSON.stringify(bodyData),
-        },
-        activeRouter
-      );
-    }
-
-    if (!res.ok) {
-      const errText = await res.text().catch(() => '');
-      return {
-        success: false,
-        error: `Router returned HTTP ${res.status}: ${errText || res.statusText}`,
-      };
-    }
-
-    const data = await res.json().catch(() => ({ success: true }));
-    return { success: true, data };
-  } catch (err: any) {
-    return { success: false, error: err.message };
-  }
+  return createSecret(payload, activeRouter);
 }
 
 /**
- * 4.1 Create Native RouterOS Scheduler Entry (/rest/system/scheduler/add)
- * For automatic disconnection & profile shift upon expiry
+ * 4. Create Native RouterOS Scheduler Entry (/rest/system/scheduler/add)
  */
 export async function createMikrotikSchedulerRest(
-  activeRouter: {
-    ipAddress?: string;
-    ip?: string;
-    apiPort?: number;
-    port?: number;
-    username?: string;
-    password?: string;
-  },
+  activeRouter: RouterAuthInfo,
   payload: {
     name: string;
     startDate: string;
@@ -837,138 +327,25 @@ export async function createMikrotikSchedulerRest(
     comment?: string;
   }
 ): Promise<{ success: boolean; data?: any; error?: string }> {
-  const isBrowser = typeof window !== 'undefined';
-  const baseUrl = getMikrotikRestBaseUrl(activeRouter);
-
-  const bodyData = {
-    name: payload.name,
-    'start-date': payload.startDate,
-    'start-time': payload.startTime,
-    interval: payload.interval || '0s',
-    'on-event': payload.onEvent,
-    comment: payload.comment || `Auto-expiry for ${payload.name}`,
-  };
-
-  try {
-    let res = await safeMikrotikFetch(
-      `${baseUrl}/system/scheduler/add`,
-      {
-        method: 'POST',
-        body: JSON.stringify(bodyData),
-      },
-      activeRouter
-    );
-
-    if (res.status === 401) {
-      return {
-        success: false,
-        error: 'Action failed: Router authentication error. Please verify credentials.',
-      };
-    }
-
-    if (!res.ok && (res.status === 404 || res.status === 405)) {
-      res = await safeMikrotikFetch(
-        `${baseUrl}/system/scheduler`,
-        {
-          method: 'PUT',
-          body: JSON.stringify(bodyData),
-        },
-        activeRouter
-      );
-    }
-
-    if (!res.ok) {
-      const errText = await res.text().catch(() => '');
-      return {
-        success: false,
-        error: `Router returned HTTP ${res.status}: ${errText || res.statusText}`,
-      };
-    }
-
-    const data = await res.json().catch(() => ({ success: true }));
-    return { success: true, data };
-  } catch (err: any) {
-    return { success: false, error: err.message };
-  }
+  return createScheduler(payload, activeRouter);
 }
 
 /**
- * Fetch PPPoE Secrets (/rest/ppp/secret)
+ * 5. Fetch PPPoE Secrets (/rest/ppp/secret)
  */
 export async function fetchMikrotikPppSecrets(
-  activeRouter?: {
-    ipAddress?: string;
-    ip?: string;
-    apiPort?: number;
-    port?: number;
-    username?: string;
-    password?: string;
-  }
-): Promise<{ success: boolean; secrets: any[]; error?: string }> {
-  const isBrowser = typeof window !== 'undefined';
-  const targetPort = activeRouter?.port || activeRouter?.apiPort || 8729;
-  const ip = (activeRouter?.ip || activeRouter?.ipAddress || '202.142.186.150').trim();
-  const baseUrl = getMikrotikRestBaseUrl(activeRouter);
-
-  try {
-    const res = await safeMikrotikFetch(`${baseUrl}/ppp/secret`, {
-      method: 'GET',
-    }, activeRouter);
-
-    if (res.status === 401) {
-      return {
-        success: false,
-        secrets: [],
-        error: 'Action failed: Router authentication error. Please verify credentials.',
-      };
-    }
-
-    if (!res.ok) {
-      throw new Error(`HTTP ${res.status}: ${res.statusText}`);
-    }
-    const data = await res.json();
-    const rawList = Array.isArray(data) ? data : [];
-    const secrets = rawList.map((s: any, idx: number) => ({
-      ...s,
-      '.id': s['.id'] || s.id || `sec-${idx}`,
-      id: s['.id'] || s.id || `sec-${idx}`,
-      name: s.name || s.user || `user-${idx}`,
-      profile: s.profile || 'default',
-      'remote-address': s['remote-address'] || s.remoteAddress || 'Dynamic',
-      remoteAddress: s['remote-address'] || s.remoteAddress || 'Dynamic',
-      service: s.service || 'pppoe',
-      comment: s.comment || '',
-      disabled: s.disabled === true || s.disabled === 'true',
-    }));
-
-    return {
-      success: true,
-      secrets,
-    };
-  } catch (err: any) {
-    return {
-      success: false,
-      secrets: [],
-      error: err.message,
-    };
-  }
+  activeRouter?: RouterAuthInfo
+): Promise<{ success: boolean; secrets: MikrotikPppSecret[]; error?: string }> {
+  return getProvisionedSecrets(activeRouter);
 }
 
 /**
- * Update RouterOS PPPoE Secret Profile, Remote-Address, or Comment
- * Target Endpoint: POST /api/mikrotik/ppp/secret/set (or PATCH /ppp/secret/:id)
+ * 6. Update PPPoE Secret Profile (/rest/ppp/secret/set)
  */
 export async function updateMikrotikPppSecretRest(
-  activeRouter?: {
-    ipAddress?: string;
-    ip?: string;
-    apiPort?: number;
-    port?: number;
-    username?: string;
-    password?: string;
-  },
-  secretIdOrName?: string,
-  updates?: {
+  activeRouter: RouterAuthInfo,
+  secretIdOrName: string,
+  updates: {
     profile?: string;
     remoteAddress?: string;
     comment?: string;
@@ -976,214 +353,38 @@ export async function updateMikrotikPppSecretRest(
     password?: string;
   }
 ): Promise<{ success: boolean; data?: any; error?: string }> {
-  const baseUrl = getMikrotikRestBaseUrl(activeRouter);
-
-  const bodyData: Record<string, any> = {};
-  if (secretIdOrName) {
-    bodyData['.id'] = secretIdOrName;
-    bodyData['numbers'] = secretIdOrName;
-  }
-  if (updates?.profile) bodyData['profile'] = updates.profile;
-  if (updates?.remoteAddress) bodyData['remote-address'] = updates.remoteAddress;
-  if (updates?.comment !== undefined) bodyData['comment'] = updates.comment;
-  if (updates?.disabled !== undefined) bodyData['disabled'] = String(updates.disabled);
-  if (updates?.password) bodyData['password'] = updates.password;
-
-  try {
-    // 1. Try POST /ppp/secret/set
-    let res = await safeMikrotikFetch(
-      `${baseUrl}/ppp/secret/set`,
-      {
-        method: 'POST',
-        body: JSON.stringify(bodyData),
-      },
-      activeRouter
-    );
-
-    if (res.status === 401) {
-      return {
-        success: false,
-        error: 'Action failed: Router authentication error. Please verify credentials.',
-      };
-    }
-
-    // 2. Fallback to PATCH /ppp/secret/:id
-    if (!res.ok && (res.status === 404 || res.status === 405)) {
-      const targetPath = secretIdOrName ? `${baseUrl}/ppp/secret/${encodeURIComponent(secretIdOrName)}` : `${baseUrl}/ppp/secret`;
-      res = await safeMikrotikFetch(
-        targetPath,
-        {
-          method: 'PATCH',
-          body: JSON.stringify(bodyData),
-        },
-        activeRouter
-      );
-    }
-
-    if (!res.ok) {
-      const errText = await res.text().catch(() => '');
-      return {
-        success: false,
-        error: `Router returned HTTP ${res.status}: ${errText || res.statusText}`,
-      };
-    }
-
-    const data = await res.json().catch(() => ({ success: true }));
-    return { success: true, data };
-  } catch (err: any) {
-    return { success: false, error: err.message };
-  }
+  return updateSecret(secretIdOrName, updates, activeRouter);
 }
 
 /**
- * Terminate Active Session so subscriber reconnects into restricted or updated pool
- * POST /api/mikrotik/ppp/active/remove with { ".id": activeSession[".id"], "numbers": activeSession[".id"] }
+ * 7. Disconnect / Kick Active Session (/rest/ppp/active/remove)
  */
 export async function disconnectMikrotikActiveSessionRest(
-  activeRouter?: {
-    id?: string;
-    ipAddress?: string;
-    ip?: string;
-    apiPort?: number;
-    port?: number;
-    username?: string;
-    password?: string;
-  },
+  activeRouter?: RouterAuthInfo,
   sessionIdOrName?: string
 ): Promise<{ success: boolean; error?: string }> {
-  if (!sessionIdOrName) return { success: false, error: 'Session ID or username required' };
-
-  const baseUrl = getMikrotikRestBaseUrl(activeRouter);
-
-  try {
-    // 1. RouterOS v7 strictly expects: { ".id": session[".id"] }
-    const res = await safeMikrotikFetch(
-      `${baseUrl}/ppp/active/remove`,
-      {
-        method: 'POST',
-        body: JSON.stringify({
-          '.id': sessionIdOrName,
-        }),
-      },
-      activeRouter
-    );
-
-    if (res.status === 401) {
-      return {
-        success: false,
-        error: 'Action failed: Router authentication error. Please verify credentials.',
-      };
-    }
-
-    // 2. Fallback to DELETE /ppp/active/:id
-    if (!res.ok && (res.status === 404 || res.status === 405)) {
-      const fallbackRes = await safeMikrotikFetch(
-        `${baseUrl}/ppp/active/${encodeURIComponent(sessionIdOrName)}`,
-        {
-          method: 'DELETE',
-        },
-        activeRouter
-      );
-
-      if (fallbackRes.status === 401) {
-        return {
-          success: false,
-          error: 'Action failed: Router authentication error. Please verify credentials.',
-        };
-      }
-
-      if (!fallbackRes.ok) {
-        const errText = await fallbackRes.text().catch(() => '');
-        throw new Error(`Router returned HTTP ${fallbackRes.status}: ${errText || fallbackRes.statusText}`);
-      }
-      return { success: true };
-    }
-
-    if (!res.ok) {
-      const errText = await res.text().catch(() => '');
-      throw new Error(`Router returned HTTP ${res.status}: ${errText || res.statusText}`);
-    }
-
-    return { success: true };
-  } catch (err: any) {
-    return { success: false, error: err.message };
-  }
+  if (!sessionIdOrName) return { success: false, error: 'Session ID required' };
+  return kickSession(sessionIdOrName, activeRouter);
 }
 
 /**
- * Remove PPPoE Secret directly from RouterOS REST API
- * POST /api/mikrotik/ppp/secret/remove with { ".id": secretId, "numbers": secretId }
+ * 8. Remove PPPoE Secret (/rest/ppp/secret/remove)
  */
 export async function removeMikrotikPppSecretRest(
-  activeRouter?: {
-    id?: string;
-    ipAddress?: string;
-    ip?: string;
-    apiPort?: number;
-    port?: number;
-    username?: string;
-    password?: string;
-  },
+  activeRouter?: RouterAuthInfo,
   secretIdOrName?: string
 ): Promise<{ success: boolean; error?: string }> {
-  if (!secretIdOrName) return { success: false, error: 'Secret ID or username required' };
-
-  const baseUrl = getMikrotikRestBaseUrl(activeRouter);
-
-  try {
-    // 1. Try POST /ppp/secret/remove
-    const res = await safeMikrotikFetch(
-      `${baseUrl}/ppp/secret/remove`,
-      {
-        method: 'POST',
-        body: JSON.stringify({
-          '.id': secretIdOrName,
-          numbers: secretIdOrName,
-        }),
-      },
-      activeRouter
-    );
-
-    if (res.status === 401) {
-      return {
-        success: false,
-        error: 'Action failed: Router authentication error. Please verify credentials.',
-      };
-    }
-
-    // 2. Fallback to DELETE /ppp/secret/:id
-    if (!res.ok && (res.status === 404 || res.status === 405)) {
-      const fallbackRes = await safeMikrotikFetch(
-        `${baseUrl}/ppp/secret/${encodeURIComponent(secretIdOrName)}`,
-        {
-          method: 'DELETE',
-        },
-        activeRouter
-      );
-
-      if (fallbackRes.status === 401) {
-        return {
-          success: false,
-          error: 'Action failed: Router authentication error. Please verify credentials.',
-        };
-      }
-
-      if (!fallbackRes.ok) {
-        const errText = await fallbackRes.text().catch(() => '');
-        throw new Error(`Router returned HTTP ${fallbackRes.status}: ${errText || fallbackRes.statusText}`);
-      }
-      return { success: true };
-    }
-
-    if (!res.ok) {
-      const errText = await res.text().catch(() => '');
-      throw new Error(`Router returned HTTP ${res.status}: ${errText || res.statusText}`);
-    }
-
-    return { success: true };
-  } catch (err: any) {
-    return { success: false, error: err.message };
-  }
+  if (!secretIdOrName) return { success: false, error: 'Secret identifier required' };
+  return removeSecret(secretIdOrName, activeRouter);
 }
 
-
+/**
+ * 9. Real-Time Interface Throughput Monitor (/rest/interface/monitor-traffic)
+ */
+export async function monitorInterfaceTraffic(
+  activeRouter?: RouterAuthInfo,
+  signal?: AbortSignal
+): Promise<{ success: boolean; rxMbps: number; txMbps: number; error?: string }> {
+  const targetInterface = (activeRouter as any)?.wanInterface || 'WAN3';
+  return monitorInterfaceTrafficRest(activeRouter, targetInterface, signal);
+}

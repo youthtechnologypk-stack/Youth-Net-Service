@@ -22,6 +22,7 @@ import {
 import { useISP } from '../context/ISPContext';
 import { useSubscribers } from '../hooks/useSubscribers';
 import { safeResponseJson } from '../lib/safeFetch';
+import { getBandwidthProfiles } from '../services/apiClient';
 import {
   fetchMikrotikPppProfiles,
   provisionPppoeSecretRest,
@@ -229,13 +230,11 @@ export const AddUserModal: React.FC<AddUserModalProps> = ({ isOpen, onClose, onS
           return;
         }
 
-        const res = await fetch(`/api/mikrotik/profiles?routerId=${encodeURIComponent(routerId)}`);
-        const json = await safeResponseJson<any>(res, { success: false, profiles: [] });
-
-        if (json.success && Array.isArray(json.profiles) && json.profiles.length > 0) {
-          setProfiles(json.profiles);
-          if (!profile || !json.profiles.some((p: any) => p.name === profile)) {
-            setProfile(json.profiles[0].name);
+        const profileRes = await getBandwidthProfiles(targetRouter);
+        if (profileRes.success && Array.isArray(profileRes.profiles) && profileRes.profiles.length > 0) {
+          setProfiles(profileRes.profiles);
+          if (!profile || !profileRes.profiles.some((p: any) => p.name === profile)) {
+            setProfile(profileRes.profiles[0].name);
           }
         } else {
           // Fallback to configured bandwidth profiles
