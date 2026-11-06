@@ -19,6 +19,7 @@ import { FieldAgentPortal } from './components/FieldAgentPortal';
 import { ClientSubscriberPortal } from './components/ClientSubscriberPortal';
 import { AccessDeniedView } from './components/AccessDeniedView';
 import { LoginPage } from './components/LoginPage';
+import { ActivityLogsStudio } from './components/ActivityLogsStudio';
 import { ProvisionSecretModal } from './components/ProvisionSecretModal';
 import { OutageBroadcasterModal } from './components/OutageBroadcasterModal';
 import { NewTicketModal } from './components/NewTicketModal';
@@ -35,6 +36,9 @@ import {
   saveAuthSession,
   getStoredToken,
   isOriginalAdminSession,
+  getTabFromPath,
+  getPathFromTab,
+  getLandingRouteForRole,
 } from './lib/auth';
 import { Radio, ShieldCheck, Database, ShieldAlert, ArrowLeft } from 'lucide-react';
 
@@ -62,13 +66,65 @@ function ISPAppContent() {
 
   const [activeTab, setActiveTab] = useState<ActiveTab>(() => {
     const user = getStoredUser();
-    return user ? getLandingTabForRole(user.role) : 'noc';
+    if (!user) return 'noc';
+    if (user.role === 'AGENT') return 'agent_portal';
+    if (user.role === 'CLIENT') return 'client_portal';
+    const pathTab = typeof window !== 'undefined' ? getTabFromPath(window.location.pathname) : null;
+    if (pathTab && isRouteAllowedForRole(user.role, pathTab)) {
+      return pathTab as ActiveTab;
+    }
+    return getLandingTabForRole(user.role);
   });
 
   const { setActiveViewTab } = useISP();
   useEffect(() => {
     setActiveViewTab?.(activeTab);
   }, [activeTab, setActiveViewTab]);
+
+  // Synchronize browser address bar with RBAC path
+  useEffect(() => {
+    if (!currentUser) {
+      if (typeof window !== 'undefined' && window.location.pathname !== '/login') {
+        window.history.replaceState(null, '', '/login');
+      }
+      return;
+    }
+
+    if (currentUser.role === 'AGENT' && activeTab !== 'agent_portal') {
+      setActiveTab('agent_portal');
+      return;
+    }
+    if (currentUser.role === 'CLIENT' && activeTab !== 'client_portal') {
+      setActiveTab('client_portal');
+      return;
+    }
+
+    const expectedPath = getPathFromTab(activeTab);
+    if (typeof window !== 'undefined' && window.location.pathname !== expectedPath) {
+      window.history.replaceState(null, '', expectedPath);
+    }
+  }, [currentUser, activeTab]);
+
+  // Browser navigation popstate listener
+  useEffect(() => {
+    const handlePopState = () => {
+      const user = getStoredUser();
+      if (!user) {
+        setCurrentUser(null);
+        return;
+      }
+      const pathTab = getTabFromPath(window.location.pathname);
+      if (user.role === 'AGENT') {
+        setActiveTab('agent_portal');
+      } else if (user.role === 'CLIENT') {
+        setActiveTab('client_portal');
+      } else if (pathTab && isRouteAllowedForRole(user.role, pathTab)) {
+        setActiveTab(pathTab as ActiveTab);
+      }
+    };
+    window.addEventListener('popstate', handlePopState);
+    return () => window.removeEventListener('popstate', handlePopState);
+  }, []);
 
   // Sidebar collapsible state (HIDDEN by default)
   const [isSidebarOpen, setIsSidebarOpen] = useState(false);
@@ -98,6 +154,10 @@ function ISPAppContent() {
     setCurrentRole(user.role);
     const landingTab = getLandingTabForRole(user.role);
     setActiveTab(landingTab);
+    const landingPath = getLandingRouteForRole(user.role);
+    if (typeof window !== 'undefined') {
+      window.history.replaceState(null, '', landingPath);
+    }
   };
 
   // Handle Logout
@@ -154,12 +214,13 @@ function ISPAppContent() {
   // Route permission validation
   const isPermitted = isRouteAllowedForRole(currentRole, activeTab);
   const isClient = currentRole === 'CLIENT' || currentUser.role === 'CLIENT';
+  const isAgent = currentRole === 'AGENT' || currentUser.role === 'AGENT';
   const isOriginalAdmin = isOriginalAdminSession();
 
   return (
     <div className="flex h-screen w-screen overflow-hidden bg-slate-950 text-slate-100 font-sans selection:bg-cyan-900 selection:text-cyan-200">
-      {/* 1. Off-Canvas Collapsible Sidebar (Strictly hidden for Client subscribers; internal NOC operations only) */}
-      {!isClient && (
+      {/* 1. Off-Canvas Collapsible Sidebar (Strictly hidden for Client subscribers and Field Agents) */}
+      {!isClient && !isAgent && (
         <Sidebar
           isOpen={isSidebarOpen}
           onClose={() => setIsSidebarOpen(false)}
@@ -335,6 +396,9 @@ function ISPAppContent() {
 
                 {/* Settings Studio */}
                 {activeTab === 'settings' && <SettingsStudio />}
+
+                {/* Activity & System Audit Logs */}
+                {activeTab === 'logs' && <ActivityLogsStudio />}
               </>
             )}
           </div>

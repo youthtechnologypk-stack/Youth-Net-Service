@@ -37,6 +37,7 @@ import { DeleteConfirmDialog } from './DeleteConfirmDialog';
 import { PermissionMatrixStudio } from './PermissionMatrixStudio';
 import { buildStandardWhatsAppCredentialText, getPortalUrlForRole } from '../services/authUtils';
 import { RealMikrotikSubscriber, fetchLiveMikrotikSubscribers } from '../services/mikrotikSubscriberSync';
+import { getStandardPortalUsers, USERS_STORAGE_KEY } from '../lib/userRepository';
 
 interface UserManagementStudioProps {
   currentSimulatedRole?: SystemRole;
@@ -47,7 +48,16 @@ export const UserManagementStudio: React.FC<UserManagementStudioProps> = ({
   currentSimulatedRole = 'ADMIN',
   onSwitchSimulatedRole,
 }) => {
-  const { routers, selectedRouterId, logWhatsAppNotice, deletePppoeUser } = useISP();
+  const {
+    routers,
+    selectedRouterId,
+    logWhatsAppNotice,
+    deletePppoeUser,
+    portalUsers: users,
+    addPortalUser,
+    updatePortalUser,
+    deletePortalUser,
+  } = useISP();
   const [liveSubscribers, setLiveSubscribers] = useState<RealMikrotikSubscriber[]>([]);
 
   useEffect(() => {
@@ -58,16 +68,6 @@ export const UserManagementStudio: React.FC<UserManagementStudioProps> = ({
       }
     });
   }, [routers, selectedRouterId]);
-
-  // Primary user accounts state
-  const [users, setUsers] = useState<UserAccount[]>(() => {
-    try {
-      const saved = localStorage.getItem('netpulse_user_accounts_v1');
-      return saved ? JSON.parse(saved) : INITIAL_USER_ACCOUNTS;
-    } catch {
-      return INITIAL_USER_ACCOUNTS;
-    }
-  });
 
   const [activeManagementTab, setActiveManagementTab] = useState<'users' | 'permissions'>('users');
   const [roleFilter, setRoleFilter] = useState<'ALL' | 'CLIENT' | 'AGENT' | 'MANAGER'>('ALL');
@@ -91,16 +91,6 @@ export const UserManagementStudio: React.FC<UserManagementStudioProps> = ({
   const [isDeleteDialogOpen, setIsDeleteDialogOpen] = useState(false);
   const [isDeleting, setIsDeleting] = useState(false);
 
-  // Sync users to storage
-  const saveUsers = (updated: UserAccount[]) => {
-    setUsers(updated);
-    try {
-      localStorage.setItem('netpulse_user_accounts_v1', JSON.stringify(updated));
-    } catch {
-      // Storage unavailable
-    }
-  };
-
   // Fetch from server API on mount to synchronize with PostgreSQL database
   useEffect(() => {
     const fetchServerUsers = async () => {
@@ -109,27 +99,22 @@ export const UserManagementStudio: React.FC<UserManagementStudioProps> = ({
         if (res.ok) {
           const data = await res.json();
           if (data.success && Array.isArray(data.users) && data.users.length > 0) {
-            // Merge with local users to preserve client metadata if needed
-            const serverUsers: UserAccount[] = data.users.map((su: any) => {
+            data.users.forEach((su: any) => {
               const localMatch = users.find((u) => u.username === su.username || u.id === su.id);
-              return {
-                id: su.id,
-                username: su.username,
-                fullName: su.fullName || su.displayName || 'System User',
-                displayName: su.displayName || su.fullName || 'System User',
-                phone: su.phone || '+92 300 0000000',
-                role: su.role,
-                isActive: su.isActive !== false,
-                email: localMatch?.email || `${su.username}@youthnet.pk`,
-                assignedArea: localMatch?.assignedArea,
-                department: localMatch?.department,
-                cashLimit: localMatch?.cashLimit,
-                linkedCustomerId: localMatch?.linkedCustomerId,
-                linkedAgentId: localMatch?.linkedAgentId,
-                createdAt: su.createdAt || new Date().toISOString(),
-              };
+              if (!localMatch) {
+                addPortalUser({
+                  id: su.id,
+                  username: su.username,
+                  fullName: su.fullName || su.displayName || 'System User',
+                  displayName: su.displayName || su.fullName || 'System User',
+                  phone: su.phone || '+92 300 0000000',
+                  role: su.role,
+                  isActive: su.isActive !== false,
+                  email: `${su.username}@youthnet.pk`,
+                  createdAt: su.createdAt || new Date().toISOString(),
+                });
+              }
             });
-            saveUsers(serverUsers);
           }
         }
       } catch {
@@ -140,10 +125,36 @@ export const UserManagementStudio: React.FC<UserManagementStudioProps> = ({
     fetchServerUsers();
   }, []);
 
+  // Listen for youthnet_users_updated events across modules
+  useEffect(() => {
+    const handleUsersUpdated = () => {
+      const stored = getStandardPortalUsers();
+      stored.forEach((su) => {
+        const localMatch = users.find((u) => u.username?.toLowerCase() === su.username.toLowerCase());
+        if (!localMatch) {
+          addPortalUser({
+            id: su.id,
+            username: su.username,
+            fullName: su.fullName,
+            displayName: su.fullName,
+            phone: su.phone,
+            role: su.role,
+            isActive: su.isActive !== false,
+            email: su.email || `${su.username}@youthnet.pk`,
+            createdAt: su.createdAt,
+            password: su.password,
+          });
+        }
+      });
+    };
+
+    window.addEventListener('youthnet_users_updated', handleUsersUpdated);
+    return () => window.removeEventListener('youthnet_users_updated', handleUsersUpdated);
+  }, [users, addPortalUser]);
+
   // 1. Create New Account Callback
   const handleAccountCreated = (newUser: UserAccount, plainPassword: string, sendWhatsApp: boolean) => {
-    const updated = [newUser, ...users.filter((u) => u.username !== newUser.username)];
-    saveUsers(updated);
+    addPortalUser({ ...newUser, password: plainPassword });
 
     setSelectedUser(newUser);
     setLastGeneratedPassword(plainPassword);
@@ -165,7 +176,7 @@ export const UserManagementStudio: React.FC<UserManagementStudioProps> = ({
     if (sendWhatsApp) {
       setIsWhatsAppModalOpen(true);
     } else {
-      setActionNotice(`User account @${newUser.username} (${newUser.role}) created successfully.`);
+      setActionNotice(`Account created! You can now log in with these credentials. (@${newUser.username} - ${newUser.role})`);
       setTimeout(() => setActionNotice(null), 5000);
     }
   };
@@ -187,8 +198,7 @@ export const UserManagementStudio: React.FC<UserManagementStudioProps> = ({
       // continue locally
     }
 
-    const updated = users.map((u) => (u.id === updatedUser.id ? updatedUser : u));
-    saveUsers(updated);
+    updatePortalUser(updatedUser.id, updatedUser);
     setActionNotice(`User @${updatedUser.username} profile updated successfully.`);
     setTimeout(() => setActionNotice(null), 4000);
   };
@@ -208,6 +218,7 @@ export const UserManagementStudio: React.FC<UserManagementStudioProps> = ({
       // continue locally
     }
 
+    updatePortalUser(userId, { password: newPassword });
     setSelectedUser(targetUser);
     setLastGeneratedPassword(newPassword);
 
@@ -253,8 +264,7 @@ export const UserManagementStudio: React.FC<UserManagementStudioProps> = ({
       // continue locally
     }
 
-    const updated = users.map((u) => (u.id === user.id ? { ...u, isActive: nextStatus } : u));
-    saveUsers(updated);
+    updatePortalUser(user.id, { isActive: nextStatus });
 
     setActionNotice(
       `Account @${user.username} (${user.displayName || user.fullName}) is now ${
@@ -773,8 +783,7 @@ export const UserManagementStudio: React.FC<UserManagementStudioProps> = ({
               await deletePppoeUser(userToDelete.username);
             }
 
-            const updated = users.filter((u) => u.id !== userToDelete.id);
-            saveUsers(updated);
+            deletePortalUser(userToDelete.id);
 
             setActionNotice(`User "${userToDelete.fullName || userToDelete.displayName}" deleted.`);
             setTimeout(() => setActionNotice(null), 4000);

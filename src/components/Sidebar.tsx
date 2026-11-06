@@ -18,6 +18,7 @@ import {
   X,
   LogOut,
   Network,
+  ShieldAlert,
 } from 'lucide-react';
 import { ActiveTab } from './Header';
 import { SystemRole, UserAccount } from '../types/auth';
@@ -159,6 +160,15 @@ export const Sidebar: React.FC<SidebarProps> = ({
       badge: 'Granular Matrix',
       badgeColor: 'bg-indigo-950 text-indigo-300 border-indigo-800',
       roles: ['ADMIN'],
+    },
+    {
+      id: 'logs' as ActiveTab,
+      label: 'Activity & Audit Logs',
+      subtitle: 'System Trail & Security Events',
+      icon: ShieldAlert,
+      badge: 'Audit Trail',
+      badgeColor: 'bg-amber-950 text-amber-300 border-amber-800',
+      roles: ['ADMIN', 'MANAGER'],
     },
     {
       id: 'mobile' as ActiveTab,

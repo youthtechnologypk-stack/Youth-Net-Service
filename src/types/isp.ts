@@ -90,6 +90,7 @@ export interface MikrotikRouter {
   currentWanTxMbps: number;
   activePppoeCount: number;
   walledGardenPool: string; // e.g. "172.16.100.0/24"
+  proxyMode?: 'proxy' | 'direct'; // 'proxy' (Netlify Managed Proxy Mode) or 'direct' (Direct IP Mode)
 }
 
 export interface ActiveSession {
@@ -379,3 +380,26 @@ export interface MikrotikPppSecret {
   'caller-id'?: string;
   callerId?: string;
 }
+
+export interface HistoricalSessionRecord {
+  id: string;
+  username: string;
+  connectTime: string;
+  disconnectTime: string | null;
+  duration: string;
+  totalDownloadMB: number;
+  totalUploadMB: number;
+  assignedIp?: string;
+  callerId?: string;
+  routerId?: string;
+  terminationReason?: string;
+  lastUpdated: string;
+}
+
+export interface ProfilePriceRecord {
+  profileName: string;
+  priceMonthly: number;
+  customRateLabel?: string;
+  updatedAt: string;
+}
+

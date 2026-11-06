@@ -68,6 +68,10 @@ export const MikrotikStudio: React.FC<MikrotikStudioProps> = ({
     provisionedSecrets,
     bandwidthProfiles,
     routerError,
+    isSslOrCorsBlocked,
+    directCertUrl,
+    routerProxyMode,
+    setRouterProxyMode,
     isSyncingRouter,
     syncSelectedRouterNow,
     kickSession,
@@ -77,6 +81,8 @@ export const MikrotikStudio: React.FC<MikrotikStudioProps> = ({
     deletePackage,
     refreshRouterHealth,
     renewSubscriberPackage,
+    updatePackagePrice,
+    profilePriceMap,
   } = useISP();
   const { formatCurrency, currencySymbol } = useCurrency();
 
@@ -91,6 +97,10 @@ export const MikrotikStudio: React.FC<MikrotikStudioProps> = ({
   const [isAddProfileModalOpen, setIsAddProfileModalOpen] = useState(false);
   const [selectedProfileToEdit, setSelectedProfileToEdit] = useState<InternetPackage | null>(null);
   const [copiedProfileId, setCopiedProfileId] = useState<string | null>(null);
+
+  // Profile Price Quick Edit State
+  const [priceEditTarget, setPriceEditTarget] = useState<{ profileName: string; currentPrice: number } | null>(null);
+  const [newPriceValue, setNewPriceValue] = useState<number>(2500);
 
   // User Deletion state
   const [userToDelete, setUserToDelete] = useState<{ username: string; name: string } | null>(null);
@@ -307,7 +317,7 @@ export const MikrotikStudio: React.FC<MikrotikStudioProps> = ({
                   </span>
                 </div>
                 <p className="text-xs text-slate-400 mt-0.5">
-                  Model: <strong className="text-slate-200">{currentRouter.model}</strong> &bull; IP: <code className="text-cyan-400">{currentRouter.ip || currentRouter.ipAddress}:{currentRouter.port || currentRouter.apiPort || 8729}</code> (RouterOS v7 HTTPS REST API)
+                  Model: <strong className="text-slate-200">{currentRouter.model}</strong> &bull; IP: <code className="text-cyan-400">{currentRouter.ip || currentRouter.ipAddress}:{currentRouter.port || (currentRouter.useSsl ? 443 : 80)}</code> (RouterOS v7 HTTPS REST API)
                 </p>
               </div>
             </div>
@@ -323,7 +333,7 @@ export const MikrotikStudio: React.FC<MikrotikStudioProps> = ({
                 >
                   {routers.map((r) => (
                     <option key={r.id} value={r.id}>
-                      {r.name} ({r.ip || r.ipAddress}:{r.port || r.apiPort || 8729}) [{r.status.toUpperCase()}]
+                      {r.name} ({r.ip || r.ipAddress}:{r.port || (r.useSsl ? 443 : 80)}) [{r.status.toUpperCase()}]
                     </option>
                   ))}
                 </select>
@@ -358,28 +368,56 @@ export const MikrotikStudio: React.FC<MikrotikStudioProps> = ({
             </div>
           </div>
 
-          {/* Live Sync Failure Error Banner */}
+          {/* Live Sync Failure / SSL Certificate / Proxy Error Banner */}
           {routerError && (
             <div className="mt-4 p-4 bg-rose-950/40 border border-rose-700/80 rounded-xl flex flex-col sm:flex-row items-start sm:items-center justify-between gap-3 text-xs text-rose-200 animate-fade-in shadow-lg">
               <div className="flex items-start gap-3">
                 <AlertTriangle className="w-5 h-5 text-rose-400 shrink-0 mt-0.5" />
                 <div>
-                  <h4 className="font-bold text-rose-300 text-sm">RouterOS REST API Connection Error</h4>
+                  <div className="flex items-center gap-2">
+                    <h4 className="font-bold text-rose-300 text-sm">RouterOS REST API Connection Error</h4>
+                    <span className="text-[10px] px-2 py-0.5 rounded bg-rose-900/60 text-rose-200 font-mono font-bold uppercase border border-rose-700/60">
+                      Disconnected
+                    </span>
+                  </div>
                   <p className="mt-1 font-mono text-rose-200 leading-relaxed font-semibold">
                     {routerError}
                   </p>
-                  <p className="mt-1.5 text-rose-400 text-[11px]">
-                    💡 <strong>REST API Diagnostic:</strong> Direct HTTPS request to <code className="font-mono text-white bg-rose-900/50 px-1 py-0.5 rounded">https://{currentRouter.ip || currentRouter.ipAddress}:{currentRouter.port || currentRouter.apiPort || 8729}/rest/</code> failed. Verify <code className="font-mono text-white bg-rose-900/50 px-1 py-0.5 rounded">/ip service enable www-ssl</code> is enabled, public IP reachability, SSL certificate validity, and browser CORS permissions.
+                  <p className="mt-1.5 text-rose-300 text-xs flex flex-wrap items-center gap-1.5">
+                    <span>Browser blocked self-signed SSL.</span>
+                    <a
+                      href={directCertUrl || `https://${currentRouter.ip || currentRouter.ipAddress || '202.142.186.150'}:${currentRouter.port || 443}/rest/system/resource`}
+                      target="_blank"
+                      rel="noopener noreferrer"
+                      className="text-cyan-300 underline font-bold hover:text-cyan-200 inline-flex items-center gap-1 bg-cyan-950/60 px-2 py-0.5 rounded border border-cyan-800"
+                    >
+                      [Click here to authorize certificate in new tab]
+                      <ExternalLink className="w-3 h-3" />
+                    </a>
+                    <span>, then click Retry Sync.</span>
                   </p>
+                  <div className="mt-2 flex items-center gap-2 text-[11px] text-slate-300">
+                    <span className="text-slate-400">Current Gateway Mode:</span>
+                    <span className="font-mono font-bold text-cyan-300">
+                      {routerProxyMode === 'proxy' ? 'Netlify Managed Proxy Mode (/api/mikrotik)' : 'Direct IP Mode'}
+                    </span>
+                    <button
+                      type="button"
+                      onClick={() => setRouterProxyMode(routerProxyMode === 'proxy' ? 'direct' : 'proxy')}
+                      className="text-[10px] text-cyan-400 underline hover:text-cyan-300 ml-1 cursor-pointer font-semibold"
+                    >
+                      Switch to {routerProxyMode === 'proxy' ? 'Direct IP Mode' : 'Netlify Managed Proxy Mode'}
+                    </button>
+                  </div>
                 </div>
               </div>
               <button
                 onClick={handleTriggerSync}
                 disabled={isSyncingRouter}
-                className="px-3 py-1.5 bg-rose-900/60 hover:bg-rose-800 text-white border border-rose-600 rounded-lg font-mono text-[11px] shrink-0 cursor-pointer disabled:opacity-50 transition flex items-center gap-1.5 shadow-sm"
+                className="px-3.5 py-2 bg-rose-900/80 hover:bg-rose-800 text-white border border-rose-600 rounded-lg font-mono text-xs shrink-0 cursor-pointer disabled:opacity-50 transition flex items-center gap-1.5 shadow-md"
               >
                 <RefreshCw className={`w-3.5 h-3.5 ${isSyncingRouter ? 'animate-spin' : ''}`} />
-                <span>{isSyncingRouter ? 'Syncing with Router...' : 'Retry Sync'}</span>
+                <span>{isSyncingRouter ? 'Connecting...' : 'Retry Sync'}</span>
               </button>
             </div>
           )}
@@ -947,6 +985,7 @@ export const MikrotikStudio: React.FC<MikrotikStudioProps> = ({
                   <tr>
                     <th className="py-3 px-4">Profile Name</th>
                     <th className="py-3 px-4">Rate Limit / RX-TX</th>
+                    <th className="py-3 px-4">Commercial Rate</th>
                     <th className="py-3 px-4">Local Address</th>
                     <th className="py-3 px-4">Remote Address / Pool</th>
                     <th className="py-3 px-4">Only-One</th>
@@ -970,6 +1009,7 @@ export const MikrotikStudio: React.FC<MikrotikStudioProps> = ({
                     const remoteAddr = prof['remote-address'] || '-';
                     const onlyOne = prof['only-one'] ? String(prof['only-one']) : 'default';
                     const isDefault = prof.name === 'default' || prof.name === 'default-encryption';
+                    const currentProfPrice = profilePriceMap[prof.name] || 2500;
 
                     return (
                       <tr key={prof['.id'] || prof.name} className="hover:bg-slate-800/60 transition">
@@ -985,6 +1025,10 @@ export const MikrotikStudio: React.FC<MikrotikStudioProps> = ({
                         </td>
                         <td className="py-3 px-4 font-mono font-bold text-emerald-300">
                           {rateLimit}
+                        </td>
+                        <td className="py-3 px-4 font-mono font-bold text-amber-300">
+                          {formatCurrency(currentProfPrice)}
+                          <span className="text-[10px] text-slate-500 font-normal">/mo</span>
                         </td>
                         <td className="py-3 px-4 font-mono text-slate-300">
                           {localAddr}
@@ -1007,6 +1051,17 @@ export const MikrotikStudio: React.FC<MikrotikStudioProps> = ({
                           <div className="flex items-center justify-end gap-1.5">
                             <button
                               onClick={() => {
+                                setPriceEditTarget({ profileName: prof.name, currentPrice: currentProfPrice });
+                                setNewPriceValue(currentProfPrice);
+                              }}
+                              className="px-2 py-1 rounded text-[11px] transition bg-cyan-950/80 hover:bg-cyan-900 text-cyan-300 border border-cyan-800 flex items-center gap-1 cursor-pointer"
+                              title="Edit Profile Commercial Rate"
+                            >
+                              <Edit2 className="w-3 h-3 text-cyan-400" />
+                              <span>Edit Rate</span>
+                            </button>
+                            <button
+                              onClick={() => {
                                 const cli = `/ppp profile print where name="${prof.name}"`;
                                 navigator.clipboard.writeText(cli);
                                 setSyncToast({
@@ -1027,7 +1082,7 @@ export const MikrotikStudio: React.FC<MikrotikStudioProps> = ({
                   })}
                   {(hasLiveProfiles ? filteredDynamicProfiles.length === 0 : packages.length === 0) && (
                     <tr>
-                      <td colSpan={6} className="py-8 text-center text-slate-400 font-sans">
+                      <td colSpan={7} className="py-8 text-center text-slate-400 font-sans">
                         No bandwidth profiles found matching your search.
                       </td>
                     </tr>
@@ -1156,6 +1211,19 @@ export const MikrotikStudio: React.FC<MikrotikStudioProps> = ({
 
                       <button
                         onClick={() => {
+                          const cur = profilePriceMap[pkg.mikrotikProfile] || pkg.priceMonthly;
+                          setPriceEditTarget({ profileName: pkg.mikrotikProfile, currentPrice: cur });
+                          setNewPriceValue(cur);
+                        }}
+                        className="px-2.5 py-1 rounded-lg bg-amber-950/70 hover:bg-amber-900/90 text-amber-300 border border-amber-800 text-[11px] font-bold transition flex items-center gap-1 cursor-pointer"
+                        title="Edit Commercial Monthly Price"
+                      >
+                        <Edit2 className="w-3 h-3 text-amber-400" />
+                        <span>Edit Rate</span>
+                      </button>
+
+                      <button
+                        onClick={() => {
                           setSelectedProfileToEdit(pkg);
                           setIsAddProfileModalOpen(true);
                         }}
@@ -1268,6 +1336,70 @@ export const MikrotikStudio: React.FC<MikrotikStudioProps> = ({
         }}
         profileToEdit={selectedProfileToEdit}
       />
+
+      {/* Quick Edit Profile Rate Modal */}
+      {priceEditTarget && (
+        <div className="fixed inset-0 z-50 bg-black/80 flex items-center justify-center p-4 backdrop-blur-sm animate-fade-in">
+          <div className="bg-slate-900 border border-slate-800 rounded-2xl max-w-sm w-full p-5 space-y-4 shadow-2xl">
+            <div className="flex items-center justify-between border-b border-slate-800 pb-3">
+              <div>
+                <h3 className="text-sm font-bold text-white">Edit Bandwidth Profile Price</h3>
+                <p className="text-xs text-cyan-400 font-mono mt-0.5">{priceEditTarget.profileName}</p>
+              </div>
+              <button
+                onClick={() => setPriceEditTarget(null)}
+                className="text-slate-400 hover:text-white p-1 rounded-lg"
+              >
+                <X className="w-4 h-4" />
+              </button>
+            </div>
+
+            <div className="space-y-3">
+              <div>
+                <label className="block text-slate-400 text-xs mb-1">Monthly Rate / Price (PKR)</label>
+                <div className="relative">
+                  <span className="absolute left-3 top-2.5 text-slate-500 font-mono text-xs">Rs.</span>
+                  <input
+                    type="number"
+                    min="100"
+                    step="50"
+                    value={newPriceValue}
+                    onChange={(e) => setNewPriceValue(Number(e.target.value) || 0)}
+                    className="w-full bg-slate-950 border border-slate-700 text-amber-300 font-mono font-bold pl-10 pr-3 py-2 rounded-lg text-sm focus:outline-none focus:border-cyan-500"
+                  />
+                </div>
+                <p className="text-[10px] text-slate-500 mt-1">
+                  New invoices and auto-provisioning for this profile will bill at {formatCurrency(newPriceValue)}/month.
+                </p>
+              </div>
+            </div>
+
+            <div className="flex items-center justify-end gap-2 pt-2 border-t border-slate-800">
+              <button
+                type="button"
+                onClick={() => setPriceEditTarget(null)}
+                className="px-3 py-1.5 rounded-lg bg-slate-800 hover:bg-slate-700 text-slate-300 text-xs font-medium cursor-pointer"
+              >
+                Cancel
+              </button>
+              <button
+                type="button"
+                onClick={() => {
+                  updatePackagePrice(priceEditTarget.profileName, newPriceValue);
+                  setSyncToast({
+                    type: 'success',
+                    message: `Profile "${priceEditTarget.profileName}" updated to ${formatCurrency(newPriceValue)}/month.`,
+                  });
+                  setPriceEditTarget(null);
+                }}
+                className="px-4 py-1.5 rounded-lg bg-cyan-600 hover:bg-cyan-500 text-slate-950 text-xs font-bold transition cursor-pointer shadow-md shadow-cyan-950/40"
+              >
+                Save Price
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
 
       {/* Subscriber 360° Detail Drawer / Modal */}
       <SubscriberProfileDrawer

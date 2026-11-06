@@ -10,6 +10,7 @@ export interface UserAccount {
   email?: string;
   role: SystemRole;
   passwordHash?: string; // bcrypt hash ($2b$12$...)
+  password?: string; // Stored plain/temporary credential for portal access
   phone: string;
   isActive: boolean;
   mustChangePassword?: boolean;

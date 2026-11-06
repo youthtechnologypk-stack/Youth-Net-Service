@@ -17,6 +17,7 @@ import {
 import { useISP } from '../context/ISPContext';
 import { useCurrency } from '../context/CurrencyContext';
 import { FieldAgent } from '../types/isp';
+import { storageService } from '../services/storageService';
 
 interface AddOrEditAgentModalProps {
   isOpen: boolean;
@@ -57,6 +58,7 @@ export const AddOrEditAgentModal: React.FC<AddOrEditAgentModalProps> = ({
   const [cashInHand, setCashInHand] = useState<number>(0);
 
   const [isSubmitting, setIsSubmitting] = useState(false);
+  const [isConfirmingDelete, setIsConfirmingDelete] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [successMessage, setSuccessMessage] = useState<string | null>(null);
 
@@ -130,6 +132,24 @@ export const AddOrEditAgentModal: React.FC<AddOrEditAgentModalProps> = ({
           baseSalary: Number(baseSalary) || 600,
           cashInHand: Number(cashInHand) || 0,
         });
+
+        // Sync with Centralized Persistence Engine (storageService)
+        const existingPortalUser = storageService.getPortalUsers().find(
+          (u) =>
+            u.linkedAgentId === agentToEdit.id ||
+            u.phone === cleanPhone ||
+            u.fullName.toLowerCase() === agentToEdit.name.toLowerCase()
+        );
+        if (existingPortalUser) {
+          storageService.savePortalUser({
+            ...existingPortalUser,
+            fullName: cleanName,
+            phone: cleanPhone,
+            area: finalArea,
+            baseSalary: Number(baseSalary) || 35000,
+            commissionRate: 5,
+          });
+        }
         setSuccessMessage(`Agent "${cleanName}" details updated successfully!`);
       } else {
         const created = addAgent({
@@ -140,6 +160,24 @@ export const AddOrEditAgentModal: React.FC<AddOrEditAgentModalProps> = ({
           status,
           baseSalary: Number(baseSalary) || 600,
           cashInHand: 0,
+        });
+
+        // Sync with Centralized Persistence Engine (storageService)
+        storageService.savePortalUser({
+          id: `usr-agent-${Date.now().toString().slice(-4)}`,
+          username: cleanName.toLowerCase().replace(/[^a-z0-9]/g, '') || `agent_${Date.now().toString().slice(-4)}`,
+          password: 'fiber1234',
+          role: 'AGENT',
+          fullName: cleanName,
+          phone: cleanPhone,
+          email: email.trim() || `${cleanName.toLowerCase().replace(/[^a-z0-9]/g, '.')}@netpulse.io`,
+          area: finalArea,
+          balance: 0,
+          baseSalary: Number(baseSalary) || 35000,
+          commissionRate: 5,
+          linkedAgentId: created.id,
+          isActive: true,
+          createdAt: new Date().toISOString(),
         });
         setSuccessMessage(`New Agent "${created.name}" enrolled & WhatsApp welcome dispatched!`);
       }
@@ -160,15 +198,14 @@ export const AddOrEditAgentModal: React.FC<AddOrEditAgentModalProps> = ({
 
   const handleDelete = () => {
     if (!agentToEdit) return;
-
-    if (
-      window.confirm(
-        `Are you sure you want to offboard agent "${agentToEdit.name}"?\nThis will remove them from active field assignments.`
-      )
-    ) {
-      deleteAgent(agentToEdit.id);
-      onClose();
+    deleteAgent(agentToEdit.id);
+    const existing = storageService.getPortalUsers().find(
+      (u) => u.linkedAgentId === agentToEdit.id || u.phone === agentToEdit.phone
+    );
+    if (existing) {
+      storageService.deletePortalUser(existing.id);
     }
+    onClose();
   };
 
   return (

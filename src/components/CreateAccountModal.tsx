@@ -25,6 +25,7 @@ import {
 import { UserAccount, SystemRole } from '../types/auth';
 import { useISP } from '../context/ISPContext';
 import { generateRandomPassword, buildStandardWhatsAppCredentialText, getPortalUrlForRole } from '../services/authUtils';
+import { saveUnifiedPortalUser } from '../lib/userRepository';
 import {
   RealMikrotikSubscriber,
   fetchLiveMikrotikSubscribers,
@@ -229,30 +230,19 @@ export const CreateAccountModal: React.FC<CreateAccountModalProps> = ({
       createdAt: new Date().toISOString(),
     };
 
-    // 1. Save the created portal user credential into localStorage (youthnet_portal_users)
+    // 1. Save the created portal user into standardized USERS_STORAGE_KEY (youthnet_portal_users)
     try {
-      const existingPortalUsersRaw = localStorage.getItem('youthnet_portal_users');
-      const existingList: any[] = existingPortalUsersRaw ? JSON.parse(existingPortalUsersRaw) : [];
-      const portalUserRecord = {
-        id: newUser.id,
+      saveUnifiedPortalUser({
         username: cleanUsername,
         password: plainPass,
+        role,
         fullName: fullName.trim(),
         phone: cleanPhone,
-        role,
+        area: assignedArea || 'Sector G-11',
         linkedCustomerId: selectedSubscriber?.username || cleanUsername,
-        pppoeUsername: selectedSubscriber?.username || cleanUsername,
-        assignedIp: selectedSubscriber?.address || '',
-        callerId: selectedSubscriber?.callerId || '',
-        profile: selectedSubscriber?.profile || 'default',
-        createdAt: new Date().toISOString(),
-      };
-
-      const updatedList = [
-        portalUserRecord,
-        ...existingList.filter((u) => u.username?.toLowerCase() !== cleanUsername),
-      ];
-      localStorage.setItem('youthnet_portal_users', JSON.stringify(updatedList));
+        linkedAgentId: role === 'AGENT' ? linkedAgentId : undefined,
+        department: role === 'MANAGER' ? department : undefined,
+      });
     } catch (storageErr) {
       console.warn('Failed saving to youthnet_portal_users:', storageErr);
     }
@@ -355,10 +345,10 @@ export const CreateAccountModal: React.FC<CreateAccountModalProps> = ({
                   </div>
                   <div>
                     <h4 className="text-sm font-bold text-white">
-                      Portal Account Ready for @{createdSuccessToast.user.username}
+                      Account created! You can now log in with these credentials.
                     </h4>
                     <p className="text-[11px] text-emerald-300 font-mono mt-0.5">
-                      Saved to <code className="bg-emerald-900/60 px-1 py-0.5 rounded text-emerald-200">youthnet_portal_users</code> &bull; Ready for instant login
+                      Account @{createdSuccessToast.user.username} saved to <code className="bg-emerald-900/60 px-1 py-0.5 rounded text-emerald-200">youthnet_portal_users</code> &bull; Ready for instant login
                     </p>
                   </div>
                 </div>

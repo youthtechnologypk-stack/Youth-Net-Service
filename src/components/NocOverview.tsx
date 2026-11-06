@@ -16,6 +16,8 @@ import {
   FileText,
   DollarSign,
   Layers,
+  ExternalLink,
+  RefreshCw,
 } from 'lucide-react';
 import { useISP } from '../context/ISPContext';
 import { useCurrency } from '../context/CurrencyContext';
@@ -57,6 +59,12 @@ export const NocOverview: React.FC<NocOverviewProps> = ({
     whatsAppLogs,
     olts,
     onus,
+    routerProxyMode,
+    setRouterProxyMode,
+    isSslOrCorsBlocked,
+    directCertUrl,
+    syncSelectedRouterNow,
+    isSyncingRouter,
   } = useISP();
   const { formatCurrency } = useCurrency();
 
@@ -110,13 +118,43 @@ export const NocOverview: React.FC<NocOverviewProps> = ({
   return (
     <div className="space-y-6">
       {/* Real Router Connection Error Banner if router unreachable / CORS / SSL */}
-      {routerError && (
-        <div className="bg-rose-950/90 border border-rose-500/60 text-rose-200 px-4 py-3 rounded-xl flex items-center gap-3 text-xs sm:text-sm font-mono shadow-lg shadow-rose-950/50">
-          <AlertTriangle className="w-5 h-5 text-rose-400 shrink-0" />
-          <div className="flex-1">
-            <span className="text-rose-100 font-bold block sm:inline">Connection Failed: </span>
-            {routerError}
+      {routerError && currentRouter?.status !== 'online' && (
+        <div className="bg-rose-950/90 border border-rose-500/60 text-rose-200 px-4 py-3.5 rounded-xl flex flex-col md:flex-row md:items-center justify-between gap-3 text-xs sm:text-sm font-mono shadow-lg shadow-rose-950/50">
+          <div className="flex items-start gap-3">
+            <AlertTriangle className="w-5 h-5 text-rose-400 shrink-0 mt-0.5" />
+            <div>
+              <div className="flex items-center gap-2">
+                <span className="text-rose-100 font-bold">RouterOS REST API Connection Notice</span>
+                <span className="text-[11px] px-2 py-0.5 bg-rose-900/60 border border-rose-700/60 rounded font-semibold text-rose-300">
+                  Disconnected
+                </span>
+              </div>
+              <p className="mt-1 font-mono text-rose-200 leading-relaxed text-xs">
+                {routerError}
+              </p>
+              <p className="mt-1.5 text-rose-300 text-xs flex flex-wrap items-center gap-1.5 font-sans">
+                <span>Browser blocked self-signed SSL.</span>
+                <a
+                  href={directCertUrl || `https://${currentRouter?.ip || currentRouter?.ipAddress || '202.142.186.150'}:${currentRouter?.port || 443}/rest/system/resource`}
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  className="text-cyan-300 underline font-bold hover:text-cyan-200 inline-flex items-center gap-1 bg-cyan-950/60 px-2 py-0.5 rounded border border-cyan-800"
+                >
+                  [Click here to authorize certificate in new tab]
+                  <ExternalLink className="w-3 h-3" />
+                </a>
+                <span>, then click Retry Sync.</span>
+              </p>
+            </div>
           </div>
+          <button
+            onClick={() => syncSelectedRouterNow()}
+            disabled={isSyncingRouter}
+            className="self-start md:self-center px-3.5 py-2 bg-rose-900/80 hover:bg-rose-800 text-white border border-rose-600 rounded-lg font-mono text-xs shrink-0 cursor-pointer disabled:opacity-50 transition flex items-center gap-1.5 shadow-md"
+          >
+            <RefreshCw className={`w-3.5 h-3.5 ${isSyncingRouter ? 'animate-spin' : ''}`} />
+            <span>{isSyncingRouter ? 'Connecting...' : 'Retry Sync'}</span>
+          </button>
         </div>
       )}
 
@@ -133,7 +171,7 @@ export const NocOverview: React.FC<NocOverviewProps> = ({
               {currentRouter.status === 'online' ? 'RouterOS v7 REST Live' : 'Router Unreachable'}
             </span>
             <span className="text-xs text-slate-400 font-mono hidden sm:inline">
-              Active BNG: <span className="text-slate-200 font-bold">{currentRouter.name}</span> ({currentRouter.ip || currentRouter.ipAddress}:{currentRouter.port || currentRouter.apiPort || 8729})
+              Active BNG: <span className="text-slate-200 font-bold">{currentRouter.name}</span> ({currentRouter.ip || currentRouter.ipAddress}:{currentRouter.port || (currentRouter.useSsl ? 443 : 80)})
             </span>
           </div>
           <div className="flex items-center gap-3 text-xs font-mono text-slate-400">

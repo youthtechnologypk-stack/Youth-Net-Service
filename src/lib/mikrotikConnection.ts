@@ -12,8 +12,8 @@ import {
   resetPppoeCallerIdInMikrotik,
   kickPppoeSessionByUsername,
   getSubscriberInterfaceTraffic,
-} from '../../lib/mikrotik.js';
-import type { SubscriberTrafficResult } from '../../lib/mikrotik.js';
+} from '../../lib/mikrotik.ts';
+import type { SubscriberTrafficResult } from '../../lib/mikrotik.ts';
 
 export {
   routerOSPool,

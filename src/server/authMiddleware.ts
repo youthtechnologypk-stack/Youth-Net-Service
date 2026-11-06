@@ -1,6 +1,6 @@
 import { Request, Response, NextFunction } from 'express';
 import crypto from 'crypto';
-import { JwtTokenPayload, SystemRole } from '../types/auth';
+import { JwtTokenPayload, SystemRole } from '../types/auth.ts';
 
 const JWT_SECRET = process.env.JWT_SECRET || 'netpulse_carrier_grade_super_secret_jwt_key_2026';
 

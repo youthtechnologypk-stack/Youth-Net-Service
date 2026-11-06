@@ -39,10 +39,10 @@ export const LoginPage: React.FC<LoginPageProps> = ({ onLoginSuccess }) => {
       if (res.success && res.user) {
         onLoginSuccess(res.user);
       } else {
-        setErrorMessage(res.error || 'Authentication failed. Please verify your credentials.');
+        setErrorMessage(res.error || 'Invalid username or password. Please verify your credentials.');
       }
     } catch (err: any) {
-      setErrorMessage(err.message || 'Network error occurred during login.');
+      setErrorMessage(err.message || 'Invalid username or password. Please verify your credentials.');
     } finally {
       setIsLoading(false);
     }

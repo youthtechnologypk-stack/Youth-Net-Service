@@ -9,7 +9,7 @@ import {
   AreaOutage,
   IspExpense,
   WhatsAppNotificationLog,
-} from '../types/isp';
+} from '../types/isp.ts';
 
 export const INITIAL_PACKAGES: InternetPackage[] = [
   {
@@ -67,11 +67,11 @@ export const INITIAL_ROUTERS: MikrotikRouter[] = [
     model: 'MikroTik CCR2004-16G-2S+',
     ipAddress: '202.142.186.150',
     ip: '202.142.186.150',
-    apiPort: 8729,
-    port: 8729,
+    apiPort: 81,
+    port: 81,
     username: 'admin',
     password: '',
-    useSsl: true,
+    useSsl: false,
     version: 'RouterOS v7.16.2',
     location: 'Central NOC Data Center - Rack 04',
     cpuLoad: 0,
@@ -84,6 +84,7 @@ export const INITIAL_ROUTERS: MikrotikRouter[] = [
     currentWanTxMbps: 0,
     activePppoeCount: 0,
     walledGardenPool: '172.16.100.0/24',
+    proxyMode: 'proxy',
   },
 ];
 

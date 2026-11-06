@@ -12,6 +12,7 @@ import {
   Shield,
   Layers,
   CheckCircle2,
+  Network,
 } from 'lucide-react';
 import { useISP } from '../context/ISPContext';
 import { MikrotikRouter } from '../types/isp';
@@ -31,6 +32,8 @@ export const RouterFleet: React.FC<RouterFleetProps> = ({ onOpenAddDeviceModal }
     customers,
     deleteMikrotikRouter,
     refreshRouterHealth,
+    routerProxyMode,
+    setRouterProxyMode,
   } = useISP();
 
   const [testingRouterId, setTestingRouterId] = useState<string | null>(null);
@@ -143,6 +146,59 @@ export const RouterFleet: React.FC<RouterFleetProps> = ({ onOpenAddDeviceModal }
         </button>
       </div>
 
+      {/* Target Router Gateway Mode: Direct IP vs Netlify Managed Proxy Mode */}
+      <div className="bg-slate-900 border border-slate-800 p-4 rounded-xl flex flex-col md:flex-row items-start md:items-center justify-between gap-3 text-xs shadow-lg">
+        <div className="space-y-1">
+          <div className="flex items-center gap-2">
+            <Network className="w-4 h-4 text-cyan-400 shrink-0" />
+            <span className="font-bold text-white text-sm">RouterOS REST Gateway Architecture</span>
+            <span className={`text-[10px] px-2 py-0.5 rounded font-mono font-bold uppercase border ${
+              routerProxyMode === 'proxy'
+                ? 'bg-emerald-950 text-emerald-300 border-emerald-700/60'
+                : 'bg-amber-950 text-amber-300 border-amber-700/60'
+            }`}>
+              {routerProxyMode === 'proxy' ? 'Netlify Managed Proxy Mode (Recommended)' : 'Direct IP Mode'}
+            </span>
+          </div>
+          <p className="text-slate-400 text-xs">
+            {routerProxyMode === 'proxy'
+              ? 'All REST calls route through /api/mikrotik proxy rewrite to bypass browser CORS restrictions and untrusted SSL blocks.'
+              : 'Direct browser fetch to raw router public IP (requires allowing self-signed certificates and browser CORS permissions).'}
+          </p>
+        </div>
+
+        <div className="flex items-center gap-1.5 bg-slate-950 p-1 rounded-lg border border-slate-800 shrink-0">
+          <button
+            type="button"
+            onClick={() => {
+              setRouterProxyMode('proxy');
+              showToast('Switched to Netlify Managed Proxy Mode (/api/mikrotik rewrite)');
+            }}
+            className={`px-3 py-1.5 rounded-md font-medium text-xs transition cursor-pointer ${
+              routerProxyMode === 'proxy'
+                ? 'bg-cyan-600 text-slate-950 font-bold shadow'
+                : 'text-slate-400 hover:text-white'
+            }`}
+          >
+            Netlify Managed Proxy Mode
+          </button>
+          <button
+            type="button"
+            onClick={() => {
+              setRouterProxyMode('direct');
+              showToast('Switched to Direct IP Mode (raw IP/port fetch)');
+            }}
+            className={`px-3 py-1.5 rounded-md font-medium text-xs transition cursor-pointer ${
+              routerProxyMode === 'direct'
+                ? 'bg-amber-600 text-slate-950 font-bold shadow'
+                : 'text-slate-400 hover:text-white'
+            }`}
+          >
+            Direct IP Mode
+          </button>
+        </div>
+      </div>
+
       {/* Empty State when no routers registered */}
       {(!routers || routers.length === 0) ? (
         <div className="bg-slate-900 border border-slate-800 rounded-2xl p-10 text-center space-y-4 shadow-xl">
@@ -229,7 +285,7 @@ export const RouterFleet: React.FC<RouterFleetProps> = ({ onOpenAddDeviceModal }
                   <div className="flex justify-between items-center">
                     <span className="text-slate-400">Management IP:</span>
                     <span className="text-cyan-300 font-bold">
-                      {router.ip || router.ipAddress}:{router.port || router.apiPort || 8729} {router.useSsl ? '(TLS)' : ''}
+                      {router.ip || router.ipAddress}:{router.port || (router.useSsl ? 443 : 80)} {router.useSsl ? '(TLS)' : ''}
                     </span>
                   </div>
                   <div className="flex justify-between items-center">

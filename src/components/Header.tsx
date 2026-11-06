@@ -14,6 +14,7 @@ import {
   Megaphone,
   Shield,
   ShieldCheck,
+  ShieldAlert,
   Users,
   Layers,
   Settings,
@@ -41,6 +42,7 @@ export type ActiveTab =
   | 'permissions'
   | 'architecture'
   | 'settings'
+  | 'logs'
   | 'agent_portal'
   | 'client_portal';
 
@@ -102,6 +104,11 @@ export const Header: React.FC<HeaderProps> = ({
     activeUser?.role === 'CLIENT' ||
     currentRole === 'CLIENT' ||
     effectiveRole === 'CLIENT';
+  const isAgent =
+    currentUser?.role === 'AGENT' ||
+    activeUser?.role === 'AGENT' ||
+    currentRole === 'AGENT' ||
+    effectiveRole === 'AGENT';
 
   // ==========================================================================
   // ISOLATED CLIENT PORTAL HEADER (Zero Internal Telemetry & No Admin Tools)
@@ -146,6 +153,61 @@ export const Header: React.FC<HeaderProps> = ({
             <PWAInstallPrompt role="CLIENT" variant="button" />
 
             {/* Logout Button */}
+            {onLogout && (
+              <button
+                type="button"
+                onClick={onLogout}
+                className="flex items-center gap-1.5 bg-slate-900 hover:bg-rose-950/80 text-slate-300 hover:text-rose-200 border border-slate-800 hover:border-rose-800/80 px-3 py-1.5 rounded-xl text-xs font-semibold transition cursor-pointer shadow-sm"
+                title="Sign Out of Session"
+              >
+                <LogOut className="w-3.5 h-3.5 text-rose-400" />
+                <span>Logout</span>
+              </button>
+            )}
+          </div>
+        </div>
+      </header>
+    );
+  }
+
+  // ==========================================================================
+  // ISOLATED FIELD AGENT HEADER (Strict Mobile / Recovery Portal Header)
+  // No router selector, no telemetry controls, no backend admin crons
+  // ==========================================================================
+  if (isAgent) {
+    return (
+      <header className="bg-slate-950 border-b border-slate-800 text-slate-100 sticky top-0 z-40 backdrop-blur-md bg-opacity-95 shadow-lg select-none">
+        <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-3 flex items-center justify-between gap-4">
+          <div className="flex items-center gap-3">
+            <div className="flex items-center justify-center w-9 h-9 rounded-xl bg-gradient-to-tr from-emerald-600 to-cyan-600 text-white shadow-lg shadow-emerald-500/20">
+              <Network className="w-5 h-5" />
+            </div>
+            <div>
+              <div className="flex items-center gap-2">
+                <span className="font-black tracking-wider text-base text-slate-100 uppercase">
+                  Youth Net
+                </span>
+                <span className="text-[10px] px-2 py-0.5 rounded-full bg-emerald-950 text-emerald-300 border border-emerald-800 font-mono font-bold">
+                  Field Agent Portal
+                </span>
+              </div>
+              <p className="text-[11px] text-slate-400 font-sans">
+                Cash Recovery, Invoice Collection &amp; Support Dispatch
+              </p>
+            </div>
+          </div>
+
+          <div className="flex items-center gap-2.5 sm:gap-3">
+            <div className="flex items-center gap-2 bg-slate-900 border border-slate-800 px-3 py-1.5 rounded-xl font-mono text-xs">
+              <User className="w-3.5 h-3.5 text-emerald-400 shrink-0" />
+              <span className="text-slate-400 text-[10px] hidden sm:inline">Agent:</span>
+              <span className="text-white font-bold font-sans">
+                {activeUser?.fullName || activeUser?.username || 'Field Agent'}
+              </span>
+            </div>
+
+            <PWAInstallPrompt role="AGENT" variant="button" />
+
             {onLogout && (
               <button
                 type="button"
@@ -458,6 +520,18 @@ export const Header: React.FC<HeaderProps> = ({
               </button>
 
               <button
+                onClick={() => setActiveTab('logs')}
+                className={`flex items-center gap-2 px-3 py-2 text-xs sm:text-sm font-medium rounded-lg transition whitespace-nowrap ${
+                  activeTab === 'logs'
+                    ? 'bg-slate-800 text-cyan-400 border border-cyan-500/30 shadow-sm'
+                    : 'text-slate-400 hover:text-slate-200 hover:bg-slate-900'
+                }`}
+              >
+                <ShieldAlert className="w-4 h-4 text-amber-400" />
+                Activity Logs
+              </button>
+
+              <button
                 onClick={() => setActiveTab('mobile')}
                 className={`flex items-center gap-2 px-3 py-2 text-xs sm:text-sm font-medium rounded-lg transition whitespace-nowrap ${
                   activeTab === 'mobile'
@@ -561,35 +635,6 @@ export const Header: React.FC<HeaderProps> = ({
               >
                 <CreditCard className="w-4 h-4" />
                 Agent Cash &amp; Billing
-              </button>
-            </>
-          )}
-
-          {/* FIELD AGENT TABS */}
-          {currentRole === 'AGENT' && (
-            <>
-              <button
-                onClick={() => setActiveTab('agent_portal')}
-                className={`flex items-center gap-2 px-3 py-2 text-xs sm:text-sm font-medium rounded-lg transition whitespace-nowrap ${
-                  activeTab === 'agent_portal'
-                    ? 'bg-slate-800 text-cyan-400 border border-cyan-500/30 shadow-sm'
-                    : 'text-slate-400 hover:text-slate-200 hover:bg-slate-900'
-                }`}
-              >
-                <Smartphone className="w-4 h-4" />
-                My Field Portal (Tickets &amp; Cash)
-              </button>
-
-              <button
-                onClick={() => setActiveTab('mobile')}
-                className={`flex items-center gap-2 px-3 py-2 text-xs sm:text-sm font-medium rounded-lg transition whitespace-nowrap ${
-                  activeTab === 'mobile'
-                    ? 'bg-slate-800 text-cyan-400 border border-cyan-500/30 shadow-sm'
-                    : 'text-slate-400 hover:text-slate-200 hover:bg-slate-900'
-                }`}
-              >
-                <Activity className="w-4 h-4" />
-                Mobile Device Simulator
               </button>
             </>
           )}

@@ -86,7 +86,11 @@ export class MikrotikRouterOSv7Service {
     }
     this.authHeader = `Basic ${credentials}`;
     const proto = this.config.useSsl ? 'https' : 'http';
-    this.baseUrl = `${proto}://${this.config.host}:${this.config.port}/rest`;
+    if (typeof window !== 'undefined') {
+      this.baseUrl = `${window.location.origin}/api/mikrotik`;
+    } else {
+      this.baseUrl = `${proto}://${this.config.host}:${this.config.port}/rest`;
+    }
   }
 
   /**
@@ -101,10 +105,14 @@ export class MikrotikRouterOSv7Service {
       const response = await fetch(url, {
         ...options,
         signal: controller.signal,
+        credentials: 'omit',
         headers: {
           Authorization: this.authHeader,
           'Content-Type': 'application/json',
           Accept: 'application/json',
+          'x-router-host': this.config.host,
+          'x-router-port': String(this.config.port),
+          'x-router-ssl': this.config.useSsl ? 'true' : 'false',
           ...(options.headers || {}),
         },
       });

@@ -47,6 +47,7 @@ export const EditRouterModal: React.FC<EditRouterModalProps> = ({
   const [ipAddress, setIpAddress] = useState('');
   const [apiPort, setApiPort] = useState<number>(8728);
   const [useSsl, setUseSsl] = useState<boolean>(false);
+  const [proxyMode, setProxyMode] = useState<'proxy' | 'direct'>('proxy');
   const [username, setUsername] = useState('');
   const [password, setPassword] = useState('');
   const [location, setLocation] = useState('');
@@ -73,6 +74,7 @@ export const EditRouterModal: React.FC<EditRouterModalProps> = ({
       setIpAddress(router.ipAddress || '');
       setApiPort(router.apiPort || 8728);
       setUseSsl(Boolean(router.useSsl));
+      setProxyMode(router.proxyMode || 'proxy');
       setUsername(router.username || 'admin');
       setPassword(''); // Blank by default to keep existing
       setLocation(router.location || '');
@@ -137,6 +139,7 @@ export const EditRouterModal: React.FC<EditRouterModalProps> = ({
         apiPort: Number(apiPort) || 8728,
         username: username.trim(),
         useSsl,
+        proxyMode,
         location: location.trim(),
         wanInterface: wanInterface.trim(),
         walledGardenPool: walledGardenPool.trim(),
@@ -350,6 +353,44 @@ export const EditRouterModal: React.FC<EditRouterModalProps> = ({
               className="w-full bg-slate-950 border border-slate-700 text-slate-200 text-xs px-3.5 py-2.5 rounded-xl focus:outline-none focus:border-cyan-500 font-mono"
               placeholder="172.16.100.0/24"
             />
+          </div>
+
+          {/* REST Gateway Architecture */}
+          <div className="p-3 bg-slate-950/70 border border-slate-800 rounded-xl space-y-2">
+            <div>
+              <span className="text-xs font-bold text-slate-200 block">
+                RouterOS REST Gateway Architecture
+              </span>
+              <span className="text-[11px] text-slate-400">
+                Route via reverse proxy (avoids CORS & untrusted SSL) or direct browser fetch.
+              </span>
+            </div>
+            <div className="grid grid-cols-2 gap-2 mt-2">
+              <button
+                type="button"
+                onClick={() => setProxyMode('proxy')}
+                className={`px-3 py-2 rounded-lg text-xs font-semibold border text-left transition cursor-pointer ${
+                  proxyMode === 'proxy'
+                    ? 'bg-cyan-950/80 border-cyan-500 text-cyan-200'
+                    : 'bg-slate-900 border-slate-800 text-slate-400 hover:text-slate-300'
+                }`}
+              >
+                <div className="font-bold">Netlify Managed Proxy</div>
+                <div className="text-[10px] text-slate-400">/api/mikrotik (Recommended)</div>
+              </button>
+              <button
+                type="button"
+                onClick={() => setProxyMode('direct')}
+                className={`px-3 py-2 rounded-lg text-xs font-semibold border text-left transition cursor-pointer ${
+                  proxyMode === 'direct'
+                    ? 'bg-amber-950/80 border-amber-500 text-amber-200'
+                    : 'bg-slate-900 border-slate-800 text-slate-400 hover:text-slate-300'
+                }`}
+              >
+                <div className="font-bold">Direct IP Mode</div>
+                <div className="text-[10px] text-slate-400">Direct browser fetch with CORS</div>
+              </button>
+            </div>
           </div>
 
           {/* TLS / SSL Checkbox */}

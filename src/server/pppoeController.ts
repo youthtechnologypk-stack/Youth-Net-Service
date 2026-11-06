@@ -1,6 +1,6 @@
 import { Request, Response } from 'express';
 import { RouterOSAPI } from 'node-routeros';
-import { getRouterCredentials, getAllRouters, saveCustomerInDb, deleteCustomerInDb } from '../db/routerRepo.js';
+import { getRouterCredentials, getAllRouters, saveCustomerInDb, deleteCustomerInDb } from '../db/routerRepo.ts';
 
 export interface AddPppoeUserPayload {
   username: string;

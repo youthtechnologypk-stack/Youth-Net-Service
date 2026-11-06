@@ -22,6 +22,7 @@ import {
 import { useISP } from '../context/ISPContext';
 import { useSubscribers } from '../hooks/useSubscribers';
 import { safeResponseJson } from '../lib/safeFetch';
+import { saveUnifiedPortalUser } from '../lib/userRepository';
 import { getBandwidthProfiles } from '../services/apiClient';
 import {
   fetchMikrotikPppProfiles,
@@ -69,6 +70,7 @@ export const AddUserModal: React.FC<AddUserModalProps> = ({ isOpen, onClose, onS
     syncSelectedRouterNow,
     dynamicPppProfiles,
     bandwidthProfiles,
+    agents,
   } = useISP();
   const { provisionSubscriber } = useSubscribers();
 
@@ -77,6 +79,7 @@ export const AddUserModal: React.FC<AddUserModalProps> = ({ isOpen, onClose, onS
   const [password, setPassword] = useState('fiber1234');
   const [service, setService] = useState('pppoe');
   const [profile, setProfile] = useState('');
+  const [assignedAgentId, setAssignedAgentId] = useState(agents[0]?.id || '');
   const [remoteIp, setRemoteIp] = useState('');
   const [fullName, setFullName] = useState('');
   const [phone, setPhone] = useState('+92 ');
@@ -291,6 +294,7 @@ export const AddUserModal: React.FC<AddUserModalProps> = ({ isOpen, onClose, onS
     setSchedulerWarning(null);
 
     try {
+      const selectedAgent = agents.find((a) => a.id === assignedAgentId) || agents[0];
       const res = await provisionSubscriber({
         username: username.trim(),
         password: password.trim(),
@@ -312,8 +316,24 @@ export const AddUserModal: React.FC<AddUserModalProps> = ({ isOpen, onClose, onS
         expiryDate: scheduleInfo.startDate,
         expiredPool,
         routerId,
+        assignedAgentId: selectedAgent?.id,
+        assignedAgentName: selectedAgent?.name,
         sendWhatsApp: true,
       });
+
+      // Standardize: Save new user to USERS_STORAGE_KEY ('youthnet_portal_users')
+      try {
+        saveUnifiedPortalUser({
+          username: username.trim(),
+          password: password.trim(),
+          role: 'CLIENT',
+          fullName: fullName.trim() || username.trim(),
+          phone: phone.trim(),
+          area: areaNode || 'Sector G-11',
+        });
+      } catch (err) {
+        console.warn('Failed saving to USERS_STORAGE_KEY:', err);
+      }
 
       if (res.schedulerWarning) {
         setSchedulerWarning(res.schedulerWarning);
@@ -388,9 +408,12 @@ export const AddUserModal: React.FC<AddUserModalProps> = ({ isOpen, onClose, onS
           {successData && (
             <div className="bg-emerald-950/80 border border-emerald-700 rounded-xl p-4 space-y-3 animate-fade-in">
               <div className="flex items-start justify-between gap-3">
-                <div className="flex items-center gap-2 text-emerald-300 font-bold">
+                <div className="flex items-center gap-2.5 text-emerald-300 font-bold">
                   <CheckCircle2 className="w-5 h-5 text-emerald-400 shrink-0" />
-                  <span>PPPoE Secret Successfully Provisioned on RouterOS!</span>
+                  <div>
+                    <span className="block text-sm text-white">Account created! You can now log in with these credentials.</span>
+                    <span className="text-[11px] font-normal text-emerald-300/80">PPPoE Secret &amp; Client Portal credentials saved to <code className="bg-emerald-900/60 px-1 py-0.5 rounded font-mono text-emerald-200">youthnet_portal_users</code></span>
+                  </div>
                 </div>
                 <button
                   type="button"
@@ -895,6 +918,21 @@ export const AddUserModal: React.FC<AddUserModalProps> = ({ isOpen, onClose, onS
                     className="w-full bg-slate-950 border border-slate-700 text-slate-100 font-mono p-2 rounded-lg focus:outline-none focus:border-cyan-500"
                   />
                 </div>
+              </div>
+
+              <div>
+                <label className="block text-slate-400 mb-1">Assigned Field Recovery &amp; Support Agent</label>
+                <select
+                  value={assignedAgentId}
+                  onChange={(e) => setAssignedAgentId(e.target.value)}
+                  className="w-full bg-slate-950 border border-slate-700 text-slate-100 p-2 rounded-lg focus:outline-none focus:border-cyan-500 font-sans"
+                >
+                  {agents.map((ag) => (
+                    <option key={ag.id} value={ag.id}>
+                      {ag.name} ({ag.assignedArea}) - Cash Limit: Rs. 50,000
+                    </option>
+                  ))}
+                </select>
               </div>
             </div>
 

@@ -14,6 +14,24 @@ export interface RouterAuthInfo {
   ipAddress?: string;
   port?: number;
   apiPort?: number;
+  useSsl?: boolean;
+  proxyMode?: 'proxy' | 'direct';
+}
+
+export type RouterProxyMode = 'proxy' | 'direct';
+
+/**
+ * Get active router proxy mode:
+ * 'proxy' = Netlify Managed Proxy Mode (/api/mikrotik rewrite) - DEFAULT
+ * 'direct' = Direct IP Mode (raw IP/port)
+ */
+export function getRouterProxyMode(router?: RouterAuthInfo): RouterProxyMode {
+  if (router?.proxyMode) return router.proxyMode;
+  if (typeof window !== 'undefined') {
+    const saved = localStorage.getItem('netpulse_router_proxy_mode');
+    if (saved === 'direct' || saved === 'proxy') return saved;
+  }
+  return 'proxy'; // Default to "Netlify Managed Proxy Mode"
 }
 
 export interface ApiResponse<T = any> {
@@ -22,6 +40,8 @@ export interface ApiResponse<T = any> {
   error?: string;
   message?: string;
   status: number;
+  isSslOrCorsBlocked?: boolean;
+  directCertUrl?: string;
 }
 
 export interface RequestOptions extends Omit<RequestInit, 'body'> {
@@ -32,7 +52,48 @@ export interface RequestOptions extends Omit<RequestInit, 'body'> {
 }
 
 /**
+ * Resolve REST API host, port, SSL, and protocol strictly per RouterOS v7 specs.
+ * DO NOT use port 8728 or 8729 for REST API calls. Strip any custom port :8729/:8728 automatically.
+ */
+export function resolveRestHostAndPort(router?: RouterAuthInfo): {
+  host: string;
+  port: number;
+  useSsl: boolean;
+  protocol: 'http' | 'https';
+} {
+  let rawHost = (router?.ip || router?.ipAddress || '202.142.186.150').trim();
+  rawHost = rawHost.replace(/^https?:\/\//i, '');
+
+  let embeddedPort: number | undefined;
+  if (rawHost.includes(':')) {
+    const parts = rawHost.split(':');
+    rawHost = parts[0].trim();
+    const p = parseInt(parts[1], 10);
+    if (!isNaN(p)) embeddedPort = p;
+  }
+
+  let useSsl = router?.useSsl ?? (embeddedPort === 443 || router?.port === 443 || router?.apiPort === 443);
+  let targetPort = router?.port || router?.apiPort || embeddedPort;
+
+  // Physical testbed router strictly serves RouterOS v7 REST on port 81 (HTTP)
+  if (rawHost === '202.142.186.150') {
+    targetPort = (targetPort && targetPort !== 443 && targetPort !== 8728 && targetPort !== 8729) ? targetPort : 81;
+    useSsl = false;
+  } else if (!targetPort || targetPort === 8728 || targetPort === 8729) {
+    if (useSsl) {
+      targetPort = 443;
+    } else {
+      targetPort = 80;
+    }
+  }
+
+  const protocol: 'http' | 'https' = useSsl || targetPort === 443 || targetPort === 8443 ? 'https' : 'http';
+  return { host: rawHost, port: targetPort, useSsl, protocol };
+}
+
+/**
  * Extract active router credentials from auth state or localStorage ('registered_routers')
+ * Inherits credentials reliably across router switches
  */
 export function getActiveRouterAuth(activeRouter?: RouterAuthInfo): {
   username: string;
@@ -42,18 +103,29 @@ export function getActiveRouterAuth(activeRouter?: RouterAuthInfo): {
   let username = activeRouter?.username?.trim() || '';
   let password = activeRouter?.password || '';
 
-  if (typeof window !== 'undefined' && (!username || !password)) {
+  if (typeof window !== 'undefined') {
     try {
+      const selectedId = activeRouter?.id || localStorage.getItem('netpulse_selected_router_id');
       const raw = localStorage.getItem('registered_routers');
       if (raw) {
         const routers = JSON.parse(raw);
         if (Array.isArray(routers) && routers.length > 0) {
-          const match = activeRouter?.id
-            ? routers.find((r: any) => r.id === activeRouter.id)
-            : routers[0];
-          const r = match || routers[0];
-          if (!username) username = r.username || 'admin';
-          if (!password) password = r.password || '';
+          const match = selectedId ? routers.find((r: any) => r.id === selectedId) : undefined;
+          const target =
+            match ||
+            (activeRouter?.ip || activeRouter?.ipAddress
+              ? routers.find(
+                  (r: any) =>
+                    r.ip === (activeRouter?.ip || activeRouter?.ipAddress) ||
+                    r.ipAddress === (activeRouter?.ip || activeRouter?.ipAddress)
+                )
+              : undefined) ||
+            routers[0];
+
+          if (target) {
+            if (!username) username = target.username || 'admin';
+            if (!password && target.password !== undefined) password = target.password;
+          }
         }
       }
     } catch {}
@@ -77,16 +149,15 @@ export function getActiveRouterAuth(activeRouter?: RouterAuthInfo): {
 
 /**
  * Returns the base URL for RouterOS REST API:
- * In browser: always uses `/api/mikrotik` (Netlify proxy rewrites to RouterOS REST port 81)
- * On server / node: uses `https://${ip}:${port}/rest` or fallback
+ * In browser: uses `/api/mikrotik` (proxied to RouterOS REST)
+ * On server / node: uses standard HTTP/HTTPS with sanitized ports (443/80/81, never 8729)
  */
 export function getBaseUrl(activeRouter?: RouterAuthInfo): string {
   if (typeof window !== 'undefined') {
     return `${window.location.origin}/api/mikrotik`;
   }
-  const ip = (activeRouter?.ip || activeRouter?.ipAddress || '202.142.186.150').trim();
-  const targetPort = activeRouter?.port || activeRouter?.apiPort || 8729;
-  return `https://${ip}:${targetPort}/rest`;
+  const { host, port, protocol } = resolveRestHostAndPort(activeRouter);
+  return `${protocol}://${host}:${port}/rest`;
 }
 
 /**
@@ -152,10 +223,26 @@ class ApiClient {
     bodyData?: any,
     options: RequestOptions = {}
   ): Promise<ApiResponse<T>> {
-    const baseUrl = getBaseUrl(options.router);
-    const auth = getActiveRouterAuth(options.router);
+    // Resolve active router and auth
+    let effectiveRouter = options.router;
+    if (!effectiveRouter && typeof window !== 'undefined') {
+      try {
+        const selectedId = localStorage.getItem('netpulse_selected_router_id');
+        const raw = localStorage.getItem('registered_routers');
+        if (raw) {
+          const routers = JSON.parse(raw);
+          if (Array.isArray(routers) && routers.length > 0) {
+            effectiveRouter = selectedId ? routers.find((r: any) => r.id === selectedId) || routers[0] : routers[0];
+          }
+        }
+      } catch {}
+    }
 
-    // Normalize endpoint path: ensure leading slash and avoid duplicating `/api/mikrotik`
+    const proxyMode = getRouterProxyMode(effectiveRouter);
+    const auth = getActiveRouterAuth(effectiveRouter);
+    const resolved = resolveRestHostAndPort(effectiveRouter);
+
+    // Normalize endpoint path: ensure leading slash
     let cleanEndpoint = endpoint.trim();
     if (cleanEndpoint.startsWith('/api/mikrotik/')) {
       cleanEndpoint = cleanEndpoint.replace(/^\/api\/mikrotik\//, '/');
@@ -163,8 +250,17 @@ class ApiClient {
       cleanEndpoint = `/${cleanEndpoint}`;
     }
 
+    // 1. ROUTE ALL ROUTEROS REST CALLS THROUGH REVERSE PROXY:
+    // Default to 'Netlify Managed Proxy Mode' (/api/mikrotik/*)
+    // Only use direct IP if user explicitly switched to 'direct'
+    let fullUrl: string;
+    if (proxyMode === 'direct') {
+      fullUrl = `${resolved.protocol}://${resolved.host}:${resolved.port}/rest${cleanEndpoint}`;
+    } else {
+      fullUrl = `/api/mikrotik${cleanEndpoint}`;
+    }
+
     // Append query params if provided
-    let fullUrl = `${baseUrl}${cleanEndpoint}`;
     if (options.params) {
       const searchParams = new URLSearchParams();
       Object.entries(options.params).forEach(([key, val]) => {
@@ -178,7 +274,7 @@ class ApiClient {
       }
     }
 
-    // Build standard headers
+    // 2. ATTACH EXPLICIT PROXY HEADERS
     const incomingHeaders = (options.headers as Record<string, string>) || {};
     const headers: Record<string, string> = {
       Authorization: auth.authHeader,
@@ -188,6 +284,11 @@ class ApiClient {
       'Cache-Control': 'no-cache, no-store, must-revalidate',
       Pragma: 'no-cache',
       Expires: '0',
+      'x-router-host': resolved.host,
+      'x-router-ip': resolved.host,
+      'x-router-port': String(resolved.port),
+      'x-router-ssl': resolved.useSsl ? 'true' : 'false',
+      'x-router-id': effectiveRouter?.id || '',
       ...incomingHeaders,
     };
 
@@ -204,8 +305,9 @@ class ApiClient {
       method,
       headers,
       signal: controller.signal,
-      // CRITICAL: 'omit' prevents modern browsers (Chrome, Safari, Firefox) from triggering the native HTTP Basic Auth modal on 401!
+      // CRITICAL: 'omit' prevents modern browsers from triggering the native HTTP Basic Auth modal on 401
       credentials: 'omit',
+      mode: proxyMode === 'direct' ? 'cors' : 'same-origin',
     };
 
     if (bodyData !== undefined && method !== 'GET') {
@@ -225,11 +327,26 @@ class ApiClient {
           message: 'Request was cancelled',
         };
       }
+
+      const isTypeError =
+        networkErr instanceof TypeError ||
+        (networkErr?.message || '').toLowerCase().includes('failed to fetch') ||
+        (networkErr?.message || '').toLowerCase().includes('networkerror');
+
+      const directCertUrl = `https://${resolved.host}:${resolved.port}/rest/system/resource`;
+      let errMsg = networkErr.message || 'Network connection failure';
+      if (isTypeError) {
+        errMsg =
+          'Browser blocked self-signed SSL. [Click here to authorize certificate in new tab], then click Retry Sync.';
+      }
+
       return {
         success: false,
         status: 0,
-        error: networkErr.message || 'Network connection failure',
-        message: networkErr.message || 'Network connection failure',
+        error: errMsg,
+        message: errMsg,
+        isSslOrCorsBlocked: isTypeError,
+        directCertUrl,
       };
     }
 

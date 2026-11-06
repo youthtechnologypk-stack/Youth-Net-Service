@@ -1781,24 +1781,49 @@ export const BillingManagement: React.FC<BillingManagementProps> = ({
                         {agent.assignedArea}
                       </span>
                     </div>
-                    <span
-                      className={`text-[10px] font-semibold px-2 py-0.5 rounded uppercase ${
-                        agent.status === 'active'
-                          ? 'bg-emerald-950 text-emerald-300 border border-emerald-800'
-                          : 'bg-rose-950 text-rose-300 border border-rose-800'
-                      }`}
-                    >
-                      {agent.status}
-                    </span>
+                    <div className="flex items-center gap-1.5">
+                      <span
+                        className={`text-[10px] font-semibold px-2 py-0.5 rounded uppercase ${
+                          agent.status === 'active'
+                            ? 'bg-emerald-950 text-emerald-300 border border-emerald-800'
+                            : 'bg-rose-950 text-rose-300 border border-rose-800'
+                        }`}
+                      >
+                        {agent.status}
+                      </span>
+                      <button
+                        onClick={() => {
+                          setSelectedAgentToManage(agent);
+                          setIsAddOrEditAgentModalOpen(true);
+                        }}
+                        className="p-1 rounded-lg bg-slate-800 hover:bg-slate-700 text-slate-400 hover:text-cyan-300 border border-slate-700 transition cursor-pointer"
+                        title="Edit Agent Profile & Salary"
+                      >
+                        <Edit3 className="w-3.5 h-3.5" />
+                      </button>
+                    </div>
                   </div>
 
                   <div className="bg-slate-950 p-3 rounded-lg border border-slate-800/80 space-y-1.5 font-mono text-xs">
-                    <div className="flex justify-between">
-                      <span className="text-slate-400">Cash in Hand:</span>
-                      <strong className="text-cyan-400 font-bold">
-                        {formatCurrency(agent.cashInHand)}
-                      </strong>
-                    </div>
+                    {(() => {
+                      const dynamicCash = invoices
+                        .filter(
+                          (inv) =>
+                            (inv.collectedByAgentId === agent.id || (inv as any).agentId === agent.id) &&
+                            inv.status === 'paid'
+                        )
+                        .reduce((sum, inv) => sum + (Number(inv.totalAmount || inv.baseAmount || 0)), 0);
+                      const finalCashInHand = dynamicCash > 0 ? dynamicCash : (agent.cashInHand || 0);
+
+                      return (
+                        <div className="flex justify-between">
+                          <span className="text-slate-400">Cash in Hand:</span>
+                          <strong className="text-cyan-400 font-bold">
+                            {formatCurrency(finalCashInHand)}
+                          </strong>
+                        </div>
+                      );
+                    })()}
                     <div className="flex justify-between">
                       <span className="text-slate-400">Base Salary:</span>
                       <span className="text-white">{formatCurrency(agent.baseSalary)}</span>

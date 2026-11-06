@@ -89,6 +89,8 @@ export interface ProvisionSubscriberParams {
   routerId?: string;
   initialBalance?: number;
   sendWhatsApp?: boolean;
+  assignedAgentId?: string;
+  assignedAgentName?: string;
 }
 
 // LocalStorage helpers with safe fallbacks
@@ -160,6 +162,9 @@ export const useSubscribers = () => {
     complaints,
     logWhatsAppNotice,
     syncSelectedRouterNow,
+    agents,
+    profilePriceMap,
+    addPortalUser,
   } = useISP();
   const { formatCurrency } = useCurrency();
 
@@ -421,7 +426,9 @@ export const useSubscribers = () => {
       const matchedPackage =
         packages.find((p) => p.mikrotikProfile === profile || p.name === profile) ||
         packages[0];
-      const packagePrice = matchedPackage ? matchedPackage.priceMonthly : 2500;
+      const packagePrice =
+        (profile && profilePriceMap && profilePriceMap[profile]) ||
+        (matchedPackage ? matchedPackage.priceMonthly : 2500);
       const targetRouter =
         routers.find((r) => r.id === targetRouterId) || routers[0];
 
@@ -438,6 +445,7 @@ export const useSubscribers = () => {
         name: fullName,
         plan: profile,
         days: validityDays,
+        dueDay: 5,
         expiredPool: params.expiredPool || '16.16.16.0/24',
       });
 
@@ -522,29 +530,25 @@ export const useSubscribers = () => {
       } catch {}
 
       // 2. Concurrently auto-create account in portal user repository (youthnet_portal_users & /api/auth/users)
-      const portalUserRecord = {
+      const portalUserRecord: UserAccount = {
         id: `usr-${cleanUsername}-${Date.now().toString().slice(-4)}`,
         username: cleanUsername,
         password: plainPassword,
         fullName,
         phone,
+        email: `${cleanUsername}@youthnet.pk`,
         role: 'CLIENT',
-        linkedCustomerId: cleanUsername,
-        pppoeUsername: cleanUsername,
-        assignedIp: params.remoteIp || 'Dynamic',
-        profile,
+        isActive: true,
+        grantClientPortal: true,
+        department: 'Subscribers',
         createdAt: new Date().toISOString(),
+        permissions: { view_dashboard: true, view_traffic: true },
       };
 
       try {
-        const existingPortalUsers = getStoredPortalUsers();
-        const updatedPortalUsers = [
-          portalUserRecord,
-          ...existingPortalUsers.filter((u) => u.username?.toLowerCase() !== cleanUsername),
-        ];
-        saveStoredPortalUsers(updatedPortalUsers);
+        addPortalUser(portalUserRecord);
       } catch (err) {
-        console.warn('Portal user save warning:', err);
+        console.warn('Portal user add warning:', err);
       }
 
       try {
@@ -564,9 +568,14 @@ export const useSubscribers = () => {
 
       // 3. Register subscriber automatically into active recurring billing cycle (youthnet_billing_subscribers)
       const now = new Date();
-      const billingDay = 1;
-      const nextMonth = new Date(now.getFullYear(), now.getMonth() + 1, 1);
+      const billingDay = 5;
+      const nextMonth = new Date(now.getFullYear(), now.getMonth() + 1, 5);
       const nextBillingDate = nextMonth.toISOString().split('T')[0];
+
+      // Determine assigned field agent
+      const assignedAgentObj = agents.find((a) => a.id === params.assignedAgentId) || agents[0];
+      const assignedAgentId = params.assignedAgentId || assignedAgentObj?.id;
+      const assignedAgentName = params.assignedAgentName || assignedAgentObj?.name || 'Area Field Technician';
 
       const billingSubscriberRecord: BillingSubscriber = {
         id: `bill-sub-${cleanUsername}`,
@@ -603,7 +612,7 @@ export const useSubscribers = () => {
       const monthStr = now.toLocaleString('en-US', { month: 'short' }).toUpperCase();
       const yearStr = now.getFullYear();
       const initialInvoiceNumber = `INV-${monthStr}${yearStr}-${cleanUsername.toUpperCase()}`;
-      const dueDate = new Date(now.getFullYear(), now.getMonth(), 10).toISOString().split('T')[0];
+      const dueDate = new Date(now.getFullYear(), now.getMonth() + 1, 5).toISOString().split('T')[0];
 
       const initialInvoice: Invoice = {
         id: `inv-${Date.now()}-${cleanUsername}`,
@@ -621,6 +630,8 @@ export const useSubscribers = () => {
         status: 'unpaid',
         dueDate,
         issuedAt: now.toISOString(),
+        collectedByAgentId: assignedAgentId,
+        agentName: assignedAgentName,
         whatsappNoticeSent: true,
         whatsappNoticeTimestamp: now.toISOString(),
       };

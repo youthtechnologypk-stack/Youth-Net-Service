@@ -20,6 +20,7 @@ import {
   getBaseUrl,
   notifyAuthError,
   RouterAuthInfo,
+  resolveRestHostAndPort,
 } from './apiClient';
 
 export interface FetchRouterLiveResult {
@@ -42,6 +43,8 @@ export interface FetchRouterLiveResult {
     txMbps: number;
   };
   error?: string;
+  isSslOrCorsBlocked?: boolean;
+  directCertUrl?: string;
 }
 
 export interface FetchTelemetryOptions {
@@ -77,6 +80,15 @@ export async function safeMikrotikFetch(
   activeRouter?: RouterAuthInfo
 ): Promise<Response> {
   const auth = getActiveRouterAuth(activeRouter);
+  const resolved = resolveRestHostAndPort(activeRouter);
+
+  // If a raw direct router URL was passed (e.g. https://202.142.186.150:443/rest/...),
+  // rewrite it to the reverse proxy (/api/mikrotik/...) to avoid direct browser fetch CORS failures!
+  let targetUrl = url;
+  if (targetUrl.includes('/rest/')) {
+    const subpath = targetUrl.slice(targetUrl.indexOf('/rest/') + 6);
+    targetUrl = `/api/mikrotik/${subpath}`;
+  }
 
   const incomingHeaders = (init.headers as Record<string, string>) || {};
   const headers: Record<string, string> = {
@@ -86,6 +98,11 @@ export async function safeMikrotikFetch(
     'Cache-Control': 'no-cache, no-store, must-revalidate',
     Pragma: 'no-cache',
     Expires: '0',
+    'x-router-host': resolved.host,
+    'x-router-ip': resolved.host,
+    'x-router-port': String(resolved.port),
+    'x-router-ssl': resolved.useSsl ? 'true' : 'false',
+    'x-router-id': activeRouter?.id || '',
     ...incomingHeaders,
   };
 
@@ -101,9 +118,9 @@ export async function safeMikrotikFetch(
 
   let res: Response;
   try {
-    res = await fetch(url, fetchInit);
+    res = await fetch(targetUrl, fetchInit);
   } catch (err: any) {
-    console.warn(`[SafeMikrotikFetch] Network error for ${url}:`, err);
+    console.warn(`[SafeMikrotikFetch] Network error for ${targetUrl}:`, err);
     throw err;
   }
 
@@ -133,8 +150,9 @@ export async function fetchMikrotikLiveTelemetry(
   options?: FetchTelemetryOptions
 ): Promise<FetchRouterLiveResult> {
   const router = activeRouter;
-  const targetPort = activeRouter.port || activeRouter.apiPort || 8729;
-  const ip = (activeRouter.ip || activeRouter.ipAddress || '127.0.0.1').trim();
+  const resolved = resolveRestHostAndPort(activeRouter);
+  const targetPort = resolved.port;
+  const ip = resolved.host;
 
   try {
     const sessionsPromise: Promise<{ success: boolean; activeSessions: ActiveSession[]; error?: string }> =
@@ -160,6 +178,44 @@ export async function fetchMikrotikLiveTelemetry(
         activeSessions: options?.cachedSessions || [],
         interfaces: options?.cachedInterfaces || [],
         error: 'Action failed: Router authentication error. Please verify credentials.',
+      };
+    }
+
+    // ACCURATE ONLINE / HEALTH CHECK:
+    // A router must ONLY show [ONLINE] if GET /system/resource returns a valid HTTP 200 with `cpu-load` and `uptime`.
+    // If the fetch fails, show status as [OFFLINE / UNREACHABLE] with required error banner.
+    const rData = resRes.success && resRes.data
+      ? (Array.isArray(resRes.data) ? resRes.data[0] : resRes.data)
+      : null;
+
+    const hasValidResource = Boolean(
+      resRes.success &&
+      rData &&
+      rData['cpu-load'] !== undefined &&
+      rData.uptime !== undefined
+    );
+
+    if (!hasValidResource) {
+      const isSslBlocked = resRes.isSslOrCorsBlocked || sessionsRes.error?.includes('self-signed') || resRes.error?.includes('self-signed');
+      const directUrl = resRes.directCertUrl || `https://${ip}:${targetPort}/rest/system/resource`;
+      const errorMsg = isSslBlocked
+        ? 'Browser blocked self-signed SSL. [Click here to authorize certificate in new tab], then click Retry Sync.'
+        : (resRes.error || 'Cannot reach RouterOS REST API. Verify IP, credentials, and ensure www/www-ssl service is enabled in IP > Services.');
+
+      return {
+        success: false,
+        error: errorMsg,
+        isSslOrCorsBlocked: isSslBlocked,
+        directCertUrl: directUrl,
+        activeSessions: options?.cachedSessions || [],
+        interfaces: options?.cachedInterfaces || [],
+        router: {
+          status: 'unreachable',
+          cpuLoad: 0,
+          uptime: '0s',
+          memoryUsageMb: 0,
+          totalMemoryMb: 0,
+        },
       };
     }
 
@@ -203,26 +259,14 @@ export async function fetchMikrotikLiveTelemetry(
       });
     }
 
-    let cpuLoad = 0;
-    let memoryUsageMb = 0;
-    let totalMemoryMb = 0;
-    let uptime = '0s';
-    let version = 'RouterOS v7';
-    let model = 'MikroTik';
-
-    if (resRes.success && resRes.data) {
-      const r = Array.isArray(resRes.data) ? resRes.data[0] : resRes.data;
-      if (r) {
-        cpuLoad = Number(r['cpu-load']) || 0;
-        const freeMem = Number(r['free-memory']) || 0;
-        const totalMem = Number(r['total-memory']) || 0;
-        totalMemoryMb = Math.round(totalMem / (1024 * 1024));
-        memoryUsageMb = Math.round((totalMem - freeMem) / (1024 * 1024));
-        uptime = r.uptime || '0s';
-        version = r.version ? `RouterOS ${r.version}` : 'RouterOS v7';
-        model = r['board-name'] || 'MikroTik';
-      }
-    }
+    const cpuLoad = Number(rData['cpu-load']) || 0;
+    const freeMem = Number(rData['free-memory']) || 0;
+    const totalMem = Number(rData['total-memory']) || 0;
+    const totalMemoryMb = Math.round(totalMem / (1024 * 1024));
+    const memoryUsageMb = Math.round((totalMem - freeMem) / (1024 * 1024));
+    const uptime = rData.uptime || '0s';
+    const version = rData.version ? `RouterOS ${rData.version}` : 'RouterOS v7';
+    const model = rData['board-name'] || 'MikroTik';
 
     return {
       success: true,
@@ -253,15 +297,27 @@ export async function fetchMikrotikLiveTelemetry(
         error: 'Aborted',
       };
     }
-    const isNetlifyHost = typeof window !== 'undefined' && window.location.hostname.includes('netlify.app');
-    const targetDesc = isNetlifyHost ? `Netlify Proxy (/api/mikrotik -> ${ip}:${targetPort})` : `${ip}:${targetPort}`;
+    const isTypeError =
+      err instanceof TypeError ||
+      (err?.message || '').toLowerCase().includes('failed to fetch');
+    const directUrl = `https://${ip}:${targetPort}/rest/system/resource`;
+    const errorMsg = isTypeError
+      ? 'Browser blocked self-signed SSL. [Click here to authorize certificate in new tab], then click Retry Sync.'
+      : (err?.message || 'Cannot reach RouterOS REST API. Verify IP, credentials, and ensure www/www-ssl service is enabled in IP > Services.');
+
     return {
       success: false,
-      error: `Cannot reach router at ${targetDesc} - ${err?.message || 'Check Public IP reachability, SSL cert, or CORS.'}`,
+      error: errorMsg,
+      isSslOrCorsBlocked: isTypeError,
+      directCertUrl: directUrl,
       activeSessions: options?.cachedSessions || [],
       interfaces: options?.cachedInterfaces || [],
       router: {
         status: 'unreachable',
+        cpuLoad: 0,
+        uptime: '0s',
+        memoryUsageMb: 0,
+        totalMemoryMb: 0,
       },
     };
   }

@@ -26,6 +26,7 @@ import {
   ChevronRight,
   Send,
   AlertCircle,
+  Printer,
 } from 'lucide-react';
 import { useISP } from '../context/ISPContext';
 import { formatCurrency } from '../context/CurrencyContext';
@@ -36,6 +37,7 @@ import {
   calculateExpirationMetrics,
 } from '../services/mikrotikSubscriberSync';
 import { apiClient } from '../services/apiClient';
+import { storageService } from '../services/storageService';
 
 export interface SubscriberProfileDrawerProps {
   isOpen: boolean;
@@ -77,6 +79,8 @@ export const SubscriberProfileDrawer: React.FC<SubscriberProfileDrawerProps> = (
     createInvoice,
     createComplaintTicket,
     renewSubscriberPackage,
+    sessionHistory,
+    getSubscriberHistoricalUsage,
   } = useISP();
 
   const [activeTab, setActiveTab] = useState<'overview' | 'sessions' | 'complaints' | 'billing'>('overview');
@@ -267,37 +271,109 @@ export const SubscriberProfileDrawer: React.FC<SubscriberProfileDrawerProps> = (
     return packages[0] || null;
   }, [customer, packages, liveSession]);
 
-  // Invoices for this subscriber
+  // Invoices for this subscriber (Context + Centralized Storage Engine)
   const subscriberInvoices: Invoice[] = useMemo(() => {
-    if (!customer) return server360Data?.invoices || [];
+    const cleanUser = (username || '').toLowerCase();
+    const stored = storageService.getInvoicesBySubscriber(cleanUser).map((si) => ({
+      id: si.id,
+      invoiceNumber: si.invoiceNo,
+      customerId: customer?.id || `cust-${si.subscriberUsername}`,
+      customerName: customer?.name || si.subscriberUsername,
+      customerPhone: customer?.phone || '+92 300 0000000',
+      packageId: customer?.packageId || 'pkg-1',
+      packageName: subscriberPackage?.name || 'Broadband Fiber',
+      billingMonth: new Date(si.createdDate).toLocaleDateString('en-US', { month: 'long', year: 'numeric' }),
+      baseAmount: si.subtotal || si.amount,
+      taxAmount: si.taxAmount || 0,
+      discountAmount: 0,
+      totalAmount: si.amount,
+      status: si.status === 'PAID' ? 'paid' : 'unpaid',
+      dueDate: si.dueDate,
+      issuedAt: si.createdDate,
+      receiptNumber: si.receiptNumber,
+    } as Invoice));
+
     const matched = invoices.filter(
       (inv) =>
-        inv.customerId === customer.id ||
-        (customer.name && inv.customerName.toLowerCase() === customer.name.toLowerCase()) ||
-        (customer.phone && inv.customerPhone === customer.phone)
+        (customer && inv.customerId === customer.id) ||
+        inv.invoiceNumber.toLowerCase().includes(cleanUser) ||
+        (customer?.name && inv.customerName.toLowerCase() === customer.name.toLowerCase()) ||
+        (customer?.phone && inv.customerPhone === customer.phone)
     );
-    if (matched.length > 0) return matched;
+
+    const merged = [...matched];
+    stored.forEach((st) => {
+      if (!merged.some((m) => m.invoiceNumber === st.invoiceNumber || m.id === st.id)) {
+        merged.push(st);
+      }
+    });
+
+    if (merged.length > 0) return merged;
     return server360Data?.invoices || [];
-  }, [customer, invoices, server360Data]);
+  }, [customer, invoices, server360Data, username, subscriberPackage]);
 
   // Latest invoice
   const latestInvoice = subscriberInvoices[0] || null;
 
-  // Complaints for this subscriber
+  // Complaints for this subscriber (Context + Centralized Storage Engine)
   const subscriberComplaints: ComplaintTicket[] = useMemo(() => {
-    if (!customer) return server360Data?.complaints || [];
+    const cleanUser = (username || '').toLowerCase();
+    const stored = storageService.getTicketsBySubscriber(cleanUser).map((st) => ({
+      id: st.id,
+      ticketNumber: st.ticketNo,
+      customerId: customer?.id || `cust-${st.subscriberUsername}`,
+      customerName: customer?.name || st.subscriberUsername,
+      customerPhone: customer?.phone || '+92 300 0000000',
+      title: st.issue,
+      description: st.issue,
+      category: 'fiber_cut' as any,
+      priority: st.priority.toLowerCase() as any,
+      status: st.status === 'RESOLVED' ? 'resolved' : 'open',
+      assignedTo: 'Area Field Technician',
+      createdAt: st.createdAt,
+    } as unknown as ComplaintTicket));
+
     const matched = complaints.filter(
       (cmp) =>
-        cmp.customerId === customer.id ||
-        (customer.name && cmp.customerName.toLowerCase() === customer.name.toLowerCase()) ||
-        (customer.phone && cmp.customerPhone === customer.phone)
+        (customer && cmp.customerId === customer.id) ||
+        (customer?.name && cmp.customerName.toLowerCase() === customer.name.toLowerCase()) ||
+        (customer?.phone && cmp.customerPhone === customer.phone)
     );
-    if (matched.length > 0) return matched;
+
+    const merged = [...matched];
+    stored.forEach((st) => {
+      if (!merged.some((m) => m.id === st.id || m.ticketNumber === st.ticketNumber)) {
+        merged.push(st);
+      }
+    });
+
+    if (merged.length > 0) return merged;
     return server360Data?.complaints || [];
-  }, [customer, complaints, server360Data]);
+  }, [customer, complaints, server360Data, username]);
+
+  // Historical data usage metrics
+  const historicalUsage = useMemo(() => {
+    return getSubscriberHistoricalUsage(username || '');
+  }, [getSubscriberHistoricalUsage, username]);
 
   // Session history logs
   const sessionLogs: SessionLog[] = useMemo(() => {
+    const cleanUser = (username || '').toLowerCase();
+    const storedHistory = sessionHistory.filter((s) => s.username?.toLowerCase() === cleanUser);
+    if (storedHistory.length > 0) {
+      return storedHistory.map((s) => ({
+        id: s.id,
+        connectedAt: s.connectTime,
+        disconnectedAt: s.disconnectTime,
+        duration: s.duration,
+        assignedIp: s.assignedIp || customer?.assignedIp || 'Dynamic',
+        callerId: s.callerId || customer?.macAddress || 'N/A',
+        terminationReason: s.terminationReason || 'Normal Disconnect',
+        bytesDownloadedMb: Math.round(s.totalDownloadMB),
+        bytesUploadedMb: Math.round(s.totalUploadMB),
+      }));
+    }
+
     if (server360Data?.sessionHistory && Array.isArray(server360Data.sessionHistory) && server360Data.sessionHistory.length > 0) {
       return server360Data.sessionHistory;
     }
@@ -319,7 +395,7 @@ export const SubscriberProfileDrawer: React.FC<SubscriberProfileDrawerProps> = (
     }
 
     return [];
-  }, [server360Data, liveSession, customer]);
+  }, [sessionHistory, username, server360Data, liveSession, customer]);
 
   // Bandwidth telemetry calculations
   const telemetry = useMemo(() => {
@@ -398,6 +474,40 @@ export const SubscriberProfileDrawer: React.FC<SubscriberProfileDrawerProps> = (
       setActionFeedback({
         type: 'error',
         message: err.message || 'Failed to renew subscriber package.',
+      });
+    } finally {
+      setActionLoading(null);
+    }
+  };
+
+  // Operational Action: Shift to Expired Pool (Restricted Profile & Disconnect)
+  const handleShiftToExpiredPool = async () => {
+    if (!username) return;
+    setActionLoading('shift-expired');
+    setActionFeedback(null);
+    try {
+      await fetch(`/api/subscribers/${encodeURIComponent(username)}/isolate`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ status: 'walled_garden', targetProfile: 'EXPIRED-POOL', routerId: selectedRouterId }),
+      }).catch(() => {});
+
+      if (liveSession?.id) {
+        await kickSession(liveSession.id);
+      }
+
+      if (customer?.id) {
+        await toggleCustomerStatus(customer.id, 'walled_garden');
+      }
+
+      setActionFeedback({
+        type: 'success',
+        message: `Subscriber shifted to EXPIRED-POOL profile and kicked from active session.`,
+      });
+    } catch (err: any) {
+      setActionFeedback({
+        type: 'error',
+        message: err.message || 'Failed to shift to expired pool.',
       });
     } finally {
       setActionLoading(null);
@@ -912,6 +1022,63 @@ export const SubscriberProfileDrawer: React.FC<SubscriberProfileDrawerProps> = (
                 </div>
               </div>
 
+              {/* CARD: HISTORICAL DATA & TRAFFIC CONSUMPTION */}
+              <div className="bg-slate-950 border border-slate-800 rounded-xl p-4 shadow-md space-y-3">
+                <div className="flex items-center justify-between border-b border-slate-800/80 pb-2.5 flex-wrap gap-2">
+                  <div className="flex items-center gap-2">
+                    <Activity className="w-4 h-4 text-cyan-400" />
+                    <h3 className="text-xs font-bold text-white uppercase tracking-wider">
+                      Carrier Historical Data Consumption &amp; Traffic Aggregate
+                    </h3>
+                  </div>
+                  <span className="text-[10px] font-mono px-2 py-0.5 rounded bg-cyan-950 text-cyan-300 border border-cyan-800">
+                    {historicalUsage.sessionCount} Sessions Logged
+                  </span>
+                </div>
+
+                <div className="grid grid-cols-2 sm:grid-cols-4 gap-2.5 text-xs font-mono">
+                  <div className="bg-slate-900/80 p-2.5 rounded-lg border border-slate-800">
+                    <span className="text-[10px] text-slate-400 block mb-0.5 flex items-center gap-1">
+                      <Download className="w-3 h-3 text-emerald-400" />
+                      Total Download
+                    </span>
+                    <span className="text-emerald-300 font-bold text-sm">
+                      {historicalUsage.totalDownloadMB > 1024
+                        ? `${(historicalUsage.totalDownloadMB / 1024).toFixed(2)} GB`
+                        : `${historicalUsage.totalDownloadMB.toFixed(1)} MB`}
+                    </span>
+                  </div>
+
+                  <div className="bg-slate-900/80 p-2.5 rounded-lg border border-slate-800">
+                    <span className="text-[10px] text-slate-400 block mb-0.5 flex items-center gap-1">
+                      <Upload className="w-3 h-3 text-cyan-400" />
+                      Total Upload
+                    </span>
+                    <span className="text-cyan-300 font-bold text-sm">
+                      {historicalUsage.totalUploadMB > 1024
+                        ? `${(historicalUsage.totalUploadMB / 1024).toFixed(2)} GB`
+                        : `${historicalUsage.totalUploadMB.toFixed(1)} MB`}
+                    </span>
+                  </div>
+
+                  <div className="bg-slate-900/80 p-2.5 rounded-lg border border-slate-800">
+                    <span className="text-[10px] text-slate-400 block mb-0.5">Combined Traffic</span>
+                    <span className="text-white font-bold text-sm">
+                      {historicalUsage.totalMB > 1024
+                        ? `${(historicalUsage.totalMB / 1024).toFixed(2)} GB`
+                        : `${historicalUsage.totalMB.toFixed(1)} MB`}
+                    </span>
+                  </div>
+
+                  <div className="bg-slate-900/80 p-2.5 rounded-lg border border-slate-800">
+                    <span className="text-[10px] text-slate-400 block mb-0.5">Carrier Accounting</span>
+                    <span className="text-indigo-300 font-bold text-xs">
+                      {historicalUsage.lastActiveSession ? 'Real-Time Sync' : 'Session History'}
+                    </span>
+                  </div>
+                </div>
+              </div>
+
               {/* CARD 2: FINANCIAL & BILLING STATUS */}
               <div className="bg-slate-950 border border-slate-800 rounded-xl p-4 shadow-md">
                 <div className="flex items-center justify-between border-b border-slate-800/80 pb-3 mb-3">
@@ -946,7 +1113,7 @@ export const SubscriberProfileDrawer: React.FC<SubscriberProfileDrawerProps> = (
                       {formatCurrency(customer?.balanceDue || 0)}
                     </div>
                     <span className="text-[10px] text-slate-500 mt-0.5 block">
-                      Billing cycle: 1st of every month
+                      Billing cycle: 5th of every month
                     </span>
                   </div>
 
@@ -1012,7 +1179,25 @@ export const SubscriberProfileDrawer: React.FC<SubscriberProfileDrawerProps> = (
                     </span>
                   </button>
 
-                  {/* Action 1: Force Kick */}
+                  {/* Action 1: Shift to Expired Pool */}
+                  <button
+                    onClick={handleShiftToExpiredPool}
+                    disabled={actionLoading === 'shift-expired'}
+                    className="p-3 bg-slate-900 hover:bg-amber-950/40 border border-slate-800 hover:border-amber-700 rounded-lg text-left transition group disabled:opacity-50 cursor-pointer"
+                  >
+                    <div className="flex items-center justify-between text-xs font-bold text-amber-400 mb-1">
+                      <span>Shift to Expired Pool</span>
+                      <ShieldAlert className="w-4 h-4" />
+                    </div>
+                    <p className="text-[11px] text-slate-400">
+                      Moves secret to EXPIRED-POOL profile (256k) and disconnects active session immediately.
+                    </p>
+                    <span className="text-[10px] text-slate-500 group-hover:text-amber-300 font-mono mt-2 block">
+                      {actionLoading === 'shift-expired' ? 'Shifting Pool...' : 'Isolate Now →'}
+                    </span>
+                  </button>
+
+                  {/* Action 2: Force Kick */}
                   <button
                     onClick={handleForceKick}
                     disabled={actionLoading === 'kick'}
@@ -1027,28 +1212,6 @@ export const SubscriberProfileDrawer: React.FC<SubscriberProfileDrawerProps> = (
                     </p>
                     <span className="text-[10px] text-slate-500 group-hover:text-rose-300 font-mono mt-2 block">
                       {actionLoading === 'kick' ? 'Kicking Session...' : 'Execute Kick →'}
-                    </span>
-                  </button>
-
-                  {/* Action 2: Walled Garden Isolate / Restore */}
-                  <button
-                    onClick={handleToggleWalledGarden}
-                    disabled={actionLoading === 'isolate'}
-                    className="p-3 bg-slate-900 hover:bg-amber-950/40 border border-slate-800 hover:border-amber-700 rounded-lg text-left transition group disabled:opacity-50 cursor-pointer"
-                  >
-                    <div className="flex items-center justify-between text-xs font-bold text-amber-400 mb-1">
-                      <span>
-                        {customer?.status === 'walled_garden' ? 'Restore Active' : 'Isolate Walled Garden'}
-                      </span>
-                      <ShieldAlert className="w-4 h-4" />
-                    </div>
-                    <p className="text-[11px] text-slate-400">
-                      {customer?.status === 'walled_garden'
-                        ? 'Restore high-speed profile and unblock Internet access.'
-                        : 'Routes traffic to overdue captive portal pool and severs active session.'}
-                    </p>
-                    <span className="text-[10px] text-slate-500 group-hover:text-amber-300 font-mono mt-2 block">
-                      {actionLoading === 'isolate' ? 'Updating Status...' : 'Toggle Pool →'}
                     </span>
                   </button>
 
@@ -1209,16 +1372,43 @@ export const SubscriberProfileDrawer: React.FC<SubscriberProfileDrawerProps> = (
                           </span>
                         </td>
                         <td className="py-2.5 px-3 text-right">
-                          {inv.status !== 'paid' && onOpenCashModal ? (
+                          <div className="flex items-center justify-end gap-1.5 font-sans">
+                            {/* WhatsApp Dispatch */}
                             <button
-                              onClick={() => onOpenCashModal(inv.id)}
-                              className="bg-emerald-900/80 hover:bg-emerald-800 text-emerald-200 text-[11px] px-2 py-0.5 rounded font-sans transition"
+                              type="button"
+                              onClick={() => {
+                                const cleanPhone = (customer?.phone || '').replace(/[^0-9]/g, '');
+                                const text = `*YOUTH NET ISP - BILLING STATEMENT*\n\nDear *${customer?.name || username}*,\nInvoice: *${inv.invoiceNumber}*\nMonth: ${inv.billingMonth}\nAmount: *Rs. ${Number(inv.totalAmount).toLocaleString()}*\nDue Date: ${inv.dueDate}\nStatus: *${inv.status.toUpperCase()}*\n\nPlease settle your bill before due date to prevent automated RouterOS service suspension.\nThank you!`;
+                                window.open(`https://wa.me/${cleanPhone || '923001234567'}?text=${encodeURIComponent(text)}`, '_blank');
+                              }}
+                              title="Send WhatsApp Invoice Notice"
+                              className="p-1 rounded bg-slate-800 hover:bg-emerald-950 text-slate-300 hover:text-emerald-400 border border-slate-700 transition cursor-pointer"
                             >
-                              Collect Cash
+                              <Send className="w-3.5 h-3.5" />
                             </button>
-                          ) : (
-                            <span className="text-[11px] text-slate-500 font-sans">Settled</span>
-                          )}
+
+                            {/* Print Receipt */}
+                            <button
+                              type="button"
+                              onClick={() => window.print()}
+                              title="Print Invoice / Receipt"
+                              className="p-1 rounded bg-slate-800 hover:bg-slate-700 text-slate-300 hover:text-cyan-300 border border-slate-700 transition cursor-pointer"
+                            >
+                              <Printer className="w-3.5 h-3.5" />
+                            </button>
+
+                            {/* Collect Cash */}
+                            {inv.status !== 'paid' && onOpenCashModal ? (
+                              <button
+                                onClick={() => onOpenCashModal(inv.id)}
+                                className="bg-emerald-900/80 hover:bg-emerald-800 text-emerald-200 text-[11px] px-2 py-0.5 rounded font-sans transition"
+                              >
+                                Collect Cash
+                              </button>
+                            ) : (
+                              <span className="text-[11px] text-emerald-400 font-sans font-semibold">Settled</span>
+                            )}
+                          </div>
                         </td>
                       </tr>
                     ))}

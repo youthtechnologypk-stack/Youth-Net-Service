@@ -1,21 +1,39 @@
 import { SystemRole, UserAccount } from '../types/auth';
+import { storageService } from '../services/storageService';
+import {
+  USERS_STORAGE_KEY,
+  AUTH_STORAGE_KEY,
+  authenticateAgainstRepository,
+  saveUnifiedPortalUser,
+  getStandardPortalUsers,
+  UnifiedPortalUser,
+} from './userRepository';
+
+export { USERS_STORAGE_KEY, saveUnifiedPortalUser, getStandardPortalUsers };
+export type { UnifiedPortalUser };
 
 export interface AuthSessionData {
   token: string;
   user: UserAccount;
+  username?: string;
+  role?: SystemRole;
+  fullName?: string;
 }
-
-const AUTH_STORAGE_KEY = 'youthnet_auth_session';
 
 /**
  * Default Landing Route by Role
+ * Requirement:
+ * 'AGENT' -> /agent/portal
+ * 'CLIENT' -> /client/portal
+ * 'ADMIN' -> /admin/noc
+ * 'MANAGER' -> /manager/dashboard
  */
 export function getLandingRouteForRole(role: SystemRole): string {
   switch (role) {
     case 'ADMIN':
-      return '/dashboard/admin';
+      return '/admin/noc';
     case 'MANAGER':
-      return '/dashboard/operations';
+      return '/manager/dashboard';
     case 'AGENT':
       return '/agent/portal';
     case 'CLIENT':
@@ -24,6 +42,44 @@ export function getLandingRouteForRole(role: SystemRole): string {
       return '/login';
   }
 }
+
+export function getTabFromPath(path: string): string | null {
+  const clean = path.toLowerCase().replace(/^\//, '').split('?')[0].split('#')[0].trim();
+  if (clean === 'agent/portal' || clean === 'agent') return 'agent_portal';
+  if (clean === 'client/portal' || clean === 'client') return 'client_portal';
+  if (clean === 'admin/noc' || clean === 'admin' || clean === 'dashboard/admin' || clean === 'noc' || clean === '') return 'noc';
+  if (clean === 'manager/dashboard' || clean === 'manager' || clean === 'dashboard/operations' || clean === 'operations') return 'operations';
+  if (clean === 'billing') return 'billing';
+  if (clean === 'complaints') return 'complaints';
+  if (clean === 'mikrotik') return 'mikrotik';
+  if (clean === 'olt') return 'olt';
+  if (clean === 'users') return 'users';
+  if (clean === 'permissions') return 'permissions';
+  if (clean === 'settings') return 'settings';
+  if (clean === 'architecture') return 'architecture';
+  if (clean === 'logs' || clean === 'activity' || clean === 'audit') return 'logs';
+  if (clean === 'mobile') return 'mobile';
+  if (clean === 'login') return 'login';
+  return null;
+}
+
+export function getPathFromTab(tab: string): string {
+  switch (tab) {
+    case 'agent_portal':
+      return '/agent/portal';
+    case 'client_portal':
+      return '/client/portal';
+    case 'noc':
+      return '/admin/noc';
+    case 'operations':
+      return '/manager/dashboard';
+    case 'logs':
+      return '/logs';
+    default:
+      return `/${tab}`;
+  }
+}
+
 
 /**
  * Checks if a given role is permitted to access a specific feature/tab
@@ -36,7 +92,7 @@ export function isRouteAllowedForRole(role: SystemRole, routeOrTab: string): boo
   const clean = routeOrTab.toLowerCase().replace(/^\//, '');
 
   if (role === 'MANAGER') {
-    // Allowed: NOC Command Center, Complaints & Ticketing SLA, Subscribers, Cash Overview
+    // Allowed: NOC Command Center, Complaints & Ticketing SLA, Subscribers, Cash Overview, Activity Logs
     // Strictly Hidden: hardware credentials/passwords, router deletion, system settings, global currency configs
     const managerAllowed = [
       'noc',
@@ -46,6 +102,7 @@ export function isRouteAllowedForRole(role: SystemRole, routeOrTab: string): boo
       'subscribers',
       'billing', // Can view collections & agent cash
       'olt', // Can view optical status
+      'logs', // Can view audit trail
     ];
     // Explicitly forbidden for Manager
     const managerForbidden = ['settings', 'mikrotik', 'architecture'];
@@ -55,14 +112,14 @@ export function isRouteAllowedForRole(role: SystemRole, routeOrTab: string): boo
 
   if (role === 'AGENT') {
     // Allowed: /agent/portal, mobile simulator, tickets, cash collection, ont checker
-    const agentAllowed = ['agent', 'agent/portal', 'mobile', 'tickets', 'collections', 'ont_checker'];
-    return agentAllowed.some((a) => clean.includes(a));
+    const agentAllowed = ['agent', 'agent/portal', 'agent_portal', 'mobile', 'tickets', 'collections', 'ont_checker'];
+    return agentAllowed.some((a) => clean === a || clean.includes(a));
   }
 
   if (role === 'CLIENT') {
     // Allowed: /client/portal, connection status, invoices, speed test, support
-    const clientAllowed = ['client', 'client/portal', 'my_connection', 'my_invoices', 'my_support'];
-    return clientAllowed.some((a) => clean.includes(a));
+    const clientAllowed = ['client', 'client/portal', 'client_portal', 'my_connection', 'my_invoices', 'my_support'];
+    return clientAllowed.some((a) => clean === a || clean.includes(a));
   }
 
   return false;
@@ -80,21 +137,32 @@ const DEFAULT_ADMIN_USER: UserAccount = {
 };
 
 /**
- * Get current authenticated user from storage
+ * Get current authenticated user from storage (Strict RBAC - returns null if not logged in)
  */
 export function getStoredUser(): UserAccount | null {
   if (typeof window === 'undefined') return null;
   try {
     const raw = localStorage.getItem(AUTH_STORAGE_KEY);
     if (!raw) {
-      // Persist admin session so route changes and refreshes never loop or wipe state
-      saveAuthSession('token-admin-session', DEFAULT_ADMIN_USER);
-      return DEFAULT_ADMIN_USER;
+      return null;
     }
-    const parsed: AuthSessionData = JSON.parse(raw);
-    return parsed.user || DEFAULT_ADMIN_USER;
+    const parsed: any = JSON.parse(raw);
+    if (parsed.user) return parsed.user;
+    if (parsed.username && parsed.role) {
+      return {
+        id: parsed.id || `usr-${parsed.username}`,
+        username: parsed.username,
+        fullName: parsed.fullName || parsed.username,
+        displayName: parsed.fullName || parsed.username,
+        phone: parsed.phone || '+92 300 0000000',
+        role: parsed.role,
+        isActive: true,
+        createdAt: parsed.createdAt || new Date().toISOString(),
+      };
+    }
+    return null;
   } catch {
-    return DEFAULT_ADMIN_USER;
+    return null;
   }
 }
 
@@ -102,14 +170,14 @@ export function getStoredUser(): UserAccount | null {
  * Get stored JWT auth token
  */
 export function getStoredToken(): string | null {
-  if (typeof window === 'undefined') return 'token-admin-session';
+  if (typeof window === 'undefined') return null;
   try {
     const raw = localStorage.getItem(AUTH_STORAGE_KEY);
-    if (!raw) return 'token-admin-session';
-    const parsed: AuthSessionData = JSON.parse(raw);
-    return parsed.token || 'token-admin-session';
+    if (!raw) return null;
+    const parsed: any = JSON.parse(raw);
+    return parsed.token || null;
   } catch {
-    return 'token-admin-session';
+    return null;
   }
 }
 
@@ -119,7 +187,16 @@ export function getStoredToken(): string | null {
 export function saveAuthSession(token: string, user: UserAccount, isRoleSimulation = false): void {
   if (typeof window === 'undefined') return;
   try {
-    localStorage.setItem(AUTH_STORAGE_KEY, JSON.stringify({ token, user }));
+    localStorage.setItem(
+      AUTH_STORAGE_KEY,
+      JSON.stringify({
+        token,
+        user,
+        username: user.username,
+        role: user.role,
+        fullName: user.fullName || user.displayName,
+      })
+    );
     if (!isRoleSimulation) {
       if (user.role === 'ADMIN') {
         sessionStorage.setItem('auth_original_role', 'ADMIN');
@@ -160,127 +237,74 @@ export function clearAuthSession(): void {
 }
 
 /**
- * API Login call
+ * API Login Authentication Handler
+ * Authenticates against standardized USERS_STORAGE_KEY, MikroTik secrets, and fallback DB
  */
 export async function apiLogin(
   username: string,
   password: string
 ): Promise<{ success: boolean; user?: UserAccount; token?: string; error?: string }> {
+  const enteredUser = (username || '').trim().toLowerCase();
+  const enteredPass = (password || '').trim();
+
+  if (!enteredUser || !enteredPass) {
+    return { success: false, error: 'Please enter both username and password.' };
+  }
+
+  // 1. Authenticate against live local repository (USERS_STORAGE_KEY = 'youthnet_portal_users')
+  // Also checks MikroTik secrets array if subscriber
+  const repoResult = authenticateAgainstRepository(enteredUser, enteredPass);
+  if (repoResult.success && repoResult.user) {
+    saveAuthSession(repoResult.token || `session_${Date.now()}`, repoResult.user);
+    storageService.logAuditEvent({
+      actor: repoResult.user.username,
+      actorRole: repoResult.user.role,
+      actionType: 'AUTH_LOGIN',
+      actionTitle: 'User Authenticated Session',
+      target: getLandingRouteForRole(repoResult.user.role),
+      severity: 'SUCCESS',
+      details: `Account @${repoResult.user.username} signed in successfully.`,
+    });
+    return { success: true, user: repoResult.user, token: repoResult.token };
+  }
+
+  // 2. Fallback to server API if available
   try {
     const res = await fetch('/api/auth/login', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ username, password }),
+      body: JSON.stringify({ username: enteredUser, password: enteredPass }),
     });
 
     const data = await res.json();
-    if (res.ok && data.success) {
+    if (res.ok && data.success && data.user) {
       saveAuthSession(data.token, data.user);
+      storageService.logAuditEvent({
+        actor: data.user.username,
+        actorRole: data.user.role,
+        actionType: 'AUTH_LOGIN',
+        actionTitle: 'User Authenticated Session',
+        target: getLandingRouteForRole(data.user.role),
+        severity: 'SUCCESS',
+        details: `Account @${data.user.username} signed in successfully via server DB.`,
+      });
       return { success: true, user: data.user, token: data.token };
     }
-
-    // If server login failed, check if user exists in localStorage youthnet_portal_users
-    if (typeof window !== 'undefined') {
-      try {
-        const rawPortalUsers = localStorage.getItem('youthnet_portal_users');
-        if (rawPortalUsers) {
-          const list: any[] = JSON.parse(rawPortalUsers);
-          const cleanUser = username.trim().toLowerCase();
-          const cleanPass = password.trim();
-          const matched = list.find(
-            (u) =>
-              (u.username?.trim().toLowerCase() === cleanUser || u.pppoeUsername?.trim().toLowerCase() === cleanUser) &&
-              (u.password === cleanPass || cleanPass === 'P@ssword' || cleanPass === 'client@123')
-          );
-          if (matched) {
-            const portalAccount: UserAccount = {
-              id: matched.id || `usr-${cleanUser}`,
-              username: matched.username || cleanUser,
-              fullName: matched.fullName || matched.name || cleanUser,
-              displayName: matched.fullName || matched.name || cleanUser,
-              phone: matched.phone || '+92 300 0000000',
-              role: matched.role || 'CLIENT',
-              isActive: true,
-              linkedCustomerId: matched.linkedCustomerId || cleanUser,
-              createdAt: matched.createdAt || new Date().toISOString(),
-            };
-            const token = `portal-token-${cleanUser}-${Date.now()}`;
-            saveAuthSession(token, portalAccount);
-            return { success: true, user: portalAccount, token };
-          }
-        }
-      } catch {}
-    }
-
-    return { success: false, error: data.error || 'Authentication failed' };
   } catch (err: any) {
-    // Browser fallback for demo resilience
-    const cleanUser = username.trim().toLowerCase();
-    const cleanPass = password.trim();
-
-    // Check localStorage youthnet_portal_users first in browser fallback
-    if (typeof window !== 'undefined') {
-      try {
-        const rawPortalUsers = localStorage.getItem('youthnet_portal_users');
-        if (rawPortalUsers) {
-          const list: any[] = JSON.parse(rawPortalUsers);
-          const matched = list.find(
-            (u) =>
-              (u.username?.trim().toLowerCase() === cleanUser || u.pppoeUsername?.trim().toLowerCase() === cleanUser) &&
-              (u.password === cleanPass || cleanPass === 'P@ssword' || cleanPass === 'client@123')
-          );
-          if (matched) {
-            const portalAccount: UserAccount = {
-              id: matched.id || `usr-${cleanUser}`,
-              username: matched.username || cleanUser,
-              fullName: matched.fullName || matched.name || cleanUser,
-              displayName: matched.fullName || matched.name || cleanUser,
-              phone: matched.phone || '+92 300 0000000',
-              role: matched.role || 'CLIENT',
-              isActive: true,
-              linkedCustomerId: matched.linkedCustomerId || cleanUser,
-              createdAt: matched.createdAt || new Date().toISOString(),
-            };
-            const token = `portal-token-${cleanUser}-${Date.now()}`;
-            saveAuthSession(token, portalAccount);
-            return { success: true, user: portalAccount, token };
-          }
-        }
-      } catch {}
-    }
-
-    const matches: Record<string, { role: SystemRole; fullName: string; phone: string }> = {
-      admin: { role: 'ADMIN', fullName: 'NOC Master Administrator', phone: '+92 300 1234567' },
-      manager: { role: 'MANAGER', fullName: 'NOC Operations Manager', phone: '+92 301 9876543' },
-      agent: { role: 'AGENT', fullName: 'Bilal Khan (Field Agent)', phone: '+92 301 5550192' },
-      client: { role: 'CLIENT', fullName: 'Dr. Shahzad Rafique (Subscriber)', phone: '+92 300 5559812' },
-    };
-
-    const validPasswords: Record<string, string[]> = {
-      admin: ['P@ssword', 'admin@123'],
-      manager: ['mgr@123', 'manager@123'],
-      agent: ['agent@123'],
-      client: ['client@123'],
-    };
-
-    if (matches[cleanUser] && validPasswords[cleanUser]?.includes(cleanPass)) {
-      const fallbackUser: UserAccount = {
-        id: `usr-${cleanUser}-01`,
-        username: cleanUser,
-        fullName: matches[cleanUser].fullName,
-        displayName: matches[cleanUser].fullName,
-        phone: matches[cleanUser].phone,
-        role: matches[cleanUser].role,
-        isActive: true,
-        createdAt: new Date().toISOString(),
-      };
-      const fallbackToken = `mock-token-${cleanUser}-${Date.now()}`;
-      saveAuthSession(fallbackToken, fallbackUser);
-      return { success: true, user: fallbackUser, token: fallbackToken };
-    }
-
-    return { success: false, error: 'Invalid username or password. Please check your credentials.' };
+    // Network or server offline - continue with repository error
   }
+
+  // Log failed authentication attempt
+  storageService.logAuditEvent({
+    actor: enteredUser,
+    actorRole: 'SYSTEM',
+    actionType: 'AUTH_FAILED',
+    actionTitle: 'Failed Authentication Attempt',
+    severity: 'WARNING',
+    details: `Failed sign-in attempt for username "${username}".`,
+  });
+
+  return { success: false, error: 'Invalid username or password. Please verify your credentials.' };
 }
 
 /**
@@ -288,6 +312,18 @@ export async function apiLogin(
  */
 export async function apiLogout(): Promise<void> {
   try {
+    const user = getStoredUser();
+    if (user) {
+      storageService.logAuditEvent({
+        actor: user.username,
+        actorRole: user.role,
+        actionType: 'AUTH_LOGOUT',
+        actionTitle: 'User Session Terminated',
+        severity: 'INFO',
+        details: `User @${user.username} logged out from active portal session.`,
+      });
+    }
+
     const token = getStoredToken();
     if (token) {
       await fetch('/api/auth/logout', {

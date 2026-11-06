@@ -76,7 +76,7 @@ export const AddMikrotikDeviceModal: React.FC<AddMikrotikDeviceModalProps> = ({
   const [model, setModel] = useState('CCR2004-16G-2S+');
   const [customModel, setCustomModel] = useState('');
   const [ipAddress, setIpAddress] = useState('202.142.186.150');
-  const [apiPort, setApiPort] = useState<number>(8729);
+  const [apiPort, setApiPort] = useState<number>(443);
   const [useSsl, setUseSsl] = useState<boolean>(true);
   const [username, setUsername] = useState('admin');
   const [password, setPassword] = useState('');
@@ -138,7 +138,7 @@ export const AddMikrotikDeviceModal: React.FC<AddMikrotikDeviceModalProps> = ({
 
     const finalName = name.trim() || `BRAS-${model.split('-')[0]}-01`;
     const finalIp = ipAddress.trim() || '192.168.88.1';
-    const finalPort = Number(apiPort) || (useSsl ? 443 : 8728);
+    const finalPort = Number(apiPort) || (useSsl ? 443 : 80);
     const finalUser = username.trim() || 'admin';
     const finalPass = password.trim();
     const finalModel = model === 'Custom' ? (customModel.trim() || 'MikroTik RouterOS') : `MikroTik ${model}`;
@@ -155,6 +155,7 @@ export const AddMikrotikDeviceModal: React.FC<AddMikrotikDeviceModalProps> = ({
       apiPort: finalPort,
       port: finalPort,
       useSsl: Boolean(useSsl),
+      proxyMode: 'proxy',
       username: finalUser,
       password: finalPass,
       version: version || 'RouterOS v7.16.2',
@@ -386,7 +387,7 @@ export const AddMikrotikDeviceModal: React.FC<AddMikrotikDeviceModalProps> = ({
                         Enable SSL/TLS (RouterOS v7 Native HTTPS REST API)
                       </span>
                       <span className="text-[10px] text-slate-400 block">
-                        Uses HTTPS REST on port 443 / 8729 — recommended for cloud connectivity
+                        Uses HTTPS REST on port 443 — recommended for cloud connectivity
                       </span>
                     </div>
                   </div>
@@ -396,10 +397,10 @@ export const AddMikrotikDeviceModal: React.FC<AddMikrotikDeviceModalProps> = ({
                     onChange={(e) => {
                       const checked = e.target.checked;
                       setUseSsl(checked);
-                      if (checked && (apiPort === 8728 || !apiPort)) {
+                      if (checked && (apiPort === 80 || apiPort === 8728 || !apiPort)) {
                         setApiPort(443);
-                      } else if (!checked && apiPort === 443) {
-                        setApiPort(8728);
+                      } else if (!checked && (apiPort === 443 || apiPort === 8729)) {
+                        setApiPort(80);
                       }
                     }}
                     className="w-4 h-4 rounded bg-slate-900 border-slate-700 text-cyan-600 focus:ring-0 cursor-pointer"

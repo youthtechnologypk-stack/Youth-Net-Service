@@ -1,7 +1,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import pg from 'pg';
-import { MikrotikRouter, InternetPackage } from '../types/isp';
+import { MikrotikRouter, InternetPackage } from '../types/isp.ts';
 
 const { Pool } = pg;
 
