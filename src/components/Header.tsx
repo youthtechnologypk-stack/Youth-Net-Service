@@ -28,6 +28,7 @@ import { SystemRole, UserAccount } from '../types/auth';
 import { Invoice } from '../types/isp';
 import { GlobalSearchBar } from './GlobalSearchBar';
 import { PWAInstallPrompt } from './PWAInstallPrompt';
+import { ThemeToggle } from './ThemeToggle';
 import { getStoredUser } from '../lib/auth';
 
 export type ActiveTab =
@@ -110,13 +111,24 @@ export const Header: React.FC<HeaderProps> = ({
     currentRole === 'AGENT' ||
     effectiveRole === 'AGENT';
 
+  const getTabClassName = (tab: ActiveTab, themeColor: 'cyan' | 'indigo' = 'cyan') => {
+    const isActive = activeTab === tab;
+    if (isActive) {
+      if (themeColor === 'indigo') {
+        return 'bg-indigo-50 dark:bg-slate-800 text-indigo-700 dark:text-indigo-400 border border-indigo-200 dark:border-indigo-500/30 shadow-sm font-semibold';
+      }
+      return 'bg-cyan-50 dark:bg-slate-800 text-cyan-700 dark:text-cyan-400 border border-cyan-200 dark:border-cyan-500/30 shadow-sm font-semibold';
+    }
+    return 'text-slate-600 dark:text-slate-400 hover:text-slate-900 dark:hover:text-slate-200 hover:bg-slate-100 dark:hover:bg-slate-900';
+  };
+
   // ==========================================================================
   // ISOLATED CLIENT PORTAL HEADER (Zero Internal Telemetry & No Admin Tools)
   // Only shows: Company Logo ("Youth Net"), Client Account Name badge, "Install App", and "Logout"
   // ==========================================================================
   if (isClient) {
     return (
-      <header className="bg-slate-950 border-b border-slate-800 text-slate-100 sticky top-0 z-40 backdrop-blur-md bg-opacity-95 shadow-lg select-none">
+      <header className="bg-white/95 dark:bg-slate-950 border-b border-slate-200 dark:border-slate-800 text-slate-900 dark:text-slate-100 sticky top-0 z-40 backdrop-blur-md shadow-sm dark:shadow-lg select-none transition-colors duration-200">
         <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-3 flex items-center justify-between gap-4">
           {/* Company Logo: Youth Net */}
           <div className="flex items-center gap-3">
@@ -125,26 +137,29 @@ export const Header: React.FC<HeaderProps> = ({
             </div>
             <div>
               <div className="flex items-center gap-2">
-                <span className="font-black tracking-wider text-base text-slate-100 uppercase">
+                <span className="font-black tracking-wider text-base text-slate-900 dark:text-slate-100 uppercase">
                   Youth Net
                 </span>
-                <span className="text-[10px] px-2 py-0.5 rounded-full bg-cyan-950 text-cyan-300 border border-cyan-800 font-mono font-bold">
+                <span className="text-[10px] px-2 py-0.5 rounded-full bg-cyan-50 dark:bg-cyan-950 text-cyan-700 dark:text-cyan-300 border border-cyan-200 dark:border-cyan-800 font-mono font-bold">
                   Subscriber Portal
                 </span>
               </div>
-              <p className="text-[11px] text-slate-400 font-sans">
+              <p className="text-[11px] text-slate-500 dark:text-slate-400 font-sans">
                 Self-Service Dashboard &amp; Billing Management
               </p>
             </div>
           </div>
 
-          {/* Right Section: Client Account Name Badge, Install App Button, Logout */}
+          {/* Right Section: Theme Toggle, Client Account Name Badge, Install App Button, Logout */}
           <div className="flex items-center gap-2.5 sm:gap-3">
+            {/* Global Theme Toggle */}
+            <ThemeToggle />
+
             {/* Client Account Name Badge */}
-            <div className="flex items-center gap-2 bg-slate-900 border border-slate-800 px-3 py-1.5 rounded-xl font-mono text-xs">
-              <User className="w-3.5 h-3.5 text-cyan-400 shrink-0" />
-              <span className="text-slate-400 text-[10px] hidden sm:inline">Subscriber:</span>
-              <span className="text-white font-bold font-sans">
+            <div className="flex items-center gap-2 bg-slate-100 dark:bg-slate-900 border border-slate-200 dark:border-slate-800 px-3 py-1.5 rounded-xl font-mono text-xs">
+              <User className="w-3.5 h-3.5 text-cyan-600 dark:text-cyan-400 shrink-0" />
+              <span className="text-slate-500 dark:text-slate-400 text-[10px] hidden sm:inline">Subscriber:</span>
+              <span className="text-slate-900 dark:text-white font-bold font-sans">
                 {activeUser?.fullName || activeUser?.username || 'Client'}
               </span>
             </div>
@@ -157,10 +172,10 @@ export const Header: React.FC<HeaderProps> = ({
               <button
                 type="button"
                 onClick={onLogout}
-                className="flex items-center gap-1.5 bg-slate-900 hover:bg-rose-950/80 text-slate-300 hover:text-rose-200 border border-slate-800 hover:border-rose-800/80 px-3 py-1.5 rounded-xl text-xs font-semibold transition cursor-pointer shadow-sm"
+                className="flex items-center gap-1.5 bg-slate-100 dark:bg-slate-900 hover:bg-rose-50 dark:hover:bg-rose-950/80 text-slate-700 dark:text-slate-300 hover:text-rose-600 dark:hover:text-rose-200 border border-slate-200 dark:border-slate-800 hover:border-rose-300 dark:hover:border-rose-800/80 px-3 py-1.5 rounded-xl text-xs font-semibold transition cursor-pointer shadow-sm"
                 title="Sign Out of Session"
               >
-                <LogOut className="w-3.5 h-3.5 text-rose-400" />
+                <LogOut className="w-3.5 h-3.5 text-rose-500 dark:text-rose-400" />
                 <span>Logout</span>
               </button>
             )}
@@ -176,7 +191,7 @@ export const Header: React.FC<HeaderProps> = ({
   // ==========================================================================
   if (isAgent) {
     return (
-      <header className="bg-slate-950 border-b border-slate-800 text-slate-100 sticky top-0 z-40 backdrop-blur-md bg-opacity-95 shadow-lg select-none">
+      <header className="bg-white/95 dark:bg-slate-950 border-b border-slate-200 dark:border-slate-800 text-slate-900 dark:text-slate-100 sticky top-0 z-40 backdrop-blur-md shadow-sm dark:shadow-lg select-none transition-colors duration-200">
         <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-3 flex items-center justify-between gap-4">
           <div className="flex items-center gap-3">
             <div className="flex items-center justify-center w-9 h-9 rounded-xl bg-gradient-to-tr from-emerald-600 to-cyan-600 text-white shadow-lg shadow-emerald-500/20">
@@ -184,24 +199,27 @@ export const Header: React.FC<HeaderProps> = ({
             </div>
             <div>
               <div className="flex items-center gap-2">
-                <span className="font-black tracking-wider text-base text-slate-100 uppercase">
+                <span className="font-black tracking-wider text-base text-slate-900 dark:text-slate-100 uppercase">
                   Youth Net
                 </span>
-                <span className="text-[10px] px-2 py-0.5 rounded-full bg-emerald-950 text-emerald-300 border border-emerald-800 font-mono font-bold">
+                <span className="text-[10px] px-2 py-0.5 rounded-full bg-emerald-50 dark:bg-emerald-950 text-emerald-700 dark:text-emerald-300 border border-emerald-200 dark:border-emerald-800 font-mono font-bold">
                   Field Agent Portal
                 </span>
               </div>
-              <p className="text-[11px] text-slate-400 font-sans">
+              <p className="text-[11px] text-slate-500 dark:text-slate-400 font-sans">
                 Cash Recovery, Invoice Collection &amp; Support Dispatch
               </p>
             </div>
           </div>
 
           <div className="flex items-center gap-2.5 sm:gap-3">
-            <div className="flex items-center gap-2 bg-slate-900 border border-slate-800 px-3 py-1.5 rounded-xl font-mono text-xs">
-              <User className="w-3.5 h-3.5 text-emerald-400 shrink-0" />
-              <span className="text-slate-400 text-[10px] hidden sm:inline">Agent:</span>
-              <span className="text-white font-bold font-sans">
+            {/* Global Theme Toggle */}
+            <ThemeToggle />
+
+            <div className="flex items-center gap-2 bg-slate-100 dark:bg-slate-900 border border-slate-200 dark:border-slate-800 px-3 py-1.5 rounded-xl font-mono text-xs">
+              <User className="w-3.5 h-3.5 text-emerald-600 dark:text-emerald-400 shrink-0" />
+              <span className="text-slate-500 dark:text-slate-400 text-[10px] hidden sm:inline">Agent:</span>
+              <span className="text-slate-900 dark:text-white font-bold font-sans">
                 {activeUser?.fullName || activeUser?.username || 'Field Agent'}
               </span>
             </div>
@@ -212,10 +230,10 @@ export const Header: React.FC<HeaderProps> = ({
               <button
                 type="button"
                 onClick={onLogout}
-                className="flex items-center gap-1.5 bg-slate-900 hover:bg-rose-950/80 text-slate-300 hover:text-rose-200 border border-slate-800 hover:border-rose-800/80 px-3 py-1.5 rounded-xl text-xs font-semibold transition cursor-pointer shadow-sm"
+                className="flex items-center gap-1.5 bg-slate-100 dark:bg-slate-900 hover:bg-rose-50 dark:hover:bg-rose-950/80 text-slate-700 dark:text-slate-300 hover:text-rose-600 dark:hover:text-rose-200 border border-slate-200 dark:border-slate-800 hover:border-rose-300 dark:hover:border-rose-800/80 px-3 py-1.5 rounded-xl text-xs font-semibold transition cursor-pointer shadow-sm"
                 title="Sign Out of Session"
               >
-                <LogOut className="w-3.5 h-3.5 text-rose-400" />
+                <LogOut className="w-3.5 h-3.5 text-rose-500 dark:text-rose-400" />
                 <span>Logout</span>
               </button>
             )}
@@ -226,26 +244,26 @@ export const Header: React.FC<HeaderProps> = ({
   }
 
   return (
-    <header className="bg-slate-950 border-b border-slate-800 text-slate-100 sticky top-0 z-40 backdrop-blur-md bg-opacity-95">
+    <header className="bg-white/95 dark:bg-slate-950 border-b border-slate-200 dark:border-slate-800 text-slate-900 dark:text-slate-100 sticky top-0 z-40 backdrop-blur-md shadow-sm dark:shadow-md transition-colors duration-200">
       {/* Top Banner / Router Status */}
-      <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-2.5 flex flex-wrap items-center justify-between gap-3 border-b border-slate-800/60">
+      <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-2.5 flex flex-wrap items-center justify-between gap-3 border-b border-slate-200/80 dark:border-slate-800/60">
         <div className="flex items-center gap-3">
           {onToggleSidebar && (
             <button
               onClick={onToggleSidebar}
               className={`flex items-center gap-1.5 px-3 py-1.5 rounded-xl border text-xs font-mono font-bold transition shadow-sm cursor-pointer ${
                 isSidebarOpen
-                  ? 'bg-cyan-950 text-cyan-300 border-cyan-700 ring-1 ring-cyan-500/50'
-                  : 'bg-slate-900 hover:bg-slate-800 text-slate-200 hover:text-white border-slate-700'
+                  ? 'bg-cyan-50 dark:bg-cyan-950 text-cyan-700 dark:text-cyan-300 border-cyan-300 dark:border-cyan-700 ring-1 ring-cyan-500/50'
+                  : 'bg-slate-100 hover:bg-slate-200 dark:bg-slate-900 dark:hover:bg-slate-800 text-slate-700 hover:text-slate-900 dark:text-slate-200 dark:hover:text-white border-slate-200 dark:border-slate-700'
               }`}
               title={isSidebarOpen ? 'Close Menu (Esc)' : 'Open Navigation Menu'}
               aria-label="Toggle navigation menu"
               aria-expanded={isSidebarOpen}
             >
               {isSidebarOpen ? (
-                <X className="w-4 h-4 text-cyan-400" />
+                <X className="w-4 h-4 text-cyan-600 dark:text-cyan-400" />
               ) : (
-                <Menu className="w-4 h-4 text-cyan-400" />
+                <Menu className="w-4 h-4 text-cyan-600 dark:text-cyan-400" />
               )}
               <span className="font-bold">Menu</span>
             </button>
@@ -256,14 +274,14 @@ export const Header: React.FC<HeaderProps> = ({
           </div>
           <div>
             <div className="flex items-center gap-2">
-              <span className="font-black tracking-wider text-base text-slate-100 uppercase">
-                Youth Net <span className="text-cyan-400 font-mono">Service</span>
+              <span className="font-black tracking-wider text-base text-slate-900 dark:text-slate-100 uppercase">
+                Youth Net <span className="text-cyan-600 dark:text-cyan-400 font-mono">Service</span>
               </span>
-              <span className="text-xs px-2 py-0.5 rounded-full bg-cyan-950 text-cyan-400 border border-cyan-700/50 font-mono">
+              <span className="text-xs px-2 py-0.5 rounded-full bg-cyan-50 dark:bg-cyan-950 text-cyan-700 dark:text-cyan-400 border border-cyan-200 dark:border-cyan-700/50 font-mono">
                 RouterOS v7.16
               </span>
             </div>
-            <p className="text-xs text-slate-400">Carrier-Grade ISP Operations & MikroTik Automation</p>
+            <p className="text-xs text-slate-500 dark:text-slate-400">Carrier-Grade ISP Operations & MikroTik Automation</p>
           </div>
         </div>
 
@@ -279,32 +297,32 @@ export const Header: React.FC<HeaderProps> = ({
 
         {/* Live Router Telemetry Indicator & Actions */}
         <div className="flex items-center flex-wrap gap-2.5 sm:gap-4 text-xs font-mono">
-          <div className="flex items-center gap-2 bg-slate-900 border border-slate-800 px-3 py-1.5 rounded-md">
-            <Server className="w-3.5 h-3.5 text-cyan-400" />
+          <div className="flex items-center gap-2 bg-slate-100 dark:bg-slate-900 border border-slate-200 dark:border-slate-800 px-3 py-1.5 rounded-md">
+            <Server className="w-3.5 h-3.5 text-cyan-600 dark:text-cyan-400" />
             <select
               value={selectedRouterId}
               onChange={(e) => setSelectedRouterId(e.target.value)}
-              className="bg-transparent text-slate-200 text-xs focus:outline-none cursor-pointer"
+              className="bg-transparent text-slate-800 dark:text-slate-200 text-xs focus:outline-none cursor-pointer"
             >
               {(!routers || routers.length === 0) ? (
-                <option value="" disabled className="bg-slate-900 text-slate-400">
+                <option value="" disabled className="bg-white dark:bg-slate-900 text-slate-400">
                   No Routers Connected
                 </option>
               ) : (
                 routers.map((r) => (
-                  <option key={r.id} value={r.id} className="bg-slate-900 text-slate-100">
+                  <option key={r.id} value={r.id} className="bg-white dark:bg-slate-900 text-slate-900 dark:text-slate-100">
                     {r.name} ({r.ipAddress})
                   </option>
                 ))
               )}
             </select>
             {currentRouter && (
-              <span className={`inline-block w-2 h-2 rounded-full ${currentRouter.status === 'online' ? 'bg-emerald-400 animate-ping' : 'bg-rose-400'}`} />
+              <span className={`inline-block w-2 h-2 rounded-full ${currentRouter.status === 'online' ? 'bg-emerald-500 animate-ping' : 'bg-rose-500'}`} />
             )}
             {onOpenAddRouterModal && (
               <button
                 onClick={onOpenAddRouterModal}
-                className="p-1 rounded bg-slate-800 hover:bg-slate-700 text-cyan-400 hover:text-cyan-300 border border-slate-700 transition"
+                className="p-1 rounded bg-slate-200 hover:bg-slate-300 dark:bg-slate-800 dark:hover:bg-slate-700 text-cyan-600 dark:text-cyan-400 hover:text-cyan-700 dark:hover:text-cyan-300 border border-slate-300 dark:border-slate-700 transition"
                 title="Add New MikroTik Router"
               >
                 <PlusCircle className="w-3.5 h-3.5" />
@@ -316,52 +334,55 @@ export const Header: React.FC<HeaderProps> = ({
             <>
               <span className={`hidden xl:inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full text-[11px] font-mono shadow-sm ${
                 currentRouter.status === 'online'
-                  ? 'bg-emerald-950/90 text-emerald-300 border border-emerald-500/30'
-                  : 'bg-rose-950/90 text-rose-300 border border-rose-500/30'
+                  ? 'bg-emerald-50 dark:bg-emerald-950/90 text-emerald-700 dark:text-emerald-300 border border-emerald-200 dark:border-emerald-500/30'
+                  : 'bg-rose-50 dark:bg-rose-950/90 text-rose-700 dark:text-rose-300 border border-rose-200 dark:border-rose-500/30'
               }`}>
-                <span className={`w-1.5 h-1.5 rounded-full ${currentRouter.status === 'online' ? 'bg-emerald-400 animate-pulse' : 'bg-rose-400'}`} />
+                <span className={`w-1.5 h-1.5 rounded-full ${currentRouter.status === 'online' ? 'bg-emerald-500 animate-pulse' : 'bg-rose-500'}`} />
                 {currentRouter.status === 'online' ? 'RouterOS v7 REST Live' : 'Router Offline'}
               </span>
 
-              <div className="hidden lg:flex items-center gap-3 bg-slate-900/80 border border-slate-800 px-3 py-1.5 rounded-md text-slate-300">
+              <div className="hidden lg:flex items-center gap-3 bg-slate-100 dark:bg-slate-900/80 border border-slate-200 dark:border-slate-800 px-3 py-1.5 rounded-md text-slate-700 dark:text-slate-300">
                 <span>
-                  CPU: <strong className="text-cyan-300">{currentRouter.cpuLoad ?? 0}%</strong>
+                  CPU: <strong className="text-cyan-600 dark:text-cyan-300">{currentRouter.cpuLoad ?? 0}%</strong>
                 </span>
-                <span className="text-slate-600">|</span>
+                <span className="text-slate-300 dark:text-slate-600">|</span>
                 <span>
-                  WAN: <strong className="text-emerald-400">{(((currentRouter.currentWanRxMbps || 0)) / 1000).toFixed(2)} Gbps</strong>
+                  WAN: <strong className="text-emerald-600 dark:text-emerald-400">{(((currentRouter.currentWanRxMbps || 0)) / 1000).toFixed(2)} Gbps</strong>
                 </span>
-                <span className="text-slate-600">|</span>
+                <span className="text-slate-300 dark:text-slate-600">|</span>
                 <span>
-                  Sessions: <strong className="text-indigo-300">{activeSessions.length} active</strong>
+                  Sessions: <strong className="text-indigo-600 dark:text-indigo-300">{activeSessions.length} active</strong>
                 </span>
               </div>
             </>
           ) : (
-            <span className="hidden xl:inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full text-[11px] font-mono bg-slate-900 text-slate-400 border border-slate-800">
-              <span className="w-1.5 h-1.5 rounded-full bg-slate-500" />
+            <span className="hidden xl:inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full text-[11px] font-mono bg-slate-100 dark:bg-slate-900 text-slate-500 dark:text-slate-400 border border-slate-200 dark:border-slate-800">
+              <span className="w-1.5 h-1.5 rounded-full bg-slate-400 dark:bg-slate-500" />
               No Routers Connected
             </span>
           )}
 
-          {/* Quick Action Buttons, User Session & Logout */}
+          {/* Quick Action Buttons, User Session, Theme Toggle & Logout */}
           <div className="flex items-center gap-2">
-            <div className="flex items-center gap-1.5 bg-slate-900 border border-slate-800 px-2.5 py-1.5 rounded-md">
-              <Shield className="w-3.5 h-3.5 text-cyan-400" />
-              <span className="text-slate-400 text-[10px]">Session:</span>
+            {/* Global Theme Toggle */}
+            <ThemeToggle />
+
+            <div className="flex items-center gap-1.5 bg-slate-100 dark:bg-slate-900 border border-slate-200 dark:border-slate-800 px-2.5 py-1.5 rounded-md">
+              <Shield className="w-3.5 h-3.5 text-cyan-600 dark:text-cyan-400" />
+              <span className="text-slate-500 dark:text-slate-400 text-[10px]">Session:</span>
               <span className={`text-[10px] px-1.5 py-0.5 rounded font-mono font-bold ${
                 currentRole === 'ADMIN'
-                  ? 'bg-rose-950 text-rose-300 border border-rose-800'
+                  ? 'bg-rose-50 dark:bg-rose-950 text-rose-700 dark:text-rose-300 border border-rose-200 dark:border-rose-800'
                   : currentRole === 'MANAGER'
-                  ? 'bg-indigo-950 text-indigo-300 border border-indigo-800'
+                  ? 'bg-indigo-50 dark:bg-indigo-950 text-indigo-700 dark:text-indigo-300 border border-indigo-200 dark:border-indigo-800'
                   : currentRole === 'AGENT'
-                  ? 'bg-cyan-950 text-cyan-300 border border-cyan-800'
-                  : 'bg-emerald-950 text-emerald-300 border border-emerald-800'
+                  ? 'bg-cyan-50 dark:bg-cyan-950 text-cyan-700 dark:text-cyan-300 border border-cyan-200 dark:border-cyan-800'
+                  : 'bg-emerald-50 dark:bg-emerald-950 text-emerald-700 dark:text-emerald-300 border border-emerald-200 dark:border-emerald-800'
               }`}>
                 {currentRole || 'ADMIN'}
               </span>
               {currentUser?.username && (
-                <span className="text-[10px] text-slate-300 font-mono hidden sm:inline">
+                <span className="text-[10px] text-slate-600 dark:text-slate-300 font-mono hidden sm:inline">
                   ({currentUser.username})
                 </span>
               )}
@@ -395,10 +416,10 @@ export const Header: React.FC<HeaderProps> = ({
             {onLogout && (
               <button
                 onClick={onLogout}
-                className="flex items-center gap-1.5 bg-slate-800 hover:bg-rose-900/60 hover:text-rose-200 text-slate-300 font-medium px-2.5 py-1.5 rounded text-xs transition border border-slate-700 cursor-pointer shadow-sm"
+                className="flex items-center gap-1.5 bg-slate-100 hover:bg-rose-50 hover:text-rose-700 dark:bg-slate-800 dark:hover:bg-rose-900/60 dark:hover:text-rose-200 text-slate-700 dark:text-slate-300 font-medium px-2.5 py-1.5 rounded text-xs transition border border-slate-200 dark:border-slate-700 cursor-pointer shadow-sm"
                 title="Sign Out of Session"
               >
-                <LogOut className="w-3.5 h-3.5 text-rose-400" />
+                <LogOut className="w-3.5 h-3.5 text-rose-500 dark:text-rose-400" />
                 <span>Logout</span>
               </button>
             )}
@@ -416,8 +437,8 @@ export const Header: React.FC<HeaderProps> = ({
                 onClick={() => setActiveTab('noc')}
                 className={`flex items-center gap-2 px-3 py-2 text-xs sm:text-sm font-medium rounded-lg transition whitespace-nowrap ${
                   activeTab === 'noc'
-                    ? 'bg-slate-800 text-cyan-400 border border-cyan-500/30 shadow-sm'
-                    : 'text-slate-400 hover:text-slate-200 hover:bg-slate-900'
+                    ? 'bg-cyan-50 dark:bg-slate-800 text-cyan-700 dark:text-cyan-400 border border-cyan-200 dark:border-cyan-500/30 shadow-sm font-semibold'
+                    : 'text-slate-600 dark:text-slate-400 hover:text-slate-900 dark:hover:text-slate-200 hover:bg-slate-100 dark:hover:bg-slate-900'
                 }`}
               >
                 <Activity className="w-4 h-4" />
@@ -426,11 +447,7 @@ export const Header: React.FC<HeaderProps> = ({
 
               <button
                 onClick={() => setActiveTab('operations')}
-                className={`flex items-center gap-2 px-3 py-2 text-xs sm:text-sm font-medium rounded-lg transition whitespace-nowrap ${
-                  activeTab === 'operations'
-                    ? 'bg-slate-800 text-cyan-400 border border-cyan-500/30 shadow-sm'
-                    : 'text-slate-400 hover:text-slate-200 hover:bg-slate-900'
-                }`}
+                className={`flex items-center gap-2 px-3 py-2 text-xs sm:text-sm font-medium rounded-lg transition whitespace-nowrap ${getTabClassName('operations')}`}
               >
                 <Network className="w-4 h-4" />
                 Operations &amp; Dispatch
@@ -438,41 +455,29 @@ export const Header: React.FC<HeaderProps> = ({
 
               <button
                 onClick={() => setActiveTab('mikrotik')}
-                className={`flex items-center gap-2 px-3 py-2 text-xs sm:text-sm font-medium rounded-lg transition whitespace-nowrap ${
-                  activeTab === 'mikrotik'
-                    ? 'bg-slate-800 text-cyan-400 border border-cyan-500/30 shadow-sm'
-                    : 'text-slate-400 hover:text-slate-200 hover:bg-slate-900'
-                }`}
+                className={`flex items-center gap-2 px-3 py-2 text-xs sm:text-sm font-medium rounded-lg transition whitespace-nowrap ${getTabClassName('mikrotik')}`}
               >
                 <Radio className="w-4 h-4" />
                 MikroTik RouterOS v7
-                <span className="text-[10px] px-1.5 py-0.5 rounded bg-cyan-900/60 text-cyan-300 font-mono">
+                <span className="text-[10px] px-1.5 py-0.5 rounded bg-cyan-100 dark:bg-cyan-900/60 text-cyan-800 dark:text-cyan-300 font-mono font-bold">
                   Live
                 </span>
               </button>
 
               <button
                 onClick={() => setActiveTab('olt')}
-                className={`flex items-center gap-2 px-3 py-2 text-xs sm:text-sm font-medium rounded-lg transition whitespace-nowrap ${
-                  activeTab === 'olt'
-                    ? 'bg-slate-800 text-cyan-400 border border-cyan-500/30 shadow-sm'
-                    : 'text-slate-400 hover:text-slate-200 hover:bg-slate-900'
-                }`}
+                className={`flex items-center gap-2 px-3 py-2 text-xs sm:text-sm font-medium rounded-lg transition whitespace-nowrap ${getTabClassName('olt')}`}
               >
-                <Layers className="w-4 h-4 text-cyan-400" />
+                <Layers className="w-4 h-4 text-cyan-600 dark:text-cyan-400" />
                 VSOL OLT
-                <span className="text-[10px] px-1.5 py-0.5 rounded bg-emerald-900/60 text-emerald-300 font-mono">
+                <span className="text-[10px] px-1.5 py-0.5 rounded bg-emerald-100 dark:bg-emerald-900/60 text-emerald-800 dark:text-emerald-300 font-mono font-bold">
                   GPON
                 </span>
               </button>
 
               <button
                 onClick={() => setActiveTab('billing')}
-                className={`flex items-center gap-2 px-3 py-2 text-xs sm:text-sm font-medium rounded-lg transition whitespace-nowrap ${
-                  activeTab === 'billing'
-                    ? 'bg-slate-800 text-cyan-400 border border-cyan-500/30 shadow-sm'
-                    : 'text-slate-400 hover:text-slate-200 hover:bg-slate-900'
-                }`}
+                className={`flex items-center gap-2 px-3 py-2 text-xs sm:text-sm font-medium rounded-lg transition whitespace-nowrap ${getTabClassName('billing')}`}
               >
                 <CreditCard className="w-4 h-4" />
                 Billing &amp; MRR
@@ -480,16 +485,12 @@ export const Header: React.FC<HeaderProps> = ({
 
               <button
                 onClick={() => setActiveTab('complaints')}
-                className={`flex items-center gap-2 px-3 py-2 text-xs sm:text-sm font-medium rounded-lg transition whitespace-nowrap ${
-                  activeTab === 'complaints'
-                    ? 'bg-slate-800 text-cyan-400 border border-cyan-500/30 shadow-sm'
-                    : 'text-slate-400 hover:text-slate-200 hover:bg-slate-900'
-                }`}
+                className={`flex items-center gap-2 px-3 py-2 text-xs sm:text-sm font-medium rounded-lg transition whitespace-nowrap ${getTabClassName('complaints')}`}
               >
                 <AlertTriangle className="w-4 h-4" />
                 Complaints &amp; SLA
                 {pendingSlaCount > 0 && (
-                  <span className="text-[10px] px-1.5 py-0.2 rounded-full bg-rose-900/80 text-rose-300 border border-rose-700/50 font-mono">
+                  <span className="text-[10px] px-1.5 py-0.2 rounded-full bg-rose-100 dark:bg-rose-900/80 text-rose-800 dark:text-rose-300 border border-rose-300 dark:border-rose-700/50 font-mono font-bold">
                     {pendingSlaCount}
                   </span>
                 )}
@@ -497,47 +498,31 @@ export const Header: React.FC<HeaderProps> = ({
 
               <button
                 onClick={() => setActiveTab('users')}
-                className={`flex items-center gap-2 px-3 py-2 text-xs sm:text-sm font-medium rounded-lg transition whitespace-nowrap ${
-                  activeTab === 'users'
-                    ? 'bg-slate-800 text-cyan-400 border border-cyan-500/30 shadow-sm'
-                    : 'text-slate-400 hover:text-slate-200 hover:bg-slate-900'
-                }`}
+                className={`flex items-center gap-2 px-3 py-2 text-xs sm:text-sm font-medium rounded-lg transition whitespace-nowrap ${getTabClassName('users')}`}
               >
-                <Shield className="w-4 h-4 text-cyan-400" />
+                <Shield className="w-4 h-4 text-cyan-600 dark:text-cyan-400" />
                 User &amp; Access Management
               </button>
 
               <button
                 onClick={() => setActiveTab('permissions')}
-                className={`flex items-center gap-2 px-3 py-2 text-xs sm:text-sm font-medium rounded-lg transition whitespace-nowrap ${
-                  activeTab === 'permissions'
-                    ? 'bg-slate-800 text-cyan-400 border border-cyan-500/30 shadow-sm'
-                    : 'text-slate-400 hover:text-slate-200 hover:bg-slate-900'
-                }`}
+                className={`flex items-center gap-2 px-3 py-2 text-xs sm:text-sm font-medium rounded-lg transition whitespace-nowrap ${getTabClassName('permissions')}`}
               >
-                <ShieldCheck className="w-4 h-4 text-emerald-400" />
+                <ShieldCheck className="w-4 h-4 text-emerald-600 dark:text-emerald-400" />
                 Feature Matrix
               </button>
 
               <button
                 onClick={() => setActiveTab('logs')}
-                className={`flex items-center gap-2 px-3 py-2 text-xs sm:text-sm font-medium rounded-lg transition whitespace-nowrap ${
-                  activeTab === 'logs'
-                    ? 'bg-slate-800 text-cyan-400 border border-cyan-500/30 shadow-sm'
-                    : 'text-slate-400 hover:text-slate-200 hover:bg-slate-900'
-                }`}
+                className={`flex items-center gap-2 px-3 py-2 text-xs sm:text-sm font-medium rounded-lg transition whitespace-nowrap ${getTabClassName('logs')}`}
               >
-                <ShieldAlert className="w-4 h-4 text-amber-400" />
+                <ShieldAlert className="w-4 h-4 text-amber-600 dark:text-amber-400" />
                 Activity Logs
               </button>
 
               <button
                 onClick={() => setActiveTab('mobile')}
-                className={`flex items-center gap-2 px-3 py-2 text-xs sm:text-sm font-medium rounded-lg transition whitespace-nowrap ${
-                  activeTab === 'mobile'
-                    ? 'bg-slate-800 text-cyan-400 border border-cyan-500/30 shadow-sm'
-                    : 'text-slate-400 hover:text-slate-200 hover:bg-slate-900'
-                }`}
+                className={`flex items-center gap-2 px-3 py-2 text-xs sm:text-sm font-medium rounded-lg transition whitespace-nowrap ${getTabClassName('mobile')}`}
               >
                 <Smartphone className="w-4 h-4" />
                 Mobile Apps
@@ -545,11 +530,7 @@ export const Header: React.FC<HeaderProps> = ({
 
               <button
                 onClick={() => setActiveTab('architecture')}
-                className={`flex items-center gap-2 px-3 py-2 text-xs sm:text-sm font-medium rounded-lg transition whitespace-nowrap ${
-                  activeTab === 'architecture'
-                    ? 'bg-slate-800 text-cyan-400 border border-cyan-500/30 shadow-sm'
-                    : 'text-slate-400 hover:text-slate-200 hover:bg-slate-900'
-                }`}
+                className={`flex items-center gap-2 px-3 py-2 text-xs sm:text-sm font-medium rounded-lg transition whitespace-nowrap ${getTabClassName('architecture')}`}
               >
                 <Code2 className="w-4 h-4" />
                 Architecture
@@ -557,13 +538,9 @@ export const Header: React.FC<HeaderProps> = ({
 
               <button
                 onClick={() => setActiveTab('settings')}
-                className={`flex items-center gap-2 px-3 py-2 text-xs sm:text-sm font-medium rounded-lg transition whitespace-nowrap ${
-                  activeTab === 'settings'
-                    ? 'bg-slate-800 text-cyan-400 border border-cyan-500/30 shadow-sm'
-                    : 'text-slate-400 hover:text-slate-200 hover:bg-slate-900'
-                }`}
+                className={`flex items-center gap-2 px-3 py-2 text-xs sm:text-sm font-medium rounded-lg transition whitespace-nowrap ${getTabClassName('settings')}`}
               >
-                <Settings className="w-4 h-4 text-cyan-400" />
+                <Settings className="w-4 h-4 text-cyan-600 dark:text-cyan-400" />
                 Settings
               </button>
             </>
@@ -574,11 +551,7 @@ export const Header: React.FC<HeaderProps> = ({
             <>
               <button
                 onClick={() => setActiveTab('operations')}
-                className={`flex items-center gap-2 px-3 py-2 text-xs sm:text-sm font-medium rounded-lg transition whitespace-nowrap ${
-                  activeTab === 'operations'
-                    ? 'bg-slate-800 text-indigo-400 border border-indigo-500/30 shadow-sm'
-                    : 'text-slate-400 hover:text-slate-200 hover:bg-slate-900'
-                }`}
+                className={`flex items-center gap-2 px-3 py-2 text-xs sm:text-sm font-medium rounded-lg transition whitespace-nowrap ${getTabClassName('operations', 'indigo')}`}
               >
                 <Activity className="w-4 h-4" />
                 Operations &amp; Dispatch
@@ -586,11 +559,7 @@ export const Header: React.FC<HeaderProps> = ({
 
               <button
                 onClick={() => setActiveTab('noc')}
-                className={`flex items-center gap-2 px-3 py-2 text-xs sm:text-sm font-medium rounded-lg transition whitespace-nowrap ${
-                  activeTab === 'noc'
-                    ? 'bg-slate-800 text-indigo-400 border border-indigo-500/30 shadow-sm'
-                    : 'text-slate-400 hover:text-slate-200 hover:bg-slate-900'
-                }`}
+                className={`flex items-center gap-2 px-3 py-2 text-xs sm:text-sm font-medium rounded-lg transition whitespace-nowrap ${getTabClassName('noc', 'indigo')}`}
               >
                 <Network className="w-4 h-4" />
                 NOC Overview
@@ -598,16 +567,12 @@ export const Header: React.FC<HeaderProps> = ({
 
               <button
                 onClick={() => setActiveTab('complaints')}
-                className={`flex items-center gap-2 px-3 py-2 text-xs sm:text-sm font-medium rounded-lg transition whitespace-nowrap ${
-                  activeTab === 'complaints'
-                    ? 'bg-slate-800 text-indigo-400 border border-indigo-500/30 shadow-sm'
-                    : 'text-slate-400 hover:text-slate-200 hover:bg-slate-900'
-                }`}
+                className={`flex items-center gap-2 px-3 py-2 text-xs sm:text-sm font-medium rounded-lg transition whitespace-nowrap ${getTabClassName('complaints', 'indigo')}`}
               >
                 <AlertTriangle className="w-4 h-4" />
                 Complaints &amp; SLA
                 {pendingSlaCount > 0 && (
-                  <span className="text-[10px] px-1.5 py-0.2 rounded-full bg-rose-900/80 text-rose-300 border border-rose-700/50 font-mono">
+                  <span className="text-[10px] px-1.5 py-0.2 rounded-full bg-rose-100 dark:bg-rose-900/80 text-rose-800 dark:text-rose-300 border border-rose-300 dark:border-rose-700/50 font-mono font-bold">
                     {pendingSlaCount}
                   </span>
                 )}
@@ -615,23 +580,15 @@ export const Header: React.FC<HeaderProps> = ({
 
               <button
                 onClick={() => setActiveTab('olt')}
-                className={`flex items-center gap-2 px-3 py-2 text-xs sm:text-sm font-medium rounded-lg transition whitespace-nowrap ${
-                  activeTab === 'olt'
-                    ? 'bg-slate-800 text-indigo-400 border border-indigo-500/30 shadow-sm'
-                    : 'text-slate-400 hover:text-slate-200 hover:bg-slate-900'
-                }`}
+                className={`flex items-center gap-2 px-3 py-2 text-xs sm:text-sm font-medium rounded-lg transition whitespace-nowrap ${getTabClassName('olt', 'indigo')}`}
               >
-                <Layers className="w-4 h-4 text-cyan-400" />
+                <Layers className="w-4 h-4 text-cyan-600 dark:text-cyan-400" />
                 VSOL OLT
               </button>
 
               <button
                 onClick={() => setActiveTab('billing')}
-                className={`flex items-center gap-2 px-3 py-2 text-xs sm:text-sm font-medium rounded-lg transition whitespace-nowrap ${
-                  activeTab === 'billing'
-                    ? 'bg-slate-800 text-indigo-400 border border-indigo-500/30 shadow-sm'
-                    : 'text-slate-400 hover:text-slate-200 hover:bg-slate-900'
-                }`}
+                className={`flex items-center gap-2 px-3 py-2 text-xs sm:text-sm font-medium rounded-lg transition whitespace-nowrap ${getTabClassName('billing', 'indigo')}`}
               >
                 <CreditCard className="w-4 h-4" />
                 Agent Cash &amp; Billing

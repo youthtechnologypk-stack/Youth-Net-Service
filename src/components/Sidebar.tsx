@@ -25,6 +25,7 @@ import { SystemRole, UserAccount } from '../types/auth';
 import { useISP } from '../context/ISPContext';
 import { useCurrency } from '../context/CurrencyContext';
 import { isOriginalAdminSession } from '../lib/auth';
+import { ThemeToggle } from './ThemeToggle';
 
 export interface SidebarProps {
   isOpen: boolean;
@@ -220,25 +221,25 @@ export const Sidebar: React.FC<SidebarProps> = ({
 
       {/* 2. Off-Canvas Collapsible Drawer Sidebar (Hidden by default, slides in from left) */}
       <aside
-        className={`fixed top-0 bottom-0 left-0 w-72 max-w-[85vw] bg-slate-900 border-r border-slate-800 text-white z-50 flex flex-col h-full shadow-2xl transition-transform duration-300 ease-in-out select-none ${
+        className={`fixed top-0 bottom-0 left-0 w-72 max-w-[85vw] bg-white dark:bg-slate-900 border-r border-slate-200 dark:border-slate-800 text-slate-900 dark:text-white z-50 flex flex-col h-full shadow-2xl transition-transform duration-300 ease-in-out select-none ${
           isOpen ? 'translate-x-0' : '-translate-x-full'
         }`}
         aria-label="Main Navigation Drawer"
       >
         {/* Top Header with Carrier Branding & Close Button */}
-        <div className="p-4 border-b border-slate-800 bg-slate-950 flex items-center justify-between">
+        <div className="p-4 border-b border-slate-200 dark:border-slate-800 bg-slate-50 dark:bg-slate-950 flex items-center justify-between">
           <div className="flex items-center gap-2.5">
             <div className="w-8 h-8 rounded-xl bg-gradient-to-tr from-cyan-600 via-blue-600 to-indigo-600 flex items-center justify-center text-white shadow-md shadow-cyan-500/25">
               <Wifi className="w-4 h-4" />
             </div>
             <div>
               <div className="flex items-center gap-1.5">
-                <h1 className="font-black text-sm text-white tracking-tight">YOUTH NET</h1>
-                <span className="text-[9px] px-1.5 py-0.2 rounded bg-cyan-950 text-cyan-300 border border-cyan-800 font-mono font-bold">
+                <h1 className="font-black text-sm text-slate-900 dark:text-white tracking-tight">YOUTH NET</h1>
+                <span className="text-[9px] px-1.5 py-0.2 rounded bg-cyan-50 dark:bg-cyan-950 text-cyan-700 dark:text-cyan-300 border border-cyan-200 dark:border-cyan-800 font-mono font-bold">
                   FIBER
                 </span>
               </div>
-              <p className="text-[10px] text-slate-400 font-mono uppercase tracking-wider">
+              <p className="text-[10px] text-slate-500 dark:text-slate-400 font-mono uppercase tracking-wider">
                 Carrier NOC v4.2
               </p>
             </div>
@@ -247,7 +248,7 @@ export const Sidebar: React.FC<SidebarProps> = ({
           {/* Close Button */}
           <button
             onClick={onClose}
-            className="p-1.5 text-slate-400 hover:text-white rounded-lg hover:bg-slate-800 transition cursor-pointer"
+            className="p-1.5 text-slate-400 hover:text-slate-700 dark:hover:text-white rounded-lg hover:bg-slate-100 dark:hover:bg-slate-800 transition cursor-pointer"
             title="Close Menu (Esc)"
           >
             <X className="w-5 h-5" />
@@ -255,13 +256,13 @@ export const Sidebar: React.FC<SidebarProps> = ({
         </div>
 
         {/* Live Network Health Status Strip */}
-        <div className="px-4 py-2 bg-slate-950/60 border-b border-slate-800/80">
-          <div className="flex items-center justify-between px-2.5 py-1.5 rounded-lg bg-slate-900 border border-slate-800 text-[10px] font-mono">
-            <span className="flex items-center gap-1.5 text-emerald-400">
-              <span className="w-2 h-2 rounded-full bg-emerald-400 animate-pulse" />
+        <div className="px-4 py-2 bg-slate-50/80 dark:bg-slate-950/60 border-b border-slate-200 dark:border-slate-800/80">
+          <div className="flex items-center justify-between px-2.5 py-1.5 rounded-lg bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 text-[10px] font-mono">
+            <span className="flex items-center gap-1.5 text-emerald-600 dark:text-emerald-400">
+              <span className="w-2 h-2 rounded-full bg-emerald-500 animate-pulse" />
               <span className="font-bold">SYSTEM ONLINE</span>
             </span>
-            <span className="text-slate-400">{customers.length} Subscribers</span>
+            <span className="text-slate-500 dark:text-slate-400">{customers.length} Subscribers</span>
           </div>
 
           {activeOutages.length > 0 && (
@@ -324,16 +325,16 @@ export const Sidebar: React.FC<SidebarProps> = ({
                 onClick={() => handleSelectTab(item.id)}
                 className={`w-full flex items-center justify-between px-3 py-2.5 rounded-xl text-left transition cursor-pointer group ${
                   isActive
-                    ? 'bg-gradient-to-r from-cyan-600/20 to-blue-600/10 text-cyan-300 border border-cyan-500/40 shadow-sm'
-                    : 'text-slate-400 hover:text-slate-100 hover:bg-slate-800/60 border border-transparent'
+                    ? 'bg-cyan-50 dark:bg-gradient-to-r dark:from-cyan-600/20 dark:to-blue-600/10 text-cyan-800 dark:text-cyan-300 border border-cyan-200 dark:border-cyan-500/40 shadow-sm font-semibold'
+                    : 'text-slate-600 dark:text-slate-400 hover:text-slate-900 dark:hover:text-slate-100 hover:bg-slate-100 dark:hover:bg-slate-800/60 border border-transparent'
                 }`}
               >
                 <div className="flex items-center gap-3 min-w-0">
                   <div
                     className={`p-1.5 rounded-lg transition ${
                       isActive
-                        ? 'bg-cyan-600 text-slate-950 font-bold shadow-md shadow-cyan-600/30'
-                        : 'bg-slate-800/80 text-slate-400 group-hover:text-cyan-400 group-hover:bg-slate-800'
+                        ? 'bg-cyan-600 text-white dark:text-slate-950 font-bold shadow-md shadow-cyan-600/30'
+                        : 'bg-slate-100 dark:bg-slate-800/80 text-slate-500 dark:text-slate-400 group-hover:text-cyan-600 dark:group-hover:text-cyan-400 group-hover:bg-slate-200 dark:group-hover:bg-slate-800'
                     }`}
                   >
                     <Icon className="w-4 h-4 shrink-0" />
@@ -341,12 +342,12 @@ export const Sidebar: React.FC<SidebarProps> = ({
                   <div className="truncate">
                     <span
                       className={`block text-xs font-bold truncate ${
-                        isActive ? 'text-white' : 'text-slate-300'
+                        isActive ? 'text-cyan-900 dark:text-white' : 'text-slate-800 dark:text-slate-300'
                       }`}
                     >
                       {item.label}
                     </span>
-                    <span className="block text-[10px] text-slate-500 font-mono truncate">
+                    <span className="block text-[10px] text-slate-500 dark:text-slate-400 font-mono truncate">
                       {item.subtitle}
                     </span>
                   </div>
@@ -365,14 +366,22 @@ export const Sidebar: React.FC<SidebarProps> = ({
         </nav>
 
         {/* Bottom User / Role Card */}
-        <div className="p-3 border-t border-slate-800 bg-slate-950/80 text-xs font-mono space-y-2.5">
+        <div className="p-3 border-t border-slate-200 dark:border-slate-800 bg-slate-50 dark:bg-slate-950/80 text-xs font-mono space-y-2.5">
+          {/* Appearance Toggle */}
+          <div className="flex items-center justify-between px-2.5 py-1.5 rounded-xl bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800">
+            <span className="text-[11px] font-semibold text-slate-700 dark:text-slate-300 font-sans">
+              Theme Mode
+            </span>
+            <ThemeToggle showLabel />
+          </div>
+
           <div className="flex items-center justify-between">
             <div className="flex items-center gap-2">
-              <div className="w-7 h-7 rounded-lg bg-indigo-600/30 border border-indigo-500/40 flex items-center justify-center text-indigo-300 font-bold text-xs">
-                <Shield className="w-3.5 h-3.5 text-indigo-400" />
+              <div className="w-7 h-7 rounded-lg bg-indigo-100 dark:bg-indigo-600/30 border border-indigo-200 dark:border-indigo-500/40 flex items-center justify-center text-indigo-700 dark:text-indigo-300 font-bold text-xs">
+                <Shield className="w-3.5 h-3.5 text-indigo-600 dark:text-indigo-400" />
               </div>
               <div className="truncate max-w-[120px]">
-                <span className="text-[11px] font-bold text-slate-200 block leading-tight truncate">
+                <span className="text-[11px] font-bold text-slate-900 dark:text-slate-200 block leading-tight truncate font-sans">
                   {currentUser?.fullName || (
                     currentRole === 'ADMIN'
                       ? 'NOC Administrator'
@@ -383,7 +392,7 @@ export const Sidebar: React.FC<SidebarProps> = ({
                       : 'Subscriber Portal'
                   )}
                 </span>
-                <span className="text-[9px] text-cyan-400 font-mono block">
+                <span className="text-[9px] text-cyan-600 dark:text-cyan-400 font-mono block">
                   [{currentRole}]
                 </span>
               </div>
@@ -393,7 +402,7 @@ export const Sidebar: React.FC<SidebarProps> = ({
               <select
                 value={currentRole}
                 onChange={(e) => onSwitchRole(e.target.value as SystemRole)}
-                className="bg-slate-900 border border-slate-700 text-slate-300 text-[10px] rounded px-1.5 py-1 focus:outline-none cursor-pointer"
+                className="bg-white dark:bg-slate-900 border border-slate-300 dark:border-slate-700 text-slate-800 dark:text-slate-300 text-[10px] rounded px-1.5 py-1 focus:outline-none cursor-pointer"
                 title="Switch RBAC Test Role (NOC Staff Only)"
               >
                 <option value="ADMIN">ADMIN</option>
@@ -409,9 +418,9 @@ export const Sidebar: React.FC<SidebarProps> = ({
                 onLogout();
                 onClose();
               }}
-              className="w-full py-1.5 px-3 rounded-lg bg-rose-950/60 hover:bg-rose-900/80 border border-rose-800 text-rose-300 text-xs flex items-center justify-center gap-1.5 transition cursor-pointer font-bold"
+              className="w-full py-1.5 px-3 rounded-lg bg-rose-50 hover:bg-rose-100 dark:bg-rose-950/60 dark:hover:bg-rose-900/80 border border-rose-200 dark:border-rose-800 text-rose-700 dark:text-rose-300 text-xs flex items-center justify-center gap-1.5 transition cursor-pointer font-bold font-sans"
             >
-              <LogOut className="w-3.5 h-3.5" />
+              <LogOut className="w-3.5 h-3.5 text-rose-500 dark:text-rose-400" />
               <span>Sign Out of NOC</span>
             </button>
           )}

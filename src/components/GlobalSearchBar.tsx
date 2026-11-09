@@ -156,7 +156,7 @@ export const GlobalSearchBar: React.FC<GlobalSearchBarProps> = ({
               setIsOpen(true);
             }}
             placeholder="Search by name, IP (192.168...), or invoice # (Ctrl+K)..."
-            className="w-full sm:w-64 md:w-80 lg:w-96 bg-slate-950/90 border border-slate-700/80 hover:border-cyan-500/50 focus:border-cyan-500 rounded-xl pl-9 pr-14 py-1.5 text-xs text-slate-100 placeholder-slate-400 focus:outline-none focus:ring-1 focus:ring-cyan-500/50 font-mono transition shadow-inner"
+            className="w-full sm:w-64 md:w-80 lg:w-96 bg-slate-100 dark:bg-slate-950/90 border border-slate-300 dark:border-slate-700/80 hover:border-cyan-500/50 focus:border-cyan-500 rounded-xl pl-9 pr-14 py-1.5 text-xs text-slate-900 dark:text-slate-100 placeholder-slate-500 dark:placeholder-slate-400 focus:outline-none focus:ring-1 focus:ring-cyan-500/50 font-mono transition shadow-sm dark:shadow-inner"
           />
 
           {/* Right Action Icons: Keyboard Shortcut / Clear */}
@@ -168,12 +168,12 @@ export const GlobalSearchBar: React.FC<GlobalSearchBarProps> = ({
                   setQuery('');
                   inputRef.current?.focus();
                 }}
-                className="p-1 text-slate-400 hover:text-white rounded transition cursor-pointer"
+                className="p-1 text-slate-400 hover:text-slate-700 dark:hover:text-white rounded transition cursor-pointer"
               >
                 <X className="w-3.5 h-3.5" />
               </button>
             ) : (
-              <kbd className="hidden sm:inline-flex items-center gap-0.5 px-1.5 py-0.5 text-[10px] font-mono text-slate-400 bg-slate-800/80 border border-slate-700 rounded shadow-sm select-none">
+              <kbd className="hidden sm:inline-flex items-center gap-0.5 px-1.5 py-0.5 text-[10px] font-mono text-slate-500 dark:text-slate-400 bg-slate-200 dark:bg-slate-800/80 border border-slate-300 dark:border-slate-700 rounded shadow-sm select-none">
                 <span className="text-[11px]">⌘</span>K
               </kbd>
             )}
@@ -182,9 +182,9 @@ export const GlobalSearchBar: React.FC<GlobalSearchBarProps> = ({
 
         {/* Live Search Floating Results Dropdown */}
         {isOpen && query.trim() !== '' && (
-          <div className="absolute top-full left-0 right-0 sm:right-auto sm:w-[480px] md:w-[540px] mt-2 bg-slate-900 border border-slate-800 rounded-2xl shadow-2xl z-50 overflow-hidden flex flex-col max-h-[80vh] animate-fade-in font-sans">
+          <div className="absolute top-full left-0 right-0 sm:right-auto sm:w-[480px] md:w-[540px] mt-2 bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 rounded-2xl shadow-2xl z-50 overflow-hidden flex flex-col max-h-[80vh] animate-fade-in font-sans">
             {/* Filter Tabs Header */}
-            <div className="p-2.5 bg-slate-950 border-b border-slate-800 flex items-center justify-between text-xs font-mono">
+            <div className="p-2.5 bg-slate-50 dark:bg-slate-950 border-b border-slate-200 dark:border-slate-800 flex items-center justify-between text-xs font-mono">
               <div className="flex items-center gap-1">
                 <button
                   type="button"
@@ -192,7 +192,7 @@ export const GlobalSearchBar: React.FC<GlobalSearchBarProps> = ({
                   className={`px-2.5 py-1 rounded-lg font-bold transition cursor-pointer text-[11px] ${
                     activeFilter === 'all'
                       ? 'bg-cyan-600 text-slate-950'
-                      : 'text-slate-400 hover:text-white bg-slate-900'
+                      : 'text-slate-600 hover:text-slate-900 bg-slate-100 dark:text-slate-400 dark:hover:text-white dark:bg-slate-900'
                   }`}
                 >
                   All ({totalResults})
@@ -203,7 +203,7 @@ export const GlobalSearchBar: React.FC<GlobalSearchBarProps> = ({
                   className={`px-2.5 py-1 rounded-lg font-bold transition cursor-pointer text-[11px] ${
                     activeFilter === 'customers'
                       ? 'bg-cyan-600 text-slate-950'
-                      : 'text-slate-400 hover:text-white bg-slate-900'
+                      : 'text-slate-600 hover:text-slate-900 bg-slate-100 dark:text-slate-400 dark:hover:text-white dark:bg-slate-900'
                   }`}
                 >
                   Customers ({matchingCustomers.length})
@@ -214,7 +214,7 @@ export const GlobalSearchBar: React.FC<GlobalSearchBarProps> = ({
                   className={`px-2.5 py-1 rounded-lg font-bold transition cursor-pointer text-[11px] ${
                     activeFilter === 'invoices'
                       ? 'bg-cyan-600 text-slate-950'
-                      : 'text-slate-400 hover:text-white bg-slate-900'
+                      : 'text-slate-600 hover:text-slate-900 bg-slate-100 dark:text-slate-400 dark:hover:text-white dark:bg-slate-900'
                   }`}
                 >
                   Invoices ({matchingInvoices.length})
@@ -225,18 +225,18 @@ export const GlobalSearchBar: React.FC<GlobalSearchBarProps> = ({
                   className={`px-2.5 py-1 rounded-lg font-bold transition cursor-pointer text-[11px] ${
                     activeFilter === 'sessions'
                       ? 'bg-cyan-600 text-slate-950'
-                      : 'text-slate-400 hover:text-white bg-slate-900'
+                      : 'text-slate-600 hover:text-slate-900 bg-slate-100 dark:text-slate-400 dark:hover:text-white dark:bg-slate-900'
                   }`}
                 >
                   Live IPs ({matchingSessions.length})
                 </button>
               </div>
 
-              <span className="text-[10px] text-slate-400">Esc to close</span>
+              <span className="text-[10px] text-slate-500 dark:text-slate-400">Esc to close</span>
             </div>
 
             {/* Scrollable Results List */}
-            <div className="overflow-y-auto p-3 space-y-3.5 text-xs font-mono max-h-[60vh] scrollbar-thin scrollbar-thumb-slate-800">
+            <div className="overflow-y-auto p-3 space-y-3.5 text-xs font-mono max-h-[60vh] scrollbar-thin scrollbar-thumb-slate-300 dark:scrollbar-thumb-slate-800">
               {totalResults === 0 ? (
                 <div className="py-8 text-center text-slate-400">
                   <Search className="w-8 h-8 text-slate-600 mx-auto mb-2 opacity-50" />

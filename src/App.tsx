@@ -1,4 +1,5 @@
 import React, { useState, useEffect } from 'react';
+import { ThemeProvider } from './context/ThemeContext';
 import { CurrencyProvider } from './context/CurrencyContext';
 import { ISPProvider, useISP } from './context/ISPContext';
 import { PermissionProvider } from './context/PermissionContext';
@@ -218,7 +219,7 @@ function ISPAppContent() {
   const isOriginalAdmin = isOriginalAdminSession();
 
   return (
-    <div className="flex h-screen w-screen overflow-hidden bg-slate-950 text-slate-100 font-sans selection:bg-cyan-900 selection:text-cyan-200">
+    <div className="flex h-screen w-screen overflow-hidden bg-slate-50 text-slate-900 dark:bg-[#0B111E] dark:text-slate-100 font-sans selection:bg-cyan-500 selection:text-white transition-colors duration-200">
       {/* 1. Off-Canvas Collapsible Sidebar (Strictly hidden for Client subscribers and Field Agents) */}
       {!isClient && !isAgent && (
         <Sidebar
@@ -290,7 +291,7 @@ function ISPAppContent() {
         )}
 
         {/* Scrollable Main Content Body */}
-        <main className="flex-1 overflow-y-auto p-4 sm:p-6 bg-slate-950">
+        <main className="flex-1 overflow-y-auto p-4 sm:p-6 bg-slate-50 dark:bg-[#0B111E] text-slate-900 dark:text-slate-100 transition-colors duration-200">
           <div className="max-w-7xl mx-auto space-y-6">
             {/* PWA Mobile Install Banner for Agents & Clients */}
             <PWAInstallPrompt role={currentRole} variant="banner" forceVisibleOnDesktop={false} />
@@ -405,36 +406,36 @@ function ISPAppContent() {
         </main>
 
         {/* Compact Footer Strip */}
-        <footer className="border-t border-slate-900 bg-slate-950/90 py-2.5 px-4 sm:px-6 text-[11px] text-slate-500 shrink-0">
+        <footer className="border-t border-slate-200 dark:border-slate-800/80 bg-white/95 dark:bg-[#0B111E]/90 py-2.5 px-4 sm:px-6 text-[11px] text-slate-500 dark:text-slate-400 shrink-0 transition-colors duration-200">
           <div className="max-w-7xl mx-auto flex flex-col sm:flex-row items-center justify-between gap-2 font-mono">
             {isClient ? (
               <>
                 <div className="flex items-center gap-2">
-                  <span className="font-bold text-slate-300">Youth Net</span>
+                  <span className="font-bold text-slate-800 dark:text-slate-200">Youth Net</span>
                   <span>&bull; Subscriber Self-Care Portal</span>
                 </div>
                 <div className="flex items-center gap-3">
-                  <span className="flex items-center gap-1 text-emerald-400">
+                  <span className="flex items-center gap-1 text-emerald-600 dark:text-emerald-400">
                     <ShieldCheck className="w-3.5 h-3.5" /> 256-bit TLS Encrypted
                   </span>
                   <span>&bull;</span>
-                  <span className="text-slate-400">24/7 Helpline: +92 51 111-968-846</span>
+                  <span className="text-slate-500 dark:text-slate-400">24/7 Helpline: +92 51 111-968-846</span>
                 </div>
               </>
             ) : (
               <>
                 <div className="flex items-center gap-2">
-                  <Radio className="w-3.5 h-3.5 text-cyan-400" />
-                  <span className="text-slate-300 font-bold">Youth Net Carrier NOC v4.2</span>
+                  <Radio className="w-3.5 h-3.5 text-cyan-600 dark:text-cyan-400" />
+                  <span className="text-slate-800 dark:text-slate-200 font-bold">Youth Net Carrier NOC v4.2</span>
                   <span>&bull; RBAC Tier [{currentRole}] Active</span>
                 </div>
 
                 <div className="flex items-center gap-3">
-                  <span className="flex items-center gap-1 text-emerald-400">
+                  <span className="flex items-center gap-1 text-emerald-600 dark:text-emerald-400">
                     <ShieldCheck className="w-3 h-3" /> Secure Auth Active
                   </span>
                   <span>&bull;</span>
-                  <span className="flex items-center gap-1 text-cyan-400">
+                  <span className="flex items-center gap-1 text-cyan-600 dark:text-cyan-400">
                     <Database className="w-3 h-3" /> PostgreSQL 16 `users` Table
                   </span>
                 </div>
@@ -481,12 +482,14 @@ function ISPAppContent() {
 
 export default function App() {
   return (
-    <CurrencyProvider>
-      <ISPProvider>
-        <PermissionProvider>
-          <ISPAppContent />
-        </PermissionProvider>
-      </ISPProvider>
-    </CurrencyProvider>
+    <ThemeProvider>
+      <CurrencyProvider>
+        <ISPProvider>
+          <PermissionProvider>
+            <ISPAppContent />
+          </PermissionProvider>
+        </ISPProvider>
+      </CurrencyProvider>
+    </ThemeProvider>
   );
 }

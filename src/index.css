@@ -1,1 +1,187 @@
 @import "tailwindcss";
+
+@custom-variant dark (&:where(.dark, .dark *));
+
+/* Smooth theme transitions for layout containers */
+.theme-transition {
+  transition: background-color 0.2s ease, border-color 0.2s ease, color 0.2s ease;
+}
+
+/* Global root color scheme */
+:root {
+  color-scheme: light;
+}
+
+html.dark {
+  color-scheme: dark;
+}
+
+/* ==========================================================================
+   LIGHT MODE COLOR TOKENS & SURFACE ELEVATION (Auto-adapting NOC components)
+   ========================================================================== */
+:root:not(.dark) {
+  --bg-app: #f8fafc;
+  --bg-card: #ffffff;
+  --border-card: #e2e8f0;
+  --text-main: #0f172a;
+  --text-muted: #64748b;
+}
+
+html.dark {
+  --bg-app: #0B111E;
+  --bg-card: #111A2E;
+  --border-card: #1e293b;
+  --text-main: #f8fafc;
+  --text-muted: #94a3b8;
+}
+
+/* When in Light Mode: map deep dark panels to clean enterprise light styling */
+:root:not(.dark) .bg-slate-900 {
+  background-color: #ffffff;
+  border-color: #e2e8f0;
+  color: #0f172a;
+}
+
+:root:not(.dark) .bg-slate-900\/90,
+:root:not(.dark) .bg-slate-900\/80,
+:root:not(.dark) .bg-slate-900\/70 {
+  background-color: rgba(255, 255, 255, 0.96);
+  border-color: #e2e8f0;
+  color: #0f172a;
+}
+
+:root:not(.dark) .bg-slate-950 {
+  background-color: #f8fafc;
+  color: #0f172a;
+}
+
+:root:not(.dark) .bg-slate-950\/90,
+:root:not(.dark) .bg-slate-950\/80,
+:root:not(.dark) .bg-slate-950\/70,
+:root:not(.dark) .bg-slate-950\/60 {
+  background-color: rgba(248, 250, 252, 0.95);
+  color: #0f172a;
+}
+
+:root:not(.dark) .border-slate-800,
+:root:not(.dark) .border-slate-800\/80,
+:root:not(.dark) .border-slate-800\/60 {
+  border-color: #e2e8f0;
+}
+
+:root:not(.dark) .border-slate-700,
+:root:not(.dark) .border-slate-700\/80 {
+  border-color: #cbd5e1;
+}
+
+/* Light mode text hierarchy */
+:root:not(.dark) .bg-slate-900 .text-white:not(button *):not([class*="bg-"] *),
+:root:not(.dark) .bg-slate-950 .text-white:not(button *):not([class*="bg-"] *),
+:root:not(.dark) .bg-white .text-white:not(button *):not([class*="bg-"] *) {
+  color: #0f172a;
+}
+
+:root:not(.dark) .bg-slate-900 .text-slate-200:not(button *):not([class*="bg-"] *),
+:root:not(.dark) .bg-slate-900 .text-slate-300:not(button *):not([class*="bg-"] *),
+:root:not(.dark) .bg-slate-950 .text-slate-200:not(button *):not([class*="bg-"] *),
+:root:not(.dark) .bg-slate-950 .text-slate-300:not(button *):not([class*="bg-"] *) {
+  color: #1e293b;
+}
+
+:root:not(.dark) .bg-slate-900 .text-slate-400:not(button *):not([class*="bg-"] *),
+:root:not(.dark) .bg-slate-950 .text-slate-400:not(button *):not([class*="bg-"] *) {
+  color: #64748b;
+}
+
+/* Light mode form inputs & controls */
+:root:not(.dark) input:not([type="checkbox"]):not([type="radio"]):not([type="submit"]):not([type="button"]),
+:root:not(.dark) select,
+:root:not(.dark) textarea {
+  background-color: #ffffff;
+  border-color: #cbd5e1;
+  color: #0f172a;
+}
+
+:root:not(.dark) input::placeholder,
+:root:not(.dark) textarea::placeholder {
+  color: #94a3b8;
+}
+
+/* Light mode tables */
+:root:not(.dark) table thead {
+  background-color: #f1f5f9;
+  border-color: #e2e8f0;
+  color: #334155;
+}
+
+:root:not(.dark) table tbody tr {
+  border-color: #e2e8f0;
+}
+
+:root:not(.dark) table tbody tr:hover {
+  background-color: #f8fafc;
+}
+
+/* ==========================================================================
+   DARK MODE COLOR TOKENS (YouthNet NOC Standard dark palette #0B111E / #111A2E)
+   ========================================================================== */
+html.dark .bg-slate-900,
+html.dark .bg-slate-900\/90,
+html.dark .bg-slate-900\/80 {
+  background-color: #111A2E;
+  border-color: #1e293b;
+}
+
+html.dark .bg-slate-950,
+html.dark .bg-slate-950\/90,
+html.dark .bg-slate-950\/80 {
+  background-color: #0B111E;
+}
+
+html.dark table thead {
+  background-color: #0f172a;
+  border-color: #1e293b;
+  color: #cbd5e1;
+}
+
+html.dark table tbody tr:hover {
+  background-color: rgba(30, 41, 59, 0.5);
+}
+
+/* Always keep CTA action buttons legible */
+button[class*="bg-cyan-600"],
+button[class*="bg-cyan-500"] {
+  color: #020617 !important;
+}
+
+button[class*="bg-blue-600"],
+button[class*="bg-indigo-600"],
+button[class*="bg-rose-600"],
+button[class*="bg-emerald-600"] {
+  color: #ffffff !important;
+}
+
+/* Subtle scrollbars */
+::-webkit-scrollbar {
+  width: 6px;
+  height: 6px;
+}
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+.dark ::-webkit-scrollbar-thumb {
+  background: rgba(148, 163, 184, 0.25);
+  border-radius: 9999px;
+}
+.dark ::-webkit-scrollbar-thumb:hover {
+  background: rgba(148, 163, 184, 0.45);
+}
+:root:not(.dark) ::-webkit-scrollbar-thumb,
+.light ::-webkit-scrollbar-thumb {
+  background: rgba(100, 116, 139, 0.25);
+  border-radius: 9999px;
+}
+:root:not(.dark) ::-webkit-scrollbar-thumb:hover,
+.light ::-webkit-scrollbar-thumb:hover {
+  background: rgba(100, 116, 139, 0.45);
+}
