@@ -62,16 +62,22 @@ ${invoice.taxAmount > 0 ? `Tax (GST 16%): ${formatCurrency(invoice.taxAmount)}\n
     invoice.discountAmount > 0 ? `Discount: -${formatCurrency(invoice.discountAmount)}\n` : ''
 }*TOTAL PAID: ${formatCurrency(invoice.totalAmount)}*
 Status: ${invoice.status.toUpperCase()}
-Collector: ${invoice.agentName || 'Bilal Khan (Field Staff)'}
+Collector: ${invoice.agentName || 'Authorized Field Staff'}
 Verification: ROS-7-${invoice.id.slice(-6)}
 
 _Thank you for choosing Youth Net Fiber Network!_`;
 
   const handleShareWhatsApp = () => {
     const encoded = encodeURIComponent(shareText);
-    const cleanPhone = invoice.customerPhone.replace(/[^0-9]/g, '');
+    const cleanPhone = (invoice.customerPhone || '').replace(/[^0-9]/g, '');
     const url = `https://wa.me/${cleanPhone}?text=${encoded}`;
-    window.open(url, '_blank');
+    const link = document.createElement('a');
+    link.href = url;
+    link.target = '_blank';
+    link.rel = 'noopener noreferrer';
+    document.body.appendChild(link);
+    link.click();
+    document.body.removeChild(link);
   };
 
   const handleCopyText = () => {
@@ -149,7 +155,7 @@ _Thank you for choosing Youth Net Fiber Network!_`;
             <div className="flex justify-between">
               <span className="text-slate-400">Field Recovery Agent:</span>
               <span className="text-emerald-400 font-semibold">
-                {invoice.agentName || 'Bilal Khan (Field Staff)'}
+                {invoice.agentName || 'Authorized Field Staff'}
               </span>
             </div>
           </div>

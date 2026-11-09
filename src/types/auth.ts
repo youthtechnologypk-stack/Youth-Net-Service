@@ -13,12 +13,15 @@ export interface UserAccount {
   password?: string; // Stored plain/temporary credential for portal access
   phone: string;
   isActive: boolean;
+  area?: string; // Normalized area/coverage sector
+  cashInHand?: number; // Normalized field cash in hand
   mustChangePassword?: boolean;
   linkedAgentId?: string; // Foreign key linking to FieldAgent
   linkedCustomerId?: string; // Foreign key linking to Customer
-  assignedArea?: string;
+  assignedArea?: string; // Compatibility alias
   department?: string; // For Managers: NOC, Operations, Accounts, Field SLA
   cashLimit?: number; // For Agents: Cash Collection Limit in PKR
+  balance?: number; // Cash in hand or user wallet balance
   grantClientPortal?: boolean; // For Clients: Grant Self-Service Portal Access
   sendWhatsAppNotice?: boolean;
   permissions?: Record<string, boolean>; // Granular feature override flags

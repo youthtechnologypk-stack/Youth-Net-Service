@@ -31,6 +31,7 @@ import {
   fetchLiveMikrotikSubscribers,
   getCachedSubscribers,
 } from '../services/mikrotikSubscriberSync';
+import { supabase } from '../services/supabaseClient';
 
 export interface CreateAccountModalProps {
   isOpen: boolean;
@@ -247,7 +248,25 @@ export const CreateAccountModal: React.FC<CreateAccountModalProps> = ({
       console.warn('Failed saving to youthnet_portal_users:', storageErr);
     }
 
-    // 2. Persist to server backend API
+    // 2. Persist directly to Supabase PostgreSQL portal_users table
+    try {
+      const newUserPayload = {
+        username: cleanUsername,
+        password: plainPass,
+        role,
+        full_name: fullName.trim(),
+        phone: cleanPhone,
+        area: assignedArea || 'Sector G-11',
+        base_salary: 0,
+        cash_in_hand: 0,
+        created_at: new Date().toISOString(),
+      };
+      await supabase.from('portal_users').insert([newUserPayload]);
+    } catch (sbErr) {
+      console.warn('Failed inserting to Supabase portal_users:', sbErr);
+    }
+
+    // 3. Persist to server backend API
     try {
       await fetch('/api/auth/users', {
         method: 'POST',

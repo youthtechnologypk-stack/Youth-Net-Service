@@ -1,5 +1,6 @@
 import { SystemRole, UserAccount } from '../types/auth';
 import { storageService } from '../services/storageService';
+import { supabase } from '../services/supabaseClient';
 import {
   USERS_STORAGE_KEY,
   AUTH_STORAGE_KEY,
@@ -132,6 +133,10 @@ const DEFAULT_ADMIN_USER: UserAccount = {
   displayName: 'NOC Master Administrator',
   phone: '+92 300 1234567',
   role: 'ADMIN',
+  area: 'Central NOC Core',
+  assignedArea: 'Central NOC Core',
+  cashInHand: 0,
+  balance: 0,
   isActive: true,
   createdAt: new Date().toISOString(),
 };
@@ -147,17 +152,24 @@ export function getStoredUser(): UserAccount | null {
       return null;
     }
     const parsed: any = JSON.parse(raw);
-    if (parsed.user) return parsed.user;
-    if (parsed.username && parsed.role) {
+    const u = parsed.user || (parsed.username && parsed.role ? parsed : null);
+    if (u) {
       return {
-        id: parsed.id || `usr-${parsed.username}`,
-        username: parsed.username,
-        fullName: parsed.fullName || parsed.username,
-        displayName: parsed.fullName || parsed.username,
-        phone: parsed.phone || '+92 300 0000000',
-        role: parsed.role,
-        isActive: true,
-        createdAt: parsed.createdAt || new Date().toISOString(),
+        id: u.id || `usr-${u.username}`,
+        username: u.username,
+        fullName: u.fullName || u.displayName || u.username,
+        displayName: u.displayName || u.fullName || u.username,
+        phone: u.phone || '+92 300 0000000',
+        role: u.role,
+        area: u.area || u.assignedArea || 'Central Zone',
+        assignedArea: u.area || u.assignedArea || 'Central Zone',
+        cashInHand: Number(u.cashInHand ?? u.balance ?? 0),
+        balance: Number(u.cashInHand ?? u.balance ?? 0),
+        email: u.email || `${u.username}@youthnet.pk`,
+        isActive: u.isActive !== false,
+        linkedAgentId: u.linkedAgentId,
+        linkedCustomerId: u.linkedCustomerId,
+        createdAt: u.createdAt || new Date().toISOString(),
       };
     }
     return null;
@@ -234,11 +246,18 @@ export function clearAuthSession(): void {
   if (typeof window === 'undefined') return;
   localStorage.removeItem(AUTH_STORAGE_KEY);
   sessionStorage.removeItem('auth_original_role');
+  sessionStorage.clear();
+  try {
+    localStorage.removeItem('netpulse_active_subscriber_session');
+    localStorage.removeItem('netpulse_agent_filter');
+    window.dispatchEvent(new Event('youthnet_auth_changed'));
+    window.dispatchEvent(new Event('storage'));
+  } catch {}
 }
 
 /**
  * API Login Authentication Handler
- * Authenticates against standardized USERS_STORAGE_KEY, MikroTik secrets, and fallback DB
+ * Authenticates directly against Supabase PostgreSQL (portal_users) with repository & local fallbacks
  */
 export async function apiLogin(
   username: string,
@@ -251,7 +270,78 @@ export async function apiLogin(
     return { success: false, error: 'Please enter both username and password.' };
   }
 
-  // 1. Authenticate against live local repository (USERS_STORAGE_KEY = 'youthnet_portal_users')
+  // 1. Direct Authentication against Supabase PostgreSQL portal_users table
+  try {
+    let { data: user, error } = await supabase
+      .from('portal_users')
+      .select('*')
+      .ilike('username', enteredUser)
+      .eq('password', enteredPass)
+      .maybeSingle();
+
+    // Check if short username (e.g. "hassnain") matches email in Supabase ("hassnain@youthnet.pk")
+    if (!user && !enteredUser.includes('@')) {
+      const { data: userEmailMatch } = await supabase
+        .from('portal_users')
+        .select('*')
+        .ilike('username', `${enteredUser}@youthnet.pk`)
+        .eq('password', enteredPass)
+        .maybeSingle();
+      if (userEmailMatch) {
+        user = userEmailMatch;
+      }
+    }
+
+    if (user) {
+      const userAccount: UserAccount = {
+        id: user.id,
+        username: user.username,
+        fullName: user.full_name || user.username,
+        displayName: user.full_name || user.username,
+        phone: user.phone || '+92 300 0000000',
+        role: user.role,
+        area: user.area || 'Central NOC Core',
+        assignedArea: user.area || 'Central NOC Core',
+        cashInHand: Number(user.cash_in_hand || 0),
+        balance: Number(user.cash_in_hand || 0),
+        email: user.username.includes('@') ? user.username : `${user.username}@youthnet.pk`,
+        isActive: true,
+        createdAt: user.created_at || new Date().toISOString(),
+      };
+
+      const token = `supabase_token_${Date.now()}_${user.id}`;
+      saveAuthSession(token, userAccount);
+
+      // Reconcile into local cache for offline availability
+      try {
+        saveUnifiedPortalUser({
+          username: user.username,
+          password: enteredPass,
+          role: user.role,
+          fullName: user.full_name || user.username,
+          phone: user.phone,
+          area: user.area,
+          email: user.username.includes('@') ? user.username : `${user.username}@youthnet.pk`,
+        });
+      } catch {}
+
+      storageService.logAuditEvent({
+        actor: user.username,
+        actorRole: user.role,
+        actionType: 'AUTH_LOGIN',
+        actionTitle: 'User Authenticated via Supabase PostgreSQL',
+        target: getLandingRouteForRole(user.role),
+        severity: 'SUCCESS',
+        details: `Account @${user.username} (${user.role}) signed in successfully via Supabase.`,
+      });
+
+      return { success: true, user: userAccount, token };
+    }
+  } catch (sbErr) {
+    console.warn('Supabase authentication check failed, trying local repository:', sbErr);
+  }
+
+  // 2. Authenticate against live local repository (USERS_STORAGE_KEY = 'youthnet_portal_users')
   // Also checks MikroTik secrets array if subscriber
   const repoResult = authenticateAgainstRepository(enteredUser, enteredPass);
   if (repoResult.success && repoResult.user) {

@@ -78,6 +78,7 @@ import {
 } from '../services/mikrotikSubscriberSync';
 import { storageService } from '../services/storageService';
 import { saveUnifiedPortalUser, USERS_STORAGE_KEY } from '../lib/userRepository';
+import { supabase } from '../services/supabaseClient';
 
 interface BandwidthDataPoint {
   time: string;
@@ -684,6 +685,126 @@ export const ISPProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
     });
     return unsubscribe;
   }, []);
+
+  // Supabase PostgreSQL Realtime Sync for Invoices, Complaints, and Field Agents
+  useEffect(() => {
+    const fetchSupabaseInvoices = async () => {
+      try {
+        const { data } = await supabase
+          .from('invoices')
+          .select('*')
+          .order('created_at', { ascending: false });
+
+        if (data && data.length > 0) {
+          const mapped: Invoice[] = data.map((inv: any) => ({
+            id: inv.id,
+            invoiceNumber: inv.invoice_no,
+            customerId: inv.subscriber_username,
+            customerName: inv.subscriber_username,
+            customerPhone: '+92 300 0000000',
+            packageId: 'pkg-default',
+            packageName: '20M_Ultra Fiber',
+            billingMonth: 'Current Billing',
+            baseAmount: Number(inv.amount) || 0,
+            taxAmount: 0,
+            discountAmount: 0,
+            totalAmount: Number(inv.amount) || 0,
+            status: (inv.status || 'DUE').toUpperCase() === 'PAID' ? 'paid' : 'unpaid',
+            dueDate: inv.due_date,
+            issuedAt: inv.created_at || new Date().toISOString(),
+            paidAt: inv.paid_at || undefined,
+            collectedByAgentId: inv.assigned_agent_id || undefined,
+            agentName: inv.assigned_agent_name || undefined,
+            whatsappNoticeSent: false,
+          }));
+          setInvoices(mapped);
+        }
+      } catch (err) {
+        console.warn('Supabase fetch invoices error:', err);
+      }
+    };
+
+    const fetchSupabaseTickets = async () => {
+      try {
+        const { data } = await supabase
+          .from('tickets')
+          .select('*')
+          .order('created_at', { ascending: false });
+
+        if (data && data.length > 0) {
+          const mapped: ComplaintTicket[] = data.map((t: any) => ({
+            id: t.id,
+            ticketNumber: t.ticket_no,
+            customerId: t.subscriber_username,
+            customerName: t.subscriber_username,
+            customerPhone: '+92 300 0000000',
+            customerAddress: 'Islamabad Federal Division',
+            areaNode: 'Sector G-11',
+            category: 'router_issue',
+            priority: (t.priority || 'medium').toLowerCase() as any,
+            status: (t.status || 'open').toLowerCase() === 'resolved' ? 'resolved' : 'open',
+            title: t.issue?.split(':')[0] || 'Technical SLA Ticket',
+            description: t.issue || 'Broadband maintenance issue',
+            assignedAgentId: t.assigned_agent_id || undefined,
+            slaTargetHours: 4,
+            createdAt: t.created_at || new Date().toISOString(),
+            slaDeadline: new Date(new Date(t.created_at || Date.now()).getTime() + 4 * 3600 * 1000).toISOString(),
+            routerId: 'router-ccr2004-core',
+          }));
+          setComplaints(mapped);
+        }
+      } catch (err) {
+        console.warn('Supabase fetch tickets error:', err);
+      }
+    };
+
+    const fetchSupabaseUsers = async () => {
+      try {
+        const { data } = await supabase.from('portal_users').select('*');
+        if (data && data.length > 0) {
+          // Reconcile agent cash
+          setAgents((prev) =>
+            prev.map((ag) => {
+              const matched = data.find(
+                (u: any) =>
+                  (u.username && u.username.toLowerCase().includes(ag.name.toLowerCase().split(' ')[0])) ||
+                  (u.full_name && u.full_name.toLowerCase().includes(ag.name.toLowerCase().split(' ')[0]))
+              );
+              if (matched && matched.cash_in_hand !== undefined && matched.cash_in_hand !== null) {
+                return { ...ag, cashInHand: Number(matched.cash_in_hand) || 0 };
+              }
+              return ag;
+            })
+          );
+        }
+      } catch (err) {
+        console.warn('Supabase fetch users notice:', err);
+      }
+    };
+
+    fetchSupabaseInvoices();
+    fetchSupabaseTickets();
+    fetchSupabaseUsers();
+
+    // Enable Supabase Realtime Subscriptions
+    const realtimeChannel = supabase
+      .channel('public:isp_realtime_sync')
+      .on('postgres_changes', { event: '*', schema: 'public', table: 'invoices' }, () => {
+        fetchSupabaseInvoices();
+      })
+      .on('postgres_changes', { event: '*', schema: 'public', table: 'tickets' }, () => {
+        fetchSupabaseTickets();
+      })
+      .on('postgres_changes', { event: '*', schema: 'public', table: 'portal_users' }, () => {
+        fetchSupabaseUsers();
+      })
+      .subscribe();
+
+    return () => {
+      supabase.removeChannel(realtimeChannel);
+    };
+  }, []);
+
   const [selectedRouterId, setSelectedRouterId] = useState<string>(() => {
     try {
       const stored = localStorage.getItem('netpulse_selected_router_id');
@@ -2663,6 +2784,31 @@ export const ISPProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
       )
     );
 
+    // Sync payment & agent cash_in_hand directly to Supabase PostgreSQL
+    try {
+      supabase
+        .from('invoices')
+        .update({ status: 'PAID', paid_at: new Date().toISOString() })
+        .or(`id.eq.${invoiceId},invoice_no.eq.${targetInvoice.invoiceNumber}`);
+
+      supabase
+        .from('portal_users')
+        .select('id, cash_in_hand')
+        .or(`id.eq.${agentId},username.ilike.%${targetAgent.name.split(' ')[0]}%`)
+        .maybeSingle()
+        .then(({ data: agentRow }) => {
+          if (agentRow) {
+            const currentCash = Number(agentRow.cash_in_hand) || 0;
+            supabase
+              .from('portal_users')
+              .update({ cash_in_hand: currentCash + amount })
+              .eq('id', agentRow.id);
+          }
+        });
+    } catch (e) {
+      console.warn('Supabase collectAgentCashPayment error:', e);
+    }
+
     // Restore customer balance and status if previously walled-garden
     const cust = customers.find((c) => c.id === targetInvoice.customerId);
     if (cust) {
@@ -3730,6 +3876,26 @@ export const ISPProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
       ]);
     }
 
+    // Insert directly into Supabase PostgreSQL invoices table
+    try {
+      const newInvoicePayload = {
+        invoice_no: newInv.invoiceNumber,
+        subscriber_username: (newInv.customerName || newInv.customerId || '').trim().toLowerCase(),
+        assigned_agent_id: newInv.collectedByAgentId || null,
+        assigned_agent_name: newInv.agentName || null,
+        amount: Number(newInv.totalAmount) || 0,
+        due_date: newInv.dueDate,
+        status: (newInv.status || 'unpaid').toUpperCase() === 'PAID' ? 'PAID' : 'DUE',
+        cycle_day: 5,
+        created_at: new Date().toISOString(),
+      };
+      supabase.from('invoices').insert([newInvoicePayload]).then(({ error }) => {
+        if (error) console.warn('Supabase invoice insert error:', error);
+      });
+    } catch (e) {
+      console.warn('Supabase createInvoice error:', e);
+    }
+
     return newInv;
   };
 
@@ -3784,6 +3950,26 @@ export const ISPProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
               : c
           )
         );
+      }
+    }
+
+    // Update Supabase PostgreSQL invoice status if updated
+    if (updatedFields.status) {
+      try {
+        const isPaid = updatedFields.status === 'paid';
+        const target = invoices.find((i) => i.id === invoiceId);
+        supabase
+          .from('invoices')
+          .update({
+            status: isPaid ? 'PAID' : 'DUE',
+            paid_at: isPaid ? (updatedFields.paidAt || new Date().toISOString()) : null,
+          })
+          .or(`id.eq.${invoiceId},invoice_no.eq.${target?.invoiceNumber || invoiceId}`)
+          .then(({ error }) => {
+            if (error) console.warn('Supabase invoice status update notice:', error);
+          });
+      } catch (err) {
+        console.warn('Supabase update invoice notice:', err);
       }
     }
   };
@@ -3860,6 +4046,24 @@ export const ISPProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
       setAgents((prev) =>
         prev.map((a) => (a.id === assignedAgentId ? { ...a, activeTicketsAssigned: a.activeTicketsAssigned + 1 } : a))
       );
+    }
+
+    // Direct INSERT into Supabase PostgreSQL tickets table
+    try {
+      const newTicketPayload = {
+        ticket_no: newTkt.ticketNumber,
+        subscriber_username: (newTkt.pppoeUsername || newTkt.customerName || newTkt.customerId || '').trim().toLowerCase(),
+        assigned_agent_id: assignedAgentId || null,
+        issue: `${newTkt.title}: ${newTkt.description}`,
+        priority: (newTkt.priority || 'MEDIUM').toUpperCase(),
+        status: (status || 'OPEN').toUpperCase() === 'RESOLVED' ? 'RESOLVED' : 'OPEN',
+        created_at: now.toISOString(),
+      };
+      supabase.from('tickets').insert([newTicketPayload]).then(({ error }) => {
+        if (error) console.warn('Supabase ticket insert error:', error);
+      });
+    } catch (e) {
+      console.warn('Supabase createComplaintTicket error:', e);
     }
 
     return newTkt;
@@ -4079,6 +4283,19 @@ export const ISPProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
           resolutionNotes,
         })
         .catch((err) => console.warn('WhatsApp Ticket resolved alert error:', err));
+    }
+
+    // Direct UPDATE to Supabase PostgreSQL tickets table
+    try {
+      supabase
+        .from('tickets')
+        .update({ status: 'RESOLVED' })
+        .or(`id.eq.${ticketId},ticket_no.eq.${targetTkt?.ticketNumber || ticketId}`)
+        .then(({ error }) => {
+          if (error) console.warn('Supabase resolve ticket notice:', error);
+        });
+    } catch (e) {
+      console.warn('Supabase resolve ticket error:', e);
     }
   };
 

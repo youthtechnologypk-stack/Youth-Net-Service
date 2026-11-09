@@ -1,6 +1,7 @@
 import React, { useState, useEffect } from 'react';
 import { ThemeProvider } from './context/ThemeContext';
 import { CurrencyProvider } from './context/CurrencyContext';
+import { AuthProvider } from './context/AuthContext';
 import { ISPProvider, useISP } from './context/ISPContext';
 import { PermissionProvider } from './context/PermissionContext';
 import { Sidebar } from './components/Sidebar';
@@ -318,6 +319,7 @@ function ISPAppContent() {
                 {/* 2. Operations & Dispatch (Customized for Manager / Admin) */}
                 {activeTab === 'operations' && (
                   <ManagerOperationsDashboard
+                    currentUser={currentUser}
                     onOpenTicketModal={() => setIsTicketOpen(true)}
                     onOpenOutageModal={() => setIsOutageOpen(true)}
                   />
@@ -484,11 +486,13 @@ export default function App() {
   return (
     <ThemeProvider>
       <CurrencyProvider>
-        <ISPProvider>
-          <PermissionProvider>
-            <ISPAppContent />
-          </PermissionProvider>
-        </ISPProvider>
+        <AuthProvider>
+          <ISPProvider>
+            <PermissionProvider>
+              <ISPAppContent />
+            </PermissionProvider>
+          </ISPProvider>
+        </AuthProvider>
       </CurrencyProvider>
     </ThemeProvider>
   );

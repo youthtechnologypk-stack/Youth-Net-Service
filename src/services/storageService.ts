@@ -1,8 +1,10 @@
 /**
  * Centralized Persistence Engine (Repository Pattern)
- * Production-ready storage service using IndexedDB with automatic LocalStorage fallback.
+ * Production-ready storage service using Supabase PostgreSQL + IndexedDB + LocalStorage fallback.
  * Manages: portal_users, bandwidth_profiles, invoices, tickets, consumption_logs
  */
+
+import { supabase, SupabasePortalUser, SupabaseInvoice, SupabaseTicket } from './supabaseClient';
 
 export interface PortalUser {
   id: string;
@@ -349,10 +351,120 @@ class StorageService {
         await this.persistAuditLogs();
       }
 
+      // 4. Synchronize live with Supabase PostgreSQL and subscribe to Realtime updates
+      await this.syncWithSupabase();
+      this.setupSupabaseRealtime();
+
       this.isInitialized = true;
     })();
 
     return this.initPromise;
+  }
+
+  /**
+   * Synchronize portal_users, invoices, and tickets from production Supabase PostgreSQL
+   */
+  public async syncWithSupabase(): Promise<void> {
+    try {
+      // 1. Sync portal_users
+      const { data: users, error: uErr } = await supabase.from('portal_users').select('*');
+      if (users && users.length > 0) {
+        users.forEach((su: SupabasePortalUser) => {
+          const cleanU = (su.username || '').toLowerCase();
+          const existingIdx = this.cache.portal_users.findIndex(
+            (u) => (u.username || '').toLowerCase() === cleanU || u.id === su.id
+          );
+          const mapped: PortalUser = {
+            id: su.id,
+            username: su.username,
+            password: su.password,
+            role: su.role,
+            fullName: su.full_name || su.username,
+            phone: su.phone || '+92 300 0000000',
+            area: su.area || 'Central NOC Core',
+            baseSalary: su.base_salary,
+            balance: su.cash_in_hand || 0,
+            createdAt: su.created_at || new Date().toISOString(),
+            isActive: true,
+          };
+          if (existingIdx >= 0) {
+            this.cache.portal_users[existingIdx] = { ...this.cache.portal_users[existingIdx], ...mapped };
+          } else {
+            this.cache.portal_users.push(mapped);
+          }
+        });
+        await this.persistPortalUsers();
+        this.emitChange('portal_users');
+      }
+
+      // 2. Sync invoices
+      const { data: invoices, error: invErr } = await supabase
+        .from('invoices')
+        .select('*')
+        .order('created_at', { ascending: false });
+
+      if (invoices && invoices.length > 0) {
+        this.cache.invoices = invoices.map((inv: any) => ({
+          id: inv.id,
+          invoiceNo: inv.invoice_no,
+          subscriberUsername: inv.subscriber_username,
+          agentId: inv.assigned_agent_id || '',
+          amount: Number(inv.amount) || 0,
+          dueDate: inv.due_date,
+          status: (inv.status || 'DUE').toUpperCase() === 'PAID' ? 'PAID' : 'DUE',
+          createdDate: inv.created_at || new Date().toISOString(),
+          cycleDay: inv.cycle_day || 5,
+          paidDate: inv.paid_at || undefined,
+        }));
+        await this.persistInvoices();
+        this.emitChange('invoices');
+      }
+
+      // 3. Sync tickets
+      const { data: tickets, error: tickErr } = await supabase
+        .from('tickets')
+        .select('*')
+        .order('created_at', { ascending: false });
+
+      if (tickets && tickets.length > 0) {
+        this.cache.tickets = tickets.map((t: any) => ({
+          id: t.id,
+          ticketNo: t.ticket_no,
+          subscriberUsername: t.subscriber_username,
+          agentId: t.assigned_agent_id || '',
+          issue: t.issue,
+          priority: (t.priority || 'MEDIUM').toUpperCase() as any,
+          status: (t.status || 'OPEN').toUpperCase() === 'RESOLVED' ? 'RESOLVED' : 'OPEN',
+          createdAt: t.created_at || new Date().toISOString(),
+        }));
+        await this.persistTickets();
+        this.emitChange('tickets');
+      }
+    } catch (err) {
+      console.warn('[StorageService] Error syncing with Supabase:', err);
+    }
+  }
+
+  private realtimeSubscribed = false;
+  private setupSupabaseRealtime(): void {
+    if (this.realtimeSubscribed || typeof window === 'undefined') return;
+    try {
+      this.realtimeSubscribed = true;
+      supabase
+        .channel('public:storage_live_sync')
+        .on('postgres_changes', { event: '*', schema: 'public', table: 'portal_users' }, () => {
+          this.syncWithSupabase();
+        })
+        .on('postgres_changes', { event: '*', schema: 'public', table: 'invoices' }, () => {
+          this.syncWithSupabase();
+        })
+        .on('postgres_changes', { event: '*', schema: 'public', table: 'tickets' }, () => {
+          this.syncWithSupabase();
+        })
+        .subscribe();
+    } catch (err) {
+      console.warn('[StorageService] Realtime subscription notice:', err);
+    }
   }
 
   private openIndexedDB(): Promise<IDBDatabase> {
@@ -539,12 +651,42 @@ class StorageService {
 
     await this.persistPortalUsers();
     this.emitChange('portal_users');
+
+    // Supabase PostgreSQL insert/upsert
+    try {
+      const cleanUser = (user.username || '').trim().toLowerCase();
+      const payload: any = {
+        username: cleanUser,
+        password: user.password || 'client123',
+        role: user.role,
+        full_name: user.fullName || user.username,
+        phone: user.phone || '+92 300 0000000',
+        area: user.area || 'Sector G-11',
+        base_salary: user.baseSalary || 0,
+        cash_in_hand: user.balance || 0,
+        created_at: user.createdAt || new Date().toISOString(),
+      };
+      if (/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(user.id)) {
+        payload.id = user.id;
+      }
+      await supabase.from('portal_users').upsert([payload], { onConflict: 'username' });
+    } catch (err) {
+      console.warn('[StorageService] Supabase savePortalUser notice:', err);
+    }
   }
 
   public async deletePortalUser(id: string): Promise<void> {
     this.cache.portal_users = this.cache.portal_users.filter((u) => u.id !== id && u.username !== id);
     await this.persistPortalUsers();
     this.emitChange('portal_users');
+
+    try {
+      if (/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(id)) {
+        await supabase.from('portal_users').delete().eq('id', id);
+      } else {
+        await supabase.from('portal_users').delete().eq('username', id);
+      }
+    } catch {}
   }
 
   private async persistPortalUsers(): Promise<void> {
@@ -675,12 +817,35 @@ class StorageService {
 
     await this.persistInvoices();
     this.emitChange('invoices');
+
+    // Supabase INSERT directly into invoices
+    try {
+      const isUuid = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(invoice.id);
+      const payload: any = {
+        invoice_no: invoice.invoiceNo,
+        subscriber_username: invoice.subscriberUsername,
+        amount: invoice.amount,
+        due_date: invoice.dueDate,
+        status: invoice.status === 'PAID' ? 'PAID' : 'DUE',
+        cycle_day: invoice.cycleDay || 5,
+        created_at: invoice.createdDate || new Date().toISOString(),
+        paid_at: invoice.paidDate || null,
+        assigned_agent_id: invoice.agentId || null,
+      };
+      if (isUuid) {
+        payload.id = invoice.id;
+      }
+      await supabase.from('invoices').insert([payload]);
+    } catch (err) {
+      console.warn('[StorageService] Supabase saveInvoice error:', err);
+    }
   }
 
   public async markInvoicePaid(
     invoiceId: string,
     paymentMethod: string = 'CASH',
-    receiptNumber?: string
+    receiptNumber?: string,
+    collectingAgentId?: string
   ): Promise<StorageInvoice | null> {
     const inv = this.cache.invoices.find((i) => i.id === invoiceId || i.invoiceNo === invoiceId);
     if (!inv) return null;
@@ -689,6 +854,9 @@ class StorageService {
     inv.paidDate = new Date().toISOString();
     inv.paymentMethod = paymentMethod;
     inv.receiptNumber = receiptNumber || `REC-${Date.now().toString().slice(-6)}`;
+    if (collectingAgentId) {
+      inv.agentId = collectingAgentId;
+    }
 
     // Update subscriber balance
     const user = this.getPortalUserByUsername(inv.subscriberUsername);
@@ -699,6 +867,35 @@ class StorageService {
 
     await this.persistInvoices();
     this.emitChange('invoices');
+
+    // Supabase update: mark paid and update collecting agent's cash_in_hand
+    try {
+      const nowIso = new Date().toISOString();
+      const isUuid = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(invoiceId);
+      if (isUuid) {
+        await supabase.from('invoices').update({ status: 'PAID', paid_at: nowIso }).eq('id', invoiceId);
+      } else {
+        await supabase.from('invoices').update({ status: 'PAID', paid_at: nowIso }).eq('invoice_no', invoiceId);
+      }
+
+      // Update collecting agent cash_in_hand
+      const targetAgentId = collectingAgentId || inv.agentId;
+      if (targetAgentId) {
+        const { data: agentRecord } = await supabase
+          .from('portal_users')
+          .select('id, cash_in_hand')
+          .or(`id.eq.${targetAgentId},username.ilike.${targetAgentId}`)
+          .maybeSingle();
+
+        if (agentRecord) {
+          const updatedCash = (Number(agentRecord.cash_in_hand) || 0) + Number(inv.amount);
+          await supabase.from('portal_users').update({ cash_in_hand: updatedCash }).eq('id', agentRecord.id);
+        }
+      }
+    } catch (err) {
+      console.warn('[StorageService] Supabase markInvoicePaid error:', err);
+    }
+
     return inv;
   }
 
@@ -706,6 +903,15 @@ class StorageService {
     this.cache.invoices = this.cache.invoices.filter((i) => i.id !== id && i.invoiceNo !== id);
     await this.persistInvoices();
     this.emitChange('invoices');
+
+    try {
+      const isUuid = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(id);
+      if (isUuid) {
+        await supabase.from('invoices').delete().eq('id', id);
+      } else {
+        await supabase.from('invoices').delete().eq('invoice_no', id);
+      }
+    } catch {}
   }
 
   /**
@@ -760,6 +966,26 @@ class StorageService {
 
     await this.persistTickets();
     this.emitChange('tickets');
+
+    // Supabase ticket persistence
+    try {
+      const isUuid = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(ticket.id);
+      const payload: any = {
+        ticket_no: ticket.ticketNo,
+        subscriber_username: ticket.subscriberUsername,
+        issue: ticket.issue,
+        priority: ticket.priority,
+        status: ticket.status === 'RESOLVED' ? 'RESOLVED' : 'OPEN',
+        created_at: ticket.createdAt || new Date().toISOString(),
+        assigned_agent_id: ticket.agentId || null,
+      };
+      if (isUuid) {
+        payload.id = ticket.id;
+      }
+      await supabase.from('tickets').insert([payload]);
+    } catch (err) {
+      console.warn('[StorageService] Supabase saveTicket error:', err);
+    }
   }
 
   public async resolveTicket(ticketId: string, resolutionNotes: string = 'Resolved by technician'): Promise<void> {
@@ -772,6 +998,18 @@ class StorageService {
 
     await this.persistTickets();
     this.emitChange('tickets');
+
+    // Supabase update ticket status
+    try {
+      const isUuid = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(ticketId);
+      if (isUuid) {
+        await supabase.from('tickets').update({ status: 'RESOLVED' }).eq('id', ticketId);
+      } else {
+        await supabase.from('tickets').update({ status: 'RESOLVED' }).eq('ticket_no', ticketId);
+      }
+    } catch (err) {
+      console.warn('[StorageService] Supabase resolveTicket error:', err);
+    }
   }
 
   private async persistTickets(): Promise<void> {

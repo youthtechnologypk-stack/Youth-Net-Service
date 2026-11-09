@@ -43,6 +43,7 @@ import { RecordPaymentModal } from './RecordPaymentModal';
 import { ReceiptModal } from './ReceiptModal';
 import { CreateInvoiceModal } from './CreateInvoiceModal';
 import { GenerateInvoiceModal } from './GenerateInvoiceModal';
+import { supabase } from '../services/supabaseClient';
 import { DeleteConfirmDialog } from './DeleteConfirmDialog';
 import { EditInvoiceModal } from './EditInvoiceModal';
 import { AgentSalaryModal, SalaryModalMode } from './AgentSalaryModal';
@@ -521,6 +522,37 @@ export const BillingManagement: React.FC<BillingManagementProps> = ({
           currencySymbol,
         })
         .catch((err) => console.warn('WhatsApp Business payment receipt dispatch error:', err));
+    }
+
+    // Direct Supabase PostgreSQL update
+    try {
+      const isUuid = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(invoice.id);
+      if (isUuid) {
+        supabase.from('invoices').update({ status: 'PAID', paid_at: new Date().toISOString() }).eq('id', invoice.id);
+      } else {
+        supabase.from('invoices').update({ status: 'PAID', paid_at: new Date().toISOString() }).eq('invoice_no', invoice.invoiceNumber);
+      }
+
+      // If collector is an agent, credit cash_in_hand in portal_users
+      if (details.collectorName) {
+        const shortCollector = details.collectorName.split(' ')[0].toLowerCase();
+        supabase
+          .from('portal_users')
+          .select('id, cash_in_hand')
+          .or(`username.ilike.%${shortCollector}%,full_name.ilike.%${shortCollector}%`)
+          .maybeSingle()
+          .then(({ data: agentRow }) => {
+            if (agentRow) {
+              const currentCash = Number(agentRow.cash_in_hand) || 0;
+              supabase
+                .from('portal_users')
+                .update({ cash_in_hand: currentCash + details.amount })
+                .eq('id', agentRow.id);
+            }
+          });
+      }
+    } catch (e) {
+      console.warn('Supabase handlePaymentRecorded notice:', e);
     }
 
     setIsRecordPaymentOpen(false);

@@ -252,7 +252,7 @@ export const RecordPaymentModal: React.FC<RecordPaymentModalProps> = ({
                 required
                 value={collectorName}
                 onChange={(e) => setCollectorName(e.target.value)}
-                placeholder="e.g. Bilal Khan / Counter Cashier"
+                placeholder="e.g. Field Recovery Agent / Counter Cashier"
                 className="w-full bg-slate-950 border border-slate-700 rounded-xl px-3 py-2 text-white text-xs focus:outline-none focus:border-cyan-500 font-sans"
               />
             </div>

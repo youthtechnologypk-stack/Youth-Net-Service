@@ -29,17 +29,22 @@ import { useISP } from '../context/ISPContext';
 import { useCurrency } from '../context/CurrencyContext';
 import { Customer, ComplaintTicket } from '../types/isp';
 import { FeatureGate } from './FeatureGate';
+import { useAuth } from '../context/AuthContext';
+import { UserAccount } from '../types/auth';
+import { MapPin } from 'lucide-react';
 
 interface ManagerOperationsDashboardProps {
   onOpenTicketModal: () => void;
   onOpenOutageModal: () => void;
   onSelectCustomer?: (customer: Customer) => void;
+  currentUser?: UserAccount;
 }
 
 export const ManagerOperationsDashboard: React.FC<ManagerOperationsDashboardProps> = ({
   onOpenTicketModal,
   onOpenOutageModal,
   onSelectCustomer,
+  currentUser,
 }) => {
   const {
     customers,
@@ -57,6 +62,22 @@ export const ManagerOperationsDashboard: React.FC<ManagerOperationsDashboardProp
     kickSession,
   } = useISP();
   const { formatCurrency, currencySymbol } = useCurrency();
+  const { currentUser: authUser } = useAuth();
+
+  const activeManager = currentUser || authUser;
+  const managerName = activeManager?.fullName || 'NOC Operations Manager';
+  const managerUsername = activeManager?.username || 'manager';
+  const managerArea = activeManager?.area || 'All Federal Sectors';
+  const hasSpecificSector = Boolean(
+    managerArea &&
+      managerArea !== 'All Federal Sectors' &&
+      managerArea !== 'All Coverage Sectors' &&
+      managerArea !== 'Central NOC Core'
+  );
+
+  const [sectorFilter, setSectorFilter] = useState<string>(() =>
+    hasSpecificSector ? managerArea : 'ALL'
+  );
 
   const [activeSubTab, setActiveSubTab] = useState<
     'outages' | 'tickets' | 'subscribers' | 'agent_cash' | 'olt_telemetry'
@@ -76,19 +97,43 @@ export const ManagerOperationsDashboard: React.FC<ManagerOperationsDashboardProp
     setTimeout(() => setToastNotice(null), 4000);
   };
 
-  // Critical metrics for Manager
-  const activeOutages = outages.filter((o) => o.status !== 'resolved');
-  const openComplaints = complaints.filter((c) => c.status !== 'resolved');
-  const totalAgentCashInHand = agents.reduce((acc, a) => acc + (a.cashInHand || 0), 0);
-  const totalCollectedToday = agents.reduce((acc, a) => acc + (a.totalCollectedToday || 0), 0);
+  // Sector-scoped datasets
+  const scopedOutages = outages.filter((o) =>
+    sectorFilter === 'ALL' ? true : o.areaNode.toLowerCase().includes(sectorFilter.toLowerCase())
+  );
 
-  const filteredTickets = complaints.filter((c) => {
+  const scopedComplaints = complaints.filter((c) =>
+    sectorFilter === 'ALL'
+      ? true
+      : (c.areaNode && c.areaNode.toLowerCase().includes(sectorFilter.toLowerCase())) ||
+        (c.customerAddress && c.customerAddress.toLowerCase().includes(sectorFilter.toLowerCase()))
+  );
+
+  const scopedCustomers = customers.filter((c) =>
+    sectorFilter === 'ALL'
+      ? true
+      : c.areaNode && c.areaNode.toLowerCase().includes(sectorFilter.toLowerCase())
+  );
+
+  const scopedAgents = agents.filter((a) =>
+    sectorFilter === 'ALL'
+      ? true
+      : a.assignedArea && a.assignedArea.toLowerCase().includes(sectorFilter.toLowerCase())
+  );
+
+  // Critical metrics for Manager
+  const activeOutages = scopedOutages.filter((o) => o.status !== 'resolved');
+  const openComplaints = scopedComplaints.filter((c) => c.status !== 'resolved');
+  const totalAgentCashInHand = scopedAgents.reduce((acc, a) => acc + (a.cashInHand || 0), 0);
+  const totalCollectedToday = scopedAgents.reduce((acc, a) => acc + (a.totalCollectedToday || 0), 0);
+
+  const filteredTickets = scopedComplaints.filter((c) => {
     if (ticketFilter === 'open') return c.status !== 'resolved';
     if (ticketFilter === 'critical') return c.priority === 'critical' && c.status !== 'resolved';
     return true;
   });
 
-  const filteredSubscribers = customers.filter(
+  const filteredSubscribers = scopedCustomers.filter(
     (c) =>
       c.name.toLowerCase().includes(searchSubscriber.toLowerCase()) ||
       c.pppoeUsername.toLowerCase().includes(searchSubscriber.toLowerCase()) ||
@@ -131,15 +176,45 @@ export const ManagerOperationsDashboard: React.FC<ManagerOperationsDashboardProp
             <Activity className="w-5 h-5" />
           </div>
           <div>
-            <div className="flex items-center gap-2">
+            <div className="flex flex-wrap items-center gap-2">
               <h2 className="text-base font-bold text-white">NOC Operations &amp; Dispatch Control</h2>
               <span className="px-2 py-0.5 rounded bg-indigo-950 border border-indigo-800 text-indigo-300 font-mono text-[10px] font-bold">
-                OPERATIONS MANAGER
+                OPERATIONS MANAGER &bull; {managerName} (@{managerUsername})
               </span>
             </div>
-            <p className="text-xs text-slate-400 mt-0.5">
-              Supervise fiber cuts, SLA dispatching, subscriber profiles, and field agent cash reconciliation.
-            </p>
+            <div className="flex flex-wrap items-center gap-2 text-xs text-slate-400 mt-1">
+              <span className="flex items-center gap-1 font-mono text-cyan-400 font-bold">
+                <MapPin className="w-3 h-3 text-cyan-400 shrink-0" />
+                <span>Zone: {managerArea}</span>
+              </span>
+              <span>&bull;</span>
+              <span>Supervise fiber cuts, SLA dispatching, and field agent cash reconciliation.</span>
+            </div>
+            {hasSpecificSector && (
+              <div className="flex items-center gap-1 text-[11px] font-mono mt-2">
+                <span className="text-slate-500">Coverage Filter:</span>
+                <button
+                  onClick={() => setSectorFilter(managerArea)}
+                  className={`px-2 py-0.5 rounded cursor-pointer transition ${
+                    sectorFilter !== 'ALL'
+                      ? 'bg-cyan-600 text-slate-950 font-bold'
+                      : 'bg-slate-800 text-slate-400 hover:text-white'
+                  }`}
+                >
+                  My Sector ({managerArea})
+                </button>
+                <button
+                  onClick={() => setSectorFilter('ALL')}
+                  className={`px-2 py-0.5 rounded cursor-pointer transition ${
+                    sectorFilter === 'ALL'
+                      ? 'bg-cyan-600 text-slate-950 font-bold'
+                      : 'bg-slate-800 text-slate-400 hover:text-white'
+                  }`}
+                >
+                  All Sectors
+                </button>
+              </div>
+            )}
           </div>
         </div>
 
@@ -294,7 +369,7 @@ export const ManagerOperationsDashboard: React.FC<ManagerOperationsDashboardProp
           </div>
 
           <div className="space-y-3">
-            {outages.map((outage) => (
+            {scopedOutages.map((outage) => (
               <div
                 key={outage.id}
                 className="bg-slate-950 border border-slate-800 rounded-xl p-4 flex flex-col md:flex-row items-start md:items-center justify-between gap-3"
@@ -601,7 +676,7 @@ export const ManagerOperationsDashboard: React.FC<ManagerOperationsDashboardProp
             </div>
 
             <div className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-3 gap-3">
-              {agents.map((agent) => (
+              {scopedAgents.map((agent) => (
                 <div key={agent.id} className="bg-slate-950 border border-slate-800 rounded-xl p-4 space-y-3">
                   <div className="flex items-center justify-between">
                     <span className="font-bold text-white text-sm font-sans">{agent.name}</span>

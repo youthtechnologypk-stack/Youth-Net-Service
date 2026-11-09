@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useState, useEffect, useMemo } from 'react';
 import {
   Smartphone,
   CheckCircle2,
@@ -16,6 +16,7 @@ import {
   Sparkles,
   Users,
   Lock,
+  RefreshCw,
 } from 'lucide-react';
 import { useISP } from '../context/ISPContext';
 import { useCurrency } from '../context/CurrencyContext';
@@ -23,11 +24,12 @@ import { UserAccount } from '../types/auth';
 import { Invoice } from '../types/isp';
 import { FeatureGate } from './FeatureGate';
 import { PWAInstallPrompt } from './PWAInstallPrompt';
+import { supabase, SupabaseInvoice, SupabaseTicket } from '../services/supabaseClient';
 
 interface FieldAgentPortalProps {
   currentUser: UserAccount;
-  onOpenReceiptModal: (invoice: Invoice) => void;
-  onOpenPaymentModal: (invoice: Invoice) => void;
+  onOpenReceiptModal?: (invoice: Invoice) => void;
+  onOpenPaymentModal?: (invoice: Invoice) => void;
 }
 
 export const FieldAgentPortal: React.FC<FieldAgentPortalProps> = ({
@@ -36,44 +38,144 @@ export const FieldAgentPortal: React.FC<FieldAgentPortalProps> = ({
   onOpenPaymentModal,
 }) => {
   const {
-    agents,
     customers,
-    complaints,
-    invoices,
     onus,
     collectAgentCashPayment,
     resolveTicket,
   } = useISP();
   const { formatCurrency, currencySymbol } = useCurrency();
 
-  // Find agent matching currentUser
-  const activeAgent =
-    agents.find((a) => a.id === currentUser.linkedAgentId || a.name.toLowerCase().includes(currentUser.username)) ||
-    agents[0];
-
   const [activeTab, setActiveTab] = useState<'tickets' | 'collections' | 'ont_checker' | 'directory'>('tickets');
   const [collectionSuccessToast, setCollectionSuccessToast] = useState<string | null>(null);
   const [ontSearchQuery, setOntSearchQuery] = useState('');
   const [dirSearchQuery, setDirSearchQuery] = useState('');
 
-  // Agent's assigned tickets
-  const myAssignedTickets = complaints.filter(
-    (c) => c.assignedAgentId === activeAgent.id || c.status !== 'resolved'
-  );
+  // Agent dynamic state from Supabase
+  const [agentCash, setAgentCash] = useState<number>(Number(currentUser.cashInHand || 0));
+  const [assignedTickets, setAssignedTickets] = useState<SupabaseTicket[]>([]);
+  const [assignedInvoices, setAssignedInvoices] = useState<SupabaseInvoice[]>([]);
+  const [isLoadingData, setIsLoadingData] = useState<boolean>(true);
 
-  // Unpaid invoices in agent's area
-  const areaInvoices = invoices.filter((i) => i.status !== 'paid');
+  // Fetch this specific agent's live data from Supabase
+  const fetchAgentData = async () => {
+    setIsLoadingData(true);
+    try {
+      // 1. Fetch agent's latest cash_in_hand from portal_users
+      const { data: userRow } = await supabase
+        .from('portal_users')
+        .select('cash_in_hand, area, full_name')
+        .eq('id', currentUser.id)
+        .maybeSingle();
+
+      if (userRow && userRow.cash_in_hand !== undefined) {
+        setAgentCash(Number(userRow.cash_in_hand) || 0);
+      }
+
+      // 2. Fetch tickets strictly assigned to this agent
+      const { data: tktData } = await supabase
+        .from('tickets')
+        .select('*')
+        .or(`assigned_agent_id.eq.${currentUser.id},assigned_agent_id.eq.${currentUser.username}`)
+        .order('created_at', { ascending: false });
+
+      if (tktData) {
+        setAssignedTickets(tktData as SupabaseTicket[]);
+      }
+
+      // 3. Fetch unpaid recovery invoices strictly assigned to this agent
+      const { data: invData } = await supabase
+        .from('invoices')
+        .select('*')
+        .or(`assigned_agent_id.eq.${currentUser.id},assigned_agent_id.eq.${currentUser.username},assigned_agent_name.eq.${currentUser.fullName}`)
+        .eq('status', 'DUE')
+        .order('created_at', { ascending: false });
+
+      if (invData) {
+        setAssignedInvoices(invData as SupabaseInvoice[]);
+      }
+    } catch (err) {
+      console.warn('FieldAgentPortal fetch error:', err);
+    } finally {
+      setIsLoadingData(false);
+    }
+  };
+
+  useEffect(() => {
+    fetchAgentData();
+
+    // Realtime subscriptions for agent portal
+    const channel = supabase
+      .channel(`public:agent_${currentUser.id}`)
+      .on('postgres_changes', { event: '*', schema: 'public', table: 'tickets' }, () => {
+        fetchAgentData();
+      })
+      .on('postgres_changes', { event: '*', schema: 'public', table: 'invoices' }, () => {
+        fetchAgentData();
+      })
+      .on('postgres_changes', { event: '*', schema: 'public', table: 'portal_users' }, (payload) => {
+        if (payload.new && (payload.new as any).id === currentUser.id) {
+          setAgentCash(Number((payload.new as any).cash_in_hand) || 0);
+        }
+      })
+      .subscribe();
+
+    return () => {
+      supabase.removeChannel(channel);
+    };
+  }, [currentUser.id]);
 
   // Handle direct cash collection with 1-click WhatsApp receipt
-  const handleCollectCash = async (invoice: Invoice) => {
+  const handleCollectCash = async (inv: SupabaseInvoice) => {
     try {
-      await collectAgentCashPayment(invoice.id, activeAgent.id, invoice.totalAmount);
+      const amount = Number(inv.amount) || 0;
+      const nowIso = new Date().toISOString();
+
+      // 1. Mark invoice as PAID in Supabase
+      const { error: invErr } = await supabase
+        .from('invoices')
+        .update({ status: 'PAID', paid_at: nowIso })
+        .eq('id', inv.id);
+
+      if (invErr) throw new Error(invErr.message);
+
+      // 2. Increment agent's cash_in_hand in portal_users
+      const newCash = agentCash + amount;
+      await supabase
+        .from('portal_users')
+        .update({ cash_in_hand: newCash })
+        .eq('id', currentUser.id);
+
+      setAgentCash(newCash);
+
+      // Context sync fallback
+      try {
+        await collectAgentCashPayment(inv.id, currentUser.id, amount);
+      } catch {}
+
       setCollectionSuccessToast(
-        `Collected ${formatCurrency(invoice.totalAmount)} from ${invoice.customerName}! 1-Click WhatsApp receipt dispatched.`
+        `Collected ${formatCurrency(amount)} from @${inv.subscriber_username}! Receipt recorded & added to Cash-in-Hand.`
       );
       setTimeout(() => setCollectionSuccessToast(null), 5000);
+      await fetchAgentData();
     } catch (err: any) {
       setCollectionSuccessToast(`Collection error: ${err.message || 'Failed'}`);
+    }
+  };
+
+  // Handle marking ticket fixed
+  const handleMarkTicketFixed = async (ticketId: string) => {
+    try {
+      await supabase
+        .from('tickets')
+        .update({ status: 'RESOLVED' })
+        .eq('id', ticketId);
+
+      resolveTicket(ticketId, 'Resolved in field by technician');
+      setCollectionSuccessToast('Complaint marked RESOLVED successfully!');
+      setTimeout(() => setCollectionSuccessToast(null), 4000);
+      await fetchAgentData();
+    } catch (err: any) {
+      alert(`Failed to resolve ticket: ${err.message}`);
     }
   };
 
@@ -106,11 +208,11 @@ export const FieldAgentPortal: React.FC<FieldAgentPortalProps> = ({
             </div>
             <div>
               <div className="flex items-center gap-2">
-                <h2 className="text-sm font-bold text-white">{activeAgent.name}</h2>
+                <h2 className="text-sm font-bold text-white">{currentUser.fullName}</h2>
                 <PWAInstallPrompt role="AGENT" variant="button" />
               </div>
               <span className="text-[11px] text-emerald-400 font-mono flex items-center gap-1">
-                <MapPin className="w-3 h-3" /> {activeAgent.assignedArea}
+                <MapPin className="w-3 h-3" /> {currentUser.area || 'Assigned Zone'}
               </span>
             </div>
           </div>
@@ -118,7 +220,7 @@ export const FieldAgentPortal: React.FC<FieldAgentPortalProps> = ({
           <div className="text-right">
             <span className="text-[10px] text-slate-400 block font-mono">Cash in Hand</span>
             <span className="text-sm font-bold text-cyan-300 font-mono block">
-              {formatCurrency(activeAgent.cashInHand)}
+              Rs. {Number(agentCash).toLocaleString()}
             </span>
           </div>
         </div>
@@ -141,7 +243,7 @@ export const FieldAgentPortal: React.FC<FieldAgentPortalProps> = ({
           }`}
         >
           <Clock className="w-3 h-3" />
-          <span>Tickets</span>
+          <span>Tickets ({assignedTickets.filter((t) => t.status !== 'RESOLVED').length})</span>
         </button>
 
         <button
@@ -151,7 +253,7 @@ export const FieldAgentPortal: React.FC<FieldAgentPortalProps> = ({
           }`}
         >
           <DollarSign className="w-3 h-3" />
-          <span>Cash</span>
+          <span>Cash ({assignedInvoices.length})</span>
         </button>
 
         <button
@@ -175,167 +277,118 @@ export const FieldAgentPortal: React.FC<FieldAgentPortalProps> = ({
         </button>
       </div>
 
-      {/* Tab 1: My Assigned Tickets */}
+      {/* Tab 1: My Assigned Tickets (Strictly filtered to currentUser) */}
       {activeTab === 'tickets' && (
         <div className="space-y-3">
           <div className="flex items-center justify-between text-slate-400 text-[11px] px-1 font-mono">
-            <span>Active Dispatch Tasks in your Sector</span>
-            <span>{myAssignedTickets.length} Pending</span>
+            <span>Assigned Tasks for @{currentUser.username}</span>
+            <span>{assignedTickets.filter((t) => t.status !== 'RESOLVED').length} Active</span>
           </div>
 
-          {myAssignedTickets.map((ticket) => (
-            <div
-              key={ticket.id}
-              className="bg-slate-900 border border-slate-800 rounded-xl p-3.5 space-y-2.5 shadow-md"
-            >
-              <div className="flex items-start justify-between gap-2">
-                <div>
-                  <span className="font-bold text-white text-xs block">{ticket.customerName}</span>
-
-                  {/* FeatureGate: agent_view_subscriber_contact_location */}
-                  <FeatureGate
-                    feature="agent_view_subscriber_contact_location"
-                    role="AGENT"
-                    fallback={
-                      <span className="text-[10px] text-slate-500 font-mono italic block mt-0.5">
-                        [Location masked by Admin policy]
-                      </span>
-                    }
+          {assignedTickets.map((ticket) => {
+            const isResolved = ticket.status === 'RESOLVED';
+            return (
+              <div
+                key={ticket.id}
+                className="bg-slate-900 border border-slate-800 rounded-xl p-3.5 space-y-2.5 shadow-md"
+              >
+                <div className="flex items-start justify-between gap-2">
+                  <div>
+                    <span className="font-bold text-white text-xs block">@{ticket.subscriber_username}</span>
+                    <span className="text-[10px] text-slate-400 font-mono">Ticket #{ticket.ticket_no}</span>
+                  </div>
+                  <span
+                    className={`px-1.5 py-0.5 rounded font-mono font-bold text-[10px] ${
+                      ticket.priority?.toUpperCase() === 'CRITICAL'
+                        ? 'bg-rose-950 text-rose-300 border border-rose-800'
+                        : 'bg-amber-950 text-amber-300 border border-amber-800'
+                    }`}
                   >
-                    <span className="text-[11px] text-slate-400 block mt-0.5">{ticket.customerAddress}</span>
-                  </FeatureGate>
+                    {ticket.priority || 'MEDIUM'}
+                  </span>
                 </div>
-                <span
-                  className={`px-1.5 py-0.5 rounded font-mono font-bold text-[10px] ${
-                    ticket.priority === 'critical'
-                      ? 'bg-rose-950 text-rose-300 border border-rose-800'
-                      : 'bg-amber-950 text-amber-300 border border-amber-800'
-                  }`}
-                >
-                  {ticket.priority}
-                </span>
-              </div>
 
-              <div className="p-2 bg-slate-950 rounded-lg text-slate-300 text-[11px] font-mono leading-relaxed">
-                🚨 {ticket.description || 'Optical fiber drop disconnected. Verify subscriber splice point.'}
-              </div>
+                <div className="p-2 bg-slate-950 rounded-lg text-slate-300 text-[11px] font-mono leading-relaxed">
+                  🚨 {ticket.issue || 'Broadband line disturbance. Inspect connection.'}
+                </div>
 
-              <div className="flex items-center justify-between pt-1 border-t border-slate-800/80">
-                {/* FeatureGate: agent_view_subscriber_contact_location */}
-                <FeatureGate
-                  feature="agent_view_subscriber_contact_location"
-                  role="AGENT"
-                  fallback={
-                    <span className="text-[10px] text-slate-500 font-mono py-1">
-                      [Phone Contact Restricted]
-                    </span>
-                  }
-                >
-                  <a
-                    href={`tel:${ticket.customerPhone}`}
-                    className="px-2.5 py-1.5 rounded-lg bg-slate-800 hover:bg-slate-700 text-cyan-400 font-mono text-[11px] flex items-center gap-1.5"
-                  >
-                    <Phone className="w-3 h-3" />
-                    <span>Call: {ticket.customerPhone}</span>
-                  </a>
-                </FeatureGate>
+                <div className="flex items-center justify-between pt-1 border-t border-slate-800/80">
+                  <span className="text-[10px] text-slate-500 font-mono">
+                    Logged: {new Date(ticket.created_at || Date.now()).toLocaleDateString()}
+                  </span>
 
-                {ticket.status !== 'resolved' ? (
-                  /* FeatureGate: agent_resolve_fiber_tickets */
-                  <FeatureGate
-                    feature="agent_resolve_fiber_tickets"
-                    role="AGENT"
-                    mode="disable"
-                  >
+                  {!isResolved ? (
                     <button
-                      onClick={() => resolveTicket(ticket.id, 'Resolved in field by technician')}
+                      onClick={() => handleMarkTicketFixed(ticket.id)}
                       className="px-3 py-1.5 rounded-lg bg-emerald-600 hover:bg-emerald-500 text-slate-950 font-bold font-mono text-[11px] flex items-center gap-1 transition cursor-pointer"
                     >
                       <CheckCircle2 className="w-3.5 h-3.5" />
                       <span>Mark Fixed</span>
                     </button>
-                  </FeatureGate>
-                ) : (
-                  <span className="text-emerald-400 font-mono text-[11px]">✓ Resolved</span>
-                )}
+                  ) : (
+                    <span className="text-emerald-400 font-mono text-[11px]">✓ Resolved</span>
+                  )}
+                </div>
               </div>
-            </div>
-          ))}
+            );
+          })}
 
-          {myAssignedTickets.length === 0 && (
+          {assignedTickets.length === 0 && (
             <div className="text-center py-10 bg-slate-900 border border-slate-800 rounded-xl text-slate-500">
-              No pending field tickets assigned. All subscriber lines nominal!
+              No tasks currently assigned to {currentUser.fullName}. All systems running smoothly!
             </div>
           )}
         </div>
       )}
 
-      {/* Tab 2: Doorstep Cash Collection with agent_collect_cash_receipts */}
+      {/* Tab 2: Doorstep Cash Collection (Strictly filtered to currentUser) */}
       {activeTab === 'collections' && (
         <div className="space-y-3">
           <div className="flex items-center justify-between text-slate-400 text-[11px] px-1 font-mono">
-            <span>Outstanding Subscriber Dues</span>
-            <span>1-Click Cash Recovery</span>
+            <span>Assigned Recovery Dues for @{currentUser.username}</span>
+            <span>1-Click Recovery</span>
           </div>
 
-          {areaInvoices.slice(0, 10).map((inv) => (
+          {assignedInvoices.map((inv) => (
             <div
               key={inv.id}
               className="bg-slate-900 border border-slate-800 rounded-xl p-3.5 space-y-2.5 shadow-md"
             >
               <div className="flex items-start justify-between">
                 <div>
-                  <span className="font-bold text-white text-xs block">{inv.customerName}</span>
-                  <span className="text-[11px] text-slate-400 font-mono">Invoice #{inv.invoiceNumber}</span>
-                  <span className="text-[10px] text-slate-500 block">{inv.packageName}</span>
+                  <span className="font-bold text-white text-xs block">@{inv.subscriber_username}</span>
+                  <span className="text-[11px] text-slate-400 font-mono">Invoice #{inv.invoice_no}</span>
+                  <span className="text-[10px] text-slate-500 block">Cycle Day: {inv.cycle_day || 5}th</span>
                 </div>
                 <div className="text-right">
                   <span className="text-rose-400 font-bold font-mono text-sm block">
-                    {formatCurrency(inv.totalAmount)}
+                    Rs. {Number(inv.amount).toLocaleString()}
                   </span>
-                  <span className="text-[10px] text-slate-500 font-mono">Due: {inv.dueDate}</span>
+                  <span className="text-[10px] text-slate-500 font-mono">Due: {inv.due_date}</span>
                 </div>
               </div>
 
-              <div className="flex items-center justify-between pt-2 border-t border-slate-800">
-                {/* FeatureGate: agent_view_subscriber_contact_location */}
-                <FeatureGate
-                  feature="agent_view_subscriber_contact_location"
-                  role="AGENT"
-                  fallback={
-                    <span className="text-[10px] text-slate-500 font-mono">[Contact Protected]</span>
-                  }
+              <div className="flex items-center justify-end pt-2 border-t border-slate-800">
+                <button
+                  onClick={() => handleCollectCash(inv)}
+                  className="px-3 py-1.5 rounded-lg bg-emerald-600 hover:bg-emerald-500 text-slate-950 font-bold font-mono text-xs flex items-center gap-1.5 shadow transition cursor-pointer"
                 >
-                  <a
-                    href={`tel:${inv.customerPhone}`}
-                    className="px-2 py-1 rounded bg-slate-800 text-slate-300 text-[11px] flex items-center gap-1"
-                  >
-                    <Phone className="w-3 h-3 text-cyan-400" />
-                    <span>{inv.customerPhone}</span>
-                  </a>
-                </FeatureGate>
-
-                {/* FeatureGate: agent_collect_cash_receipts */}
-                <FeatureGate
-                  feature="agent_collect_cash_receipts"
-                  role="AGENT"
-                  mode="disable"
-                >
-                  <button
-                    onClick={() => handleCollectCash(inv)}
-                    className="px-3 py-1.5 rounded-lg bg-emerald-600 hover:bg-emerald-500 text-slate-950 font-bold font-mono text-xs flex items-center gap-1.5 shadow transition cursor-pointer"
-                  >
-                    <DollarSign className="w-3.5 h-3.5" />
-                    <span>Receive Cash &amp; Issue Receipt</span>
-                  </button>
-                </FeatureGate>
+                  <DollarSign className="w-3.5 h-3.5" />
+                  <span>Receive Cash &amp; Credit My Wallet</span>
+                </button>
               </div>
             </div>
           ))}
+
+          {assignedInvoices.length === 0 && (
+            <div className="text-center py-10 bg-slate-900 border border-slate-800 rounded-xl text-slate-500">
+              No outstanding dues pending recovery for {currentUser.fullName}.
+            </div>
+          )}
         </div>
       )}
 
-      {/* Tab 3: Quick ONT Signal Checker with agent_check_ont_optical_power */}
+      {/* Tab 3: Quick ONT Signal Checker */}
       {activeTab === 'ont_checker' && (
         <FeatureGate
           feature="agent_check_ont_optical_power"
@@ -399,7 +452,7 @@ export const FieldAgentPortal: React.FC<FieldAgentPortalProps> = ({
         </FeatureGate>
       )}
 
-      {/* Tab 4: Full Area Directory with agent_full_area_directory */}
+      {/* Tab 4: Full Area Directory */}
       {activeTab === 'directory' && (
         <FeatureGate
           feature="agent_full_area_directory"
@@ -448,3 +501,5 @@ export const FieldAgentPortal: React.FC<FieldAgentPortalProps> = ({
     </div>
   );
 };
+
+export default FieldAgentPortal;
