@@ -486,17 +486,12 @@ function getInitialPackages(): InternetPackage[] {
 const STORAGE_KEY_ACTIVE_SESSIONS = 'registered_active_sessions';
 
 function getInitialActiveSessions(): ActiveSession[] {
-  if (typeof window === 'undefined') return [];
-  try {
-    const raw = localStorage.getItem(STORAGE_KEY_ACTIVE_SESSIONS);
-    if (raw) {
-      const parsed = JSON.parse(raw);
-      if (Array.isArray(parsed)) return parsed;
-    }
-    return [];
-  } catch {
-    return [];
+  if (typeof window !== 'undefined') {
+    try {
+      localStorage.removeItem(STORAGE_KEY_ACTIVE_SESSIONS);
+    } catch {}
   }
+  return [];
 }
 
 const STORAGE_KEY_AGENTS = 'youthnet_agents';
@@ -1093,9 +1088,17 @@ export const ISPProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
         );
       }
 
-      // ACCURATE ONLINE / HEALTH CHECK:
-      // Router is ONLY online if GET /system/resource returned HTTP 200 with cpu-load and uptime
-      if (telemetryResult.success && telemetryResult.router && telemetryResult.router.status === 'online') {
+      // HEALTH CHECK UPDATE:
+      // A router must NOT be marked "UNREACHABLE" if /ppp/active or /interface or /system/resource returned valid records.
+      // If /ppp/active succeeds, set status = 'online' and remove the red SSL banner automatically.
+      const isOnline = Boolean(
+        (telemetryResult.success && telemetryResult.router?.status === 'online') ||
+        (telemetryResult.activeSessions && telemetryResult.activeSessions.length > 0) ||
+        (telemetryResult.interfaces && telemetryResult.interfaces.length > 0) ||
+        (secretsResult.success && secretsResult.secrets && secretsResult.secrets.length > 0)
+      );
+
+      if (isOnline) {
         setRouterError(null);
         setIsSslOrCorsBlocked(false);
         setRouters((prev) =>
@@ -1103,7 +1106,7 @@ export const ISPProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
             r.id === targetRouter.id
               ? {
                   ...r,
-                  ...telemetryResult.router,
+                  ...(telemetryResult.router || {}),
                   status: 'online',
                   activePppoeCount: telemetryResult.activeSessions.length,
                 }
@@ -1133,14 +1136,14 @@ export const ISPProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
           message: `Live data synchronized from RouterOS v7 REST API (${telemetryResult.activeSessions.length} active sessions, ${secCount} secrets, ${profilesResult.profiles?.length || 0} profiles)`,
         };
       } else {
-        // Unreachable: Do NOT replace existing data with empty arrays if the network fetch fails.
-        // Keep previously cached state and display a clear non-blocking retry toast.
+        // Only mark UNREACHABLE if ALL endpoints failed
         const isSslBlocked = Boolean(telemetryResult.isSslOrCorsBlocked);
         setIsSslOrCorsBlocked(isSslBlocked);
+        const cleanIp = (targetIp || '202.142.186.150').replace(/:\d+$/, '');
         if (telemetryResult.directCertUrl) {
           setDirectCertUrl(telemetryResult.directCertUrl);
         } else {
-          setDirectCertUrl(`https://${targetIp}:${targetPort}/rest/system/resource`);
+          setDirectCertUrl(`https://${cleanIp}:${targetPort}/rest/system/resource`);
         }
 
         const errorMsg =
@@ -1341,9 +1344,10 @@ export const ISPProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
     let isCancelled = false;
     let inFlight = false;
     let abortController: AbortController | null = null;
+    let pollTimer: any = null;
 
     const pollLiveTraffic = async () => {
-      // 1. If tab/browser is minimized or in background, skip polling to avoid session pile-up
+      // 1. If tab/browser is minimized or in background, skip polling completely to prevent session pile-up
       if (typeof document !== 'undefined' && document.hidden) {
         return;
       }
@@ -1365,15 +1369,13 @@ export const ISPProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
           setRouterError(null);
           return;
         }
-        const targetPort = targetRouter.port || targetRouter.apiPort || 8729;
-        const targetIp = targetRouter.ip || targetRouter.ipAddress || '127.0.0.1';
 
         // Check if user is actively viewing a tab/widget with live traffic graphs
         const isViewingTrafficWidget =
           activeViewTabRef.current === 'noc' ||
           activeViewTabRef.current === 'mikrotik';
 
-        // 1. Poll Active Sessions and Telemetry every 6 seconds (5 to 8s window) with anti-caching headers
+        // 1. Relaxed Background Telemetry Poll: only query interface traffic if user is viewing traffic widget
         const result = await fetchMikrotikLiveTelemetry(targetRouter, {
           signal: abortController.signal,
           pollTraffic: isViewingTrafficWidget,
@@ -1386,8 +1388,8 @@ export const ISPProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
 
         if (result.success && result.router) {
           const now = Date.now();
-          // Periodically refresh provisioned secrets and bandwidth profiles in background every 18s
-          if (now - lastSessionsPollTimeRef.current >= 18000) {
+          // Periodically refresh provisioned secrets and bandwidth profiles in background every 60s
+          if (now - lastSessionsPollTimeRef.current >= 60000) {
             lastSessionsPollTimeRef.current = now;
             Promise.all([
               fetchMikrotikPppSecrets(targetRouter).catch(() => ({ success: false, secrets: [] })),
@@ -1404,6 +1406,7 @@ export const ISPProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
           }
 
           setRouterError(null);
+          setIsSslOrCorsBlocked(false);
           setRouters((prev) =>
             prev.map((r) =>
               r.id === selectedRouterId
@@ -1417,8 +1420,7 @@ export const ISPProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
             )
           );
 
-          // COMPLETELY replace the activeSessions state with the fresh array returned by the router:
-          // This guarantees reconnected users get their brand-new uptime and disconnected users disappear immediately!
+          // Render ONLY genuine live records returned by /rest/ppp/active
           setActiveSessions([...result.activeSessions]);
           updateRollingSessionHistory(result.activeSessions);
 
@@ -1434,18 +1436,24 @@ export const ISPProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
             ]);
           }
         } else if (result.error !== 'Aborted') {
-          const errorMsg =
-            result.error ||
-            'Cannot reach RouterOS REST API. Verify IP, credentials, and ensure www/www-ssl service is enabled in IP > Services.';
-          setRouterError(errorMsg);
-          setRouters((prev) =>
-            prev.map((r) =>
-              r.id === selectedRouterId
-                ? { ...r, status: 'unreachable', cpuLoad: 0, uptime: '0s' }
-                : r
-            )
-          );
-          // Preserve cached activeSessions - do NOT wipe with [] on network error
+          // If active sessions or interfaces succeeded, don't mark unreachable
+          if (result.activeSessions && result.activeSessions.length > 0) {
+            setRouterError(null);
+            setIsSslOrCorsBlocked(false);
+            setActiveSessions([...result.activeSessions]);
+          } else {
+            const errorMsg =
+              result.error ||
+              'Cannot reach RouterOS REST API. Verify IP, credentials, and ensure www/www-ssl service is enabled in IP > Services.';
+            setRouterError(errorMsg);
+            setRouters((prev) =>
+              prev.map((r) =>
+                r.id === selectedRouterId
+                  ? { ...r, status: 'unreachable', cpuLoad: 0, uptime: '0s' }
+                  : r
+              )
+            );
+          }
         }
       } catch (err: any) {
         if (!isCancelled && !abortController?.signal.aborted) {
@@ -1459,96 +1467,59 @@ export const ISPProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
                 : r
             )
           );
-          // Preserve cached activeSessions - do NOT wipe with [] on network error
         }
       } finally {
         inFlight = false;
       }
     };
 
-    pollLiveTraffic();
-    // Automated background polling interval: every 6 seconds (5 to 8s range) for live active sessions
-    const interval = setInterval(pollLiveTraffic, 6000);
+    const startPolling = () => {
+      if (pollTimer) clearInterval(pollTimer);
+      // Relaxed 20-second interval to prevent RouterOS REST session flooding
+      pollTimer = setInterval(pollLiveTraffic, 20000);
+    };
+
+    const stopPolling = () => {
+      if (pollTimer) {
+        clearInterval(pollTimer);
+        pollTimer = null;
+      }
+      if (abortController) {
+        abortController.abort();
+        abortController = null;
+      }
+    };
+
+    // Tab visibility listener: pause polling when tab is hidden, resume when focused
+    const handleVisibilityChange = () => {
+      if (typeof document !== 'undefined') {
+        if (document.hidden) {
+          stopPolling();
+        } else {
+          pollLiveTraffic();
+          startPolling();
+        }
+      }
+    };
+
+    if (typeof document !== 'undefined') {
+      document.addEventListener('visibilitychange', handleVisibilityChange);
+      window.addEventListener('focus', handleVisibilityChange);
+    }
+
+    // Initial poll and start 20s interval
+    if (typeof document === 'undefined' || !document.hidden) {
+      pollLiveTraffic();
+      startPolling();
+    }
 
     return () => {
       isCancelled = true;
-      if (abortController) {
-        abortController.abort();
-        abortController = null;
+      stopPolling();
+      if (typeof document !== 'undefined') {
+        document.removeEventListener('visibilitychange', handleVisibilityChange);
+        window.removeEventListener('focus', handleVisibilityChange);
       }
-      clearInterval(interval);
-    };
-  }, [isTrafficStreaming, selectedRouterId]);
-
-  // Dedicated 2-Second Interface Monitor-Traffic Poller for live Recharts throughput graph
-  // Uses POST /api/mikrotik/interface/monitor-traffic with body {"interface": activeRouter.uplinkInterface || "WAN3", "once": "yes"}
-  useEffect(() => {
-    if (!isTrafficStreaming || !selectedRouterId) return;
-
-    let isMounted = true;
-    let inFlight = false;
-    let abortController: AbortController | null = null;
-
-    const pollMonitorTraffic = async () => {
-      if (typeof document !== 'undefined' && document.hidden) return;
-      const isViewingTrafficWidget =
-        activeViewTabRef.current === 'noc' ||
-        activeViewTabRef.current === 'mikrotik';
-      if (!isViewingTrafficWidget) return;
-
-      if (inFlight) return;
-      inFlight = true;
-
-      if (abortController) {
-        abortController.abort();
-      }
-      abortController = new AbortController();
-
-      try {
-        const targetRouter =
-          routersRef.current.find((r) => r.id === selectedRouterId) ||
-          routersRef.current[0];
-        if (!targetRouter) return;
-
-        const res = await monitorInterfaceTraffic(targetRouter, abortController.signal);
-        if (!isMounted || abortController.signal.aborted) return;
-
-        if (res.success) {
-          const nowStr = new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' });
-          setBandwidthHistory((prev) => [
-            ...prev.slice(1),
-            { time: nowStr, rxMbps: res.rxMbps, txMbps: res.txMbps },
-          ]);
-          setRouters((prev) =>
-            prev.map((r) =>
-              r.id === selectedRouterId
-                ? {
-                    ...r,
-                    currentWanRxMbps: res.rxMbps,
-                    currentWanTxMbps: res.txMbps,
-                    status: 'online',
-                  }
-                : r
-            )
-          );
-        }
-      } catch {
-        // Non-blocking error
-      } finally {
-        inFlight = false;
-      }
-    };
-
-    pollMonitorTraffic();
-    const interval = setInterval(pollMonitorTraffic, 2000);
-
-    return () => {
-      isMounted = false;
-      if (abortController) {
-        abortController.abort();
-        abortController = null;
-      }
-      clearInterval(interval);
     };
   }, [isTrafficStreaming, selectedRouterId]);
 

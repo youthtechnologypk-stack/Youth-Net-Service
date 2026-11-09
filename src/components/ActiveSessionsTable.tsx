@@ -116,6 +116,7 @@ export const ActiveSessionsTable: React.FC<ActiveSessionsTableProps> = ({
 }) => {
   const [searchQuery, setSearchQuery] = useState('');
   const [deletingUser, setDeletingUser] = useState<string | null>(null);
+  const [confirmDeleteUser, setConfirmDeleteUser] = useState<string | null>(null);
   const [quickSort, setQuickSort] = useState<'highest-tx' | 'highest-rx' | 'longest-uptime' | 'alpha-asc' | 'custom'>('highest-tx');
   const [sortField, setSortField] = useState<SortField>('tx');
   const [sortDirection, setSortDirection] = useState<SortDirection>('desc');
@@ -548,28 +549,42 @@ export const ActiveSessionsTable: React.FC<ActiveSessionsTableProps> = ({
                       )}
 
                       {onDeleteSecret && (
-                        <button
-                          onClick={async () => {
-                            if (
-                              window.confirm(
-                                `Permanently delete PPPoE subscriber & secret "${session.username}" from MikroTik router and PostgreSQL database?`
-                              )
-                            ) {
-                              setDeletingUser(session.username);
-                              try {
-                                await onDeleteSecret(session.username);
-                              } finally {
-                                setDeletingUser(null);
-                              }
-                            }
-                          }}
-                          disabled={deletingUser === session.username}
-                          className="p-1 rounded text-[11px] transition bg-rose-950/60 hover:bg-rose-900 border border-rose-800/80 text-rose-300 hover:text-rose-100 disabled:opacity-50 cursor-pointer flex items-center gap-1"
-                          title={`Permanently delete secret for "${session.username}"`}
-                        >
-                          <Trash2 className="w-3.5 h-3.5 text-rose-400" />
-                          <span className="sr-only">Delete Secret</span>
-                        </button>
+                        confirmDeleteUser === session.username ? (
+                          <div className="flex items-center gap-1 bg-rose-950/90 border border-rose-600 rounded px-1.5 py-0.5 animate-in fade-in">
+                            <span className="text-[10px] text-rose-200 font-medium">Delete?</span>
+                            <button
+                              onClick={async () => {
+                                setDeletingUser(session.username);
+                                try {
+                                  await onDeleteSecret(session.username);
+                                } finally {
+                                  setDeletingUser(null);
+                                  setConfirmDeleteUser(null);
+                                }
+                              }}
+                              disabled={deletingUser === session.username}
+                              className="px-1.5 py-0.5 rounded text-[10px] bg-rose-600 hover:bg-rose-500 text-white font-semibold transition cursor-pointer"
+                            >
+                              Yes
+                            </button>
+                            <button
+                              onClick={() => setConfirmDeleteUser(null)}
+                              className="px-1 py-0.5 rounded text-[10px] bg-slate-700 hover:bg-slate-600 text-slate-300 transition cursor-pointer"
+                            >
+                              No
+                            </button>
+                          </div>
+                        ) : (
+                          <button
+                            onClick={() => setConfirmDeleteUser(session.username)}
+                            disabled={deletingUser === session.username}
+                            className="p-1 rounded text-[11px] transition bg-rose-950/60 hover:bg-rose-900 border border-rose-800/80 text-rose-300 hover:text-rose-100 disabled:opacity-50 cursor-pointer flex items-center gap-1"
+                            title={`Permanently delete secret for "${session.username}"`}
+                          >
+                            <Trash2 className="w-3.5 h-3.5 text-rose-400" />
+                            <span className="sr-only">Delete Secret</span>
+                          </button>
+                        )
                       )}
                     </div>
                   </td>

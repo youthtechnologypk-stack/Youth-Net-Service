@@ -72,6 +72,9 @@ export function resolveRestHostAndPort(router?: RouterAuthInfo): {
     if (!isNaN(p)) embeddedPort = p;
   }
 
+  // Strictly strip any lingering port suffix e.g. :443 or :80
+  rawHost = rawHost.replace(/:\d+$/, '').trim();
+
   let useSsl = router?.useSsl ?? (embeddedPort === 443 || router?.port === 443 || router?.apiPort === 443);
   let targetPort = router?.port || router?.apiPort || embeddedPort;
 
@@ -242,11 +245,19 @@ class ApiClient {
     const auth = getActiveRouterAuth(effectiveRouter);
     const resolved = resolveRestHostAndPort(effectiveRouter);
 
-    // Normalize endpoint path: ensure leading slash
+    // Normalize endpoint path: ensure leading slash and strip duplicate /rest/ or /api/mikrotik/
     let cleanEndpoint = endpoint.trim();
     if (cleanEndpoint.startsWith('/api/mikrotik/')) {
       cleanEndpoint = cleanEndpoint.replace(/^\/api\/mikrotik\//, '/');
-    } else if (!cleanEndpoint.startsWith('/')) {
+    } else if (cleanEndpoint.startsWith('/api/mikrotik')) {
+      cleanEndpoint = cleanEndpoint.replace(/^\/api\/mikrotik/, '/');
+    }
+    if (cleanEndpoint.startsWith('/rest/')) {
+      cleanEndpoint = cleanEndpoint.replace(/^\/rest\//, '/');
+    } else if (cleanEndpoint.startsWith('rest/')) {
+      cleanEndpoint = cleanEndpoint.replace(/^rest\//, '/');
+    }
+    if (!cleanEndpoint.startsWith('/')) {
       cleanEndpoint = `/${cleanEndpoint}`;
     }
 
