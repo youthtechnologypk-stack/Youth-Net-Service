@@ -68,20 +68,6 @@ export const DEFAULT_UNIFIED_USERS: UnifiedPortalUser[] = [
     isActive: true,
     createdAt: '2026-02-01T00:00:00.000Z',
   },
-  {
-    id: 'usr-client-01',
-    username: 'client',
-    originalUsername: 'client',
-    password: 'client123',
-    role: 'CLIENT',
-    fullName: 'Dr. Shahzad Rafique (Subscriber)',
-    phone: '+92 300 5559812',
-    area: 'Sector G-11/3',
-    email: 'shahzad@gmail.com',
-    linkedCustomerId: 'client',
-    isActive: true,
-    createdAt: '2026-02-20T00:00:00.000Z',
-  },
 ];
 
 /**

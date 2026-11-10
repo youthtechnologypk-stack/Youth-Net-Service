@@ -23,6 +23,7 @@ import { useISP } from '../context/ISPContext';
 import { useCurrency } from '../context/CurrencyContext';
 import { Invoice, InvoiceStatus, InvoiceLineItem, InvoiceItemCategory } from '../types/isp';
 import { useSubscribers, UnifiedSubscriber, appendStoredBillingLedger } from '../hooks/useSubscribers';
+import { supabase, SupabasePortalUser } from '../services/supabaseClient';
 
 export interface GenerateInvoiceModalProps {
   isOpen: boolean;
@@ -62,6 +63,40 @@ export const GenerateInvoiceModal: React.FC<GenerateInvoiceModalProps> = ({
   const [packageName, setPackageName] = useState('Standard-Broadband');
   const [sendWhatsApp, setSendWhatsApp] = useState(true);
   const [notes, setNotes] = useState('');
+  const [assignedAgentId, setAssignedAgentId] = useState<string>('');
+  const [portalAgents, setPortalAgents] = useState<SupabasePortalUser[]>([]);
+
+  // Fetch live agents directly from Supabase portal_users (single source of truth)
+  useEffect(() => {
+    const fetchPortalAgents = async () => {
+      try {
+        const { data } = await supabase
+          .from('portal_users')
+          .select('id, full_name, username, area, role')
+          .eq('role', 'AGENT');
+
+        if (data) {
+          setPortalAgents(data as SupabasePortalUser[]);
+        }
+      } catch (err) {
+        console.warn('Failed to query portal_users for agents:', err);
+      }
+    };
+
+    fetchPortalAgents();
+
+    // Listen for realtime changes on portal_users
+    const ch = supabase
+      .channel('public:gen_inv_agents')
+      .on('postgres_changes', { event: '*', schema: 'public', table: 'portal_users' }, () => {
+        fetchPortalAgents();
+      })
+      .subscribe();
+
+    return () => {
+      supabase.removeChannel(ch);
+    };
+  }, []);
 
   // Toast notification
   const [toastMessage, setToastMessage] = useState<string | null>(null);
@@ -276,7 +311,33 @@ export const GenerateInvoiceModal: React.FC<GenerateInvoiceModalProps> = ({
     // 2. Update React context state so Invoices table immediately renders it at the top
     setInvoices((prev) => [newInvoice, ...prev.filter((i) => i.id !== newInvoice.id)]);
 
-    // 3. Record in double-entry ledger history
+    // 3. Persist directly to Supabase PostgreSQL invoices table
+    const selectedAgent = portalAgents.find((a) => a.id === assignedAgentId);
+    (async () => {
+      try {
+        const { error: sbErr } = await supabase
+          .from('invoices')
+          .insert([
+            {
+              invoice_no: finalInvoiceNumber,
+              subscriber_username: subUsername,
+              assigned_agent_id: assignedAgentId || null,
+              assigned_agent_name: selectedAgent ? selectedAgent.full_name : null,
+              amount: Number(totalAmount) || 0,
+              due_date: dueDate,
+              status: status === 'paid' ? 'PAID' : 'DUE',
+              cycle_day: 5,
+              paid_at: status === 'paid' ? new Date().toISOString() : null,
+              created_at: new Date().toISOString(),
+            },
+          ]);
+        if (sbErr) console.warn('Supabase invoice insert notice:', sbErr);
+      } catch (err: any) {
+        console.warn('Supabase invoice network notice:', err);
+      }
+    })();
+
+    // 4. Record in double-entry ledger history
     appendStoredBillingLedger({
       id: `led-${Date.now()}`,
       date: new Date().toISOString(),
@@ -593,6 +654,28 @@ export const GenerateInvoiceModal: React.FC<GenerateInvoiceModalProps> = ({
                 />
               </div>
             )}
+          </div>
+
+          {/* Assigned Field Recovery Agent */}
+          <div>
+            <label className="block text-slate-300 font-medium mb-1 font-mono">
+              Assigned Field Recovery Agent (portal_users)
+            </label>
+            <select
+              value={assignedAgentId}
+              onChange={(e) => setAssignedAgentId(e.target.value)}
+              className="w-full bg-slate-950 border border-slate-700 text-slate-200 font-mono p-2 rounded-lg text-xs focus:outline-none focus:border-cyan-500"
+            >
+              <option value="">-- Unassigned --</option>
+              {portalAgents.map((ag) => (
+                <option key={ag.id} value={ag.id}>
+                  {ag.full_name} (@{ag.username}) {ag.area ? `• ${ag.area}` : ''}
+                </option>
+              ))}
+            </select>
+            <span className="text-[10px] text-slate-500 font-mono mt-0.5 block">
+              Directly queried from PostgreSQL <code className="text-purple-400 font-mono">portal_users</code>. Real-time synced to Agent Portal.
+            </span>
           </div>
 
           {/* TOTAL SUMMARY CARD */}

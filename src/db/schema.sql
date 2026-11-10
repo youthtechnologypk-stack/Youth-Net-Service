@@ -114,8 +114,7 @@ ON CONFLICT (role) DO NOTHING;
 INSERT INTO users (id, username, password_hash, full_name, phone, role, is_active) VALUES
     ('usr-admin-01', 'admin', '$2b$12$netpulse.8a3ad33751bd8645f7766df1272bb63b1467e5eaa0e7c703', 'NOC Master Administrator', '+92 300 1234567', 'ADMIN', TRUE),
     ('usr-mgr-01', 'manager', '$2b$12$netpulse.manager123hash7a8b9c0d1e2f3a4b5c6d7e8f9a0b1c2d', 'NOC Operations Manager', '+92 301 9876543', 'MANAGER', TRUE),
-    ('usr-agent-01', 'agent', '$2b$12$netpulse.agent123hash7a8b9c0d1e2f3a4b5c6d7e8f9a0b1c2d3e', 'Bilal Khan (Field Recovery Agent)', '+92 301 5550192', 'AGENT', TRUE),
-    ('usr-client-01', 'client', '$2b$12$netpulse.client123hash7a8b9c0d1e2f3a4b5c6d7e8f9a0b1c2d3', 'Dr. Shahzad Rafique (Subscriber)', '+92 300 5559812', 'CLIENT', TRUE)
+    ('usr-agent-01', 'agent', '$2b$12$netpulse.agent123hash7a8b9c0d1e2f3a4b5c6d7e8f9a0b1c2d3e', 'Bilal Khan (Field Recovery Agent)', '+92 301 5550192', 'AGENT', TRUE)
 ON CONFLICT (username) DO UPDATE
 SET role = EXCLUDED.role, full_name = EXCLUDED.full_name;
 

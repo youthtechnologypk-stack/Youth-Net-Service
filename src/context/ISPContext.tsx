@@ -1125,9 +1125,9 @@ export const ISPProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
           ]);
         }
 
-        const secCount = secretsResult.success && secretsResult.secrets.length > 0
+        const secCount = secretsResult.success && Array.isArray(secretsResult.secrets)
           ? secretsResult.secrets.length
-          : customers.length;
+          : provisionedSecrets.length;
 
         return {
           success: true,

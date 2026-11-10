@@ -63,26 +63,10 @@ export const SEED_AGENT_ACCOUNT = {
   createdAt: '2026-02-15T00:00:00.000Z',
 };
 
-export const SEED_CLIENT_ACCOUNT = {
-  id: 'usr-client-01',
-  username: 'client',
-  email: 'client@youthnet.pk',
-  role: 'CLIENT' as const,
-  passwordHash: hashPassword('client@123'),
-  fullName: 'Dr. Shahzad Rafique (Client)',
-  displayName: 'Dr. Shahzad Rafique (Client)',
-  phone: '+92 300 5559812',
-  linkedCustomerId: 'cust-101',
-  isActive: true,
-  mustChangePassword: false,
-  createdAt: '2026-01-15T00:00:00.000Z',
-};
-
 export const INITIAL_USER_ACCOUNTS = [
   SEED_ADMIN_ACCOUNT,
   SEED_MANAGER_ACCOUNT,
   SEED_AGENT_ACCOUNT,
-  SEED_CLIENT_ACCOUNT,
   {
     id: 'usr-agent-02',
     username: 'tariq.mehmood',
@@ -97,20 +81,6 @@ export const INITIAL_USER_ACCOUNTS = [
     isActive: true,
     mustChangePassword: false,
     createdAt: '2026-03-01T00:00:00.000Z',
-  },
-  {
-    id: 'usr-client-02',
-    username: 'fatima_noor_g11',
-    email: 'fatima.noor@outlook.com',
-    role: 'CLIENT' as const,
-    passwordHash: hashPassword('client@123'),
-    fullName: 'Fatima Noor',
-    displayName: 'Fatima Noor',
-    phone: '+92 313 5552390',
-    linkedCustomerId: 'cust-104',
-    isActive: true,
-    mustChangePassword: false,
-    createdAt: '2026-02-10T00:00:00.000Z',
   },
 ];
 

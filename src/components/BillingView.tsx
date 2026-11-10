@@ -18,6 +18,8 @@ import {
   ChevronDown,
   RefreshCw,
   Users,
+  Edit2,
+  Trash2,
 } from 'lucide-react';
 import { supabase, SupabaseInvoice, SupabasePortalUser } from '../services/supabaseClient';
 import { useISP } from '../context/ISPContext';
@@ -48,9 +50,19 @@ export const BillingView: React.FC<BillingViewProps> = ({
   // Modal States
   const [isGenerateModalOpen, setIsGenerateModalOpen] = useState<boolean>(false);
   const [isMarkPaidModalOpen, setIsMarkPaidModalOpen] = useState<boolean>(false);
+  const [isEditModalOpen, setIsEditModalOpen] = useState<boolean>(false);
+  const [invoiceToEdit, setInvoiceToEdit] = useState<SupabaseInvoice | null>(null);
+  const [invoiceToDelete, setInvoiceToDelete] = useState<SupabaseInvoice | null>(null);
   const [selectedInvoice, setSelectedInvoice] = useState<SupabaseInvoice | null>(null);
   const [collectingAgentId, setCollectingAgentId] = useState<string>('');
   const [paidPaymentMethod, setPaidPaymentMethod] = useState<string>('Cash Handover');
+
+  // Edit Invoice Form State
+  const [editAmount, setEditAmount] = useState<number>(0);
+  const [editDueDate, setEditDueDate] = useState<string>('');
+  const [editCycleDay, setEditCycleDay] = useState<number>(5);
+  const [editStatus, setEditStatus] = useState<'DUE' | 'PAID' | 'OVERDUE'>('DUE');
+  const [editAssignedAgentId, setEditAssignedAgentId] = useState<string>('');
 
   // New Invoice Form State
   const [newSubUsername, setNewSubUsername] = useState<string>('');
@@ -215,6 +227,95 @@ export const BillingView: React.FC<BillingViewProps> = ({
       await fetchInvoices();
     } catch (err: any) {
       alert(`Failed to mark invoice as paid: ${err.message}`);
+    } finally {
+      setIsSubmitting(false);
+    }
+  };
+
+  // 5. Open Edit Invoice Modal
+  const handleOpenEditModal = (inv: SupabaseInvoice) => {
+    setInvoiceToEdit(inv);
+    setEditAmount(Number(inv.amount) || 0);
+    setEditDueDate(inv.due_date || '');
+    setEditCycleDay(inv.cycle_day || 5);
+    setEditStatus((inv.status as any) || 'DUE');
+    setEditAssignedAgentId(inv.assigned_agent_id || '');
+    setIsEditModalOpen(true);
+  };
+
+  // 6. Execute Invoice Update in Supabase
+  const handleUpdateInvoice = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!invoiceToEdit) return;
+
+    setIsSubmitting(true);
+    try {
+      const selectedAgent = portalAgents.find((a) => a.id === editAssignedAgentId);
+      const updatedData: Partial<SupabaseInvoice> = {
+        amount: Number(editAmount) || 0,
+        due_date: editDueDate,
+        cycle_day: Number(editCycleDay) || 5,
+        status: editStatus as any,
+        assigned_agent_id: editAssignedAgentId || null,
+        assigned_agent_name: selectedAgent ? selectedAgent.full_name : null,
+      };
+
+      if (editStatus === 'PAID' && !invoiceToEdit.paid_at) {
+        updatedData.paid_at = new Date().toISOString();
+      }
+
+      const { error } = await supabase
+        .from('invoices')
+        .update(updatedData)
+        .eq('id', invoiceToEdit.id);
+
+      if (error) {
+        throw new Error(error.message);
+      }
+
+      // Update local state immediately
+      setInvoices((prev) =>
+        prev.map((i) => (i.id === invoiceToEdit.id ? { ...i, ...updatedData } : i))
+      );
+
+      setActionNotice(`Invoice ${invoiceToEdit.invoice_no} updated successfully!`);
+      setTimeout(() => setActionNotice(null), 5000);
+      setIsEditModalOpen(false);
+      setInvoiceToEdit(null);
+      await fetchInvoices();
+    } catch (err: any) {
+      alert(`Failed to update invoice: ${err.message}`);
+    } finally {
+      setIsSubmitting(false);
+    }
+  };
+
+  // 7. Execute Invoice Delete in Supabase
+  const handleDeleteInvoice = async () => {
+    if (!invoiceToDelete) return;
+
+    setIsSubmitting(true);
+    try {
+      const invoiceId = invoiceToDelete.id;
+      const invoiceNo = invoiceToDelete.invoice_no;
+
+      const { error } = await supabase
+        .from('invoices')
+        .delete()
+        .eq('id', invoiceId);
+
+      if (error) {
+        throw new Error(error.message);
+      }
+
+      // Remove from local state instantly
+      setInvoices((prev) => prev.filter((i) => i.id !== invoiceId));
+
+      setActionNotice(`Invoice ${invoiceNo} deleted successfully.`);
+      setTimeout(() => setActionNotice(null), 5000);
+      setInvoiceToDelete(null);
+    } catch (err: any) {
+      alert(`Failed to delete invoice: ${err.message}`);
     } finally {
       setIsSubmitting(false);
     }
@@ -465,7 +566,7 @@ export const BillingView: React.FC<BillingViewProps> = ({
                         )}
                       </td>
                       <td className="py-3 px-4 text-right whitespace-nowrap">
-                        <div className="flex items-center justify-end gap-2">
+                        <div className="flex items-center justify-end gap-1.5">
                           {!isPaid ? (
                             <button
                               type="button"
@@ -474,7 +575,7 @@ export const BillingView: React.FC<BillingViewProps> = ({
                                 setCollectingAgentId(inv.assigned_agent_id || (portalAgents[0]?.id ?? ''));
                                 setIsMarkPaidModalOpen(true);
                               }}
-                              className="px-3 py-1.5 bg-emerald-600 hover:bg-emerald-500 text-slate-950 font-bold rounded-lg text-xs flex items-center gap-1.5 transition active:scale-95 shadow cursor-pointer"
+                              className="px-2.5 py-1.5 bg-emerald-600 hover:bg-emerald-500 text-slate-950 font-bold rounded-lg text-xs flex items-center gap-1 transition active:scale-95 shadow cursor-pointer"
                               title="1-Click Mark Paid & Credit Field Agent"
                             >
                               <CheckCircle2 className="w-3.5 h-3.5" />
@@ -489,6 +590,32 @@ export const BillingView: React.FC<BillingViewProps> = ({
                             >
                               <Printer className="w-3.5 h-3.5" />
                               <span>Receipt</span>
+                            </button>
+                          )}
+
+                          {/* Edit Invoice Button (Admin/Manager) */}
+                          {(currentRole === 'ADMIN' || currentRole === 'MANAGER') && (
+                            <button
+                              type="button"
+                              onClick={() => handleOpenEditModal(inv)}
+                              className="p-1.5 bg-slate-800 hover:bg-slate-700 text-cyan-400 hover:text-white border border-slate-700 rounded-lg text-xs transition cursor-pointer"
+                              title="Edit Invoice Details"
+                            >
+                              <Edit2 className="w-3.5 h-3.5" />
+                              <span className="sr-only">Edit Invoice</span>
+                            </button>
+                          )}
+
+                          {/* Delete Invoice Button (Admin/Manager) */}
+                          {(currentRole === 'ADMIN' || currentRole === 'MANAGER') && (
+                            <button
+                              type="button"
+                              onClick={() => setInvoiceToDelete(inv)}
+                              className="p-1.5 bg-rose-950/80 hover:bg-rose-900 text-rose-300 hover:text-rose-100 border border-rose-800 rounded-lg text-xs transition cursor-pointer"
+                              title="Delete Invoice"
+                            >
+                              <Trash2 className="w-3.5 h-3.5" />
+                              <span className="sr-only">Delete Invoice</span>
                             </button>
                           )}
                         </div>
@@ -707,6 +834,191 @@ export const BillingView: React.FC<BillingViewProps> = ({
                   )}
                 </button>
               </div>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Modal: Edit Invoice */}
+      {isEditModalOpen && invoiceToEdit && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/75 backdrop-blur-sm animate-fade-in font-sans">
+          <div className="bg-[#111A2E] border border-slate-700 rounded-2xl w-full max-w-md p-6 shadow-2xl relative">
+            <div className="flex items-center justify-between pb-4 border-b border-slate-800">
+              <div className="flex items-center gap-2.5">
+                <div className="p-2 bg-indigo-950 border border-indigo-700/60 text-indigo-400 rounded-xl">
+                  <Edit2 className="w-4 h-4" />
+                </div>
+                <div>
+                  <h2 className="text-base font-bold text-white">Edit Invoice Details</h2>
+                  <p className="text-xs text-slate-400 font-mono">Invoice #{invoiceToEdit.invoice_no}</p>
+                </div>
+              </div>
+              <button
+                type="button"
+                onClick={() => {
+                  setIsEditModalOpen(false);
+                  setInvoiceToEdit(null);
+                }}
+                className="text-slate-400 hover:text-white transition"
+              >
+                <X className="w-5 h-5" />
+              </button>
+            </div>
+
+            <form onSubmit={handleUpdateInvoice} className="space-y-4 mt-4">
+              <div>
+                <label className="block text-xs font-medium text-slate-300 mb-1">
+                  Subscriber Username
+                </label>
+                <input
+                  type="text"
+                  disabled
+                  value={`@${invoiceToEdit.subscriber_username}`}
+                  className="w-full px-3 py-2 bg-slate-950 border border-slate-800 rounded-lg text-sm text-slate-400 font-mono cursor-not-allowed"
+                />
+              </div>
+
+              <div className="grid grid-cols-2 gap-3">
+                <div>
+                  <label className="block text-xs font-medium text-slate-300 mb-1">Amount (PKR)</label>
+                  <input
+                    type="number"
+                    required
+                    min="0"
+                    step="50"
+                    value={editAmount}
+                    onChange={(e) => setEditAmount(Number(e.target.value))}
+                    className="w-full px-3 py-2 bg-slate-900 border border-slate-700 rounded-lg text-sm text-white font-mono focus:outline-none focus:border-cyan-500"
+                  />
+                </div>
+
+                <div>
+                  <label className="block text-xs font-medium text-slate-300 mb-1">Billing Cycle Day</label>
+                  <input
+                    type="number"
+                    min="1"
+                    max="31"
+                    value={editCycleDay}
+                    onChange={(e) => setEditCycleDay(Number(e.target.value))}
+                    className="w-full px-3 py-2 bg-slate-900 border border-slate-700 rounded-lg text-sm text-white font-mono focus:outline-none focus:border-cyan-500"
+                  />
+                </div>
+              </div>
+
+              <div className="grid grid-cols-2 gap-3">
+                <div>
+                  <label className="block text-xs font-medium text-slate-300 mb-1">Due Date</label>
+                  <input
+                    type="date"
+                    required
+                    value={editDueDate}
+                    onChange={(e) => setEditDueDate(e.target.value)}
+                    className="w-full px-3 py-2 bg-slate-900 border border-slate-700 rounded-lg text-sm text-white focus:outline-none focus:border-cyan-500"
+                  />
+                </div>
+
+                <div>
+                  <label className="block text-xs font-medium text-slate-300 mb-1">Payment Status</label>
+                  <select
+                    value={editStatus}
+                    onChange={(e) => setEditStatus(e.target.value as any)}
+                    className="w-full px-3 py-2 bg-slate-900 border border-slate-700 rounded-lg text-sm text-white focus:outline-none focus:border-cyan-500"
+                  >
+                    <option value="DUE">DUE</option>
+                    <option value="PAID">PAID</option>
+                    <option value="OVERDUE">OVERDUE</option>
+                  </select>
+                </div>
+              </div>
+
+              <div>
+                <label className="block text-xs font-medium text-slate-300 mb-1">Assigned Field Recovery Agent</label>
+                <select
+                  value={editAssignedAgentId}
+                  onChange={(e) => setEditAssignedAgentId(e.target.value)}
+                  className="w-full px-3 py-2 bg-slate-900 border border-slate-700 rounded-lg text-sm text-white focus:outline-none focus:border-cyan-500"
+                >
+                  <option value="">-- Unassigned --</option>
+                  {portalAgents.map((ag) => (
+                    <option key={ag.id} value={ag.id}>
+                      {ag.full_name} ({ag.area})
+                    </option>
+                  ))}
+                </select>
+              </div>
+
+              <div className="flex items-center justify-end gap-3 pt-3 border-t border-slate-800">
+                <button
+                  type="button"
+                  onClick={() => {
+                    setIsEditModalOpen(false);
+                    setInvoiceToEdit(null);
+                  }}
+                  className="px-4 py-2 bg-slate-800 hover:bg-slate-700 text-slate-300 rounded-lg text-sm transition"
+                >
+                  Cancel
+                </button>
+                <button
+                  type="submit"
+                  disabled={isSubmitting}
+                  className="px-5 py-2 bg-indigo-600 hover:bg-indigo-500 text-white font-bold rounded-lg text-sm transition shadow-lg shadow-indigo-950/50 flex items-center gap-1.5"
+                >
+                  {isSubmitting ? (
+                    <>
+                      <RefreshCw className="w-4 h-4 animate-spin" />
+                      <span>Saving...</span>
+                    </>
+                  ) : (
+                    <span>Save Changes</span>
+                  )}
+                </button>
+              </div>
+            </form>
+          </div>
+        </div>
+      )}
+
+      {/* Modal: Delete Invoice Confirmation */}
+      {invoiceToDelete && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/75 backdrop-blur-sm animate-fade-in font-sans">
+          <div className="bg-[#111A2E] border border-rose-800/80 rounded-2xl w-full max-w-sm p-6 shadow-2xl relative space-y-4">
+            <div className="flex items-center gap-3">
+              <div className="p-3 bg-rose-950/90 border border-rose-700 text-rose-400 rounded-xl">
+                <Trash2 className="w-5 h-5" />
+              </div>
+              <div>
+                <h3 className="text-base font-bold text-white">Delete Invoice?</h3>
+                <p className="text-xs text-rose-300 font-mono">Invoice #{invoiceToDelete.invoice_no}</p>
+              </div>
+            </div>
+
+            <p className="text-xs text-slate-300 leading-relaxed">
+              Are you sure you want to permanently delete Invoice <strong className="text-white font-mono">#{invoiceToDelete.invoice_no}</strong> for <strong className="text-cyan-300">@{invoiceToDelete.subscriber_username}</strong> ({formatCurrency(Number(invoiceToDelete.amount) || 0)})?
+            </p>
+
+            <div className="flex items-center justify-end gap-2.5 pt-3 border-t border-slate-800">
+              <button
+                type="button"
+                onClick={() => setInvoiceToDelete(null)}
+                className="px-4 py-2 bg-slate-800 hover:bg-slate-700 text-slate-300 rounded-lg text-xs font-semibold transition"
+              >
+                Cancel
+              </button>
+              <button
+                type="button"
+                onClick={handleDeleteInvoice}
+                disabled={isSubmitting}
+                className="px-4 py-2 bg-rose-600 hover:bg-rose-500 text-white font-bold rounded-lg text-xs transition shadow-lg shadow-rose-950/50 flex items-center gap-1.5 cursor-pointer"
+              >
+                {isSubmitting ? (
+                  <>
+                    <RefreshCw className="w-3.5 h-3.5 animate-spin" />
+                    <span>Deleting...</span>
+                  </>
+                ) : (
+                  <span>Delete Permanently</span>
+                )}
+              </button>
             </div>
           </div>
         </div>

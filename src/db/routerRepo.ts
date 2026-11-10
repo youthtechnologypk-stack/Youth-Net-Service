@@ -1191,15 +1191,6 @@ const DEFAULT_SEED_USERS: DbUserRecord[] = [
     role: 'AGENT',
     is_active: true,
   },
-  {
-    id: 'usr-client-01',
-    username: 'client',
-    password_hash: '$2b$12$netpulse.client123hash7a8b9c0d1e2f3a4b5c6d7e8f9a0b1c2d3',
-    full_name: 'Dr. Shahzad Rafique (Subscriber)',
-    phone: '+92 300 5559812',
-    role: 'CLIENT',
-    is_active: true,
-  },
 ];
 
 function ensureUsersFile(): DbUserRecord[] {

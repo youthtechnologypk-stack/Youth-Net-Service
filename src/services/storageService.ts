@@ -194,22 +194,6 @@ const INITIAL_PORTAL_USERS: PortalUser[] = [
     isActive: true,
     createdAt: '2026-02-15T00:00:00.000Z',
   },
-  {
-    id: 'usr-client-01',
-    username: 'client',
-    password: 'client123',
-    role: 'CLIENT',
-    fullName: 'Dr. Shahzad Rafique',
-    phone: '+92 300 5559812',
-    email: 'shahzad@gmail.com',
-    area: 'Sector G-11/3',
-    address: 'House 42, Street 18, Sector G-11/3, Islamabad',
-    cnic: '37405-1928472-1',
-    balance: 2500,
-    isActive: true,
-    linkedCustomerId: 'client',
-    createdAt: '2026-02-20T00:00:00.000Z',
-  },
 ];
 
 const INITIAL_PROFILES: BandwidthProfile[] = [
@@ -269,7 +253,7 @@ const INITIAL_AUDIT_LOGS: AuditLogEntry[] = [
     target: 'INV-FEB2026-CLIENT',
     severity: 'SUCCESS',
     ipAddress: '10.50.12.89',
-    details: 'Agent Bilal Khan collected Rs. 2,500 cash payment for subscriber Dr. Shahzad Rafique. Receipt #REC-892147.',
+    details: 'Agent Bilal Khan collected Rs. 2,500 cash payment for subscriber account. Receipt #REC-892147.',
     metadata: { agentName: 'Bilal Khan', amount: 2500, method: 'CASH' },
   },
   {

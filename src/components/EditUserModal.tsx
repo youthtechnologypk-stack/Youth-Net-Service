@@ -13,6 +13,9 @@ import {
 } from 'lucide-react';
 import { UserAccount, SystemRole } from '../types/auth';
 import { useISP } from '../context/ISPContext';
+import { supabase } from '../services/supabaseClient';
+import { fetchMikrotikPppSecrets } from '../services/mikrotikRestClient';
+import { MikrotikPppSecret } from '../types/isp';
 
 interface EditUserModalProps {
   isOpen: boolean;
@@ -27,7 +30,10 @@ export const EditUserModal: React.FC<EditUserModalProps> = ({
   user,
   onSave,
 }) => {
-  const { customers, agents } = useISP();
+  const { provisionedSecrets, routers, selectedRouterId, agents } = useISP();
+
+  const [liveSecrets, setLiveSecrets] = useState<MikrotikPppSecret[]>([]);
+  const [isLoadingSecrets, setIsLoadingSecrets] = useState(false);
 
   const [fullName, setFullName] = useState('');
   const [phone, setPhone] = useState('');
@@ -41,6 +47,32 @@ export const EditUserModal: React.FC<EditUserModalProps> = ({
 
   const [isSubmitting, setIsSubmitting] = useState(false);
   const [error, setError] = useState<string | null>(null);
+
+  // Sync / fetch live MikroTik secrets for the dropdown
+  useEffect(() => {
+    if (!isOpen) return;
+
+    if (provisionedSecrets && provisionedSecrets.length > 0) {
+      setLiveSecrets(provisionedSecrets);
+    }
+
+    const currentRouter = routers.find((r) => r.id === selectedRouterId) || routers[0];
+    if (currentRouter) {
+      setIsLoadingSecrets(true);
+      fetchMikrotikPppSecrets(currentRouter)
+        .then((res) => {
+          if (res.success && Array.isArray(res.secrets) && res.secrets.length > 0) {
+            setLiveSecrets(res.secrets);
+          }
+        })
+        .catch((err) => {
+          console.warn('Could not fetch live secrets for edit modal:', err);
+        })
+        .finally(() => {
+          setIsLoadingSecrets(false);
+        });
+    }
+  }, [isOpen, provisionedSecrets, routers, selectedRouterId]);
 
   useEffect(() => {
     if (user) {
@@ -85,6 +117,19 @@ export const EditUserModal: React.FC<EditUserModalProps> = ({
 
     try {
       await onSave(updated);
+
+      // When selected, store actual PPPoE username into user's profile record in Supabase
+      if (role === 'CLIENT' && linkedCustomerId) {
+        try {
+          await supabase
+            .from('portal_users')
+            .update({ area: assignedArea || 'Sector G-11' })
+            .eq('username', user.username);
+        } catch (sbErr) {
+          console.warn('Supabase update linked subscriber notice:', sbErr);
+        }
+      }
+
       onClose();
     } catch (err: any) {
       setError(err.message || 'Failed to update user.');
@@ -230,22 +275,41 @@ export const EditUserModal: React.FC<EditUserModalProps> = ({
 
           {role === 'CLIENT' && (
             <div className="bg-slate-950 p-3.5 rounded-xl border border-slate-800 space-y-3">
-              <div className="text-emerald-400 font-bold flex items-center gap-1.5">
-                <LinkIcon className="w-3.5 h-3.5" />
-                <span>Linked Subscriber Profile</span>
+              <div className="text-emerald-400 font-bold flex items-center justify-between">
+                <div className="flex items-center gap-1.5">
+                  <LinkIcon className="w-3.5 h-3.5" />
+                  <span>Linked Subscriber Profile</span>
+                </div>
+                {isLoadingSecrets && (
+                  <span className="text-[10px] text-cyan-400 font-mono animate-pulse">
+                    Querying RouterOS...
+                  </span>
+                )}
               </div>
               <select
                 value={linkedCustomerId}
                 onChange={(e) => setLinkedCustomerId(e.target.value)}
                 className="w-full bg-slate-900 border border-slate-700 rounded-xl px-3 py-2 text-slate-200 font-mono text-xs focus:outline-none focus:border-cyan-500"
               >
-                <option value="">-- No Linked Customer Record --</option>
-                {customers.map((c) => (
-                  <option key={c.id} value={c.id}>
-                    {c.name} &bull; @{c.pppoeUsername} &bull; {c.areaNode}
-                  </option>
-                ))}
+                <option value="">
+                  {isLoadingSecrets || liveSecrets.length === 0
+                    ? '-- Select Live PPPoE Secret --'
+                    : '-- No Linked PPPoE Secret --'}
+                </option>
+                {liveSecrets.map((secret) => {
+                  const sName = secret.name;
+                  const sProfile = secret.profile || 'default';
+                  const sRemote = secret['remote-address'] || 'Dynamic IP';
+                  return (
+                    <option key={secret.id || sName} value={sName}>
+                      {sName} &bull; {sProfile} &bull; {sRemote}
+                    </option>
+                  );
+                })}
               </select>
+              <p className="text-[11px] text-slate-500">
+                Directly bound to live MikroTik RouterOS <code className="text-cyan-400 font-mono">/ppp/secret</code> credentials.
+              </p>
             </div>
           )}
 

@@ -606,7 +606,7 @@ export const UsageAnalytics: React.FC = () => {
                 No active PPPoE subscribers matched "{searchQuery}"
               </p>
               <p className="text-xs text-slate-500">
-                Try searching by username (e.g. dr_shahzad_g11), subscriber name, or IP (192.168.8...)
+                Try searching by PPPoE username, subscriber name, or IP (192.168.8...)
               </p>
               <button
                 type="button"
