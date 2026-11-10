@@ -170,16 +170,17 @@ export const useSubscribers = () => {
 
   // Unified subscriber list merging MikroTik secrets, registered customers, portal users, and billing data
   const unifiedSubscribers: UnifiedSubscriber[] = useMemo(() => {
-    const portalUsers = getStoredPortalUsers();
-    const billingSubs = getStoredBillingSubscribers();
+    const portalUsers = getStoredPortalUsers() || [];
+    const billingSubs = getStoredBillingSubscribers() || [];
     const subMap = new Map<string, UnifiedSubscriber>();
 
     // 1. Ingest registered customers from state / DB
-    customers.forEach((c) => {
-      const uKey = (c.pppoeUsername || c.name || c.id).toLowerCase();
-      const matchedPkg = packages.find((p) => p.id === c.packageId || p.mikrotikProfile === c.packageId);
-      const isOnline = activeSessions.some((s) => s.username?.toLowerCase() === uKey);
-      const userInvoices = invoices.filter((i) => i.customerId === c.id || (i.customerName && i.customerName.toLowerCase() === c.name.toLowerCase()));
+    (customers || []).forEach((c) => {
+      const uKey = (c.pppoeUsername || c.name || c.id || '').toLowerCase();
+      if (!uKey) return;
+      const matchedPkg = (packages || []).find((p) => p.id === c.packageId || p.mikrotikProfile === c.packageId);
+      const isOnline = (activeSessions || []).some((s) => s.username?.toLowerCase() === uKey);
+      const userInvoices = (invoices || []).filter((i) => i.customerId === c.id || (i.customerName && i.customerName.toLowerCase() === (c.name || '').toLowerCase()));
       const portalRec = portalUsers.find((p) => (p.username || '').toLowerCase() === uKey);
 
       subMap.set(uKey, {
@@ -197,7 +198,7 @@ export const useSubscribers = () => {
         profile: matchedPkg?.mikrotikProfile || 'default',
         packageId: matchedPkg?.id,
         priceMonthly: matchedPkg?.priceMonthly || 2500,
-        assignedIp: c.assignedIp || (isOnline ? activeSessions.find((s) => s.username?.toLowerCase() === uKey)?.address || 'Dynamic' : 'Dynamic'),
+        assignedIp: c.assignedIp || (isOnline ? (activeSessions || []).find((s) => s.username?.toLowerCase() === uKey)?.address || 'Dynamic' : 'Dynamic'),
         macAddress: c.macAddress || '',
         service: 'pppoe',
         status: (c.status as any) || 'active',
@@ -219,11 +220,11 @@ export const useSubscribers = () => {
       if (!uKey) return;
 
       const parsed = parseMikrotikComment(sec.comment, sec.name);
-      const isOnline = activeSessions.some((s) => s.username?.toLowerCase() === uKey);
-      const liveSession = activeSessions.find((s) => s.username?.toLowerCase() === uKey);
+      const isOnline = (activeSessions || []).some((s) => s.username?.toLowerCase() === uKey);
+      const liveSession = (activeSessions || []).find((s) => s.username?.toLowerCase() === uKey);
       const portalRec = portalUsers.find((p) => (p.username || '').toLowerCase() === uKey);
       const billingRec = billingSubs.find((b) => (b.username || '').toLowerCase() === uKey);
-      const matchedPkg = packages.find((p) => p.mikrotikProfile === sec.profile || p.name === sec.profile);
+      const matchedPkg = (packages || []).find((p) => p.mikrotikProfile === sec.profile || p.name === sec.profile);
 
       const existing = subMap.get(uKey);
       if (existing) {
@@ -306,13 +307,13 @@ export const useSubscribers = () => {
     });
 
     // 3. Ingest portal users (youthnet_portal_users) not yet in subMap
-    portalUsers.forEach((pu) => {
+    (portalUsers || []).forEach((pu) => {
       const uKey = (pu.username || '').toLowerCase();
       if (!uKey || subMap.has(uKey)) return;
 
-      const isOnline = activeSessions.some((s) => s.username?.toLowerCase() === uKey);
-      const userInvoices = invoices.filter((i) => (i.customerName && i.customerName.toLowerCase() === (pu.fullName || '').toLowerCase()) || i.invoiceNumber.toLowerCase().includes(uKey));
-      const matchedPkg = packages.find((p) => p.mikrotikProfile === pu.profile || p.name === pu.profile);
+      const isOnline = (activeSessions || []).some((s) => s.username?.toLowerCase() === uKey);
+      const userInvoices = (invoices || []).filter((i) => (i.customerName && i.customerName.toLowerCase() === (pu.fullName || '').toLowerCase()) || (i.invoiceNumber && i.invoiceNumber.toLowerCase().includes(uKey)));
+      const matchedPkg = (packages || []).find((p) => p.mikrotikProfile === pu.profile || p.name === pu.profile);
 
       subMap.set(uKey, {
         id: pu.id || `usr-${uKey}`,

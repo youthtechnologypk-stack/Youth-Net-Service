@@ -107,9 +107,9 @@ export const UsageAnalytics: React.FC = () => {
 
   // Top Talkers Ranking
   const topTalkersData = useMemo(() => {
-    return activeSessions.map((session) => {
-      const cust = customers.find((c) => c.pppoeUsername === session.username);
-      const pkg = packages.find((p) => p.mikrotikProfile === session.profileName);
+    return (activeSessions || []).map((session) => {
+      const cust = (customers || []).find((c) => c.pppoeUsername === session.username);
+      const pkg = (packages || []).find((p) => p.mikrotikProfile === session.profileName);
       const totalRate = session.rxRateMbps + session.txRateMbps;
       const totalGb = Number(((session.bytesInMb + session.bytesOutMb) / 1024).toFixed(2));
       const cap = pkg?.downloadSpeedMbps || 50;

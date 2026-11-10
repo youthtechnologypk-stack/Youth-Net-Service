@@ -29,6 +29,7 @@ import { ReceiptModal } from './components/ReceiptModal';
 import { CashPaymentModal } from './components/CashPaymentModal';
 import { AddMikrotikDeviceModal } from './components/AddMikrotikDeviceModal';
 import { PWAInstallPrompt } from './components/PWAInstallPrompt';
+import { ErrorBoundary } from './components/ErrorBoundary';
 import { Invoice } from './types/isp';
 import { SystemRole, UserAccount } from './types/auth';
 import {
@@ -484,16 +485,18 @@ function ISPAppContent() {
 
 export default function App() {
   return (
-    <ThemeProvider>
-      <CurrencyProvider>
-        <AuthProvider>
-          <ISPProvider>
-            <PermissionProvider>
-              <ISPAppContent />
-            </PermissionProvider>
-          </ISPProvider>
-        </AuthProvider>
-      </CurrencyProvider>
-    </ThemeProvider>
+    <ErrorBoundary>
+      <ThemeProvider>
+        <CurrencyProvider>
+          <AuthProvider>
+            <ISPProvider>
+              <PermissionProvider>
+                <ISPAppContent />
+              </PermissionProvider>
+            </ISPProvider>
+          </AuthProvider>
+        </CurrencyProvider>
+      </ThemeProvider>
+    </ErrorBoundary>
   );
 }

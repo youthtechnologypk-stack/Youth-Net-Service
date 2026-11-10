@@ -226,7 +226,8 @@ export const UserCredentialModal: React.FC<UserCredentialModalProps> = ({
                 }}
                 className="w-full bg-slate-950 border border-slate-700 text-slate-200 text-xs p-2.5 rounded-lg focus:outline-none focus:border-cyan-500 font-sans"
               >
-                {customers.map((c) => (
+                <option value="">-- Select Subscriber Profile --</option>
+                {(customers || []).map((c) => (
                   <option key={c.id} value={c.id}>
                     {c.name} ({c.accountNumber} - PPPoE: {c.pppoeUsername})
                   </option>

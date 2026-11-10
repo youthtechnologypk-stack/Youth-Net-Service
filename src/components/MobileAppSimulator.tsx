@@ -83,26 +83,61 @@ export const MobileAppSimulator: React.FC<MobileAppSimulatorProps> = ({
   const [ticketDescription, setTicketDescription] = useState('');
   const [ticketSubmittedMsg, setTicketSubmittedMsg] = useState(false);
 
-  const currentAgent = agents.find((a) => a.id === selectedAgentId) || agents[0];
-  const currentCustomer = customers.find((c) => c.id === selectedCustomerId) || customers[0];
+  const fallbackAgent = {
+    id: 'agent-1',
+    name: 'Field Recovery Agent',
+    phone: '+92 300 0000000',
+    email: 'agent@youthnet.pk',
+    assignedArea: 'Central Sector',
+    status: 'active' as const,
+    cashInHand: 0,
+    totalCollectedToday: 0,
+    activeTicketsAssigned: 0,
+    baseSalary: 35000,
+    advanceSalaryTaken: 0,
+    advanceSalaryReturned: 0,
+  };
+
+  const fallbackCustomer: Customer = {
+    id: 'cust-default',
+    accountNumber: 'NP-CUST-0001',
+    name: 'Subscriber Account',
+    phone: '+92 300 0000000',
+    email: 'client@youthnet.pk',
+    address: 'Sector G-11, Islamabad',
+    areaNode: 'Sector-G11-PON-01',
+    connectionType: 'pppoe',
+    packageId: 'pkg-1',
+    assignedIp: '192.168.88.10',
+    macAddress: '00:00:00:00:00:00',
+    pppoeUsername: 'subscriber',
+    installationDate: '2026-01-01',
+    billingDay: 1,
+    balanceDue: 0,
+    status: 'active',
+    routerId: 'rt-1',
+  };
+
+  const currentAgent = (agents || []).find((a) => a.id === selectedAgentId) || (agents && agents[0]) || fallbackAgent;
+  const currentCustomer = (customers || []).find((c) => c.id === selectedCustomerId) || (customers && customers[0]) || fallbackCustomer;
 
   // Customers with pending dues for Agent App
-  const customersWithDues = customers.filter((c) => c.balanceDue > 0);
+  const customersWithDues = (customers || []).filter((c) => (c.balanceDue || 0) > 0);
 
   // Tickets assigned to current agent
-  const agentTickets = complaints.filter(
+  const agentTickets = (complaints || []).filter(
     (t) => currentAgent && t.assignedAgentId === currentAgent.id && t.status !== 'resolved'
   );
 
   // Current customer invoices
-  const customerInvoices = invoices.filter((i) => currentCustomer && i.customerId === currentCustomer.id);
-  const customerTickets = complaints.filter((t) => currentCustomer && t.customerId === currentCustomer.id);
+  const customerInvoices = (invoices || []).filter((i) => currentCustomer && i.customerId === currentCustomer.id);
+  const customerTickets = (complaints || []).filter((t) => currentCustomer && t.customerId === currentCustomer.id);
 
   // Strictly collections and handovers belonging to THIS specific agent
-  const specificAgentInvoices = invoices.filter((i) => currentAgent && i.collectedByAgentId === currentAgent.id);
-  const specificAgentTotalCollected = specificAgentInvoices.reduce((sum, inv) => sum + inv.totalAmount, 0);
-  const specificAgentHandovers = cashHandovers.filter((h) => currentAgent && h.agentId === currentAgent.id);
-  const specificAgentTotalHandedOver = specificAgentHandovers.reduce((sum, h) => sum + h.amount, 0);
+  const specificAgentInvoices = (invoices || []).filter((i) => currentAgent && i.collectedByAgentId === currentAgent.id);
+  const specificAgentTotalCollected = specificAgentInvoices.reduce((sum, inv) => sum + (inv.totalAmount || 0), 0);
+  const specificAgentHandovers = (cashHandovers || []).filter((h) => currentAgent && h.agentId === currentAgent.id);
+  const specificAgentTotalHandedOver = specificAgentHandovers.reduce((sum, h) => sum + (h.amount || 0), 0);
 
   const handleAgentInstantCollect = async (cust: Customer) => {
     const targetInv = invoices.find(

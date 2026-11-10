@@ -251,7 +251,7 @@ export const ManagerOperationsDashboard: React.FC<ManagerOperationsDashboardProp
             }`}
           >
             <Users className="w-3.5 h-3.5" />
-            <span>Subscribers ({customers.length})</span>
+            <span>Subscribers ({(customers || []).length})</span>
           </button>
           <button
             onClick={() => setActiveSubTab('agent_cash')}
@@ -319,7 +319,7 @@ export const ManagerOperationsDashboard: React.FC<ManagerOperationsDashboardProp
               <span>{formatCurrency(totalAgentCashInHand)}</span>
               <CreditCard className="w-4 h-4 text-cyan-400" />
             </div>
-            <span className="text-[10px] text-slate-500 mt-0.5 block">{agents.length} Field Agents Active</span>
+            <span className="text-[10px] text-slate-500 mt-0.5 block">{(agents || []).length} Field Agents Active</span>
           </div>
         </FeatureGate>
 

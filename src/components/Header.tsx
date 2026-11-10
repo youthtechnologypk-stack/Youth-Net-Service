@@ -351,7 +351,7 @@ export const Header: React.FC<HeaderProps> = ({
                 </span>
                 <span className="text-slate-300 dark:text-slate-600">|</span>
                 <span>
-                  Sessions: <strong className="text-indigo-600 dark:text-indigo-300">{activeSessions.length} active</strong>
+                  Sessions: <strong className="text-indigo-600 dark:text-indigo-300">{(activeSessions || []).length} active</strong>
                 </span>
               </div>
             </>

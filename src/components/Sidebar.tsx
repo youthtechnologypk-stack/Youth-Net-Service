@@ -74,7 +74,7 @@ export const Sidebar: React.FC<SidebarProps> = ({
       label: 'Dashboard / Overview',
       subtitle: 'Core NOC Fleet Metrics',
       icon: Activity,
-      badge: `${activeSessions.length} Online`,
+      badge: `${(activeSessions || []).length} Online`,
       badgeColor: 'bg-emerald-950 text-emerald-300 border-emerald-800',
       roles: ['ADMIN', 'MANAGER'],
     },
@@ -262,10 +262,10 @@ export const Sidebar: React.FC<SidebarProps> = ({
               <span className="w-2 h-2 rounded-full bg-emerald-500 animate-pulse" />
               <span className="font-bold">SYSTEM ONLINE</span>
             </span>
-            <span className="text-slate-500 dark:text-slate-400">{customers.length} Subscribers</span>
+            <span className="text-slate-500 dark:text-slate-400">{(customers || []).length} Subscribers</span>
           </div>
 
-          {activeOutages.length > 0 && (
+          {(activeOutages || []).length > 0 && (
             <div
               onClick={() => {
                 onOpenOutageModal();
