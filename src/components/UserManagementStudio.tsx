@@ -24,6 +24,7 @@ import {
   AlertTriangle,
   Ban,
   CheckCircle,
+  Eye,
 } from 'lucide-react';
 import { useISP } from '../context/ISPContext';
 import { UserAccount, SystemRole } from '../types/auth';
@@ -35,9 +36,11 @@ import { WhatsAppDispatchModal } from './WhatsAppDispatchModal';
 import { AddUserModal } from './AddUserModal';
 import { DeleteConfirmDialog } from './DeleteConfirmDialog';
 import { PermissionMatrixStudio } from './PermissionMatrixStudio';
+import { SubscriberProfileView } from './SubscriberProfileView';
 import { buildStandardWhatsAppCredentialText, getPortalUrlForRole } from '../services/authUtils';
 import { RealMikrotikSubscriber, fetchLiveMikrotikSubscribers } from '../services/mikrotikSubscriberSync';
 import { getStandardPortalUsers, USERS_STORAGE_KEY } from '../lib/userRepository';
+import { supabase } from '../services/supabaseClient';
 
 interface UserManagementStudioProps {
   currentSimulatedRole?: SystemRole;
@@ -91,7 +94,10 @@ export const UserManagementStudio: React.FC<UserManagementStudioProps> = ({
   const [isDeleteDialogOpen, setIsDeleteDialogOpen] = useState(false);
   const [isDeleting, setIsDeleting] = useState(false);
 
-  // Fetch from server API on mount to synchronize with PostgreSQL database
+  // Selected username for Transworld 360° Profile View
+  const [selectedProfileUsername, setSelectedProfileUsername] = useState<string | null>(null);
+
+  // Fetch from server API and Supabase portal_users on mount
   useEffect(() => {
     const fetchServerUsers = async () => {
       try {
@@ -119,6 +125,34 @@ export const UserManagementStudio: React.FC<UserManagementStudioProps> = ({
         }
       } catch {
         // Continue with local storage on network error
+      }
+
+      // Synchronize directly with Supabase PostgreSQL portal_users table
+      try {
+        const { data: sbUsers } = await supabase.from('portal_users').select('*');
+        if (sbUsers && sbUsers.length > 0) {
+          sbUsers.forEach((su: any) => {
+            const localMatch = users.find((u) => u.username?.toLowerCase() === su.username?.toLowerCase() || u.id === su.id);
+            if (!localMatch) {
+              addPortalUser({
+                id: su.id,
+                username: su.username,
+                fullName: su.full_name || su.username,
+                displayName: su.full_name || su.username,
+                phone: su.phone || '+92 300 0000000',
+                role: su.role,
+                isActive: su.account_status !== 'SUSPENDED',
+                email: `${su.username}@youthnet.pk`,
+                area: su.area,
+                department: su.area,
+                createdAt: su.created_at || new Date().toISOString(),
+                password: su.password,
+              });
+            }
+          });
+        }
+      } catch (err) {
+        console.warn('Supabase users sync notice:', err);
       }
     };
 
@@ -312,6 +346,16 @@ export const UserManagementStudio: React.FC<UserManagementStudioProps> = ({
   const agentCount = users.filter((u) => u.role === 'AGENT').length;
   const managerCount = users.filter((u) => u.role === 'MANAGER').length;
   const adminCount = users.filter((u) => u.role === 'ADMIN').length;
+
+  // Render Transworld 360° Profile View if a subscriber was selected
+  if (selectedProfileUsername) {
+    return (
+      <SubscriberProfileView
+        username={selectedProfileUsername}
+        onBack={() => setSelectedProfileUsername(null)}
+      />
+    );
+  }
 
   return (
     <div className="space-y-6 text-xs font-sans">
@@ -534,10 +578,22 @@ export const UserManagementStudio: React.FC<UserManagementStudioProps> = ({
                   const isMasterAdmin = user.username === 'admin';
 
                   return (
-                    <tr key={user.id} className="hover:bg-slate-950/50 transition">
+                    <tr
+                      key={user.id}
+                      className={`hover:bg-slate-950/50 transition ${
+                        user.role === 'CLIENT' ? 'cursor-pointer' : ''
+                      }`}
+                    >
                       {/* 1. Full Name */}
-                      <td className="py-3.5 px-4">
-                        <div className="flex items-center gap-3">
+                      <td
+                        className="py-3.5 px-4"
+                        onClick={() => {
+                          if (user.role === 'CLIENT') {
+                            setSelectedProfileUsername(user.username);
+                          }
+                        }}
+                      >
+                        <div className="flex items-center gap-3 group">
                           <div
                             className={`w-8 h-8 rounded-xl flex items-center justify-center font-bold text-xs shrink-0 ${
                               user.role === 'ADMIN'
@@ -552,17 +608,32 @@ export const UserManagementStudio: React.FC<UserManagementStudioProps> = ({
                             {targetName.slice(0, 2).toUpperCase()}
                           </div>
                           <div>
-                            <span className="font-bold text-white block">{targetName}</span>
+                            <span
+                              className={`font-bold text-white block ${
+                                user.role === 'CLIENT' ? 'group-hover:text-cyan-400 transition' : ''
+                              }`}
+                            >
+                              {targetName}
+                            </span>
                             <span className="text-[11px] text-slate-400 font-mono">
-                              {user.department || user.assignedArea || 'Standard Tier'}
+                              {user.department || user.assignedArea || (user.role === 'CLIENT' ? 'Transworld FTTH Client' : 'Standard Tier')}
                             </span>
                           </div>
                         </div>
                       </td>
 
                       {/* 2. Username / Account ID */}
-                      <td className="py-3.5 px-4 font-mono text-[11px]">
-                        <span className="text-cyan-400 font-bold block">@{user.username}</span>
+                      <td
+                        className="py-3.5 px-4 font-mono text-[11px]"
+                        onClick={() => {
+                          if (user.role === 'CLIENT') {
+                            setSelectedProfileUsername(user.username);
+                          }
+                        }}
+                      >
+                        <span className={`text-cyan-400 font-bold block ${user.role === 'CLIENT' ? 'hover:underline' : ''}`}>
+                          @{user.username}
+                        </span>
                         <span className="text-slate-400">{user.email || `${user.username}@youthnet.pk`}</span>
                       </td>
 
@@ -638,6 +709,19 @@ export const UserManagementStudio: React.FC<UserManagementStudioProps> = ({
                       {/* 6. Actions (Edit, Reset Password, Deactivate / Delete) */}
                       <td className="py-3.5 px-4 text-right">
                         <div className="flex items-center justify-end gap-1.5">
+                          {/* Transworld 360° Profile Button for Subscribers */}
+                          {user.role === 'CLIENT' && (
+                            <button
+                              type="button"
+                              onClick={() => setSelectedProfileUsername(user.username)}
+                              className="px-2.5 py-1.5 rounded-lg bg-cyan-950 hover:bg-cyan-900 border border-cyan-700 text-cyan-300 font-bold transition flex items-center gap-1 text-[11px] shadow-sm cursor-pointer active:scale-95"
+                              title="Open Transworld 360° Subscriber Profile"
+                            >
+                              <Eye className="w-3.5 h-3.5 text-cyan-400" />
+                              <span className="hidden md:inline">360° View</span>
+                            </button>
+                          )}
+
                           {/* Copy credentials */}
                           <button
                             onClick={() => handleCopyCredentials(user)}

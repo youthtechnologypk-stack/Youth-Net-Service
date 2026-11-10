@@ -44,7 +44,7 @@ export const BillingView: React.FC<BillingViewProps> = ({
   const [portalAgents, setPortalAgents] = useState<SupabasePortalUser[]>([]);
   const [isLoading, setIsLoading] = useState<boolean>(true);
   const [searchTerm, setSearchTerm] = useState<string>('');
-  const [statusFilter, setStatusFilter] = useState<'ALL' | 'DUE' | 'PAID'>('ALL');
+  const [statusFilter, setStatusFilter] = useState<'ALL' | 'DUE' | 'PARTIAL' | 'PAID'>('ALL');
   const [actionNotice, setActionNotice] = useState<string | null>(null);
 
   // Modal States
@@ -56,12 +56,13 @@ export const BillingView: React.FC<BillingViewProps> = ({
   const [selectedInvoice, setSelectedInvoice] = useState<SupabaseInvoice | null>(null);
   const [collectingAgentId, setCollectingAgentId] = useState<string>('');
   const [paidPaymentMethod, setPaidPaymentMethod] = useState<string>('Cash Handover');
+  const [paymentReceivedInput, setPaymentReceivedInput] = useState<number | string>('');
 
   // Edit Invoice Form State
   const [editAmount, setEditAmount] = useState<number>(0);
   const [editDueDate, setEditDueDate] = useState<string>('');
   const [editCycleDay, setEditCycleDay] = useState<number>(5);
-  const [editStatus, setEditStatus] = useState<'DUE' | 'PAID' | 'OVERDUE'>('DUE');
+  const [editStatus, setEditStatus] = useState<'DUE' | 'PARTIAL' | 'PAID' | 'OVERDUE'>('DUE');
   const [editAssignedAgentId, setEditAssignedAgentId] = useState<string>('');
 
   // New Invoice Form State
@@ -174,27 +175,57 @@ export const BillingView: React.FC<BillingViewProps> = ({
     }
   };
 
-  // 4. "Mark Paid" Direct Supabase UPDATE & Agent cash_in_hand Increment
+  // Helper to open Record Payment modal with accurate remaining balance
+  const handleOpenMarkPaid = (inv: SupabaseInvoice) => {
+    setSelectedInvoice(inv);
+    const alreadyPaid = Number(inv.paid_amount) || 0;
+    const remainingDue = Math.max(0, (Number(inv.amount) || 0) - alreadyPaid);
+    setPaymentReceivedInput(remainingDue);
+    setCollectingAgentId(inv.assigned_agent_id || (portalAgents[0]?.id ?? ''));
+    setIsMarkPaidModalOpen(true);
+  };
+
+  // 4. "Record Payment / Mark Paid" Direct Supabase UPDATE & Agent cash_in_hand Increment
   const handleConfirmMarkPaid = async () => {
     if (!selectedInvoice) return;
+
+    const enteredVal = Number(paymentReceivedInput);
+    if (isNaN(enteredVal) || enteredVal <= 0) {
+      alert('Please enter a valid payment amount greater than 0.');
+      return;
+    }
 
     setIsSubmitting(true);
     try {
       const invoiceId = selectedInvoice.id;
-      const amountPaid = Number(selectedInvoice.amount) || 0;
+      const alreadyPaid = Number(selectedInvoice.paid_amount) || 0;
+      const totalAmount = Number(selectedInvoice.amount) || 0;
+      const newPaidTotal = alreadyPaid + enteredVal;
+      const newStatus = newPaidTotal >= totalAmount ? 'PAID' : 'PARTIAL';
+      const nowIso = new Date().toISOString();
 
-      // Update invoice in Supabase: status -> 'PAID'
+      // 1. Update invoice in Supabase: status, paid_amount, paid_at
+      const invoiceUpdateData: Partial<SupabaseInvoice> = {
+        status: newStatus,
+        paid_amount: newPaidTotal,
+      };
+      if (newStatus === 'PAID') {
+        invoiceUpdateData.paid_at = nowIso;
+      }
+
       const { error: invError } = await supabase
         .from('invoices')
-        .update({ status: 'PAID', paid_at: new Date().toISOString() })
+        .update(invoiceUpdateData)
         .eq('id', invoiceId);
 
       if (invError) {
         throw new Error(invError.message);
       }
 
-      // Update collecting agent's cash_in_hand in portal_users
+      // 2. Update collecting agent's cash_in_hand in portal_users by ONLY enteredVal
       const targetAgentId = collectingAgentId || selectedInvoice.assigned_agent_id;
+      let targetAgentName = selectedInvoice.assigned_agent_name || 'Field Agent';
+
       if (targetAgentId) {
         const { data: agentRecord } = await supabase
           .from('portal_users')
@@ -203,30 +234,49 @@ export const BillingView: React.FC<BillingViewProps> = ({
           .maybeSingle();
 
         if (agentRecord) {
+          targetAgentName = agentRecord.full_name;
           const currentCash = Number(agentRecord.cash_in_hand) || 0;
-          const updatedCash = currentCash + amountPaid;
+          const updatedCash = currentCash + enteredVal;
 
           await supabase
             .from('portal_users')
             .update({ cash_in_hand: updatedCash })
             .eq('id', agentRecord.id);
-
-          setActionNotice(
-            `Invoice ${selectedInvoice.invoice_no} marked PAID! ${formatCurrency(amountPaid)} added to ${agentRecord.full_name}'s Cash-in-Hand.`
-          );
-        } else {
-          setActionNotice(`Invoice ${selectedInvoice.invoice_no} marked PAID!`);
         }
-      } else {
-        setActionNotice(`Invoice ${selectedInvoice.invoice_no} marked PAID!`);
       }
+
+      // 3. Record in payment_transactions table
+      const collectorId = currentUser?.id || targetAgentId || null;
+      const collectorName = currentUser?.fullName || targetAgentName;
+
+      const { error: txError } = await supabase
+        .from('payment_transactions')
+        .insert([{
+          invoice_id: selectedInvoice.id,
+          subscriber_username: selectedInvoice.subscriber_username,
+          collected_by_id: collectorId,
+          collected_by_name: collectorName,
+          amount_paid: enteredVal,
+          payment_method: paidPaymentMethod,
+          created_at: nowIso,
+        }]);
+
+      if (txError) {
+        console.warn('payment_transactions insert notice:', txError.message);
+      }
+
+      setActionNotice(
+        `Recorded ${formatCurrency(enteredVal)} for Invoice #${selectedInvoice.invoice_no}! Status: ${newStatus}.${
+          targetAgentId ? ` Credited to ${targetAgentName}'s Cash-in-Hand.` : ''
+        }`
+      );
 
       setTimeout(() => setActionNotice(null), 5000);
       setIsMarkPaidModalOpen(false);
       setSelectedInvoice(null);
       await fetchInvoices();
     } catch (err: any) {
-      alert(`Failed to mark invoice as paid: ${err.message}`);
+      alert(`Failed to record payment: ${err.message}`);
     } finally {
       setIsSubmitting(false);
     }
@@ -323,32 +373,36 @@ export const BillingView: React.FC<BillingViewProps> = ({
 
   // Filtered Invoices
   const filteredInvoices = useMemo(() => {
-    return invoices.filter((inv) => {
+    return (invoices || []).filter((inv) => {
       const matchSearch =
         inv.invoice_no.toLowerCase().includes(searchTerm.toLowerCase()) ||
         inv.subscriber_username.toLowerCase().includes(searchTerm.toLowerCase()) ||
         (inv.assigned_agent_name && inv.assigned_agent_name.toLowerCase().includes(searchTerm.toLowerCase()));
 
+      const upperStatus = (inv.status || '').toUpperCase();
       const matchStatus =
         statusFilter === 'ALL'
           ? true
           : statusFilter === 'PAID'
-          ? (inv.status || '').toUpperCase() === 'PAID'
-          : (inv.status || '').toUpperCase() !== 'PAID';
+          ? upperStatus === 'PAID'
+          : statusFilter === 'PARTIAL'
+          ? upperStatus === 'PARTIAL'
+          : upperStatus === 'DUE';
 
       return matchSearch && matchStatus;
     });
   }, [invoices, searchTerm, statusFilter]);
 
   // Aggregate Metrics
-  const totalBilled = invoices.reduce((acc, i) => acc + (Number(i.amount) || 0), 0);
-  const totalPaid = invoices
-    .filter((i) => (i.status || '').toUpperCase() === 'PAID')
-    .reduce((acc, i) => acc + (Number(i.amount) || 0), 0);
-  const totalDue = invoices
+  const totalBilled = (invoices || []).reduce((acc, i) => acc + (Number(i.amount) || 0), 0);
+  const totalPaid = (invoices || []).reduce(
+    (acc, i) => acc + (Number(i.paid_amount) || (i.status === 'PAID' ? Number(i.amount) : 0)),
+    0
+  );
+  const totalDue = (invoices || [])
     .filter((i) => (i.status || '').toUpperCase() !== 'PAID')
-    .reduce((acc, i) => acc + (Number(i.amount) || 0), 0);
-  const totalAgentCash = portalAgents.reduce((acc, a) => acc + (Number(a.cash_in_hand) || 0), 0);
+    .reduce((acc, i) => acc + Math.max(0, (Number(i.amount) || 0) - (Number(i.paid_amount) || 0)), 0);
+  const totalAgentCash = (portalAgents || []).reduce((acc, a) => acc + (Number(a.cash_in_hand) || 0), 0);
 
   return (
     <div className="space-y-6">
@@ -427,7 +481,9 @@ export const BillingView: React.FC<BillingViewProps> = ({
           </div>
           <div className="text-2xl font-bold text-emerald-400 mt-2 font-mono">{formatCurrency(totalPaid)}</div>
           <div className="text-slate-500 text-xs mt-1">
-            {invoices.filter((i) => (i.status || '').toUpperCase() === 'PAID').length} invoices settled
+            {invoices.filter((i) => (i.status || '').toUpperCase() === 'PAID').length} fully settled
+            {invoices.filter((i) => (i.status || '').toUpperCase() === 'PARTIAL').length > 0 &&
+              ` • ${invoices.filter((i) => (i.status || '').toUpperCase() === 'PARTIAL').length} partial`}
           </div>
         </div>
 
@@ -438,7 +494,7 @@ export const BillingView: React.FC<BillingViewProps> = ({
           </div>
           <div className="text-2xl font-bold text-amber-400 mt-2 font-mono">{formatCurrency(totalDue)}</div>
           <div className="text-slate-500 text-xs mt-1">
-            {invoices.filter((i) => (i.status || '').toUpperCase() !== 'PAID').length} pending collection
+            {invoices.filter((i) => (i.status || '').toUpperCase() !== 'PAID').length} pending collection / arrears
           </div>
         </div>
 
@@ -465,7 +521,7 @@ export const BillingView: React.FC<BillingViewProps> = ({
           />
         </div>
 
-        <div className="flex items-center gap-2">
+        <div className="flex items-center gap-2 overflow-x-auto">
           <button
             type="button"
             onClick={() => setStatusFilter('ALL')}
@@ -482,11 +538,22 @@ export const BillingView: React.FC<BillingViewProps> = ({
             onClick={() => setStatusFilter('DUE')}
             className={`px-3 py-1.5 rounded-lg text-xs font-semibold transition ${
               statusFilter === 'DUE'
+                ? 'bg-rose-600 text-white font-bold'
+                : 'bg-slate-800 text-slate-300 hover:bg-slate-700'
+            }`}
+          >
+            Due ({invoices.filter((i) => (i.status || '').toUpperCase() === 'DUE').length})
+          </button>
+          <button
+            type="button"
+            onClick={() => setStatusFilter('PARTIAL')}
+            className={`px-3 py-1.5 rounded-lg text-xs font-semibold transition ${
+              statusFilter === 'PARTIAL'
                 ? 'bg-amber-600 text-slate-950 font-bold'
                 : 'bg-slate-800 text-slate-300 hover:bg-slate-700'
             }`}
           >
-            Due ({invoices.filter((i) => (i.status || '').toUpperCase() !== 'PAID').length})
+            Partial ({invoices.filter((i) => (i.status || '').toUpperCase() === 'PARTIAL').length})
           </button>
           <button
             type="button"
@@ -530,7 +597,12 @@ export const BillingView: React.FC<BillingViewProps> = ({
                 </tr>
               ) : (
                 filteredInvoices.map((inv) => {
-                  const isPaid = (inv.status || '').toUpperCase() === 'PAID';
+                  const upperStatus = (inv.status || '').toUpperCase();
+                  const isPaid = upperStatus === 'PAID';
+                  const isPartial = upperStatus === 'PARTIAL';
+                  const paidAmt = Number(inv.paid_amount) || (isPaid ? Number(inv.amount) : 0);
+                  const remainingBalance = Math.max(0, (Number(inv.amount) || 0) - paidAmt);
+
                   return (
                     <tr key={inv.id} className="hover:bg-slate-800/30 transition">
                       <td className="py-3 px-4 font-mono font-semibold text-cyan-400">{inv.invoice_no}</td>
@@ -549,8 +621,13 @@ export const BillingView: React.FC<BillingViewProps> = ({
                         )}
                       </td>
                       <td className="py-3 px-4 text-slate-300 font-mono text-xs">{inv.due_date}</td>
-                      <td className="py-3 px-4 text-right font-mono font-bold text-white text-base">
-                        {formatCurrency(Number(inv.amount) || 0)}
+                      <td className="py-3 px-4 text-right">
+                        <div className="font-mono font-bold text-white text-base">
+                          {formatCurrency(Number(inv.amount) || 0)}
+                        </div>
+                        <div className="text-[11px] text-slate-400 font-mono mt-0.5 whitespace-nowrap">
+                          (Paid: {formatCurrency(paidAmt)} | Balance: {formatCurrency(remainingBalance)})
+                        </div>
                       </td>
                       <td className="py-3 px-4 text-center">
                         {isPaid ? (
@@ -558,9 +635,14 @@ export const BillingView: React.FC<BillingViewProps> = ({
                             <CheckCircle2 className="w-3.5 h-3.5 text-emerald-400" />
                             <span>PAID</span>
                           </span>
-                        ) : (
+                        ) : isPartial ? (
                           <span className="inline-flex items-center gap-1 px-2.5 py-1 rounded-md text-xs font-bold bg-amber-950 text-amber-300 border border-amber-800">
                             <Clock className="w-3.5 h-3.5 text-amber-400" />
+                            <span>PARTIAL</span>
+                          </span>
+                        ) : (
+                          <span className="inline-flex items-center gap-1 px-2.5 py-1 rounded-md text-xs font-bold bg-rose-950/80 text-rose-300 border border-rose-800">
+                            <Clock className="w-3.5 h-3.5 text-rose-400" />
                             <span>DUE</span>
                           </span>
                         )}
@@ -570,16 +652,12 @@ export const BillingView: React.FC<BillingViewProps> = ({
                           {!isPaid ? (
                             <button
                               type="button"
-                              onClick={() => {
-                                setSelectedInvoice(inv);
-                                setCollectingAgentId(inv.assigned_agent_id || (portalAgents[0]?.id ?? ''));
-                                setIsMarkPaidModalOpen(true);
-                              }}
+                              onClick={() => handleOpenMarkPaid(inv)}
                               className="px-2.5 py-1.5 bg-emerald-600 hover:bg-emerald-500 text-slate-950 font-bold rounded-lg text-xs flex items-center gap-1 transition active:scale-95 shadow cursor-pointer"
-                              title="1-Click Mark Paid & Credit Field Agent"
+                              title="Record Payment & Credit Field Agent"
                             >
-                              <CheckCircle2 className="w-3.5 h-3.5" />
-                              <span>Mark Paid</span>
+                              <DollarSign className="w-3.5 h-3.5" />
+                              <span>{isPartial ? 'Add Payment' : 'Mark Paid'}</span>
                             </button>
                           ) : (
                             <button
@@ -750,94 +828,170 @@ export const BillingView: React.FC<BillingViewProps> = ({
         </div>
       )}
 
-      {/* Modal: Mark Paid */}
-      {isMarkPaidModalOpen && selectedInvoice && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/70 backdrop-blur-sm">
-          <div className="bg-[#111A2E] border border-slate-700 rounded-2xl w-full max-w-md p-6 shadow-2xl relative">
-            <div className="flex items-center justify-between pb-4 border-b border-slate-800">
-              <h2 className="text-lg font-bold text-white flex items-center gap-2">
-                <CheckCircle2 className="w-5 h-5 text-emerald-400" />
-                <span>Mark Invoice as Paid</span>
-              </h2>
-              <button
-                type="button"
-                onClick={() => setIsMarkPaidModalOpen(false)}
-                className="text-slate-400 hover:text-white transition"
-              >
-                <X className="w-5 h-5" />
-              </button>
-            </div>
+      {/* Modal: Record Payment / Mark Paid */}
+      {isMarkPaidModalOpen && selectedInvoice && (() => {
+        const alreadyPaid = Number(selectedInvoice.paid_amount) || 0;
+        const totalAmount = Number(selectedInvoice.amount) || 0;
+        const remainingDue = Math.max(0, totalAmount - alreadyPaid);
+        const enteredVal = Number(paymentReceivedInput) || 0;
+        const projectedTotalPaid = alreadyPaid + enteredVal;
+        const willBeFullyPaid = projectedTotalPaid >= totalAmount;
 
-            <div className="space-y-4 mt-4">
-              <div className="p-3 bg-slate-900 rounded-lg border border-slate-800 space-y-1">
-                <div className="text-xs text-slate-400">Invoice Number: <span className="text-cyan-400 font-mono font-bold">{selectedInvoice.invoice_no}</span></div>
-                <div className="text-xs text-slate-400">Subscriber: <span className="text-white font-semibold">@{selectedInvoice.subscriber_username}</span></div>
-                <div className="text-sm text-slate-300">Amount Due: <span className="text-emerald-400 font-mono font-bold">{formatCurrency(Number(selectedInvoice.amount) || 0)}</span></div>
-              </div>
-
-              <div>
-                <label className="block text-xs font-medium text-slate-300 mb-1">
-                  Collecting Field Recovery Agent (Credits Cash-in-Hand)
-                </label>
-                <select
-                  value={collectingAgentId}
-                  onChange={(e) => setCollectingAgentId(e.target.value)}
-                  className="w-full px-3 py-2 bg-slate-900 border border-slate-700 rounded-lg text-sm text-white focus:outline-none focus:border-cyan-500"
-                >
-                  <option value="">-- No Agent Credit (Direct NOC Collection) --</option>
-                  {portalAgents.map((ag) => (
-                    <option key={ag.id} value={ag.id}>
-                      {ag.full_name} ({ag.area})
-                    </option>
-                  ))}
-                </select>
-                <p className="text-[11px] text-slate-500 mt-1">
-                  Selected agent's `cash_in_hand` in Supabase `portal_users` will be credited by {formatCurrency(Number(selectedInvoice.amount) || 0)}.
-                </p>
-              </div>
-
-              <div>
-                <label className="block text-xs font-medium text-slate-300 mb-1">Payment Method</label>
-                <select
-                  value={paidPaymentMethod}
-                  onChange={(e) => setPaidPaymentMethod(e.target.value)}
-                  className="w-full px-3 py-2 bg-slate-900 border border-slate-700 rounded-lg text-sm text-white focus:outline-none focus:border-cyan-500"
-                >
-                  <option value="Cash Handover">Cash Handover</option>
-                  <option value="JazzCash">JazzCash</option>
-                  <option value="EasyPaisa">EasyPaisa</option>
-                  <option value="Bank Transfer">Bank Transfer</option>
-                </select>
-              </div>
-
-              <div className="flex items-center justify-end gap-3 pt-3 border-t border-slate-800">
+        return (
+          <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/75 backdrop-blur-sm animate-fade-in font-sans">
+            <div className="bg-[#111A2E] border border-slate-700 rounded-2xl w-full max-w-md p-6 shadow-2xl relative">
+              <div className="flex items-center justify-between pb-4 border-b border-slate-800">
+                <h2 className="text-lg font-bold text-white flex items-center gap-2">
+                  <DollarSign className="w-5 h-5 text-emerald-400" />
+                  <span>Record Payment &amp; Arrears</span>
+                </h2>
                 <button
                   type="button"
                   onClick={() => setIsMarkPaidModalOpen(false)}
-                  className="px-4 py-2 bg-slate-800 hover:bg-slate-700 text-slate-300 rounded-lg text-sm transition"
+                  className="text-slate-400 hover:text-white transition"
                 >
-                  Cancel
+                  <X className="w-5 h-5" />
                 </button>
-                <button
-                  type="button"
-                  onClick={handleConfirmMarkPaid}
-                  disabled={isSubmitting}
-                  className="px-5 py-2 bg-emerald-600 hover:bg-emerald-500 text-slate-950 font-bold rounded-lg text-sm transition shadow-lg shadow-emerald-950/50 flex items-center gap-1.5"
-                >
-                  {isSubmitting ? (
-                    <>
-                      <RefreshCw className="w-4 h-4 animate-spin" />
-                      <span>Updating...</span>
-                    </>
-                  ) : (
-                    <span>Confirm & Mark Paid</span>
-                  )}
-                </button>
+              </div>
+
+              <div className="space-y-4 mt-4">
+                {/* Financial Summary */}
+                <div className="p-3.5 bg-slate-900 rounded-xl border border-slate-800 space-y-2">
+                  <div className="flex justify-between items-center text-xs">
+                    <span className="text-slate-400">Invoice No:</span>
+                    <span className="text-cyan-400 font-mono font-bold">#{selectedInvoice.invoice_no}</span>
+                  </div>
+                  <div className="flex justify-between items-center text-xs">
+                    <span className="text-slate-400">Subscriber:</span>
+                    <span className="text-white font-semibold">@{selectedInvoice.subscriber_username}</span>
+                  </div>
+                  <div className="pt-2 border-t border-slate-800/80 flex justify-between items-center text-xs">
+                    <span className="text-slate-400">Total Amount:</span>
+                    <span className="text-white font-mono font-bold">{formatCurrency(totalAmount)}</span>
+                  </div>
+                  <div className="flex justify-between items-center text-xs">
+                    <span className="text-slate-400">Already Paid:</span>
+                    <span className="text-emerald-400 font-mono font-semibold">{formatCurrency(alreadyPaid)}</span>
+                  </div>
+                  <div className="flex justify-between items-center text-sm font-semibold">
+                    <span className="text-amber-300">Remaining Due:</span>
+                    <span className="text-amber-400 font-mono font-bold text-base">{formatCurrency(remainingDue)}</span>
+                  </div>
+                </div>
+
+                {/* Payment Input Field */}
+                <div>
+                  <div className="flex justify-between items-center mb-1">
+                    <label className="text-xs font-medium text-slate-300">
+                      Payment Received (Rs.)
+                    </label>
+                    <button
+                      type="button"
+                      onClick={() => setPaymentReceivedInput(remainingDue)}
+                      className="text-cyan-400 hover:text-cyan-300 text-[11px] underline cursor-pointer"
+                    >
+                      Fill Full Remaining ({formatCurrency(remainingDue)})
+                    </button>
+                  </div>
+                  <div className="relative">
+                    <span className="absolute left-3 top-2.5 text-slate-500 font-mono text-sm">Rs.</span>
+                    <input
+                      type="number"
+                      min="1"
+                      step="any"
+                      value={paymentReceivedInput}
+                      onChange={(e) => setPaymentReceivedInput(e.target.value)}
+                      placeholder={`Default: ${remainingDue}`}
+                      className="w-full pl-10 pr-3 py-2 bg-slate-900 border border-slate-700 rounded-lg text-white font-mono text-base focus:outline-none focus:border-cyan-500"
+                    />
+                  </div>
+                  <div className="flex items-center justify-between text-[11px] mt-1.5 px-0.5">
+                    <span className="text-slate-400">
+                      Resulting Status:{' '}
+                      <span className={`font-bold ${willBeFullyPaid ? 'text-emerald-400' : 'text-amber-400'}`}>
+                        {willBeFullyPaid ? 'PAID (Settled)' : 'PARTIAL (Arrears Remaining)'}
+                      </span>
+                    </span>
+                    {!willBeFullyPaid && (
+                      <span className="text-amber-400 font-mono">
+                        Arrears: {formatCurrency(Math.max(0, totalAmount - projectedTotalPaid))}
+                      </span>
+                    )}
+                  </div>
+                </div>
+
+                {/* Collecting Agent Selection */}
+                <div>
+                  <label className="block text-xs font-medium text-slate-300 mb-1">
+                    Collecting Field Recovery Agent (Credits Cash-in-Hand)
+                  </label>
+                  <select
+                    value={collectingAgentId}
+                    onChange={(e) => setCollectingAgentId(e.target.value)}
+                    className="w-full px-3 py-2 bg-slate-900 border border-slate-700 rounded-lg text-sm text-white focus:outline-none focus:border-cyan-500"
+                  >
+                    <option value="">-- No Agent Credit (Direct NOC Collection) --</option>
+                    {portalAgents.map((ag) => (
+                      <option key={ag.id} value={ag.id}>
+                        {ag.full_name} ({ag.area})
+                      </option>
+                    ))}
+                  </select>
+                  <p className="text-[11px] text-slate-500 mt-1">
+                    Selected agent's `cash_in_hand` in Supabase `portal_users` will be credited by{' '}
+                    <span className="text-emerald-400 font-mono font-bold">
+                      {formatCurrency(Number(paymentReceivedInput) || 0)}
+                    </span>.
+                  </p>
+                </div>
+
+                {/* Payment Method */}
+                <div>
+                  <label className="block text-xs font-medium text-slate-300 mb-1">Payment Method</label>
+                  <select
+                    value={paidPaymentMethod}
+                    onChange={(e) => setPaidPaymentMethod(e.target.value)}
+                    className="w-full px-3 py-2 bg-slate-900 border border-slate-700 rounded-lg text-sm text-white focus:outline-none focus:border-cyan-500"
+                  >
+                    <option value="Cash Handover">Cash Handover</option>
+                    <option value="JazzCash">JazzCash</option>
+                    <option value="EasyPaisa">EasyPaisa</option>
+                    <option value="Bank Transfer">Bank Transfer</option>
+                  </select>
+                </div>
+
+                <div className="flex items-center justify-end gap-3 pt-3 border-t border-slate-800">
+                  <button
+                    type="button"
+                    onClick={() => setIsMarkPaidModalOpen(false)}
+                    className="px-4 py-2 bg-slate-800 hover:bg-slate-700 text-slate-300 rounded-lg text-sm transition cursor-pointer"
+                  >
+                    Cancel
+                  </button>
+                  <button
+                    type="button"
+                    onClick={handleConfirmMarkPaid}
+                    disabled={isSubmitting || Number(paymentReceivedInput) <= 0}
+                    className="px-5 py-2 bg-emerald-600 hover:bg-emerald-500 disabled:opacity-50 disabled:cursor-not-allowed text-slate-950 font-bold rounded-lg text-sm transition shadow-lg shadow-emerald-950/50 flex items-center gap-1.5 cursor-pointer"
+                  >
+                    {isSubmitting ? (
+                      <>
+                        <RefreshCw className="w-4 h-4 animate-spin" />
+                        <span>Recording...</span>
+                      </>
+                    ) : (
+                      <>
+                        <CheckCircle2 className="w-4 h-4" />
+                        <span>Confirm &amp; Record Payment</span>
+                      </>
+                    )}
+                  </button>
+                </div>
               </div>
             </div>
           </div>
-        </div>
-      )}
+        );
+      })()}
 
       {/* Modal: Edit Invoice */}
       {isEditModalOpen && invoiceToEdit && (
@@ -925,6 +1079,7 @@ export const BillingView: React.FC<BillingViewProps> = ({
                     className="w-full px-3 py-2 bg-slate-900 border border-slate-700 rounded-lg text-sm text-white focus:outline-none focus:border-cyan-500"
                   >
                     <option value="DUE">DUE</option>
+                    <option value="PARTIAL">PARTIAL</option>
                     <option value="PAID">PAID</option>
                     <option value="OVERDUE">OVERDUE</option>
                   </select>

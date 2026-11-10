@@ -17,6 +17,7 @@ import {
   Users,
   Lock,
   RefreshCw,
+  X,
 } from 'lucide-react';
 import { useISP } from '../context/ISPContext';
 import { useCurrency } from '../context/CurrencyContext';
@@ -56,6 +57,12 @@ export const FieldAgentPortal: React.FC<FieldAgentPortalProps> = ({
   const [assignedInvoices, setAssignedInvoices] = useState<SupabaseInvoice[]>([]);
   const [isLoadingData, setIsLoadingData] = useState<boolean>(true);
 
+  // Modal State for Cash Collection
+  const [isCollectModalOpen, setIsCollectModalOpen] = useState<boolean>(false);
+  const [selectedInvForCollection, setSelectedInvForCollection] = useState<SupabaseInvoice | null>(null);
+  const [collectionAmountInput, setCollectionAmountInput] = useState<number | string>('');
+  const [isSubmittingCollection, setIsSubmittingCollection] = useState<boolean>(false);
+
   // Fetch this specific agent's live data from Supabase
   const fetchAgentData = async () => {
     setIsLoadingData(true);
@@ -82,12 +89,12 @@ export const FieldAgentPortal: React.FC<FieldAgentPortalProps> = ({
         setAssignedTickets(tktData as SupabaseTicket[]);
       }
 
-      // 3. Fetch unpaid recovery invoices strictly assigned to this agent
+      // 3. Fetch unpaid recovery invoices strictly assigned to this agent (DUE or PARTIAL)
       const { data: invData } = await supabase
         .from('invoices')
         .select('*')
         .or(`assigned_agent_id.eq.${currentUser.id},assigned_agent_id.eq.${currentUser.username},assigned_agent_name.eq.${currentUser.fullName}`)
-        .eq('status', 'DUE')
+        .in('status', ['DUE', 'PARTIAL'])
         .order('created_at', { ascending: false });
 
       if (invData) {
@@ -124,22 +131,59 @@ export const FieldAgentPortal: React.FC<FieldAgentPortalProps> = ({
     };
   }, [currentUser.id]);
 
-  // Handle direct cash collection with 1-click WhatsApp receipt
-  const handleCollectCash = async (inv: SupabaseInvoice) => {
+  // Open modal for recording payment
+  const handleOpenCollectionModal = (inv: SupabaseInvoice) => {
+    setSelectedInvForCollection(inv);
+    const alreadyPaid = Number(inv.paid_amount) || 0;
+    const remainingDue = Math.max(0, (Number(inv.amount) || 0) - alreadyPaid);
+    setCollectionAmountInput(remainingDue);
+    setIsCollectModalOpen(true);
+  };
+
+  // Handle direct cash collection with partial payment support & payment_transactions record
+  const handleConfirmCollection = async () => {
+    if (!selectedInvForCollection) return;
+    const enteredVal = Number(collectionAmountInput);
+    if (isNaN(enteredVal) || enteredVal <= 0) {
+      alert('Please enter a valid payment amount greater than 0.');
+      return;
+    }
+
+    setIsSubmittingCollection(true);
     try {
-      const amount = Number(inv.amount) || 0;
+      const inv = selectedInvForCollection;
+      const alreadyPaid = Number(inv.paid_amount) || 0;
+      const totalAmount = Number(inv.amount) || 0;
+      const newPaidTotal = alreadyPaid + enteredVal;
+      const newStatus = newPaidTotal >= totalAmount ? 'PAID' : 'PARTIAL';
       const nowIso = new Date().toISOString();
 
-      // 1. Mark invoice as PAID in Supabase
+      // 1. Update invoice in Supabase: status, paid_amount, paid_at
+      const invoiceUpdateData: Partial<SupabaseInvoice> = {
+        status: newStatus,
+        paid_amount: newPaidTotal,
+      };
+      if (newStatus === 'PAID') {
+        invoiceUpdateData.paid_at = nowIso;
+      }
+
       const { error: invErr } = await supabase
         .from('invoices')
-        .update({ status: 'PAID', paid_at: nowIso })
+        .update(invoiceUpdateData)
         .eq('id', inv.id);
 
       if (invErr) throw new Error(invErr.message);
 
-      // 2. Increment agent's cash_in_hand in portal_users
-      const newCash = agentCash + amount;
+      // 2. Increment agent's cash_in_hand in portal_users by ONLY enteredVal
+      const { data: agentRecord } = await supabase
+        .from('portal_users')
+        .select('cash_in_hand')
+        .eq('id', currentUser.id)
+        .maybeSingle();
+
+      const currentCash = Number(agentRecord?.cash_in_hand ?? agentCash) || 0;
+      const newCash = currentCash + enteredVal;
+
       await supabase
         .from('portal_users')
         .update({ cash_in_hand: newCash })
@@ -147,18 +191,39 @@ export const FieldAgentPortal: React.FC<FieldAgentPortalProps> = ({
 
       setAgentCash(newCash);
 
+      // 3. Record in payment_transactions table
+      const { error: txError } = await supabase
+        .from('payment_transactions')
+        .insert([{
+          invoice_id: inv.id,
+          subscriber_username: inv.subscriber_username,
+          collected_by_id: currentUser.id,
+          collected_by_name: currentUser.fullName,
+          amount_paid: enteredVal,
+          payment_method: 'Cash Handover',
+          created_at: nowIso,
+        }]);
+
+      if (txError) {
+        console.warn('payment_transactions insert error:', txError.message);
+      }
+
       // Context sync fallback
       try {
-        await collectAgentCashPayment(inv.id, currentUser.id, amount);
+        await collectAgentCashPayment(inv.id, currentUser.id, enteredVal);
       } catch {}
 
       setCollectionSuccessToast(
-        `Collected ${formatCurrency(amount)} from @${inv.subscriber_username}! Receipt recorded & added to Cash-in-Hand.`
+        `Collected ${formatCurrency(enteredVal)} from @${inv.subscriber_username}! Status: ${newStatus}. Credited to Wallet.`
       );
       setTimeout(() => setCollectionSuccessToast(null), 5000);
+      setIsCollectModalOpen(false);
+      setSelectedInvForCollection(null);
       await fetchAgentData();
     } catch (err: any) {
-      setCollectionSuccessToast(`Collection error: ${err.message || 'Failed'}`);
+      alert(`Collection error: ${err.message || 'Failed'}`);
+    } finally {
+      setIsSubmittingCollection(false);
     }
   };
 
@@ -349,36 +414,62 @@ export const FieldAgentPortal: React.FC<FieldAgentPortalProps> = ({
             <span>1-Click Recovery</span>
           </div>
 
-          {assignedInvoices.map((inv) => (
-            <div
-              key={inv.id}
-              className="bg-slate-900 border border-slate-800 rounded-xl p-3.5 space-y-2.5 shadow-md"
-            >
-              <div className="flex items-start justify-between">
-                <div>
-                  <span className="font-bold text-white text-xs block">@{inv.subscriber_username}</span>
-                  <span className="text-[11px] text-slate-400 font-mono">Invoice #{inv.invoice_no}</span>
-                  <span className="text-[10px] text-slate-500 block">Cycle Day: {inv.cycle_day || 5}th</span>
-                </div>
-                <div className="text-right">
-                  <span className="text-rose-400 font-bold font-mono text-sm block">
-                    Rs. {Number(inv.amount).toLocaleString()}
-                  </span>
-                  <span className="text-[10px] text-slate-500 font-mono">Due: {inv.due_date}</span>
-                </div>
-              </div>
+          {assignedInvoices.map((inv) => {
+            const isPartial = (inv.status || '').toUpperCase() === 'PARTIAL';
+            const alreadyPaid = Number(inv.paid_amount) || 0;
+            const totalAmount = Number(inv.amount) || 0;
+            const remainingDue = Math.max(0, totalAmount - alreadyPaid);
 
-              <div className="flex items-center justify-end pt-2 border-t border-slate-800">
-                <button
-                  onClick={() => handleCollectCash(inv)}
-                  className="px-3 py-1.5 rounded-lg bg-emerald-600 hover:bg-emerald-500 text-slate-950 font-bold font-mono text-xs flex items-center gap-1.5 shadow transition cursor-pointer"
-                >
-                  <DollarSign className="w-3.5 h-3.5" />
-                  <span>Receive Cash &amp; Credit My Wallet</span>
-                </button>
+            return (
+              <div
+                key={inv.id}
+                className="bg-slate-900 border border-slate-800 rounded-xl p-3.5 space-y-2.5 shadow-md"
+              >
+                <div className="flex items-start justify-between">
+                  <div>
+                    <div className="flex items-center gap-2">
+                      <span className="font-bold text-white text-xs block">@{inv.subscriber_username}</span>
+                      {isPartial ? (
+                        <span className="px-1.5 py-0.5 rounded text-[10px] font-bold bg-amber-950 text-amber-300 border border-amber-800">
+                          PARTIAL
+                        </span>
+                      ) : (
+                        <span className="px-1.5 py-0.5 rounded text-[10px] font-bold bg-rose-950 text-rose-300 border border-rose-800">
+                          DUE
+                        </span>
+                      )}
+                    </div>
+                    <span className="text-[11px] text-slate-400 font-mono">Invoice #{inv.invoice_no}</span>
+                    <span className="text-[10px] text-slate-500 block">Cycle Day: {inv.cycle_day || 5}th</span>
+                  </div>
+                  <div className="text-right">
+                    <span className="text-rose-400 font-bold font-mono text-sm block">
+                      {formatCurrency(remainingDue)}
+                    </span>
+                    <span className="text-[10px] text-slate-400 font-mono block">
+                      Total: {formatCurrency(totalAmount)}
+                    </span>
+                    {alreadyPaid > 0 && (
+                      <span className="text-[10px] text-emerald-400 font-mono block">
+                        Paid: {formatCurrency(alreadyPaid)}
+                      </span>
+                    )}
+                    <span className="text-[10px] text-slate-500 font-mono">Due: {inv.due_date}</span>
+                  </div>
+                </div>
+
+                <div className="flex items-center justify-end pt-2 border-t border-slate-800">
+                  <button
+                    onClick={() => handleOpenCollectionModal(inv)}
+                    className="px-3 py-1.5 rounded-lg bg-emerald-600 hover:bg-emerald-500 text-slate-950 font-bold font-mono text-xs flex items-center gap-1.5 shadow transition cursor-pointer"
+                  >
+                    <DollarSign className="w-3.5 h-3.5" />
+                    <span>Receive Cash &amp; Credit My Wallet</span>
+                  </button>
+                </div>
               </div>
-            </div>
-          ))}
+            );
+          })}
 
           {assignedInvoices.length === 0 && (
             <div className="text-center py-10 bg-slate-900 border border-slate-800 rounded-xl text-slate-500">
@@ -498,6 +589,141 @@ export const FieldAgentPortal: React.FC<FieldAgentPortalProps> = ({
           </div>
         </FeatureGate>
       )}
+
+      {/* Cash Collection Modal with Partial Payment Support */}
+      {isCollectModalOpen && selectedInvForCollection && (() => {
+        const alreadyPaid = Number(selectedInvForCollection.paid_amount) || 0;
+        const totalAmount = Number(selectedInvForCollection.amount) || 0;
+        const remainingDue = Math.max(0, totalAmount - alreadyPaid);
+        const enteredVal = Number(collectionAmountInput) || 0;
+        const projectedTotalPaid = alreadyPaid + enteredVal;
+        const willBeFullyPaid = projectedTotalPaid >= totalAmount;
+
+        return (
+          <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/75 backdrop-blur-sm animate-fade-in font-sans">
+            <div className="bg-[#111A2E] border border-slate-700 rounded-2xl w-full max-w-sm p-5 shadow-2xl relative">
+              <div className="flex items-center justify-between pb-3 border-b border-slate-800">
+                <h3 className="text-sm font-bold text-white flex items-center gap-2">
+                  <DollarSign className="w-4 h-4 text-emerald-400" />
+                  <span>Receive Cash Handover</span>
+                </h3>
+                <button
+                  type="button"
+                  onClick={() => {
+                    setIsCollectModalOpen(false);
+                    setSelectedInvForCollection(null);
+                  }}
+                  className="text-slate-400 hover:text-white transition"
+                >
+                  <X className="w-4 h-4" />
+                </button>
+              </div>
+
+              <div className="space-y-3.5 mt-3.5">
+                {/* Financial Summary */}
+                <div className="p-3 bg-slate-900 rounded-xl border border-slate-800 space-y-1.5 font-mono text-xs">
+                  <div className="flex justify-between items-center">
+                    <span className="text-slate-400 font-sans">Invoice:</span>
+                    <span className="text-cyan-400 font-bold">#{selectedInvForCollection.invoice_no}</span>
+                  </div>
+                  <div className="flex justify-between items-center">
+                    <span className="text-slate-400 font-sans">Subscriber:</span>
+                    <span className="text-white font-semibold font-sans">@{selectedInvForCollection.subscriber_username}</span>
+                  </div>
+                  <div className="pt-1.5 border-t border-slate-800 flex justify-between items-center">
+                    <span className="text-slate-400 font-sans">Total Billed:</span>
+                    <span className="text-white">{formatCurrency(totalAmount)}</span>
+                  </div>
+                  <div className="flex justify-between items-center">
+                    <span className="text-slate-400 font-sans">Already Paid:</span>
+                    <span className="text-emerald-400">{formatCurrency(alreadyPaid)}</span>
+                  </div>
+                  <div className="flex justify-between items-center text-sm font-bold pt-1 border-t border-slate-800">
+                    <span className="text-amber-300 font-sans">Remaining Due:</span>
+                    <span className="text-amber-400">{formatCurrency(remainingDue)}</span>
+                  </div>
+                </div>
+
+                {/* Amount Input */}
+                <div>
+                  <div className="flex justify-between items-center mb-1">
+                    <label className="text-xs font-medium text-slate-300">
+                      Payment Received (Rs.)
+                    </label>
+                    <button
+                      type="button"
+                      onClick={() => setCollectionAmountInput(remainingDue)}
+                      className="text-cyan-400 hover:text-cyan-300 text-[11px] underline cursor-pointer"
+                    >
+                      Fill Full ({formatCurrency(remainingDue)})
+                    </button>
+                  </div>
+                  <div className="relative">
+                    <span className="absolute left-3 top-2 text-slate-500 font-mono text-sm">Rs.</span>
+                    <input
+                      type="number"
+                      min="1"
+                      step="any"
+                      value={collectionAmountInput}
+                      onChange={(e) => setCollectionAmountInput(e.target.value)}
+                      placeholder={`Max: ${remainingDue}`}
+                      className="w-full pl-9 pr-3 py-1.5 bg-slate-900 border border-slate-700 rounded-lg text-white font-mono text-base focus:outline-none focus:border-cyan-500"
+                    />
+                  </div>
+                  <div className="flex items-center justify-between text-[11px] mt-1.5 px-0.5">
+                    <span className="text-slate-400">
+                      Result: <span className={`font-bold ${willBeFullyPaid ? 'text-emerald-400' : 'text-amber-400'}`}>
+                        {willBeFullyPaid ? 'PAID' : 'PARTIAL'}
+                      </span>
+                    </span>
+                    {!willBeFullyPaid && (
+                      <span className="text-amber-400 font-mono">
+                        Arrears: {formatCurrency(Math.max(0, totalAmount - projectedTotalPaid))}
+                      </span>
+                    )}
+                  </div>
+                </div>
+
+                <div className="p-2.5 bg-emerald-950/40 border border-emerald-900/60 rounded-lg text-[11px] text-emerald-300 flex items-center gap-2">
+                  <ShieldCheck className="w-4 h-4 text-emerald-400 shrink-0" />
+                  <span>Your Cash-in-Hand wallet will increment by exactly <strong className="font-mono text-emerald-300">{formatCurrency(enteredVal)}</strong> upon confirmation.</span>
+                </div>
+
+                <div className="flex items-center justify-end gap-2.5 pt-2 border-t border-slate-800">
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setIsCollectModalOpen(false);
+                      setSelectedInvForCollection(null);
+                    }}
+                    className="px-3 py-1.5 bg-slate-800 hover:bg-slate-700 text-slate-300 rounded-lg text-xs transition cursor-pointer"
+                  >
+                    Cancel
+                  </button>
+                  <button
+                    type="button"
+                    onClick={handleConfirmCollection}
+                    disabled={isSubmittingCollection || enteredVal <= 0}
+                    className="px-4 py-1.5 bg-emerald-600 hover:bg-emerald-500 disabled:opacity-50 disabled:cursor-not-allowed text-slate-950 font-bold rounded-lg text-xs transition shadow flex items-center gap-1.5 cursor-pointer font-mono"
+                  >
+                    {isSubmittingCollection ? (
+                      <>
+                        <RefreshCw className="w-3.5 h-3.5 animate-spin" />
+                        <span>Collecting...</span>
+                      </>
+                    ) : (
+                      <>
+                        <DollarSign className="w-3.5 h-3.5" />
+                        <span>Confirm Cash Collection</span>
+                      </>
+                    )}
+                  </button>
+                </div>
+              </div>
+            </div>
+          </div>
+        );
+      })()}
     </div>
   );
 };
