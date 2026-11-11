@@ -21,7 +21,7 @@ import {
   HistoricalSessionRecord,
   ProfilePriceRecord,
 } from '../types/isp';
-import { UserAccount } from '../types/auth';
+import { UserAccount, SystemRole } from '../types/auth';
 import { INITIAL_USER_ACCOUNTS } from '../data/initialUsers';
 import { VsolOlt, OnuDevice } from '../types/olt';
 import {
@@ -500,15 +500,7 @@ const STORAGE_KEY_PROFILE_PRICING = 'youthnet_profile_pricing';
 const STORAGE_KEY_SESSION_HISTORY = 'youthnet_session_history';
 
 function getInitialPortalUsers(): UserAccount[] {
-  if (typeof window === 'undefined') return INITIAL_USER_ACCOUNTS;
-  try {
-    const raw = localStorage.getItem(STORAGE_KEY_PORTAL_USERS) || localStorage.getItem('netpulse_user_accounts_v1');
-    if (raw) {
-      const parsed = JSON.parse(raw);
-      if (Array.isArray(parsed) && parsed.length > 0) return parsed;
-    }
-  } catch {}
-  return INITIAL_USER_ACCOUNTS;
+  return [];
 }
 
 function getInitialAgents(): FieldAgent[] {
@@ -583,11 +575,14 @@ export const ISPProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
     } catch {}
   }, [agents]);
 
+  // Purge any legacy cached portal_users from localStorage
   useEffect(() => {
     try {
-      localStorage.setItem(STORAGE_KEY_PORTAL_USERS, JSON.stringify(portalUsers));
+      localStorage.removeItem(STORAGE_KEY_PORTAL_USERS);
+      localStorage.removeItem('portal_users');
+      localStorage.removeItem('isp_users');
     } catch {}
-  }, [portalUsers]);
+  }, []);
 
   useEffect(() => {
     try {
@@ -756,7 +751,27 @@ export const ISPProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
     const fetchSupabaseUsers = async () => {
       try {
         const { data } = await supabase.from('portal_users').select('*');
-        if (data && data.length > 0) {
+        if (data) {
+          const mappedUsers: UserAccount[] = data.map((u: any) => ({
+            id: u.id,
+            username: u.username,
+            fullName: u.full_name || u.username,
+            displayName: u.full_name || u.username,
+            phone: u.phone || '',
+            role: (u.role || '').toUpperCase() as SystemRole,
+            area: u.area || '',
+            assignedArea: u.area || '',
+            isActive: u.account_status !== 'SUSPENDED',
+            email: `${u.username}@youthnet.pk`,
+            package_speed: u.package_speed,
+            monthly_fee: u.monthly_fee,
+            package_volume_gb: u.package_volume_gb,
+            cnic: u.cnic,
+            address: u.address,
+            createdAt: u.created_at || new Date().toISOString(),
+          }));
+          setPortalUsers(mappedUsers);
+
           // Reconcile agent cash
           setAgents((prev) =>
             prev.map((ag) => {

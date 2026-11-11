@@ -350,33 +350,22 @@ class StorageService {
    */
   public async syncWithSupabase(): Promise<void> {
     try {
-      // 1. Sync portal_users
+      // 1. Sync portal_users directly from Supabase (single source of truth)
       const { data: users, error: uErr } = await supabase.from('portal_users').select('*');
-      if (users && users.length > 0) {
-        users.forEach((su: SupabasePortalUser) => {
-          const cleanU = (su.username || '').toLowerCase();
-          const existingIdx = this.cache.portal_users.findIndex(
-            (u) => (u.username || '').toLowerCase() === cleanU || u.id === su.id
-          );
-          const mapped: PortalUser = {
-            id: su.id,
-            username: su.username,
-            password: su.password,
-            role: su.role,
-            fullName: su.full_name || su.username,
-            phone: su.phone || '+92 300 0000000',
-            area: su.area || 'Central NOC Core',
-            baseSalary: su.base_salary,
-            balance: su.cash_in_hand || 0,
-            createdAt: su.created_at || new Date().toISOString(),
-            isActive: true,
-          };
-          if (existingIdx >= 0) {
-            this.cache.portal_users[existingIdx] = { ...this.cache.portal_users[existingIdx], ...mapped };
-          } else {
-            this.cache.portal_users.push(mapped);
-          }
-        });
+      if (users) {
+        this.cache.portal_users = users.map((su: SupabasePortalUser) => ({
+          id: su.id,
+          username: su.username,
+          password: su.password,
+          role: su.role,
+          fullName: su.full_name || su.username,
+          phone: su.phone || '+92 300 0000000',
+          area: su.area || 'Central NOC Core',
+          baseSalary: su.base_salary,
+          balance: su.cash_in_hand || 0,
+          createdAt: su.created_at || new Date().toISOString(),
+          isActive: true,
+        }));
         await this.persistPortalUsers();
         this.emitChange('portal_users');
       }
