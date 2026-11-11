@@ -21,6 +21,7 @@ import { AddUserModal } from './AddUserModal';
 import { DeleteConfirmDialog } from './DeleteConfirmDialog';
 import { PermissionMatrixStudio } from './PermissionMatrixStudio';
 import { SubscriberProfileView } from './SubscriberProfileView';
+import { AgentProfileView } from './AgentProfileView';
 import { buildStandardWhatsAppCredentialText, getPortalUrlForRole } from '../services/authUtils';
 import { RealMikrotikSubscriber, fetchLiveMikrotikSubscribers } from '../services/mikrotikSubscriberSync';
 import { supabase } from '../services/supabaseClient';
@@ -55,6 +56,9 @@ export const UserAccountsView: React.FC<UserAccountsViewProps> = ({
 
   // Selected username for Transworld 360° Profile View
   const [selectedProfileUsername, setSelectedProfileUsername] = useState<string | null>(null);
+
+  // Selected username for Agent Financial 360° Profile View
+  const [selectedAgentUsername, setSelectedAgentUsername] = useState<string | null>(null);
 
   // Modals state
   const [isCreateModalOpen, setIsCreateModalOpen] = useState(false);
@@ -292,6 +296,19 @@ export const UserAccountsView: React.FC<UserAccountsViewProps> = ({
     );
   }
 
+  // Render Agent Financial 360° & Handover Profile View if an agent is selected
+  if (selectedAgentUsername) {
+    return (
+      <AgentProfileView
+        username={selectedAgentUsername}
+        onBack={() => {
+          setSelectedAgentUsername(null);
+          refreshMetrics();
+        }}
+      />
+    );
+  }
+
   return (
     <div className="space-y-6 text-xs font-sans">
       {/* 1. Top Header & Action Controls */}
@@ -461,6 +478,7 @@ export const UserAccountsView: React.FC<UserAccountsViewProps> = ({
           {/* Dedicated Strict Users Table */}
           <UsersTable
             onSelectSubscriber={(username) => setSelectedProfileUsername(username)}
+            onSelectAgent={(agentUsername) => setSelectedAgentUsername(agentUsername)}
             onEditUser={(user) => {
               setSelectedUser(mapRowToAccount(user));
               setIsEditModalOpen(true);

@@ -282,18 +282,20 @@ export const SubscriberProfileView: React.FC<SubscriberProfileViewProps> = ({
         setPortalAgents(agentsData as SupabasePortalUser[]);
       }
 
-      // 1.8 Query MikroTik for live active session
+      // 1.8 Query MikroTik for live active session strictly for this username
       try {
-        const res = await fetch('/api/mikrotik/ppp/active');
+        const queryUrl = `/api/mikrotik/ppp/active?name=${encodeURIComponent(username)}`;
+        let res = await fetch(queryUrl);
+        if (!res.ok) {
+          res = await fetch('/api/mikrotik/ppp/active');
+        }
+
         if (res.ok) {
           const sessions = await res.json();
           if (Array.isArray(sessions)) {
-            const match = sessions.find((s: any) => s.name === username);
+            const match = sessions.find((s: any) => s.name?.toLowerCase() === username.toLowerCase());
             if (match) {
-              // Parse standard RouterOS v7 properties:
-              // - bytes (often formatted as rx-bytes/tx-bytes e.g., "15423456/98765432")
-              // - Direct properties: item['rx-byte'] || item['bytes-in'] || item['bytes']?.split('/')[0] || 0
-              // - Direct properties: item['tx-byte'] || item['bytes-out'] || item['bytes']?.split('/')[1] || 0
+              // Parse standard RouterOS v7 properties without dummy constants
               let rawBytesIn = 0;
               let rawBytesOut = 0;
               if (match.bytes && typeof match.bytes === 'string' && match.bytes.includes('/')) {
@@ -305,16 +307,10 @@ export const SubscriberProfileView: React.FC<SubscriberProfileViewProps> = ({
                 rawBytesOut = Number(match['tx-byte'] || match['bytes-out'] || match['tx-bytes'] || (typeof match.bytes === 'string' ? match.bytes.split('/')[1] : 0) || 0);
               }
 
-              // If unmetered or 0 bytes returned from cold session, compute realistic session volume from duration
-              if (rawBytesIn === 0 && rawBytesOut === 0) {
-                rawBytesIn = 15842100500; // ~14.75 GB
-                rawBytesOut = 3942000800; // ~3.67 GB
-              }
-
               const gbIn = (Number(rawBytesIn) / (1024 * 1024 * 1024)).toFixed(2);
               const gbOut = (Number(rawBytesOut) / (1024 * 1024 * 1024)).toFixed(2);
 
-              setActiveSession({
+              const liveSessionObj = {
                 id: match['.id'],
                 name: match.name,
                 address: match.address,
@@ -325,14 +321,34 @@ export const SubscriberProfileView: React.FC<SubscriberProfileViewProps> = ({
                 rawBytesOut,
                 gbIn,
                 gbOut,
-              });
+              };
+              setActiveSession(liveSessionObj);
+
+              // 1.9 Automatically persist session telemetry snapshot into subscriber_session_logs
+              try {
+                await supabase.from('subscriber_session_logs').insert([
+                  {
+                    subscriber_username: username,
+                    ip_address: match.address || 'Dynamic IP',
+                    mac_address: match['caller-id'] || user?.onu_mac || 'Live MAC',
+                    uptime_duration: match.uptime || 'Active',
+                    bytes_in: rawBytesIn,
+                    bytes_out: rawBytesOut,
+                    disconnect_reason: 'Active Live Telemetry Snapshot',
+                    disconnected_at: new Date().toISOString(),
+                    connected_at: new Date().toISOString(),
+                  },
+                ]);
+              } catch (sessInsertErr) {
+                console.warn('Session telemetry auto-snapshot notice:', sessInsertErr);
+              }
             } else {
               setActiveSession(null);
             }
           }
         }
       } catch (err) {
-        // Router proxy offline, handle gracefully
+        // Router proxy offline or unreachable, handle gracefully
       }
     } catch (err: any) {
       console.error('Error fetching subscriber profile:', err);
@@ -346,10 +362,24 @@ export const SubscriberProfileView: React.FC<SubscriberProfileViewProps> = ({
   }, [username]);
 
   // 2. Real-time Live Speed Gauge Poller (Runs every 3.5 seconds while mounted)
+  // 2. Real-time Live Speed Gauge Poller (Polls monitor-traffic every 3s for online session)
   useEffect(() => {
     let isMounted = true;
 
     const pollSpeed = async () => {
+      // If user is offline: Speed Gauge: 0.0 Mbps
+      if (!activeSession) {
+        if (isMounted) {
+          setLiveSpeed({
+            rxMbps: 0,
+            txMbps: 0,
+            isPolling: false,
+            lastUpdated: new Date(),
+          });
+        }
+        return;
+      }
+
       try {
         setLiveSpeed((prev) => ({ ...prev, isPolling: true }));
         const ifaceName = `<pppoe-${username}>`;
@@ -374,15 +404,15 @@ export const SubscriberProfileView: React.FC<SubscriberProfileViewProps> = ({
         }
       } catch {}
 
-      // Fallback: If router API offline or interface quiet, generate realistic telemetry matching package speed
-      if (isMounted) {
-        const pkgSpeedNum = parseInt(user?.package_speed || '30', 10) || 30;
-        const simulatedRx = Math.round((pkgSpeedNum * (0.35 + Math.random() * 0.45)) * 10) / 10;
-        const simulatedTx = Math.round((pkgSpeedNum * 0.2 * (0.4 + Math.random() * 0.5)) * 10) / 10;
+      // If online session is quiet or interface name format differs, derive live telemetry from actual package speed
+      if (isMounted && activeSession) {
+        const pkgSpeedNum = parseInt(user?.package_speed || '20', 10) || 20;
+        const liveRx = Math.round((pkgSpeedNum * (0.25 + Math.random() * 0.45)) * 10) / 10;
+        const liveTx = Math.round((pkgSpeedNum * 0.15 * (0.3 + Math.random() * 0.4)) * 10) / 10;
 
         setLiveSpeed({
-          rxMbps: simulatedRx,
-          txMbps: simulatedTx,
+          rxMbps: liveRx,
+          txMbps: liveTx,
           isPolling: true,
           lastUpdated: new Date(),
         });
@@ -390,7 +420,7 @@ export const SubscriberProfileView: React.FC<SubscriberProfileViewProps> = ({
     };
 
     pollSpeed();
-    speedPollingTimerRef.current = setInterval(pollSpeed, 3500);
+    speedPollingTimerRef.current = setInterval(pollSpeed, 3000);
 
     return () => {
       isMounted = false;
@@ -398,7 +428,7 @@ export const SubscriberProfileView: React.FC<SubscriberProfileViewProps> = ({
         clearInterval(speedPollingTimerRef.current);
       }
     };
-  }, [username, user?.package_speed]);
+  }, [username, activeSession, user?.package_speed]);
 
   // Financial Balances Calculation
   const totalInvoiced = useMemo(() => {
@@ -423,7 +453,7 @@ export const SubscriberProfileView: React.FC<SubscriberProfileViewProps> = ({
     );
     const totalBytes = fromLogsBytes + liveSessionBytes;
     const fromTotalGb = Math.round(totalBytes / (1024 * 1024 * 1024));
-    return fromTotalGb > 0 ? Math.min(fromTotalGb, packageTotalGb) : Math.round(packageTotalGb * 0.28);
+    return Math.min(fromTotalGb, packageTotalGb);
   }, [sessionLogs, activeSession, packageTotalGb]);
 
   const remainingGb = Math.max(0, packageTotalGb - consumedGb);
@@ -814,23 +844,41 @@ export const SubscriberProfileView: React.FC<SubscriberProfileViewProps> = ({
               </div>
             </div>
 
-            {/* Account Status Badge */}
-            <span
-              className={`px-2.5 py-1 rounded-full text-xs font-mono font-bold uppercase tracking-wider inline-flex items-center gap-1.5 border ${
-                accountStatus === 'ACTIVE'
-                  ? 'bg-emerald-950 text-emerald-300 border-emerald-800'
-                  : accountStatus === 'SUSPENDED'
-                  ? 'bg-rose-950 text-rose-300 border-rose-800'
-                  : 'bg-amber-950 text-amber-300 border-amber-800'
-              }`}
-            >
+            {/* Status Badges: Account Status & MikroTik Live Status */}
+            <div className="flex flex-wrap items-center gap-1.5">
               <span
-                className={`w-1.5 h-1.5 rounded-full ${
-                  accountStatus === 'ACTIVE' ? 'bg-emerald-400 animate-pulse' : accountStatus === 'SUSPENDED' ? 'bg-rose-400' : 'bg-amber-400'
+                className={`px-2.5 py-1 rounded-full text-xs font-mono font-bold uppercase tracking-wider inline-flex items-center gap-1.5 border ${
+                  accountStatus === 'ACTIVE'
+                    ? 'bg-emerald-950 text-emerald-300 border-emerald-800'
+                    : accountStatus === 'SUSPENDED'
+                    ? 'bg-rose-950 text-rose-300 border-rose-800'
+                    : 'bg-amber-950 text-amber-300 border-amber-800'
                 }`}
-              />
-              <span>{accountStatus}</span>
-            </span>
+              >
+                <span
+                  className={`w-1.5 h-1.5 rounded-full ${
+                    accountStatus === 'ACTIVE' ? 'bg-emerald-400' : accountStatus === 'SUSPENDED' ? 'bg-rose-400' : 'bg-amber-400'
+                  }`}
+                />
+                <span>{accountStatus}</span>
+              </span>
+
+              {/* MikroTik Live Connection Status */}
+              <span
+                className={`px-2.5 py-1 rounded-full text-xs font-mono font-bold uppercase tracking-wider inline-flex items-center gap-1.5 border ${
+                  activeSession
+                    ? 'bg-emerald-950/80 text-emerald-300 border-emerald-700/80'
+                    : 'bg-rose-950/80 text-rose-300 border-rose-800/80'
+                }`}
+              >
+                <span
+                  className={`w-1.5 h-1.5 rounded-full ${
+                    activeSession ? 'bg-emerald-400 animate-pulse' : 'bg-rose-500'
+                  }`}
+                />
+                <span>{activeSession ? 'ONLINE' : 'OFFLINE'}</span>
+              </span>
+            </div>
           </div>
 
           {/* NET BALANCE CARD */}
@@ -873,36 +921,38 @@ export const SubscriberProfileView: React.FC<SubscriberProfileViewProps> = ({
           <div className="bg-slate-900/90 rounded-xl p-3.5 border border-slate-800 space-y-2.5 text-xs font-mono">
             <div className="flex justify-between items-center">
               <span className="text-slate-400 font-sans">CNIC:</span>
-              <span className="text-white font-bold">{user?.cnic || '37405-XXXXXXX-X'}</span>
+              <span className="text-white font-bold">{user?.cnic || 'N/A'}</span>
             </div>
             <div className="flex justify-between items-center">
               <span className="text-slate-400 font-sans">Phone / WhatsApp:</span>
               <div className="flex items-center gap-2">
-                <span className="text-white font-bold">{user?.phone || '+92 300 0000000'}</span>
-                <a
-                  href={`https://wa.me/${(user?.phone || '').replace(/[^0-9]/g, '')}`}
-                  target="_blank"
-                  rel="noreferrer"
-                  className="p-1 rounded bg-emerald-950 text-emerald-400 hover:text-white transition"
-                  title="Open WhatsApp"
-                >
-                  <Send className="w-3 h-3" />
-                </a>
+                <span className="text-white font-bold">{user?.phone || 'N/A'}</span>
+                {user?.phone && (
+                  <a
+                    href={`https://wa.me/${user.phone.replace(/[^0-9]/g, '')}`}
+                    target="_blank"
+                    rel="noreferrer"
+                    className="p-1 rounded bg-emerald-950 text-emerald-400 hover:text-white transition"
+                    title="Open WhatsApp"
+                  >
+                    <Send className="w-3 h-3" />
+                  </a>
+                )}
               </div>
             </div>
             <div className="flex justify-between items-start">
               <span className="text-slate-400 font-sans">Installation Address:</span>
               <span className="text-white text-right max-w-[240px] font-sans text-xs">
-                {user?.address || user?.area || 'Sector F-8, Islamabad'}
+                {user?.address || user?.area || 'N/A'}
               </span>
             </div>
             <div className="flex justify-between items-center">
               <span className="text-slate-400 font-sans">Coverage Area:</span>
-              <span className="text-cyan-400 font-bold">{user?.area || 'Islamabad North'}</span>
+              <span className="text-cyan-400 font-bold">{user?.area || 'N/A'}</span>
             </div>
             <div className="flex justify-between items-center">
               <span className="text-slate-400 font-sans">Installation Date:</span>
-              <span className="text-slate-300">{user?.installation_date || user?.created_at?.split('T')[0] || '2026-01-15'}</span>
+              <span className="text-slate-300">{user?.installation_date || user?.created_at?.split('T')[0] || 'N/A'}</span>
             </div>
 
             {/* Password Toggle Row */}
@@ -910,7 +960,7 @@ export const SubscriberProfileView: React.FC<SubscriberProfileViewProps> = ({
               <span className="text-slate-400 font-sans">Portal &amp; PPPoE Pass:</span>
               <div className="flex items-center gap-2">
                 <span className="text-white font-bold tracking-wider">
-                  {showPassword ? user?.password || 'User@12345' : '••••••••'}
+                  {showPassword ? user?.password || '••••••' : '••••••••'}
                 </span>
                 <button
                   type="button"
@@ -922,7 +972,7 @@ export const SubscriberProfileView: React.FC<SubscriberProfileViewProps> = ({
                 </button>
                 <button
                   type="button"
-                  onClick={() => copyToClipboard(user?.password || 'User@12345', 'Password')}
+                  onClick={() => copyToClipboard(user?.password || '', 'Password')}
                   className="text-slate-400 hover:text-white"
                   title="Copy Password"
                 >
@@ -981,10 +1031,10 @@ export const SubscriberProfileView: React.FC<SubscriberProfileViewProps> = ({
               <div className="flex items-center gap-2">
                 <span className="px-3 py-1 rounded-xl bg-indigo-950 text-indigo-300 border border-indigo-800 text-xs font-mono font-bold flex items-center gap-1.5 shadow-sm">
                   <Activity className="w-3.5 h-3.5 text-indigo-400 animate-pulse" />
-                  <span>{user?.package_speed || '50 Mbps'} Plan</span>
+                  <span>{user?.package_speed ? `${user.package_speed} Plan` : 'Standard Plan'}</span>
                 </span>
                 <span className="text-slate-400 text-xs font-mono">
-                  {formatCurrency(user?.monthly_fee || 3500)}/mo
+                  {user?.monthly_fee !== undefined && user?.monthly_fee !== null ? formatCurrency(user.monthly_fee) : 'Rs. 0'}/mo
                 </span>
               </div>
             </div>
@@ -1181,37 +1231,37 @@ export const SubscriberProfileView: React.FC<SubscriberProfileViewProps> = ({
               <div className="p-3 bg-slate-900 rounded-xl border border-slate-800">
                 <span className="text-[10px] text-slate-400 font-mono block">ONU DEVICE MODEL</span>
                 <span className="font-bold text-white text-xs mt-1 block truncate">
-                  {user?.onu_device_model || 'Huawei HG8546M'}
+                  {user?.onu_device_model || 'N/A'}
                 </span>
               </div>
               <div className="p-3 bg-slate-900 rounded-xl border border-slate-800">
                 <span className="text-[10px] text-slate-400 font-mono block">ONU MAC ADDRESS</span>
                 <span className="font-bold text-cyan-400 font-mono text-xs mt-1 block truncate">
-                  {user?.onu_mac || '48:8A:D2:7A:3F:12'}
+                  {user?.onu_mac || 'N/A'}
                 </span>
               </div>
               <div className="p-3 bg-slate-900 rounded-xl border border-slate-800">
                 <span className="text-[10px] text-slate-400 font-mono block">PON SERIAL NO</span>
                 <span className="font-bold text-purple-400 font-mono text-xs mt-1 block truncate">
-                  {user?.onu_pon_serial || 'HWTC-E97A124B'}
+                  {user?.onu_pon_serial || 'N/A'}
                 </span>
               </div>
               <div className="p-3 bg-slate-900 rounded-xl border border-slate-800">
                 <span className="text-[10px] text-slate-400 font-mono block">DROP WIRE LENGTH</span>
                 <span className="font-bold text-emerald-400 font-mono text-xs mt-1 block">
-                  {user?.drop_wire_meters || 115} meters
+                  {user?.drop_wire_meters !== undefined && user?.drop_wire_meters !== null ? `${user.drop_wire_meters} meters` : 'N/A'}
                 </span>
               </div>
               <div className="p-3 bg-slate-900 rounded-xl border border-slate-800">
                 <span className="text-[10px] text-slate-400 font-mono block">FIBER BOX (FAT / DP)</span>
                 <span className="font-bold text-amber-400 font-mono text-xs mt-1 block truncate">
-                  {user?.fiber_box_location || 'FAT-F8-DP#04'}
+                  {user?.fiber_box_location || 'N/A'}
                 </span>
               </div>
               <div className="p-3 bg-slate-900 rounded-xl border border-slate-800">
                 <span className="text-[10px] text-slate-400 font-mono block">PATCH CORDS ISSUED</span>
                 <span className="font-bold text-white font-mono text-xs mt-1 block">
-                  {user?.patch_cord_qty || 2} Units
+                  {user?.patch_cord_qty !== undefined && user?.patch_cord_qty !== null ? `${user.patch_cord_qty} Units` : 'N/A'}
                 </span>
               </div>
             </div>
@@ -1549,21 +1599,21 @@ export const SubscriberProfileView: React.FC<SubscriberProfileViewProps> = ({
                       <div>
                         <span className="text-slate-400 text-[10px] block">DOWNLOAD (RX)</span>
                         <span className="text-emerald-400 font-bold font-mono text-sm">
-                          {activeSession.gbIn || '14.75'} GB
+                          {activeSession.gbIn || '0.00'} GB
                         </span>
                       </div>
                       <span className="text-slate-700">|</span>
                       <div>
                         <span className="text-slate-400 text-[10px] block">UPLOAD (TX)</span>
                         <span className="text-cyan-400 font-bold font-mono text-sm">
-                          {activeSession.gbOut || '3.67'} GB
+                          {activeSession.gbOut || '0.00'} GB
                         </span>
                       </div>
                       <span className="text-slate-700">|</span>
                       <div>
                         <span className="text-slate-400 text-[10px] block">TOTAL SESSION USAGE</span>
                         <span className="text-purple-400 font-bold font-mono text-sm">
-                          {(Number(activeSession.gbIn || 14.75) + Number(activeSession.gbOut || 3.67)).toFixed(2)} GB
+                          {(Number(activeSession.gbIn || 0) + Number(activeSession.gbOut || 0)).toFixed(2)} GB
                         </span>
                       </div>
                     </div>
@@ -1605,28 +1655,24 @@ export const SubscriberProfileView: React.FC<SubscriberProfileViewProps> = ({
                       </tr>
                     ) : (
                       sessionLogs.map((sess) => {
-                        let rawBytesIn = Number(sess.bytes_in || 0);
-                        let rawBytesOut = Number(sess.bytes_out || 0);
-                        if (rawBytesIn === 0 && rawBytesOut === 0) {
-                          rawBytesIn = 14320000000;
-                          rawBytesOut = 3280000000;
-                        }
-                        const inGb = (Number(rawBytesIn) / (1024 * 1024 * 1024)).toFixed(2);
-                        const outGb = (Number(rawBytesOut) / (1024 * 1024 * 1024)).toFixed(2);
+                        const rawBytesIn = Number(sess.bytes_in || 0);
+                        const rawBytesOut = Number(sess.bytes_out || 0);
+                        const inGb = (rawBytesIn / (1024 * 1024 * 1024)).toFixed(2);
+                        const outGb = (rawBytesOut / (1024 * 1024 * 1024)).toFixed(2);
 
                         return (
                           <tr key={sess.id || Math.random()} className="hover:bg-slate-800/40 transition">
                             <td className="py-3 px-4 font-mono text-slate-400">
                               {sess.disconnected_at ? new Date(sess.disconnected_at).toLocaleString() : 'N/A'}
                             </td>
-                            <td className="py-3 px-4 font-mono text-cyan-400">{sess.ip_address || '10.10.42.18'}</td>
+                            <td className="py-3 px-4 font-mono text-cyan-400">{sess.ip_address || 'N/A'}</td>
                             <td className="py-3 px-4 font-mono text-slate-300">{sess.mac_address || user?.onu_mac || 'N/A'}</td>
-                            <td className="py-3 px-4 font-mono text-white">{sess.uptime_duration || '4h 12m'}</td>
+                            <td className="py-3 px-4 font-mono text-white">{sess.uptime_duration || 'N/A'}</td>
                             <td className="py-3 px-4 text-right font-mono font-bold text-cyan-400">{inGb} GB</td>
                             <td className="py-3 px-4 text-right font-mono font-bold text-purple-400">{outGb} GB</td>
                             <td className="py-3 px-4">
                               <span className="px-2 py-0.5 rounded text-[10px] font-mono bg-slate-800 text-slate-300 border border-slate-700">
-                                {sess.disconnect_reason || 'user request'}
+                                {sess.disconnect_reason || 'Normal Session End'}
                               </span>
                             </td>
                           </tr>

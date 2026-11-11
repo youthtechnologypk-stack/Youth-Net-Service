@@ -17,6 +17,7 @@ import {
   UserCheck,
   Shield,
   ShieldCheck,
+  Wallet,
 } from 'lucide-react';
 import { supabase } from '../services/supabaseClient';
 import { buildStandardWhatsAppCredentialText, getPortalUrlForRole } from '../services/authUtils';
@@ -45,10 +46,14 @@ export interface PortalUserRow {
   package_volume_gb?: number;
   cnic?: string;
   address?: string;
+  cash_in_hand?: number;
+  advance_balance?: number;
+  base_salary?: number;
 }
 
 export interface UsersTableProps {
   onSelectSubscriber?: (username: string) => void;
+  onSelectAgent?: (agentIdOrUsername: string) => void;
   onEditUser?: (user: PortalUserRow) => void;
   onResetPassword?: (user: PortalUserRow) => void;
   onToggleStatus?: (user: PortalUserRow) => void;
@@ -60,6 +65,7 @@ export interface UsersTableProps {
 
 export const UsersTable: React.FC<UsersTableProps> = ({
   onSelectSubscriber,
+  onSelectAgent,
   onEditUser,
   onResetPassword,
   onToggleStatus,
@@ -332,6 +338,7 @@ export const UsersTable: React.FC<UsersTableProps> = ({
                   const targetName = user.full_name || user.fullName || user.displayName || user.username || 'System User';
                   const userRole = (user.role || '').toUpperCase();
                   const isClient = userRole === 'CLIENT';
+                  const isAgent = userRole === 'AGENT';
                   const isSuspended =
                     user.account_status?.toUpperCase() === 'SUSPENDED' ||
                     user.isActive === false;
@@ -339,7 +346,9 @@ export const UsersTable: React.FC<UsersTableProps> = ({
                   return (
                     <tr
                       key={user.id}
-                      className={`hover:bg-slate-950/50 transition ${isClient ? 'cursor-pointer' : ''}`}
+                      className={`hover:bg-slate-950/50 transition ${
+                        isClient || isAgent ? 'cursor-pointer' : ''
+                      }`}
                     >
                       {/* 1. Full Name */}
                       <td
@@ -347,6 +356,8 @@ export const UsersTable: React.FC<UsersTableProps> = ({
                         onClick={() => {
                           if (isClient && onSelectSubscriber) {
                             onSelectSubscriber(user.username);
+                          } else if (isAgent && onSelectAgent) {
+                            onSelectAgent(user.username);
                           }
                         }}
                       >
@@ -457,6 +468,20 @@ export const UsersTable: React.FC<UsersTableProps> = ({
                               title="View Transworld 360° Subscriber Profile"
                             >
                               <Eye className="w-3.5 h-3.5" />
+                            </button>
+                          )}
+
+                          {/* Agent Financial 360 & Cash Handover Profile (for Agents) */}
+                          {isAgent && onSelectAgent && (
+                            <button
+                              onClick={(e) => {
+                                e.stopPropagation();
+                                onSelectAgent(user.username);
+                              }}
+                              className="p-1.5 bg-slate-950 hover:bg-emerald-950 border border-slate-800 hover:border-emerald-800 rounded-lg text-slate-400 hover:text-emerald-300 transition cursor-pointer"
+                              title="View Agent Financial Profile & Cash Handover"
+                            >
+                              <Wallet className="w-3.5 h-3.5 text-emerald-400" />
                             </button>
                           )}
 

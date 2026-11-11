@@ -27,6 +27,7 @@ export interface SupabasePortalUser {
   address?: string | null;
   base_salary?: number;
   cash_in_hand?: number;
+  advance_balance?: number;
   account_status?: 'ACTIVE' | 'EXPIRED' | 'SUSPENDED';
   package_speed?: string | null;
   package_volume_gb?: number | null;
@@ -104,4 +105,16 @@ export interface SupabaseSubscriberSessionLog {
   disconnect_reason?: string | null;
   connected_at?: string | null;
   disconnected_at: string;
+}
+
+export interface SupabaseAgentCashTransaction {
+  id?: string;
+  agent_id: string;
+  agent_name?: string | null;
+  agent_username?: string | null;
+  amount: number;
+  transaction_type: 'CASH_HANDOVER' | 'ADVANCE_TAKEN' | 'ADVANCE_RETURN' | 'SALARY_PAYOUT' | string;
+  received_by?: string | null;
+  notes?: string | null;
+  created_at?: string;
 }
