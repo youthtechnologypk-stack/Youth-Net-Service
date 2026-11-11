@@ -24,6 +24,11 @@ export interface UserAccount {
   balance?: number; // Cash in hand or user wallet balance
   grantClientPortal?: boolean; // For Clients: Grant Self-Service Portal Access
   sendWhatsAppNotice?: boolean;
+  package_speed?: string; // Subscribed speed tier (e.g. "20 Mbps")
+  monthly_fee?: number; // Monthly fee in PKR
+  package_volume_gb?: number; // FUP data limit in GB (e.g. 1500)
+  cnic?: string;
+  address?: string;
   permissions?: Record<string, boolean>; // Granular feature override flags
   createdAt: string;
   lastLoginAt?: string;

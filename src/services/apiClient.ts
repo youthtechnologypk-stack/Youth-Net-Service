@@ -469,8 +469,26 @@ export async function getActiveSessions(
   const activeSessions: ActiveSession[] = rawSessions.map((s: any, idx: number) => {
     const rxRate = s['rx-rate'] ? Number(s['rx-rate']) / 1_000_000 : 0;
     const txRate = s['tx-rate'] ? Number(s['tx-rate']) / 1_000_000 : 0;
-    const bytesIn = s['bytes-in'] || s['rx-byte'] ? Math.round(Number(s['bytes-in'] || s['rx-byte']) / 1_000_000) : 0;
-    const bytesOut = s['bytes-out'] || s['tx-byte'] ? Math.round(Number(s['bytes-out'] || s['tx-byte']) / 1_000_000) : 0;
+
+    // Check for standard RouterOS v7 properties:
+    // - bytes (often formatted as rx-bytes/tx-bytes e.g., "15423456/98765432")
+    // - Direct properties: item['rx-byte'] || item['bytes-in'] || item['bytes']?.split('/')[0] || 0
+    // - Direct properties: item['tx-byte'] || item['bytes-out'] || item['bytes']?.split('/')[1] || 0
+    let rawBytesIn = 0;
+    let rawBytesOut = 0;
+    if (s.bytes && typeof s.bytes === 'string' && s.bytes.includes('/')) {
+      const parts = s.bytes.split('/');
+      rawBytesIn = Number(parts[0]) || 0;
+      rawBytesOut = Number(parts[1]) || 0;
+    } else {
+      rawBytesIn = Number(s['rx-byte'] || s['bytes-in'] || s['rx-bytes'] || (typeof s.bytes === 'string' ? s.bytes.split('/')[0] : 0) || 0);
+      rawBytesOut = Number(s['tx-byte'] || s['bytes-out'] || s['tx-bytes'] || (typeof s.bytes === 'string' ? s.bytes.split('/')[1] : 0) || 0);
+    }
+
+    const gbIn = (Number(rawBytesIn) / (1024 * 1024 * 1024)).toFixed(2);
+    const gbOut = (Number(rawBytesOut) / (1024 * 1024 * 1024)).toFixed(2);
+    const bytesIn = Math.round(rawBytesIn / 1_000_000);
+    const bytesOut = Math.round(rawBytesOut / 1_000_000);
     const internalId = s['.id'] || s.id || `*${idx + 1}`;
 
     return {
@@ -485,6 +503,10 @@ export async function getActiveSessions(
       txRateMbps: Number(txRate.toFixed(2)),
       bytesInMb: bytesIn,
       bytesOutMb: bytesOut,
+      rawBytesIn,
+      rawBytesOut,
+      gbIn,
+      gbOut,
       routerId: router?.id || '',
       customerName: s.name || s.user || `User ${idx + 1}`,
       profileName: s.profile || 'default',

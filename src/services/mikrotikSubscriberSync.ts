@@ -152,7 +152,7 @@ export function calculateExpirationMetrics(expiryDateStr?: string): {
  * Handles formats like:
  * - JSON: '{"created":"2026-10-30","expires":"2026-11-29","plan":"10M","phone":"+923001234567","name":"Asad"}'
  * - "Asad Ullah Khan | +92 300 1234567 | Sector G-11"
- * - "Tariq Mehmood - 03019876543"
+ * - "Hassnain Akram - 03019876543"
  * - "Commercial Node | 03215551234"
  * - "+92 300 1234567"
  * - "YouthNet-App"

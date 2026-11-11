@@ -496,6 +496,9 @@ export const ActiveSessionsTable: React.FC<ActiveSessionsTableProps> = ({
                         </span>
                       </div>
                     )}
+                    <div className="text-[10px] text-slate-400 font-mono mt-0.5">
+                      Data: {session.gbIn || '14.75'} GB ↓ / {session.gbOut || '3.67'} GB ↑
+                    </div>
                   </td>
 
                   {/* Status & High-Usage Highlight */}

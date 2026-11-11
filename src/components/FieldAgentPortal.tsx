@@ -78,27 +78,26 @@ export const FieldAgentPortal: React.FC<FieldAgentPortalProps> = ({
         setAgentCash(Number(userRow.cash_in_hand) || 0);
       }
 
-      // 2. Fetch tickets strictly assigned to this agent
+      // 2. Fetch tickets strictly assigned to this agent (by UUID and Name)
       const { data: tktData } = await supabase
         .from('tickets')
         .select('*')
-        .or(`assigned_agent_id.eq.${currentUser.id},assigned_agent_id.eq.${currentUser.username}`)
+        .or(`assigned_agent_id.eq.${currentUser.id},assigned_agent_name.ilike.%${currentUser.fullName}%`)
         .order('created_at', { ascending: false });
 
       if (tktData) {
         setAssignedTickets(tktData as SupabaseTicket[]);
       }
 
-      // 3. Fetch unpaid recovery invoices strictly assigned to this agent (DUE or PARTIAL)
-      const { data: invData } = await supabase
+      // 3. Fetch recovery invoices strictly assigned to this agent (by UUID and Name)
+      const { data: agentInvoices } = await supabase
         .from('invoices')
         .select('*')
-        .or(`assigned_agent_id.eq.${currentUser.id},assigned_agent_id.eq.${currentUser.username},assigned_agent_name.eq.${currentUser.fullName}`)
-        .in('status', ['DUE', 'PARTIAL'])
+        .or(`assigned_agent_id.eq.${currentUser.id},assigned_agent_name.ilike.%${currentUser.fullName}%`)
         .order('created_at', { ascending: false });
 
-      if (invData) {
-        setAssignedInvoices(invData as SupabaseInvoice[]);
+      if (agentInvoices) {
+        setAssignedInvoices(agentInvoices as SupabaseInvoice[]);
       }
     } catch (err) {
       console.warn('FieldAgentPortal fetch error:', err);
@@ -308,7 +307,7 @@ export const FieldAgentPortal: React.FC<FieldAgentPortalProps> = ({
           }`}
         >
           <Clock className="w-3 h-3" />
-          <span>Tickets ({assignedTickets.filter((t) => t.status !== 'RESOLVED').length})</span>
+          <span>Tickets ({assignedTickets?.filter((t) => (t.status || '').toUpperCase() !== 'RESOLVED').length || 0})</span>
         </button>
 
         <button
@@ -318,7 +317,7 @@ export const FieldAgentPortal: React.FC<FieldAgentPortalProps> = ({
           }`}
         >
           <DollarSign className="w-3 h-3" />
-          <span>Cash ({assignedInvoices.length})</span>
+          <span>$ Cash ({assignedInvoices?.filter((i) => (i.status || '').toUpperCase() !== 'PAID').length || 0})</span>
         </button>
 
         <button
@@ -464,7 +463,7 @@ export const FieldAgentPortal: React.FC<FieldAgentPortalProps> = ({
                     className="px-3 py-1.5 rounded-lg bg-emerald-600 hover:bg-emerald-500 text-slate-950 font-bold font-mono text-xs flex items-center gap-1.5 shadow transition cursor-pointer"
                   >
                     <DollarSign className="w-3.5 h-3.5" />
-                    <span>Receive Cash &amp; Credit My Wallet</span>
+                    <span>Collect Payment / Mark Paid</span>
                   </button>
                 </div>
               </div>

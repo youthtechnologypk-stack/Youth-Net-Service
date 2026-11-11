@@ -105,6 +105,10 @@ export interface ActiveSession {
   txRateMbps: number;
   bytesInMb: number;
   bytesOutMb: number;
+  rawBytesIn?: number;
+  rawBytesOut?: number;
+  gbIn?: string;
+  gbOut?: string;
   routerId: string;
   customerName?: string;
   profileName: string;

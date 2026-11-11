@@ -51,18 +51,29 @@ export const ClientSubscriberPortal: React.FC<ClientSubscriberPortalProps> = ({
       (c.phone && currentUser.phone && c.phone === currentUser.phone)
   );
 
-  const subscriberName = currentUser.fullName || currentUser.username;
-  const subscriberUsername = currentUser.username;
-  const subscriberPhone = currentUser.phone || linkedCustomer?.phone || 'Not Registered';
-  const subscriberArea = currentUser.area || linkedCustomer?.areaNode || 'Islamabad Coverage Zone';
+  // Live profile queried from portal_users
+  const [clientProfile, setClientProfile] = useState<{
+    package_speed?: string;
+    monthly_fee?: number;
+    package_volume_gb?: number;
+    area?: string;
+    phone?: string;
+    address?: string;
+    full_name?: string;
+  } | null>(null);
 
-  const currentPkg = packages.find((p) => p.id === linkedCustomer?.packageId) || packages[0] || {
-    id: 'pkg-fiber-std',
-    name: 'Carrier 50M Standard Fiber',
-    downloadSpeedMbps: 50,
-    uploadSpeedMbps: 25,
-    monthlyPricePkr: 2500,
-  };
+  const subscriberName = clientProfile?.full_name || currentUser.fullName || currentUser.username;
+  const subscriberUsername = currentUser.username;
+  const subscriberPhone = clientProfile?.phone || currentUser.phone || linkedCustomer?.phone || 'Not Registered';
+  const subscriberArea = clientProfile?.area || currentUser.area || linkedCustomer?.areaNode || 'Saddar Node';
+
+  // Real package binding directly from portal_users (fallback to currentUser attributes, defaults to 20 Mbps / Rs. 2500 / 1500 GB)
+  const realSpeed = clientProfile?.package_speed || currentUser.package_speed || '20 Mbps';
+  const realFee = clientProfile?.monthly_fee ?? currentUser.monthly_fee ?? 2500;
+  const realFeeFormatted = `Rs. ${Number(realFee).toLocaleString()}`;
+  const realVolumeGb = clientProfile?.package_volume_gb || currentUser.package_volume_gb || 1500;
+  const realSpeedNum = parseInt(realSpeed, 10) || 20;
+  const realUploadNum = Math.max(5, Math.round(realSpeedNum * 0.5));
 
   // Real-time MikroTik telemetry link: ONLY if active session matches currentUser.username
   const activeSession = activeSessions.find(
@@ -92,18 +103,29 @@ export const ClientSubscriberPortal: React.FC<ClientSubscriberPortalProps> = ({
       paymentMethod: row.status === 'PAID' ? 'cash' : undefined,
       paidAt: row.paid_at || undefined,
       collectedByAgentId: row.assigned_agent_id || undefined,
-      packageId: currentPkg.id,
-      packageName: currentPkg.name,
+      packageId: 'live-plan',
+      packageName: realSpeed,
       issuedAt: row.created_at || new Date().toISOString(),
       whatsappNoticeSent: false,
     };
-  }, [currentUser.id, subscriberName, subscriberPhone, subscriberUsername, currentPkg.name]);
+  }, [currentUser.id, subscriberName, subscriberPhone, realSpeed]);
 
-  // Load Invoices and Tickets from Supabase
+  // Load Profile, Invoices and Tickets from Supabase
   const loadSubscriberData = useCallback(async () => {
     setIsLoadingData(true);
     try {
-      // 1. Fetch Invoices strictly for this subscriber
+      // 1. Fetch live client profile from portal_users
+      const { data: profData } = await supabase
+        .from('portal_users')
+        .select('*')
+        .ilike('username', subscriberUsername)
+        .maybeSingle();
+
+      if (profData) {
+        setClientProfile(profData);
+      }
+
+      // 2. Fetch Invoices strictly for this subscriber
       const { data: invData, error: invError } = await supabase
         .from('invoices')
         .select('*')
@@ -123,7 +145,7 @@ export const ClientSubscriberPortal: React.FC<ClientSubscriberPortalProps> = ({
         setClientInvoices(matchedContextInvoices);
       }
 
-      // 2. Fetch Tickets strictly for this subscriber
+      // 3. Fetch Tickets strictly for this subscriber
       const { data: tktData, error: tktError } = await supabase
         .from('tickets')
         .select('*')
@@ -210,8 +232,8 @@ export const ClientSubscriberPortal: React.FC<ClientSubscriberPortalProps> = ({
     setTestResult(null);
     setTimeout(() => {
       setTestResult({
-        download: currentPkg.downloadSpeedMbps || 50,
-        upload: currentPkg.uploadSpeedMbps || 25,
+        download: realSpeedNum,
+        upload: realUploadNum,
         ping: activeSession ? 4 : 28,
       });
       setIsTestingSpeed(false);
@@ -330,9 +352,9 @@ export const ClientSubscriberPortal: React.FC<ClientSubscriberPortalProps> = ({
 
           <div className="text-right font-mono bg-slate-950/80 px-4 py-2.5 rounded-xl border border-slate-800">
             <span className="text-[10px] text-slate-400 block">Subscribed Plan</span>
-            <span className="text-sm font-bold text-cyan-300">{currentPkg.name}</span>
-            <span className="text-[10px] text-slate-500 block">
-              {currentPkg.downloadSpeedMbps}M Down / {currentPkg.uploadSpeedMbps}M Up
+            <span className="text-sm font-bold text-cyan-300">{realSpeed}</span>
+            <span className="text-[10px] text-slate-400 block">
+              {realFeeFormatted}/mo &bull; {realVolumeGb} GB Volume
             </span>
           </div>
         </div>
@@ -350,15 +372,17 @@ export const ClientSubscriberPortal: React.FC<ClientSubscriberPortalProps> = ({
             <span className="text-slate-200 font-bold">{subscriberArea}</span>
           </div>
           <div>
-            <span className="text-slate-500 block">Line Uptime</span>
+            <span className="text-slate-500 block">Line Uptime &amp; Traffic</span>
             <span className={activeSession ? 'text-emerald-400 font-bold' : 'text-slate-500'}>
-              {activeSession ? activeSession.uptime : 'Offline'}
+              {activeSession
+                ? `${activeSession.uptime || 'Active'} (${activeSession.gbIn || '0.00'} GB ↓ / ${activeSession.gbOut || '0.00'} GB ↑)`
+                : 'Offline'}
             </span>
           </div>
           <div>
-            <span className="text-slate-500 block">Current Balance</span>
+            <span className="text-slate-500 block">Monthly Rate / Due</span>
             <span className={`font-bold ${computedBalanceDue > 0 ? 'text-rose-400' : 'text-emerald-400'}`}>
-              {formatCurrency(computedBalanceDue)}
+              {computedBalanceDue > 0 ? `${formatCurrency(computedBalanceDue)} Due` : `${realFeeFormatted} (Cleared)`}
             </span>
           </div>
         </div>
@@ -398,7 +422,7 @@ export const ClientSubscriberPortal: React.FC<ClientSubscriberPortalProps> = ({
                 <Download className="w-3 h-3 text-cyan-400" /> Download
               </span>
               <div className="text-2xl font-bold font-mono text-cyan-400">
-                {testResult ? testResult.download : currentPkg.downloadSpeedMbps}{' '}
+                {testResult ? testResult.download : realSpeedNum}{' '}
                 <span className="text-xs text-slate-500">Mbps</span>
               </div>
               <span className="text-[10px] text-slate-500 font-mono">Guaranteed 1:1 Bandwidth</span>
@@ -409,7 +433,7 @@ export const ClientSubscriberPortal: React.FC<ClientSubscriberPortalProps> = ({
                 <Upload className="w-3 h-3 text-indigo-400" /> Upload
               </span>
               <div className="text-2xl font-bold font-mono text-indigo-400">
-                {testResult ? testResult.upload : currentPkg.uploadSpeedMbps}{' '}
+                {testResult ? testResult.upload : realUploadNum}{' '}
                 <span className="text-xs text-slate-500">Mbps</span>
               </div>
               <span className="text-[10px] text-slate-500 font-mono">Symmetric Fiber Uplink</span>
