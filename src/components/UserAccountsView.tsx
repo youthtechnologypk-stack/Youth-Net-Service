@@ -22,6 +22,7 @@ import { DeleteConfirmDialog } from './DeleteConfirmDialog';
 import { PermissionMatrixStudio } from './PermissionMatrixStudio';
 import { SubscriberProfileView } from './SubscriberProfileView';
 import { AgentProfileView } from './AgentProfileView';
+import { EditStaffModal } from './EditStaffModal';
 import { buildStandardWhatsAppCredentialText, getPortalUrlForRole } from '../services/authUtils';
 import { RealMikrotikSubscriber, fetchLiveMikrotikSubscribers } from '../services/mikrotikSubscriberSync';
 import { supabase } from '../services/supabaseClient';
@@ -63,12 +64,14 @@ export const UserAccountsView: React.FC<UserAccountsViewProps> = ({
   // Modals state
   const [isCreateModalOpen, setIsCreateModalOpen] = useState(false);
   const [isEditModalOpen, setIsEditModalOpen] = useState(false);
+  const [isEditStaffModalOpen, setIsEditStaffModalOpen] = useState(false);
   const [isResetModalOpen, setIsResetModalOpen] = useState(false);
   const [isWhatsAppModalOpen, setIsWhatsAppModalOpen] = useState(false);
   const [isAddPppoeModalOpen, setIsAddPppoeModalOpen] = useState(false);
 
   // Selected user for modals
   const [selectedUser, setSelectedUser] = useState<UserAccount | null>(null);
+  const [selectedStaffUser, setSelectedStaffUser] = useState<PortalUserRow | null>(null);
   const [lastGeneratedPassword, setLastGeneratedPassword] = useState<string>('••••••••');
 
   // Deletion dialog state
@@ -480,8 +483,14 @@ export const UserAccountsView: React.FC<UserAccountsViewProps> = ({
             onSelectSubscriber={(username) => setSelectedProfileUsername(username)}
             onSelectAgent={(agentUsername) => setSelectedAgentUsername(agentUsername)}
             onEditUser={(user) => {
-              setSelectedUser(mapRowToAccount(user));
-              setIsEditModalOpen(true);
+              const roleUpper = (user.role || '').toUpperCase();
+              if (roleUpper === 'AGENT' || roleUpper === 'MANAGER') {
+                setSelectedStaffUser(user);
+                setIsEditStaffModalOpen(true);
+              } else {
+                setSelectedUser(mapRowToAccount(user));
+                setIsEditModalOpen(true);
+              }
             }}
             onResetPassword={(user) => {
               setSelectedUser(mapRowToAccount(user));
@@ -510,7 +519,23 @@ export const UserAccountsView: React.FC<UserAccountsViewProps> = ({
         subscribers={liveSubscribers}
       />
 
-      {/* B. Edit User Profile Modal */}
+      {/* B. Edit Staff Profile Modal (for Field Agents & Managers) */}
+      <EditStaffModal
+        isOpen={isEditStaffModalOpen}
+        onClose={() => {
+          setIsEditStaffModalOpen(false);
+          setSelectedStaffUser(null);
+        }}
+        staff={selectedStaffUser}
+        onSuccess={(updated) => {
+          setActionNotice(`Staff profile for @${selectedStaffUser?.username} updated successfully.`);
+          setTimeout(() => setActionNotice(null), 5000);
+          setRefreshTrigger((prev) => prev + 1);
+          refreshMetrics();
+        }}
+      />
+
+      {/* C. Edit User Profile Modal (General / Clients) */}
       <EditUserModal
         isOpen={isEditModalOpen}
         onClose={() => {

@@ -518,15 +518,23 @@ export const UsersTable: React.FC<UsersTableProps> = ({
                             )}
                           </button>
 
-                          {/* Edit User */}
+                          {/* Edit User / Staff Profile */}
                           {onEditUser && (
                             <button
                               onClick={(e) => {
                                 e.stopPropagation();
                                 onEditUser(user);
                               }}
-                              className="p-1.5 bg-slate-950 hover:bg-slate-800 border border-slate-800 rounded-lg text-slate-400 hover:text-cyan-300 transition cursor-pointer"
-                              title="Edit User Profile"
+                              className={`p-1.5 bg-slate-950 hover:bg-slate-800 border rounded-lg transition cursor-pointer ${
+                                isAgent || userRole === 'MANAGER'
+                                  ? 'border-cyan-800/80 text-cyan-400 hover:text-white hover:bg-cyan-950/60 shadow-sm'
+                                  : 'border-slate-800 text-slate-400 hover:text-cyan-300'
+                              }`}
+                              title={
+                                isAgent || userRole === 'MANAGER'
+                                  ? `Edit Staff Profile: Full Name, Phone, Area, Salary, Role, Status, Password (@${user.username})`
+                                  : 'Edit User Profile'
+                              }
                             >
                               <Edit className="w-3.5 h-3.5" />
                             </button>

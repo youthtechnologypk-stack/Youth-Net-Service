@@ -18,9 +18,11 @@ import {
   Send,
   Building,
   Check,
+  Edit,
 } from 'lucide-react';
 import { supabase, SupabasePortalUser, SupabasePaymentTransaction, SupabaseAgentCashTransaction } from '../services/supabaseClient';
 import { useCurrency } from '../context/CurrencyContext';
+import { EditStaffModal } from './EditStaffModal';
 
 export interface AgentProfileViewProps {
   username?: string;
@@ -44,6 +46,7 @@ export const AgentProfileView: React.FC<AgentProfileViewProps> = ({
   const [toastMessage, setToastMessage] = useState<{ text: string; type: 'success' | 'error' } | null>(null);
 
   // Modals
+  const [isEditStaffModalOpen, setIsEditStaffModalOpen] = useState(false);
   const [isHandoverModalOpen, setIsHandoverModalOpen] = useState(false);
   const [isAdvanceModalOpen, setIsAdvanceModalOpen] = useState(false);
   const [isAdvanceReturnModalOpen, setIsAdvanceReturnModalOpen] = useState(false);
@@ -436,6 +439,15 @@ export const AgentProfileView: React.FC<AgentProfileViewProps> = ({
 
           {/* Quick Action Button Bar */}
           <div className="flex flex-wrap items-center gap-2">
+            <button
+              onClick={() => setIsEditStaffModalOpen(true)}
+              className="px-3.5 py-2 rounded-xl bg-slate-800 hover:bg-slate-700 text-slate-200 border border-slate-700 font-bold text-xs flex items-center gap-1.5 transition cursor-pointer active:scale-95"
+              title="Edit Staff Profile: Name, Phone, Area, Salary, Status, Password"
+            >
+              <Edit className="w-3.5 h-3.5 text-cyan-400" />
+              <span>Edit Profile</span>
+            </button>
+
             <button
               onClick={() => {
                 setHandoverAmount(String(cashInHand));
@@ -974,6 +986,17 @@ export const AgentProfileView: React.FC<AgentProfileViewProps> = ({
           </div>
         </div>
       )}
+
+      {/* Edit Staff Profile Modal */}
+      <EditStaffModal
+        isOpen={isEditStaffModalOpen}
+        onClose={() => setIsEditStaffModalOpen(false)}
+        staff={agent}
+        onSuccess={() => {
+          showToast(`Staff profile for @${agent.username} updated successfully.`);
+          fetchAgentProfile();
+        }}
+      />
     </div>
   );
 };
