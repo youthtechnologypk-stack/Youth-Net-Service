@@ -164,7 +164,6 @@ export const UserAccountsView: React.FC<UserAccountsViewProps> = ({
           role: newUser.role,
           area: newUser.area || 'Saddar Node',
           account_status: newUser.isActive ? 'ACTIVE' : 'SUSPENDED',
-          is_active: newUser.isActive,
           password: plainPassword,
           created_at: new Date().toISOString(),
         },
@@ -210,7 +209,6 @@ export const UserAccountsView: React.FC<UserAccountsViewProps> = ({
           role: updatedUser.role,
           area: updatedUser.area,
           account_status: updatedUser.isActive ? 'ACTIVE' : 'SUSPENDED',
-          is_active: updatedUser.isActive,
         })
         .eq('id', updatedUser.id);
 

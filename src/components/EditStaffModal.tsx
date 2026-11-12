@@ -120,7 +120,6 @@ export const EditStaffModal: React.FC<EditStaffModalProps> = ({
       base_salary: salaryNum,
       role: role,
       account_status: accountStatus,
-      is_active: accountStatus === 'ACTIVE',
     };
 
     if (newPassword && newPassword.trim() !== '') {

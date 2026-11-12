@@ -197,7 +197,6 @@ export const UsersTable: React.FC<UsersTableProps> = ({
         .from('portal_users')
         .update({
           account_status: nextStatus,
-          is_active: nextStatus === 'ACTIVE',
         })
         .eq('id', user.id);
 

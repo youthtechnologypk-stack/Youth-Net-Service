@@ -1,4 +1,4 @@
-import React, { useState, useMemo, useRef, useEffect } from 'react';
+import React, { useState, useMemo, useRef, useEffect, useCallback } from 'react';
 import { X, AlertTriangle, Search, Cable, MapPin, CheckCircle2, User, RefreshCw } from 'lucide-react';
 import { useISP } from '../context/ISPContext';
 import { useSubscribers, UnifiedSubscriber } from '../hooks/useSubscribers';
@@ -23,6 +23,8 @@ export const NewTicketModal: React.FC<CreateTicketModalProps> = ({
 
   // Live agents from Supabase portal_users (role === 'AGENT')
   const [portalAgents, setPortalAgents] = useState<SupabasePortalUser[]>([]);
+  const [liveSubscribers, setLiveSubscribers] = useState<UnifiedSubscriber[]>([]);
+  const [isLoadingSubscribers, setIsLoadingSubscribers] = useState(false);
   const [selectedSubscriber, setSelectedSubscriber] = useState<UnifiedSubscriber | null>(null);
   const [searchQuery, setSearchQuery] = useState('');
   const [isDropdownOpen, setIsDropdownOpen] = useState(false);
@@ -56,6 +58,20 @@ export const NewTicketModal: React.FC<CreateTicketModalProps> = ({
     { id: 'agent-bilal-uuid', full_name: 'Bilal Khan', username: 'bilal_g11_f11', area: 'Sector G-11 & F-11', role: 'AGENT' },
   ];
 
+  const handleSelectSubscriber = useCallback((sub: UnifiedSubscriber) => {
+    setSelectedSubscriber(sub);
+    setSearchQuery(`${sub.fullName} (@${sub.username})`);
+    setCustomerName(sub.fullName);
+    setCustomerPhone(sub.phone);
+    setCustomerAddress(sub.address || 'Saddar Distribution Area');
+    setAreaNode(sub.areaNode || 'Saddar Node');
+    setPonPort(sub.ponPort || 'PON-01 (Saddar Core)');
+    setFeederLine(sub.feederLine || 'Feeder-Saddar-01');
+    setPppoeUsername(sub.username);
+    setAssignedIp(sub.assignedIp || 'Dynamic');
+    setIsDropdownOpen(false);
+  }, []);
+
   // Fetch real technicians directly from Supabase portal_users
   const fetchPortalAgents = async () => {
     try {
@@ -74,27 +90,196 @@ export const NewTicketModal: React.FC<CreateTicketModalProps> = ({
     }
   };
 
-  useEffect(() => {
-    if (isOpen) {
-      fetchPortalAgents();
-      setStatusMessage(null);
-      setIsSubmitting(false);
+  // Directly query /api/mikrotik/ppp/secret, /api/mikrotik/ppp/active, and Supabase portal_users
+  const fetchLiveSubscribers = useCallback(async () => {
+    setIsLoadingSubscribers(true);
+    const subMap = new Map<string, UnifiedSubscriber>();
 
-      if (defaultSubscriberUsername && unifiedSubscribers.length > 0) {
-        const found = (unifiedSubscribers || []).find(
+    // 1. Seed with context unifiedSubscribers if present
+    (unifiedSubscribers || []).forEach((s) => {
+      if (s?.username) {
+        subMap.set(s.username.toLowerCase().trim(), s);
+      }
+    });
+
+    try {
+      // 2. Query /api/mikrotik/ppp/secret
+      try {
+        const secRes = await fetch('/api/mikrotik/ppp/secret');
+        if (secRes.ok) {
+          const secrets = await secRes.json();
+          if (Array.isArray(secrets)) {
+            secrets.forEach((s: any) => {
+              const u = String(s.name || s.user || '').trim();
+              if (!u) return;
+              const key = u.toLowerCase();
+              const existing = subMap.get(key);
+              const remoteIp = s['remote-address'] || s.remoteAddress || s.address || existing?.assignedIp || 'Dynamic';
+              const profile = s.profile || existing?.profile || '20Mbps-Saddar';
+
+              subMap.set(key, {
+                id: existing?.id || s['.id'] || `sec-${u}`,
+                username: u,
+                pppoeUsername: u,
+                name: existing?.name || existing?.fullName || u,
+                fullName: existing?.fullName || existing?.name || u,
+                phone: existing?.phone || '+92 300 0000000',
+                address: existing?.address || 'Saddar Distribution Area',
+                areaNode: existing?.areaNode || 'Saddar Node',
+                ponPort: existing?.ponPort || 'PON-01 (Saddar Core)',
+                feederLine: existing?.feederLine || 'Feeder-Saddar-01',
+                cnic: existing?.cnic || '37405-0000000-0',
+                profile: profile,
+                priceMonthly: existing?.priceMonthly || 2500,
+                assignedIp: remoteIp,
+                macAddress: existing?.macAddress || 'Dynamic',
+                service: s.service || 'pppoe',
+                status: s.disabled === 'true' || s.disabled === true ? 'disabled' : 'active',
+                isOnline: existing?.isOnline || false,
+                createdDate: existing?.createdDate || new Date().toISOString(),
+                expiryDate: existing?.expiryDate || '',
+                validityDays: existing?.validityDays || 30,
+                balanceDue: existing?.balanceDue || 0,
+                hasPortalAccount: existing?.hasPortalAccount || false,
+                invoices: existing?.invoices || [],
+                accountNumber: existing?.accountNumber || `ACC-${u.toUpperCase()}`,
+              });
+            });
+          }
+        }
+      } catch (err) {
+        console.warn('MicroTik secrets query notice in ticket modal:', err);
+      }
+
+      // 3. Query /api/mikrotik/ppp/active
+      try {
+        const actRes = await fetch('/api/mikrotik/ppp/active');
+        if (actRes.ok) {
+          const actives = await actRes.json();
+          if (Array.isArray(actives)) {
+            actives.forEach((act: any) => {
+              const u = String(act.name || act.user || '').trim();
+              if (!u) return;
+              const key = u.toLowerCase();
+              const existing = subMap.get(key);
+              const activeIp = act.address || act['caller-id'] || existing?.assignedIp || 'Dynamic IP';
+              if (existing) {
+                existing.isOnline = true;
+                existing.assignedIp = activeIp;
+              } else {
+                subMap.set(key, {
+                  id: act['.id'] || `act-${u}`,
+                  username: u,
+                  pppoeUsername: u,
+                  name: u,
+                  fullName: u,
+                  phone: '+92 300 0000000',
+                  address: 'Saddar Distribution Area',
+                  areaNode: 'Saddar Node',
+                  ponPort: 'PON-01 (Saddar Core)',
+                  feederLine: 'Feeder-Saddar-01',
+                  cnic: '37405-0000000-0',
+                  profile: act.profile || act.service || '20Mbps-Saddar',
+                  priceMonthly: 2500,
+                  assignedIp: activeIp,
+                  macAddress: act['caller-id'] || 'Dynamic',
+                  service: 'pppoe',
+                  status: 'active',
+                  isOnline: true,
+                  createdDate: new Date().toISOString(),
+                  expiryDate: '',
+                  validityDays: 30,
+                  balanceDue: 0,
+                  hasPortalAccount: false,
+                  invoices: [],
+                  accountNumber: `ACC-${u.toUpperCase()}`,
+                });
+              }
+            });
+          }
+        }
+      } catch (err) {
+        console.warn('MicroTik active query notice in ticket modal:', err);
+      }
+
+      // 4. Query Supabase portal_users (role === 'CLIENT')
+      try {
+        const { data: dbClients } = await supabase
+          .from('portal_users')
+          .select('*')
+          .eq('role', 'CLIENT');
+
+        if (dbClients && Array.isArray(dbClients)) {
+          dbClients.forEach((client: any) => {
+            const u = String(client.username || '').trim();
+            if (!u) return;
+            const key = u.toLowerCase();
+            const existing = subMap.get(key);
+            if (existing) {
+              existing.fullName = client.full_name || existing.fullName;
+              existing.phone = client.phone || existing.phone;
+              existing.address = client.address || existing.address;
+              existing.areaNode = client.area || existing.areaNode;
+              existing.hasPortalAccount = true;
+            } else {
+              subMap.set(key, {
+                id: client.id,
+                username: u,
+                pppoeUsername: u,
+                name: client.full_name || u,
+                fullName: client.full_name || u,
+                phone: client.phone || '+92 300 0000000',
+                address: client.address || 'Saddar Distribution Area',
+                areaNode: client.area || 'Saddar Node',
+                ponPort: 'PON-01 (Saddar Core)',
+                feederLine: 'Feeder-Saddar-01',
+                cnic: client.cnic || '37405-0000000-0',
+                profile: client.package_speed || '20Mbps-Saddar',
+                priceMonthly: Number(client.monthly_fee) || 2500,
+                assignedIp: 'Dynamic',
+                macAddress: 'Dynamic',
+                service: 'pppoe',
+                status: client.account_status === 'SUSPENDED' ? 'disabled' : 'active',
+                isOnline: false,
+                createdDate: client.created_at || new Date().toISOString(),
+                expiryDate: '',
+                validityDays: 30,
+                balanceDue: 0,
+                hasPortalAccount: true,
+                invoices: [],
+                accountNumber: `ACC-${u.toUpperCase()}`,
+              });
+            }
+          });
+        }
+      } catch (err) {
+        console.warn('Supabase clients query notice in ticket modal:', err);
+      }
+
+      const merged = Array.from(subMap.values());
+      setLiveSubscribers(merged);
+
+      if (defaultSubscriberUsername && merged.length > 0) {
+        const found = merged.find(
           (s) => (s?.username || '').toLowerCase() === (defaultSubscriberUsername || '').toLowerCase()
         );
         if (found) {
           handleSelectSubscriber(found);
-          return;
         }
       }
-
-      if (unifiedSubscribers.length > 0 && !selectedSubscriber) {
-        handleSelectSubscriber(unifiedSubscribers[0]);
-      }
+    } finally {
+      setIsLoadingSubscribers(false);
     }
-  }, [isOpen, defaultSubscriberUsername, unifiedSubscribers.length]);
+  }, [defaultSubscriberUsername, unifiedSubscribers, handleSelectSubscriber]);
+
+  useEffect(() => {
+    if (isOpen) {
+      fetchPortalAgents();
+      fetchLiveSubscribers();
+      setStatusMessage(null);
+      setIsSubmitting(false);
+    }
+  }, [isOpen, fetchLiveSubscribers]);
 
   // Click outside listener for subscriber dropdown
   useEffect(() => {
@@ -107,33 +292,25 @@ export const NewTicketModal: React.FC<CreateTicketModalProps> = ({
     return () => document.removeEventListener('mousedown', handleClickOutside);
   }, []);
 
-  // Filtered subscribers list
+  // Combined pool of all available subscribers
+  const allSubscribers = useMemo(() => {
+    if (liveSubscribers.length > 0) return liveSubscribers;
+    return unifiedSubscribers || [];
+  }, [liveSubscribers, unifiedSubscribers]);
+
+  // Filtered subscribers list with instant search
   const filteredSubscribers = useMemo(() => {
-    if (!searchQuery.trim()) return (unifiedSubscribers || []).slice(0, 30);
+    if (!searchQuery.trim()) return (allSubscribers || []).slice(0, 50);
     const q = searchQuery.toLowerCase().trim();
-    return (unifiedSubscribers || []).filter(
+    return (allSubscribers || []).filter(
       (s) =>
         (s?.username || '').toLowerCase().includes(q) ||
         (s?.fullName || '').toLowerCase().includes(q) ||
         (s?.phone || '').toLowerCase().includes(q) ||
         (s?.assignedIp || '').toLowerCase().includes(q) ||
         (s?.macAddress || '').toLowerCase().includes(q)
-    ).slice(0, 30);
-  }, [unifiedSubscribers, searchQuery]);
-
-  const handleSelectSubscriber = (sub: UnifiedSubscriber) => {
-    setSelectedSubscriber(sub);
-    setSearchQuery(`${sub.fullName} (@${sub.username})`);
-    setCustomerName(sub.fullName);
-    setCustomerPhone(sub.phone);
-    setCustomerAddress(sub.address || 'Saddar Distribution Area');
-    setAreaNode(sub.areaNode || 'Saddar Node');
-    setPonPort(sub.ponPort || 'PON-01 (Saddar Core)');
-    setFeederLine(sub.feederLine || 'Feeder-Saddar-01');
-    setPppoeUsername(sub.username);
-    setAssignedIp(sub.assignedIp || 'Dynamic');
-    setIsDropdownOpen(false);
-  };
+    ).slice(0, 50);
+  }, [allSubscribers, searchQuery]);
 
   if (!isOpen) return null;
 
@@ -257,8 +434,15 @@ export const NewTicketModal: React.FC<CreateTicketModalProps> = ({
                 <Search className="w-3.5 h-3.5 text-cyan-400" />
                 <span>Select Client / Subscriber * (Live MikroTik Secrets &amp; Portal Users)</span>
               </label>
-              <span className="text-[10px] text-slate-400 font-mono">
-                {unifiedSubscribers.length} Live Subscribers
+              <span className="text-[10px] font-mono font-bold px-2 py-0.5 rounded-full bg-cyan-950/80 text-cyan-300 border border-cyan-800">
+                {isLoadingSubscribers ? (
+                  <span className="inline-flex items-center gap-1">
+                    <RefreshCw className="w-3 h-3 animate-spin text-cyan-400" />
+                    <span>Querying RouterOS...</span>
+                  </span>
+                ) : (
+                  `${allSubscribers.length >= 400 ? `${allSubscribers.length}+` : allSubscribers.length} Live Subscribers`
+                )}
               </span>
             </div>
 

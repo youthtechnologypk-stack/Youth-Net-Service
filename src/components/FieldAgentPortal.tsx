@@ -135,6 +135,10 @@ export const FieldAgentPortal: React.FC<FieldAgentPortalProps> = ({
     setSelectedInvForCollection(inv);
     const alreadyPaid = Number(inv.paid_amount) || 0;
     const remainingDue = Math.max(0, (Number(inv.amount) || 0) - alreadyPaid);
+    if (remainingDue <= 0) {
+      alert('This invoice has already been settled and marked PAID.');
+      return;
+    }
     setCollectionAmountInput(remainingDue);
     setIsCollectModalOpen(true);
   };
@@ -151,20 +155,23 @@ export const FieldAgentPortal: React.FC<FieldAgentPortalProps> = ({
     setIsSubmittingCollection(true);
     try {
       const inv = selectedInvForCollection;
-      const alreadyPaid = Number(inv.paid_amount) || 0;
-      const totalAmount = Number(inv.amount) || 0;
-      const newPaidTotal = alreadyPaid + enteredVal;
-      const newStatus = newPaidTotal >= totalAmount ? 'PAID' : 'PARTIAL';
+      const totalAmount = Number(inv.amount || 0);
+      const previousPaid = Number(inv.paid_amount || 0);
+      const collectedNow = Number(enteredVal || 0);
+      const newPaidTotal = previousPaid + collectedNow;
+      const remaining = totalAmount - newPaidTotal;
+
+      // Strictly evaluate PAID vs PARTIAL
+      const newStatus = remaining <= 0 ? 'PAID' : 'PARTIAL';
+      const finalPaidAmount = remaining <= 0 ? totalAmount : newPaidTotal;
       const nowIso = new Date().toISOString();
 
       // 1. Update invoice in Supabase: status, paid_amount, paid_at
       const invoiceUpdateData: Partial<SupabaseInvoice> = {
         status: newStatus,
-        paid_amount: newPaidTotal,
+        paid_amount: finalPaidAmount,
+        paid_at: newStatus === 'PAID' ? nowIso : (inv.paid_at || null),
       };
-      if (newStatus === 'PAID') {
-        invoiceUpdateData.paid_at = nowIso;
-      }
 
       const { error: invErr } = await supabase
         .from('invoices')
@@ -317,7 +324,7 @@ export const FieldAgentPortal: React.FC<FieldAgentPortalProps> = ({
           }`}
         >
           <DollarSign className="w-3 h-3" />
-          <span>$ Cash ({assignedInvoices?.filter((i) => (i.status || '').toUpperCase() !== 'PAID').length || 0})</span>
+          <span>$ Cash ({(assignedInvoices || []).filter((inv) => (Number(inv.amount) - Number(inv.paid_amount || 0)) > 0).length})</span>
         </button>
 
         <button
@@ -414,10 +421,10 @@ export const FieldAgentPortal: React.FC<FieldAgentPortalProps> = ({
           </div>
 
           {assignedInvoices.map((inv) => {
-            const isPartial = (inv.status || '').toUpperCase() === 'PARTIAL';
-            const alreadyPaid = Number(inv.paid_amount) || 0;
-            const totalAmount = Number(inv.amount) || 0;
-            const remainingDue = Math.max(0, totalAmount - alreadyPaid);
+            const totalAmount = Number(inv.amount || 0);
+            const alreadyPaid = Number(inv.paid_amount || 0);
+            const balanceDue = Math.max(0, totalAmount - alreadyPaid);
+            const displayStatus = balanceDue === 0 ? 'PAID' : (inv.status || 'DUE').toUpperCase();
 
             return (
               <div
@@ -428,12 +435,17 @@ export const FieldAgentPortal: React.FC<FieldAgentPortalProps> = ({
                   <div>
                     <div className="flex items-center gap-2">
                       <span className="font-bold text-white text-xs block">@{inv.subscriber_username}</span>
-                      {isPartial ? (
-                        <span className="px-1.5 py-0.5 rounded text-[10px] font-bold bg-amber-950 text-amber-300 border border-amber-800">
+                      {displayStatus === 'PAID' ? (
+                        <span className="px-1.5 py-0.5 rounded text-[10px] font-bold bg-emerald-500/20 text-emerald-400 border border-emerald-500/30 flex items-center gap-1">
+                          <CheckCircle2 className="w-3 h-3 text-emerald-400" />
+                          <span>PAID</span>
+                        </span>
+                      ) : displayStatus === 'PARTIAL' ? (
+                        <span className="px-1.5 py-0.5 rounded text-[10px] font-bold bg-amber-500/20 text-amber-400 border border-amber-500/30">
                           PARTIAL
                         </span>
                       ) : (
-                        <span className="px-1.5 py-0.5 rounded text-[10px] font-bold bg-rose-950 text-rose-300 border border-rose-800">
+                        <span className="px-1.5 py-0.5 rounded text-[10px] font-bold bg-rose-500/20 text-rose-400 border border-rose-500/30">
                           DUE
                         </span>
                       )}
@@ -442,8 +454,8 @@ export const FieldAgentPortal: React.FC<FieldAgentPortalProps> = ({
                     <span className="text-[10px] text-slate-500 block">Cycle Day: {inv.cycle_day || 5}th</span>
                   </div>
                   <div className="text-right">
-                    <span className="text-rose-400 font-bold font-mono text-sm block">
-                      {formatCurrency(remainingDue)}
+                    <span className={`font-bold font-mono text-sm block ${balanceDue > 0 ? 'text-rose-400' : 'text-emerald-400'}`}>
+                      {formatCurrency(balanceDue)}
                     </span>
                     <span className="text-[10px] text-slate-400 font-mono block">
                       Total: {formatCurrency(totalAmount)}
@@ -458,13 +470,20 @@ export const FieldAgentPortal: React.FC<FieldAgentPortalProps> = ({
                 </div>
 
                 <div className="flex items-center justify-end pt-2 border-t border-slate-800">
-                  <button
-                    onClick={() => handleOpenCollectionModal(inv)}
-                    className="px-3 py-1.5 rounded-lg bg-emerald-600 hover:bg-emerald-500 text-slate-950 font-bold font-mono text-xs flex items-center gap-1.5 shadow transition cursor-pointer"
-                  >
-                    <DollarSign className="w-3.5 h-3.5" />
-                    <span>Collect Payment / Mark Paid</span>
-                  </button>
+                  {balanceDue > 0 && displayStatus !== 'PAID' ? (
+                    <button
+                      onClick={() => handleOpenCollectionModal(inv)}
+                      className="px-3 py-1.5 rounded-lg bg-emerald-600 hover:bg-emerald-500 text-slate-950 font-bold font-mono text-xs flex items-center gap-1.5 shadow transition cursor-pointer"
+                    >
+                      <DollarSign className="w-3.5 h-3.5" />
+                      <span>Collect Payment / Mark Paid</span>
+                    </button>
+                  ) : (
+                    <span className="text-emerald-400 font-mono text-[11px] font-semibold flex items-center gap-1.5 py-1 px-2.5 rounded-lg bg-emerald-950/60 border border-emerald-800/80">
+                      <CheckCircle2 className="w-3.5 h-3.5 text-emerald-400" />
+                      <span>✓ Settled / Paid in Full</span>
+                    </span>
+                  )}
                 </div>
               </div>
             );

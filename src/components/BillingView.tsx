@@ -181,6 +181,10 @@ export const BillingView: React.FC<BillingViewProps> = ({
     setSelectedInvoice(inv);
     const alreadyPaid = Number(inv.paid_amount) || 0;
     const remainingDue = Math.max(0, (Number(inv.amount) || 0) - alreadyPaid);
+    if (remainingDue <= 0) {
+      alert('This invoice has already been settled and marked PAID.');
+      return;
+    }
     setPaymentReceivedInput(remainingDue);
     setCollectingAgentId(inv.assigned_agent_id || (portalAgents[0]?.id ?? ''));
     setIsMarkPaidModalOpen(true);
@@ -199,20 +203,23 @@ export const BillingView: React.FC<BillingViewProps> = ({
     setIsSubmitting(true);
     try {
       const invoiceId = selectedInvoice.id;
-      const alreadyPaid = Number(selectedInvoice.paid_amount) || 0;
-      const totalAmount = Number(selectedInvoice.amount) || 0;
-      const newPaidTotal = alreadyPaid + enteredVal;
-      const newStatus = newPaidTotal >= totalAmount ? 'PAID' : 'PARTIAL';
+      const totalAmount = Number(selectedInvoice.amount || 0);
+      const previousPaid = Number(selectedInvoice.paid_amount || 0);
+      const collectedNow = Number(enteredVal || 0);
+      const newPaidTotal = previousPaid + collectedNow;
+      const remaining = totalAmount - newPaidTotal;
+
+      // Strictly evaluate PAID vs PARTIAL
+      const newStatus = remaining <= 0 ? 'PAID' : 'PARTIAL';
+      const finalPaidAmount = remaining <= 0 ? totalAmount : newPaidTotal;
       const nowIso = new Date().toISOString();
 
       // 1. Update invoice in Supabase: status, paid_amount, paid_at
       const invoiceUpdateData: Partial<SupabaseInvoice> = {
         status: newStatus,
-        paid_amount: newPaidTotal,
+        paid_amount: finalPaidAmount,
+        paid_at: newStatus === 'PAID' ? nowIso : (selectedInvoice.paid_at || null),
       };
-      if (newStatus === 'PAID') {
-        invoiceUpdateData.paid_at = nowIso;
-      }
 
       const { error: invError } = await supabase
         .from('invoices')
@@ -382,15 +389,16 @@ export const BillingView: React.FC<BillingViewProps> = ({
         (inv?.subscriber_username || '').toLowerCase().includes(searchClean) ||
         Boolean(inv?.assigned_agent_name && (inv.assigned_agent_name || '').toLowerCase().includes(searchClean));
 
-      const upperStatus = (inv?.status || '').toUpperCase();
+      const balanceDue = Math.max(0, (Number(inv?.amount) || 0) - (Number(inv?.paid_amount) || 0));
+      const displayStatus = balanceDue === 0 ? 'PAID' : (inv?.status || 'DUE').toUpperCase();
       const matchStatus =
         statusFilter === 'ALL'
           ? true
           : statusFilter === 'PAID'
-          ? upperStatus === 'PAID'
+          ? displayStatus === 'PAID'
           : statusFilter === 'PARTIAL'
-          ? upperStatus === 'PARTIAL'
-          : upperStatus === 'DUE';
+          ? displayStatus === 'PARTIAL'
+          : displayStatus === 'DUE';
 
       return matchSearch && matchStatus;
     });
@@ -399,11 +407,10 @@ export const BillingView: React.FC<BillingViewProps> = ({
   // Aggregate Metrics
   const totalBilled = (invoices || []).reduce((acc, i) => acc + (Number(i.amount) || 0), 0);
   const totalPaid = (invoices || []).reduce(
-    (acc, i) => acc + (Number(i.paid_amount) || (i.status === 'PAID' ? Number(i.amount) : 0)),
+    (acc, i) => acc + (Number(i.paid_amount) || ((i.status || '').toUpperCase() === 'PAID' ? Number(i.amount) : 0)),
     0
   );
   const totalDue = (invoices || [])
-    .filter((i) => (i.status || '').toUpperCase() !== 'PAID')
     .reduce((acc, i) => acc + Math.max(0, (Number(i.amount) || 0) - (Number(i.paid_amount) || 0)), 0);
   const totalAgentCash = (portalAgents || []).reduce((acc, a) => acc + (Number(a.cash_in_hand) || 0), 0);
 
@@ -600,11 +607,12 @@ export const BillingView: React.FC<BillingViewProps> = ({
                 </tr>
               ) : (
                 filteredInvoices.map((inv) => {
-                  const upperStatus = (inv.status || '').toUpperCase();
-                  const isPaid = upperStatus === 'PAID';
-                  const isPartial = upperStatus === 'PARTIAL';
-                  const paidAmt = Number(inv.paid_amount) || (isPaid ? Number(inv.amount) : 0);
-                  const remainingBalance = Math.max(0, (Number(inv.amount) || 0) - paidAmt);
+                  const totalAmount = Number(inv.amount || 0);
+                  const alreadyPaid = Number(inv.paid_amount || 0);
+                  const balanceDue = Math.max(0, totalAmount - alreadyPaid);
+                  const displayStatus = balanceDue === 0 ? 'PAID' : (inv.status || 'DUE').toUpperCase();
+                  const isPaid = displayStatus === 'PAID';
+                  const isPartial = displayStatus === 'PARTIAL';
 
                   return (
                     <tr key={inv.id} className="hover:bg-slate-800/30 transition">
@@ -626,25 +634,25 @@ export const BillingView: React.FC<BillingViewProps> = ({
                       <td className="py-3 px-4 text-slate-300 font-mono text-xs">{inv.due_date}</td>
                       <td className="py-3 px-4 text-right">
                         <div className="font-mono font-bold text-white text-base">
-                          {formatCurrency(Number(inv.amount) || 0)}
+                          {formatCurrency(totalAmount)}
                         </div>
                         <div className="text-[11px] text-slate-400 font-mono mt-0.5 whitespace-nowrap">
-                          (Paid: {formatCurrency(paidAmt)} | Balance: {formatCurrency(remainingBalance)})
+                          (Paid: {formatCurrency(alreadyPaid)} | Balance: {formatCurrency(balanceDue)})
                         </div>
                       </td>
                       <td className="py-3 px-4 text-center">
-                        {isPaid ? (
-                          <span className="inline-flex items-center gap-1 px-2.5 py-1 rounded-md text-xs font-bold bg-emerald-950 text-emerald-300 border border-emerald-800">
+                        {displayStatus === 'PAID' ? (
+                          <span className="inline-flex items-center gap-1 px-2.5 py-1 rounded-md text-xs font-bold bg-emerald-500/20 text-emerald-400 border border-emerald-500/30">
                             <CheckCircle2 className="w-3.5 h-3.5 text-emerald-400" />
                             <span>PAID</span>
                           </span>
-                        ) : isPartial ? (
-                          <span className="inline-flex items-center gap-1 px-2.5 py-1 rounded-md text-xs font-bold bg-amber-950 text-amber-300 border border-amber-800">
+                        ) : displayStatus === 'PARTIAL' ? (
+                          <span className="inline-flex items-center gap-1 px-2.5 py-1 rounded-md text-xs font-bold bg-amber-500/20 text-amber-400 border border-amber-500/30">
                             <Clock className="w-3.5 h-3.5 text-amber-400" />
                             <span>PARTIAL</span>
                           </span>
                         ) : (
-                          <span className="inline-flex items-center gap-1 px-2.5 py-1 rounded-md text-xs font-bold bg-rose-950/80 text-rose-300 border border-rose-800">
+                          <span className="inline-flex items-center gap-1 px-2.5 py-1 rounded-md text-xs font-bold bg-rose-500/20 text-rose-400 border border-rose-500/30">
                             <Clock className="w-3.5 h-3.5 text-rose-400" />
                             <span>DUE</span>
                           </span>
@@ -652,7 +660,7 @@ export const BillingView: React.FC<BillingViewProps> = ({
                       </td>
                       <td className="py-3 px-4 text-right whitespace-nowrap">
                         <div className="flex items-center justify-end gap-1.5">
-                          {!isPaid ? (
+                          {balanceDue > 0 && displayStatus !== 'PAID' ? (
                             <button
                               type="button"
                               onClick={() => handleOpenMarkPaid(inv)}
@@ -663,15 +671,21 @@ export const BillingView: React.FC<BillingViewProps> = ({
                               <span>{isPartial ? 'Add Payment' : 'Mark Paid'}</span>
                             </button>
                           ) : (
-                            <button
-                              type="button"
-                              onClick={() => onOpenReceiptModal?.(inv)}
-                              className="px-2.5 py-1.5 bg-slate-800 hover:bg-slate-700 text-cyan-400 hover:text-white border border-slate-700 rounded-lg text-xs flex items-center gap-1 transition cursor-pointer"
-                              title="View & Print Official Receipt"
-                            >
-                              <Printer className="w-3.5 h-3.5" />
-                              <span>Receipt</span>
-                            </button>
+                            <div className="flex items-center gap-1.5">
+                              <span className="text-emerald-400 font-mono text-[11px] font-semibold flex items-center gap-1 px-2 py-1 rounded-md bg-emerald-950/40 border border-emerald-800/60">
+                                <CheckCircle2 className="w-3.5 h-3.5 text-emerald-400" />
+                                <span>✓ Settled / Paid in Full</span>
+                              </span>
+                              <button
+                                type="button"
+                                onClick={() => onOpenReceiptModal?.(inv)}
+                                className="px-2.5 py-1.5 bg-slate-800 hover:bg-slate-700 text-cyan-400 hover:text-white border border-slate-700 rounded-lg text-xs flex items-center gap-1 transition cursor-pointer"
+                                title="View & Print Official Receipt"
+                              >
+                                <Printer className="w-3.5 h-3.5" />
+                                <span>Receipt</span>
+                              </button>
+                            </div>
                           )}
 
                           {/* Edit Invoice Button (Admin/Manager) */}

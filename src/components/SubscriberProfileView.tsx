@@ -693,17 +693,21 @@ export const SubscriberProfileView: React.FC<SubscriberProfileViewProps> = ({
 
     try {
       const inv = selectedInvoiceForPayment;
-      const alreadyPaid = Number(inv.paid_amount) || 0;
-      const totalAmount = Number(inv.amount) || 0;
-      const newPaidTotal = alreadyPaid + enteredVal;
-      const newStatus = newPaidTotal >= totalAmount ? 'PAID' : 'PARTIAL';
+      const totalAmount = Number(inv.amount || 0);
+      const previousPaid = Number(inv.paid_amount || 0);
+      const newPaidTotal = previousPaid + enteredVal;
+      const remaining = totalAmount - newPaidTotal;
+
+      // Strictly evaluate PAID vs PARTIAL
+      const newStatus = remaining <= 0 ? 'PAID' : 'PARTIAL';
+      const finalPaidAmount = remaining <= 0 ? totalAmount : newPaidTotal;
       const nowIso = new Date().toISOString();
 
       // 1. Update invoice
       await supabase.from('invoices').update({
         status: newStatus,
-        paid_amount: newPaidTotal,
-        paid_at: newStatus === 'PAID' ? nowIso : null,
+        paid_amount: finalPaidAmount,
+        paid_at: newStatus === 'PAID' ? nowIso : (inv.paid_at || null),
       }).eq('id', inv.id);
 
       // 2. Increment collecting agent cash
@@ -1419,17 +1423,19 @@ export const SubscriberProfileView: React.FC<SubscriberProfileViewProps> = ({
                       </tr>
                     ) : (
                       invoices.map((inv) => {
-                        const isPaid = (inv.status || '').toUpperCase() === 'PAID';
-                        const isPartial = (inv.status || '').toUpperCase() === 'PARTIAL';
-                        const alreadyPaid = Number(inv.paid_amount) || 0;
-                        const balance = Math.max(0, Number(inv.amount) - alreadyPaid);
+                        const totalAmount = Number(inv.amount || 0);
+                        const alreadyPaid = Number(inv.paid_amount || 0);
+                        const balance = Math.max(0, totalAmount - alreadyPaid);
+                        const displayStatus = balance === 0 ? 'PAID' : (inv.status || 'DUE').toUpperCase();
+                        const isPaid = displayStatus === 'PAID';
+                        const isPartial = displayStatus === 'PARTIAL';
 
                         return (
                           <tr key={inv.id} className="hover:bg-slate-800/40 transition">
                             <td className="py-3 px-4 font-mono font-bold text-cyan-400">{inv.invoice_no}</td>
                             <td className="py-3 px-4 font-mono text-slate-400">{inv.due_date}</td>
                             <td className="py-3 px-4 text-right font-mono font-bold text-white">
-                              {formatCurrency(Number(inv.amount))}
+                              {formatCurrency(totalAmount)}
                             </td>
                             <td className="py-3 px-4 text-right font-mono text-emerald-400">
                               {formatCurrency(alreadyPaid)}
@@ -1438,16 +1444,16 @@ export const SubscriberProfileView: React.FC<SubscriberProfileViewProps> = ({
                               {formatCurrency(balance)}
                             </td>
                             <td className="py-3 px-4 text-center">
-                              {isPaid ? (
-                                <span className="px-2 py-0.5 rounded text-[10px] font-bold bg-emerald-950 text-emerald-300 border border-emerald-800">
+                              {displayStatus === 'PAID' ? (
+                                <span className="px-2 py-0.5 rounded text-[10px] font-bold bg-emerald-500/20 text-emerald-400 border border-emerald-500/30">
                                   PAID
                                 </span>
-                              ) : isPartial ? (
-                                <span className="px-2 py-0.5 rounded text-[10px] font-bold bg-amber-950 text-amber-300 border border-amber-800">
+                              ) : displayStatus === 'PARTIAL' ? (
+                                <span className="px-2 py-0.5 rounded text-[10px] font-bold bg-amber-500/20 text-amber-400 border border-amber-500/30">
                                   PARTIAL
                                 </span>
                               ) : (
-                                <span className="px-2 py-0.5 rounded text-[10px] font-bold bg-rose-950 text-rose-300 border border-rose-800">
+                                <span className="px-2 py-0.5 rounded text-[10px] font-bold bg-rose-500/20 text-rose-400 border border-rose-500/30">
                                   DUE
                                 </span>
                               )}
@@ -1456,7 +1462,7 @@ export const SubscriberProfileView: React.FC<SubscriberProfileViewProps> = ({
                               {inv.assigned_agent_name || 'Unassigned'}
                             </td>
                             <td className="py-3 px-4 text-right">
-                              {!isPaid ? (
+                              {balance > 0 && displayStatus !== 'PAID' ? (
                                 <button
                                   type="button"
                                   onClick={() => {
@@ -1469,14 +1475,19 @@ export const SubscriberProfileView: React.FC<SubscriberProfileViewProps> = ({
                                   Record Payment
                                 </button>
                               ) : (
-                                <button
-                                  type="button"
-                                  onClick={() => onOpenReceiptModal?.(inv)}
-                                  className="px-2.5 py-1 rounded bg-slate-800 hover:bg-slate-700 text-cyan-400 text-[11px] transition cursor-pointer flex items-center gap-1 ml-auto"
-                                >
-                                  <Printer className="w-3 h-3" />
-                                  <span>Receipt</span>
-                                </button>
+                                <div className="flex items-center justify-end gap-1.5">
+                                  <span className="text-emerald-400 font-mono text-[11px] font-semibold">
+                                    ✓ Settled / Paid in Full
+                                  </span>
+                                  <button
+                                    type="button"
+                                    onClick={() => onOpenReceiptModal?.(inv)}
+                                    className="px-2.5 py-1 rounded bg-slate-800 hover:bg-slate-700 text-cyan-400 text-[11px] transition cursor-pointer flex items-center gap-1"
+                                  >
+                                    <Printer className="w-3 h-3" />
+                                    <span>Receipt</span>
+                                  </button>
+                                </div>
                               )}
                             </td>
                           </tr>

@@ -97,18 +97,63 @@ export const AgentProfileView: React.FC<AgentProfileViewProps> = ({
       setHandoverAmount(String(userData.cash_in_hand || 0));
       setSalaryPayoutAmount(String(userData.base_salary || 35000));
 
-      // 1.2 Fetch client collections from payment_transactions
-      const { data: txData } = await supabase
-        .from('payment_transactions')
-        .select('*')
-        .or(`collected_by_id.eq.${userData.id},collected_by_name.ilike.%${userData.full_name}%`)
-        .order('created_at', { ascending: false });
+      // 1.2 Fetch client collections from payment_transactions matching both ID and full name
+      let txns: SupabasePaymentTransaction[] = [];
+      try {
+        const { data: txData } = await supabase
+          .from('payment_transactions')
+          .select('*')
+          .or(`collected_by_id.eq.${userData.id},collected_by_name.ilike.%${userData.full_name}%`);
 
-      if (txData) {
-        setCollections(txData as SupabasePaymentTransaction[]);
+        if (txData && Array.isArray(txData)) {
+          txns = txData as SupabasePaymentTransaction[];
+        }
+      } catch (err) {
+        console.warn('payment_transactions query notice:', err);
       }
 
+      // 1.2b Also query invoices where assigned_agent matches this agent and paid_amount > 0
+      try {
+        const { data: invData } = await supabase
+          .from('invoices')
+          .select('*')
+          .or(`assigned_agent_id.eq.${userData.id},assigned_agent_name.ilike.%${userData.full_name}%`)
+          .gt('paid_amount', 0);
+
+        if (invData && Array.isArray(invData)) {
+          const existingInvoiceIds = new Set(txns.map((t) => t.invoice_id).filter(Boolean));
+          invData.forEach((inv) => {
+            if (!existingInvoiceIds.has(inv.id)) {
+              txns.push({
+                id: `inv-tx-${inv.id}`,
+                invoice_id: inv.id,
+                subscriber_username: inv.subscriber_username,
+                collected_by_id: inv.assigned_agent_id || userData.id,
+                collected_by_name: inv.assigned_agent_name || userData.full_name,
+                amount_paid: Number(inv.paid_amount) || 0,
+                payment_method: 'Cash Handover',
+                payment_date: inv.paid_at || inv.created_at || new Date().toISOString(),
+                created_at: inv.paid_at || inv.created_at || new Date().toISOString(),
+                notes: `Invoice #${inv.invoice_no} collection`,
+              });
+            }
+          });
+        }
+      } catch (err) {
+        console.warn('Invoices query notice for agent profile:', err);
+      }
+
+      // Sort descending by date
+      txns.sort((a, b) => {
+        const dateA = new Date(a.payment_date || a.created_at || 0).getTime();
+        const dateB = new Date(b.payment_date || b.created_at || 0).getTime();
+        return dateB - dateA;
+      });
+
+      setCollections(txns);
+
       // 1.3 Fetch handover & settlement ledger from agent_cash_transactions
+      let cashRecords: SupabaseAgentCashTransaction[] = [];
       const { data: cashData } = await supabase
         .from('agent_cash_transactions')
         .select('*')
@@ -116,8 +161,32 @@ export const AgentProfileView: React.FC<AgentProfileViewProps> = ({
         .order('created_at', { ascending: false });
 
       if (cashData) {
-        setCashTransactions(cashData as SupabaseAgentCashTransaction[]);
+        cashRecords = cashData as SupabaseAgentCashTransaction[];
+        setCashTransactions(cashRecords);
       }
+
+      // Reconcile and calculate Cash in Hand (Collections minus Handovers)
+      const calculatedCollections = txns.reduce((sum, item) => sum + (Number(item.amount_paid) || 0), 0);
+      const totalHandedOver = cashRecords
+        .filter((t) => (t.transaction_type || '').toUpperCase() === 'HANDOVER')
+        .reduce((sum, item) => sum + (Number(item.amount) || 0), 0);
+
+      const netPendingCash = Math.max(0, calculatedCollections - totalHandedOver);
+      const finalCashInHand = (userData.cash_in_hand && userData.cash_in_hand > 0)
+        ? userData.cash_in_hand
+        : netPendingCash;
+
+      if ((!userData.cash_in_hand || userData.cash_in_hand === 0) && netPendingCash > 0) {
+        await supabase
+          .from('portal_users')
+          .update({ cash_in_hand: netPendingCash })
+          .eq('id', userData.id);
+        userData.cash_in_hand = netPendingCash;
+      }
+
+      setAgent({ ...userData, cash_in_hand: finalCashInHand });
+      setHandoverAmount(String(finalCashInHand));
+      setSalaryPayoutAmount(String(userData.base_salary || 35000));
     } catch (err) {
       console.error('Error fetching agent profile:', err);
     } finally {
@@ -138,6 +207,9 @@ export const AgentProfileView: React.FC<AgentProfileViewProps> = ({
         fetchAgentProfile();
       })
       .on('postgres_changes', { event: '*', schema: 'public', table: 'payment_transactions' }, () => {
+        fetchAgentProfile();
+      })
+      .on('postgres_changes', { event: '*', schema: 'public', table: 'invoices' }, () => {
         fetchAgentProfile();
       })
       .subscribe();
