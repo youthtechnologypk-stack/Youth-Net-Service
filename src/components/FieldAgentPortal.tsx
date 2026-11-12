@@ -18,6 +18,10 @@ import {
   Lock,
   RefreshCw,
   X,
+  Receipt,
+  CreditCard,
+  FileText,
+  Check,
 } from 'lucide-react';
 import { useISP } from '../context/ISPContext';
 import { useCurrency } from '../context/CurrencyContext';
@@ -25,7 +29,7 @@ import { UserAccount } from '../types/auth';
 import { Invoice } from '../types/isp';
 import { FeatureGate } from './FeatureGate';
 import { PWAInstallPrompt } from './PWAInstallPrompt';
-import { supabase, SupabaseInvoice, SupabaseTicket } from '../services/supabaseClient';
+import { supabase, SupabaseInvoice, SupabaseTicket, SupabaseAgentCashTransaction } from '../services/supabaseClient';
 
 interface FieldAgentPortalProps {
   currentUser: UserAccount;
@@ -46,13 +50,16 @@ export const FieldAgentPortal: React.FC<FieldAgentPortalProps> = ({
   } = useISP();
   const { formatCurrency, currencySymbol } = useCurrency();
 
-  const [activeTab, setActiveTab] = useState<'tickets' | 'collections' | 'ont_checker' | 'directory'>('tickets');
+  const [activeTab, setActiveTab] = useState<'tickets' | 'collections' | 'ledger' | 'ont_checker' | 'directory'>('tickets');
   const [collectionSuccessToast, setCollectionSuccessToast] = useState<string | null>(null);
   const [ontSearchQuery, setOntSearchQuery] = useState('');
   const [dirSearchQuery, setDirSearchQuery] = useState('');
 
   // Agent dynamic state from Supabase
   const [agentCash, setAgentCash] = useState<number>(Number(currentUser.cashInHand || 0));
+  const [agentBaseSalary, setAgentBaseSalary] = useState<number>(Number(currentUser.base_salary || 35000));
+  const [agentAdvanceBalance, setAgentAdvanceBalance] = useState<number>(Number(currentUser.advance_balance || 0));
+  const [agentCashTransactions, setAgentCashTransactions] = useState<SupabaseAgentCashTransaction[]>([]);
   const [assignedTickets, setAssignedTickets] = useState<SupabaseTicket[]>([]);
   const [assignedInvoices, setAssignedInvoices] = useState<SupabaseInvoice[]>([]);
   const [isLoadingData, setIsLoadingData] = useState<boolean>(true);
@@ -67,15 +74,34 @@ export const FieldAgentPortal: React.FC<FieldAgentPortalProps> = ({
   const fetchAgentData = async () => {
     setIsLoadingData(true);
     try {
-      // 1. Fetch agent's latest cash_in_hand from portal_users
+      // 1. Fetch agent's latest cash_in_hand, advance_balance, base_salary from portal_users
       const { data: userRow } = await supabase
         .from('portal_users')
-        .select('cash_in_hand, area, full_name')
+        .select('cash_in_hand, advance_balance, base_salary, area, full_name')
         .eq('id', currentUser.id)
         .maybeSingle();
 
-      if (userRow && userRow.cash_in_hand !== undefined) {
-        setAgentCash(Number(userRow.cash_in_hand) || 0);
+      if (userRow) {
+        if (userRow.cash_in_hand !== undefined && userRow.cash_in_hand !== null) {
+          setAgentCash(Number(userRow.cash_in_hand) || 0);
+        }
+        if (userRow.advance_balance !== undefined && userRow.advance_balance !== null) {
+          setAgentAdvanceBalance(Number(userRow.advance_balance) || 0);
+        }
+        if (userRow.base_salary !== undefined && userRow.base_salary !== null) {
+          setAgentBaseSalary(Number(userRow.base_salary) || 35000);
+        }
+      }
+
+      // 1b. Fetch cash ledger transactions for this agent
+      const { data: cashTxns } = await supabase
+        .from('agent_cash_transactions')
+        .select('*')
+        .eq('agent_id', currentUser.id)
+        .order('created_at', { ascending: false });
+
+      if (cashTxns) {
+        setAgentCashTransactions(cashTxns as SupabaseAgentCashTransaction[]);
       }
 
       // 2. Fetch tickets strictly assigned to this agent (by UUID and Name)
@@ -118,9 +144,18 @@ export const FieldAgentPortal: React.FC<FieldAgentPortalProps> = ({
       .on('postgres_changes', { event: '*', schema: 'public', table: 'invoices' }, () => {
         fetchAgentData();
       })
+      .on('postgres_changes', { event: '*', schema: 'public', table: 'agent_cash_transactions' }, () => {
+        fetchAgentData();
+      })
       .on('postgres_changes', { event: '*', schema: 'public', table: 'portal_users' }, (payload) => {
         if (payload.new && (payload.new as any).id === currentUser.id) {
           setAgentCash(Number((payload.new as any).cash_in_hand) || 0);
+          if ((payload.new as any).advance_balance !== undefined) {
+            setAgentAdvanceBalance(Number((payload.new as any).advance_balance) || 0);
+          }
+          if ((payload.new as any).base_salary !== undefined) {
+            setAgentBaseSalary(Number((payload.new as any).base_salary) || 35000);
+          }
         }
       })
       .subscribe();
@@ -306,7 +341,7 @@ export const FieldAgentPortal: React.FC<FieldAgentPortalProps> = ({
       )}
 
       {/* Navigation Tabs for Agent */}
-      <div className="grid grid-cols-4 bg-slate-900 p-1 rounded-xl border border-slate-800 text-[11px] font-mono font-bold">
+      <div className="grid grid-cols-5 bg-slate-900 p-1 rounded-xl border border-slate-800 text-[10px] sm:text-[11px] font-mono font-bold">
         <button
           onClick={() => setActiveTab('tickets')}
           className={`py-2 rounded-lg transition flex items-center justify-center gap-1 cursor-pointer ${
@@ -325,6 +360,16 @@ export const FieldAgentPortal: React.FC<FieldAgentPortalProps> = ({
         >
           <DollarSign className="w-3 h-3" />
           <span>$ Cash ({(assignedInvoices || []).filter((inv) => (Number(inv.amount) - Number(inv.paid_amount || 0)) > 0).length})</span>
+        </button>
+
+        <button
+          onClick={() => setActiveTab('ledger')}
+          className={`py-2 rounded-lg transition flex items-center justify-center gap-1 cursor-pointer ${
+            activeTab === 'ledger' ? 'bg-indigo-600 text-white shadow' : 'text-slate-400 hover:text-white'
+          }`}
+        >
+          <Receipt className="w-3 h-3" />
+          <span>$ Ledger</span>
         </button>
 
         <button
@@ -497,6 +542,117 @@ export const FieldAgentPortal: React.FC<FieldAgentPortalProps> = ({
         </div>
       )}
 
+      {/* Tab 2.5: My Financial Ledger & Salary */}
+      {activeTab === 'ledger' && (
+        <div className="space-y-4">
+          {/* Top Summary Cards */}
+          <div className="grid grid-cols-3 gap-2">
+            <div className="p-3 bg-slate-900 border border-slate-800 rounded-xl space-y-1">
+              <span className="text-[10px] text-slate-400 font-mono uppercase block flex items-center justify-between">
+                <span>Base Salary</span>
+                <CreditCard className="w-3.5 h-3.5 text-indigo-400" />
+              </span>
+              <div className="text-sm sm:text-base font-bold font-mono text-indigo-300">
+                {formatCurrency(agentBaseSalary)}
+              </div>
+              <span className="text-[9px] text-slate-500 font-mono block">Monthly</span>
+            </div>
+
+            <div className="p-3 bg-slate-900 border border-slate-800 rounded-xl space-y-1">
+              <span className="text-[10px] text-slate-400 font-mono uppercase block flex items-center justify-between">
+                <span>Cash in Hand</span>
+                <DollarSign className="w-3.5 h-3.5 text-cyan-400" />
+              </span>
+              <div className="text-sm sm:text-base font-bold font-mono text-cyan-300">
+                {formatCurrency(agentCash)}
+              </div>
+              <span className="text-[9px] text-slate-500 font-mono block">Pending Handover</span>
+            </div>
+
+            <div className="p-3 bg-slate-900 border border-slate-800 rounded-xl space-y-1">
+              <span className="text-[10px] text-slate-400 font-mono uppercase block flex items-center justify-between">
+                <span>Advance Bal</span>
+                <DollarSign className="w-3.5 h-3.5 text-amber-400" />
+              </span>
+              <div className="text-sm sm:text-base font-bold font-mono text-amber-400">
+                {formatCurrency(agentAdvanceBalance)}
+              </div>
+              <span className="text-[9px] text-slate-500 font-mono block">Outstanding</span>
+            </div>
+          </div>
+
+          {/* Audit Ledger Table */}
+          <div className="bg-slate-900 border border-slate-800 rounded-xl overflow-hidden shadow-md">
+            <div className="p-3 border-b border-slate-800 flex items-center justify-between">
+              <div className="flex items-center gap-1.5 text-xs font-bold text-white font-mono">
+                <FileText className="w-3.5 h-3.5 text-cyan-400" />
+                <span>Financial Ledger ({agentCashTransactions.length})</span>
+              </div>
+              <button
+                type="button"
+                onClick={fetchAgentData}
+                className="text-slate-400 hover:text-white transition p-1 cursor-pointer"
+                title="Refresh Ledger"
+              >
+                <RefreshCw className="w-3 h-3" />
+              </button>
+            </div>
+
+            <div className="divide-y divide-slate-800/80 font-mono text-[11px]">
+              {agentCashTransactions.length === 0 ? (
+                <div className="py-8 text-center text-slate-500 font-mono text-xs">
+                  No cash handover or advance transactions recorded in your ledger yet.
+                </div>
+              ) : (
+                agentCashTransactions.map((tx) => {
+                  const isHandover = tx.transaction_type === 'CASH_HANDOVER';
+                  const isAdvanceTaken = tx.transaction_type === 'ADVANCE_TAKEN';
+                  const isAdvanceReturn = tx.transaction_type === 'ADVANCE_RETURN';
+
+                  return (
+                    <div key={tx.id || Math.random()} className="p-3 hover:bg-slate-950/40 transition space-y-1">
+                      <div className="flex items-center justify-between">
+                        <span
+                          className={`px-1.5 py-0.5 rounded text-[10px] font-bold uppercase tracking-wider ${
+                            isHandover
+                              ? 'bg-emerald-950 text-emerald-300 border border-emerald-800'
+                              : isAdvanceTaken
+                              ? 'bg-amber-950 text-amber-300 border border-amber-800'
+                              : isAdvanceReturn
+                              ? 'bg-purple-950 text-purple-300 border border-purple-800'
+                              : 'bg-indigo-950 text-indigo-300 border border-indigo-800'
+                          }`}
+                        >
+                          {tx.transaction_type?.replace(/_/g, ' ')}
+                        </span>
+                        <span className="font-bold text-xs text-white">
+                          {formatCurrency(Number(tx.amount) || 0)}
+                        </span>
+                      </div>
+
+                      <div className="flex items-center justify-between text-[10px] text-slate-400 pt-0.5">
+                        <span>
+                          {tx.created_at
+                            ? new Date(tx.created_at).toLocaleDateString() + ' ' + new Date(tx.created_at).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })
+                            : 'Recent'}
+                        </span>
+                        <span className="text-slate-300 truncate max-w-[150px]">{tx.received_by || 'Admin'}</span>
+                      </div>
+
+                      {tx.notes && (
+                        <p className="text-[10px] text-slate-500 truncate pt-0.5 font-sans italic">
+                          {tx.notes}
+                        </p>
+                      )}
+                    </div>
+                  );
+                })
+              )}
+            </div>
+          </div>
+        </div>
+      )}
+
       {/* Tab 3: Quick ONT Signal Checker */}
       {activeTab === 'ont_checker' && (
         <FeatureGate
@@ -561,14 +717,19 @@ export const FieldAgentPortal: React.FC<FieldAgentPortalProps> = ({
         </FeatureGate>
       )}
 
-      {/* Tab 4: Full Area Directory */}
-      {activeTab === 'directory' && (
-        <FeatureGate
-          feature="agent_full_area_directory"
-          role="AGENT"
-          mode="banner"
-          disabledMessage="Access to the entire city area subscriber directory is restricted. You are limited to assigned recovery tickets and designated sector customers."
-        >
+      {/* Tab 4: Assigned Recovery Directory */}
+      {activeTab === 'directory' && (() => {
+        const query = dirSearchQuery.trim().toLowerCase();
+        const filteredList = (assignedInvoices || []).filter((inv) => {
+          if (!query) return true;
+          return (
+            (inv.subscriber_username || '').toLowerCase().includes(query) ||
+            (inv.invoice_no || '').toLowerCase().includes(query) ||
+            (inv.status || '').toLowerCase().includes(query)
+          );
+        });
+
+        return (
           <div className="space-y-3">
             <div className="relative">
               <Search className="w-3.5 h-3.5 text-slate-500 absolute left-3 top-3 pointer-events-none" />
@@ -576,37 +737,83 @@ export const FieldAgentPortal: React.FC<FieldAgentPortalProps> = ({
                 type="text"
                 value={dirSearchQuery}
                 onChange={(e) => setDirSearchQuery(e.target.value)}
-                placeholder="Search any subscriber across city node..."
+                placeholder="Search assigned recovery subscriber or invoice #..."
                 className="w-full bg-slate-900 border border-slate-800 rounded-xl pl-9 pr-3 py-2 text-xs text-white placeholder-slate-500 focus:outline-none focus:border-cyan-500 font-mono"
               />
             </div>
 
+            <div className="flex items-center justify-between text-slate-400 text-[11px] px-1 font-mono">
+              <span>All Assigned Recovery Invoices</span>
+              <span>{filteredList.length} Records</span>
+            </div>
+
             <div className="space-y-2">
-              {allAreaSubscribers.slice(0, 20).map((sub) => (
-                <div
-                  key={sub.id}
-                  className="bg-slate-900 border border-slate-800 rounded-xl p-3 space-y-1 font-mono text-xs"
-                >
-                  <div className="flex items-center justify-between">
-                    <span className="font-bold text-white font-sans">{sub.name}</span>
-                    <span className="text-cyan-400 text-[11px]">@{sub.pppoeUsername}</span>
-                  </div>
-                  <div className="flex items-center justify-between text-[11px] text-slate-400">
-                    <span>Node: {sub.areaNode}</span>
-                    <span>IP: {sub.assignedIp}</span>
-                  </div>
-                  <div className="flex items-center justify-between text-[10px] text-slate-500 pt-1 border-t border-slate-800">
-                    <span>Phone: {sub.phone}</span>
-                    <span className={sub.balanceDue > 0 ? 'text-rose-400 font-bold' : 'text-emerald-400'}>
-                      Due: {formatCurrency(sub.balanceDue)}
-                    </span>
-                  </div>
+              {filteredList.length === 0 ? (
+                <div className="py-8 text-center text-slate-500 font-mono text-xs bg-slate-900 border border-slate-800 rounded-xl">
+                  No assigned recovery invoices match this filter.
                 </div>
-              ))}
+              ) : (
+                filteredList.map((inv) => {
+                  const paid = Number(inv.paid_amount) || 0;
+                  const total = Number(inv.amount) || 0;
+                  const remaining = Math.max(0, total - paid);
+                  const status = (inv.status || (remaining <= 0 ? 'PAID' : 'DUE')).toUpperCase();
+
+                  return (
+                    <div
+                      key={inv.id}
+                      className="bg-slate-900 border border-slate-800 rounded-xl p-3 space-y-1.5 font-mono text-xs shadow-md"
+                    >
+                      <div className="flex items-center justify-between">
+                        <span className="font-bold text-white font-sans text-xs">
+                          @{inv.subscriber_username}
+                        </span>
+                        <span
+                          className={`px-1.5 py-0.5 rounded text-[10px] font-bold ${
+                            status === 'PAID'
+                              ? 'bg-emerald-950 text-emerald-300 border border-emerald-800'
+                              : status === 'PARTIAL'
+                              ? 'bg-amber-950 text-amber-300 border border-amber-800'
+                              : 'bg-rose-950 text-rose-300 border border-rose-800'
+                          }`}
+                        >
+                          {status}
+                        </span>
+                      </div>
+
+                      <div className="flex items-center justify-between text-[11px] text-slate-400">
+                        <span>Invoice: #{inv.invoice_no}</span>
+                        <span>Due: {inv.due_date || 'Current Cycle'}</span>
+                      </div>
+
+                      <div className="flex items-center justify-between text-[11px] pt-1 border-t border-slate-800">
+                        <span className="text-slate-400">Total: {formatCurrency(total)}</span>
+                        <span className="text-slate-400">Paid: <strong className="text-emerald-400">{formatCurrency(paid)}</strong></span>
+                        <span className={remaining > 0 ? 'text-rose-400 font-bold' : 'text-emerald-400'}>
+                          Bal: {formatCurrency(remaining)}
+                        </span>
+                      </div>
+
+                      {remaining > 0 && (
+                        <div className="pt-1">
+                          <button
+                            type="button"
+                            onClick={() => handleOpenCollectionModal(inv)}
+                            className="w-full py-1.5 rounded-lg bg-emerald-600 hover:bg-emerald-500 active:scale-98 text-slate-950 font-bold text-xs transition flex items-center justify-center gap-1.5 shadow-md shadow-emerald-950/40 cursor-pointer"
+                          >
+                            <DollarSign className="w-3.5 h-3.5" />
+                            <span>Collect Cash ({formatCurrency(remaining)})</span>
+                          </button>
+                        </div>
+                      )}
+                    </div>
+                  );
+                })
+              )}
             </div>
           </div>
-        </FeatureGate>
-      )}
+        );
+      })()}
 
       {/* Cash Collection Modal with Partial Payment Support */}
       {isCollectModalOpen && selectedInvForCollection && (() => {

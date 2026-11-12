@@ -22,6 +22,8 @@ export interface UserAccount {
   department?: string; // For Managers: NOC, Operations, Accounts, Field SLA
   cashLimit?: number; // For Agents: Cash Collection Limit in PKR
   balance?: number; // Cash in hand or user wallet balance
+  base_salary?: number; // Base monthly salary compensation
+  advance_balance?: number; // Outstanding advance salary balance
   grantClientPortal?: boolean; // For Clients: Grant Self-Service Portal Access
   sendWhatsAppNotice?: boolean;
   package_speed?: string; // Subscribed speed tier (e.g. "20 Mbps")

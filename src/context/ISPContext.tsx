@@ -736,6 +736,7 @@ export const ISPProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
             title: t.issue?.split(':')[0] || 'Technical SLA Ticket',
             description: t.issue || 'Broadband maintenance issue',
             assignedAgentId: t.assigned_agent_id || undefined,
+            assignedAgentName: t.assigned_agent_name || undefined,
             slaTargetHours: 4,
             createdAt: t.created_at || new Date().toISOString(),
             slaDeadline: new Date(new Date(t.created_at || Date.now()).getTime() + 4 * 3600 * 1000).toISOString(),
@@ -4166,6 +4167,23 @@ export const ISPProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
         ...prev,
       ]);
     }
+
+    // Direct UPDATE to Supabase tickets table
+    try {
+      supabase
+        .from('tickets')
+        .update({
+          assigned_agent_id: agentId,
+          assigned_agent_name: agent.name,
+          status: 'IN_PROGRESS',
+        })
+        .or(`id.eq.${ticketId},ticket_no.eq.${targetTicket?.ticketNumber || ticketId}`)
+        .then(({ error }) => {
+          if (error) console.warn('Supabase assign ticket notice:', error);
+        });
+    } catch (e) {
+      console.warn('Supabase assign ticket error:', e);
+    }
   };
 
   // Auto-Assign a specific ticket (e.g. on 5-min SLA timeout or explicit 1-click)
@@ -4196,6 +4214,23 @@ export const ISPProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
     setAgents((prev) =>
       prev.map((a) => (a.id === bestAgent.id ? { ...a, activeTicketsAssigned: a.activeTicketsAssigned + 1 } : a))
     );
+
+    // Direct UPDATE to Supabase tickets table
+    try {
+      supabase
+        .from('tickets')
+        .update({
+          assigned_agent_id: bestAgent.id,
+          assigned_agent_name: bestAgent.name,
+          status: 'IN_PROGRESS',
+        })
+        .or(`id.eq.${ticketId},ticket_no.eq.${targetTicket?.ticketNumber || ticketId}`)
+        .then(({ error }) => {
+          if (error) console.warn('Supabase auto-assign ticket notice:', error);
+        });
+    } catch (e) {
+      console.warn('Supabase auto-assign ticket error:', e);
+    }
 
     // Send the WhatsApp Group Broadcast!
     dispatchTicketWhatsAppGroupAlert(

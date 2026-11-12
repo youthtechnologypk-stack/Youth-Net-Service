@@ -14,9 +14,12 @@ import {
   Zap,
   Send,
   Users,
+  Edit,
 } from 'lucide-react';
 import { useISP } from '../context/ISPContext';
 import { ComplaintTicket, TicketCategory, TicketPriority } from '../types/isp';
+import { supabase, SupabasePortalUser } from '../services/supabaseClient';
+import { EditTicketModal } from './EditTicketModal';
 
 interface ComplaintsStudioProps {
   onOpenTicketModal: () => void;
@@ -40,12 +43,36 @@ export const ComplaintsStudio: React.FC<ComplaintsStudioProps> = ({
 
   const [categoryFilter, setCategoryFilter] = useState<string>('all');
   const [selectedTicketForResolve, setSelectedTicketForResolve] = useState<ComplaintTicket | null>(null);
+  const [selectedTicketForEdit, setSelectedTicketForEdit] = useState<ComplaintTicket | null>(null);
+  const [isEditModalOpen, setIsEditModalOpen] = useState<boolean>(false);
   const [resolutionText, setResolutionText] = useState('');
   const [now, setNow] = useState<number>(Date.now());
   const [engineStatusMsg, setEngineStatusMsg] = useState<string | null>(null);
   const [isRunningEngine, setIsRunningEngine] = useState<boolean>(false);
   const [pendingAgentSelection, setPendingAgentSelection] = useState<Record<string, string>>({});
   const [assignmentFeedback, setAssignmentFeedback] = useState<Record<string, string>>({});
+  const [realAgents, setRealAgents] = useState<SupabasePortalUser[]>([]);
+
+  // Fetch real technicians from Supabase portal_users
+  const fetchRealAgents = async () => {
+    try {
+      const { data } = await supabase
+        .from('portal_users')
+        .select('id, full_name, username, role, area')
+        .eq('role', 'AGENT')
+        .order('full_name', { ascending: true });
+
+      if (data) {
+        setRealAgents(data as SupabasePortalUser[]);
+      }
+    } catch (err) {
+      console.warn('ComplaintsStudio fetchRealAgents notice:', err);
+    }
+  };
+
+  useEffect(() => {
+    fetchRealAgents();
+  }, []);
 
   const handleConfirmAssignment = async (ticketId: string) => {
     const selected = pendingAgentSelection[ticketId];
@@ -53,6 +80,16 @@ export const ComplaintsStudio: React.FC<ComplaintsStudioProps> = ({
       // Auto-assign best technician
       const res = await autoAssignTicket(ticketId, 'Auto-assigned via Submit button');
       if (res) {
+        // Also ensure Supabase tickets table is updated
+        await supabase
+          .from('tickets')
+          .update({
+            assigned_agent_id: res.agent.id,
+            assigned_agent_name: res.agent.name,
+            status: 'IN_PROGRESS',
+          })
+          .or(`id.eq.${ticketId},ticket_no.eq.${ticketId}`);
+
         setAssignmentFeedback((prev) => ({
           ...prev,
           [ticketId]: `✓ Auto-assigned to ${res.agent.name} & WhatsApp Group alerted!`,
@@ -67,10 +104,22 @@ export const ComplaintsStudio: React.FC<ComplaintsStudioProps> = ({
       }
     } else {
       assignTicketToAgent(ticketId, selected);
-      const agentObj = agents.find((a) => a.id === selected);
+      const agentObj = realAgents.find((a) => a.id === selected) || agents.find((a) => a.id === selected);
+      const agentName = (agentObj as any)?.full_name || (agentObj as any)?.name || 'Technician';
+
+      // Strictly commit technician assignment to Supabase tickets table
+      await supabase
+        .from('tickets')
+        .update({
+          assigned_agent_id: selected,
+          assigned_agent_name: agentName,
+          status: 'IN_PROGRESS',
+        })
+        .or(`id.eq.${ticketId},ticket_no.eq.${ticketId}`);
+
       setAssignmentFeedback((prev) => ({
         ...prev,
-        [ticketId]: `✓ Assigned to ${agentObj?.name || 'Technician'} & WhatsApp sent!`,
+        [ticketId]: `✓ Assigned to ${agentName} & Supabase synced!`,
       }));
       setTimeout(() => {
         setAssignmentFeedback((prev) => {
@@ -517,12 +566,18 @@ export const ComplaintsStudio: React.FC<ComplaintsStudioProps> = ({
                         >
                           <option value="">-- Select Field Technician --</option>
                           <option value="AUTO">⚡ Auto-Assign Best Technician (Area/Load Match)</option>
-                          <optgroup label="Or Specific Technician:">
-                            {agents.map((agent) => (
-                              <option key={agent.id} value={agent.id}>
-                                👤 {agent.name} ({agent.assignedArea}) - {agent.activeTicketsAssigned} active
-                              </option>
-                            ))}
+                          <optgroup label="Available Field Technicians:">
+                            {realAgents.length > 0
+                              ? realAgents.map((ag) => (
+                                  <option key={ag.id} value={ag.id}>
+                                    👤 {ag.full_name} ({ag.area || 'Node'})
+                                  </option>
+                                ))
+                              : agents.map((agent) => (
+                                  <option key={agent.id} value={agent.id}>
+                                    👤 {agent.name} ({agent.assignedArea})
+                                  </option>
+                                ))}
                           </optgroup>
                         </select>
 
@@ -565,18 +620,33 @@ export const ComplaintsStudio: React.FC<ComplaintsStudioProps> = ({
                   Reported: {new Date(ticket.createdAt).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}
                 </span>
 
-                {!isResolved ? (
+                <div className="flex items-center gap-2">
                   <button
-                    onClick={() => setSelectedTicketForResolve(ticket)}
-                    className="bg-emerald-600 hover:bg-emerald-500 text-slate-950 font-bold text-xs px-3 py-1.5 rounded transition shadow-sm"
+                    type="button"
+                    onClick={() => {
+                      setSelectedTicketForEdit(ticket);
+                      setIsEditModalOpen(true);
+                    }}
+                    className="flex items-center gap-1 bg-slate-800 hover:bg-slate-700 text-slate-200 border border-slate-700 text-xs px-2.5 py-1.5 rounded transition cursor-pointer"
+                    title="Edit Ticket Details & Technician"
                   >
-                    Mark Resolved
+                    <Edit className="w-3.5 h-3.5 text-cyan-400" />
+                    <span>Edit</span>
                   </button>
-                ) : (
-                  <span className="text-emerald-400 text-xs flex items-center gap-1 font-semibold">
-                    <CheckCircle2 className="w-3.5 h-3.5" /> Ticket Closed
-                  </span>
-                )}
+
+                  {!isResolved ? (
+                    <button
+                      onClick={() => setSelectedTicketForResolve(ticket)}
+                      className="bg-emerald-600 hover:bg-emerald-500 text-slate-950 font-bold text-xs px-3 py-1.5 rounded transition shadow-sm cursor-pointer"
+                    >
+                      Mark Resolved
+                    </button>
+                  ) : (
+                    <span className="text-emerald-400 text-xs flex items-center gap-1 font-semibold">
+                      <CheckCircle2 className="w-3.5 h-3.5" /> Ticket Closed
+                    </span>
+                  )}
+                </div>
               </div>
             </div>
           );
@@ -641,6 +711,19 @@ export const ComplaintsStudio: React.FC<ComplaintsStudioProps> = ({
           </div>
         </div>
       )}
+
+      {/* Edit Ticket Modal */}
+      <EditTicketModal
+        ticket={selectedTicketForEdit}
+        isOpen={isEditModalOpen}
+        onClose={() => {
+          setIsEditModalOpen(false);
+          setSelectedTicketForEdit(null);
+        }}
+        onTicketUpdated={() => {
+          fetchRealAgents();
+        }}
+      />
     </div>
   );
 };

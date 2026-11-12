@@ -152,12 +152,12 @@ export const AgentProfileView: React.FC<AgentProfileViewProps> = ({
 
       setCollections(txns);
 
-      // 1.3 Fetch handover & settlement ledger from agent_cash_transactions
+      // 1.3 Fetch handover & settlement ledger from agent_cash_transactions strictly by agent_id
       let cashRecords: SupabaseAgentCashTransaction[] = [];
       const { data: cashData } = await supabase
         .from('agent_cash_transactions')
         .select('*')
-        .or(`agent_id.eq.${userData.id},agent_username.eq.${userData.username}`)
+        .eq('agent_id', userData.id)
         .order('created_at', { ascending: false });
 
       if (cashData) {
@@ -165,27 +165,45 @@ export const AgentProfileView: React.FC<AgentProfileViewProps> = ({
         setCashTransactions(cashRecords);
       }
 
-      // Reconcile and calculate Cash in Hand (Collections minus Handovers)
-      const calculatedCollections = txns.reduce((sum, item) => sum + (Number(item.amount_paid) || 0), 0);
+      // Accounting Math
+      const totalCollected = txns.reduce((sum, item) => sum + (Number(item.amount_paid) || 0), 0);
       const totalHandedOver = cashRecords
-        .filter((t) => (t.transaction_type || '').toUpperCase() === 'HANDOVER')
+        .filter((t) => {
+          const type = (t.transaction_type || '').toUpperCase();
+          return type === 'CASH_HANDOVER' || type === 'HANDOVER';
+        })
         .reduce((sum, item) => sum + (Number(item.amount) || 0), 0);
 
-      const netPendingCash = Math.max(0, calculatedCollections - totalHandedOver);
-      const finalCashInHand = (userData.cash_in_hand && userData.cash_in_hand > 0)
-        ? userData.cash_in_hand
-        : netPendingCash;
+      const actualCashInHand = Math.max(0, totalCollected - totalHandedOver);
 
-      if ((!userData.cash_in_hand || userData.cash_in_hand === 0) && netPendingCash > 0) {
+      const totalAdvanceTaken = cashRecords
+        .filter((t) => (t.transaction_type || '').toUpperCase() === 'ADVANCE_TAKEN')
+        .reduce((sum, item) => sum + (Number(item.amount) || 0), 0);
+
+      const totalAdvanceReturned = cashRecords
+        .filter((t) => {
+          const type = (t.transaction_type || '').toUpperCase();
+          return type === 'ADVANCE_RETURN' || type === 'ADVANCE_DEDUCTION';
+        })
+        .reduce((sum, item) => sum + (Number(item.amount) || 0), 0);
+
+      const actualAdvanceBalance = Math.max(0, totalAdvanceTaken - totalAdvanceReturned);
+
+      // Reconcile portal_users in Supabase if calculated values differ
+      if (userData.cash_in_hand !== actualCashInHand || userData.advance_balance !== actualAdvanceBalance) {
         await supabase
           .from('portal_users')
-          .update({ cash_in_hand: netPendingCash })
+          .update({
+            cash_in_hand: actualCashInHand,
+            advance_balance: actualAdvanceBalance,
+          })
           .eq('id', userData.id);
-        userData.cash_in_hand = netPendingCash;
+        userData.cash_in_hand = actualCashInHand;
+        userData.advance_balance = actualAdvanceBalance;
       }
 
-      setAgent({ ...userData, cash_in_hand: finalCashInHand });
-      setHandoverAmount(String(finalCashInHand));
+      setAgent({ ...userData, cash_in_hand: actualCashInHand, advance_balance: actualAdvanceBalance });
+      setHandoverAmount(String(actualCashInHand));
       setSalaryPayoutAmount(String(userData.base_salary || 35000));
     } catch (err) {
       console.error('Error fetching agent profile:', err);
@@ -254,7 +272,6 @@ export const AgentProfileView: React.FC<AgentProfileViewProps> = ({
         {
           agent_id: agent.id,
           agent_name: agent.full_name,
-          agent_username: agent.username,
           amount: amountNum,
           transaction_type: 'CASH_HANDOVER',
           received_by: handoverReceivedBy || 'Admin',
@@ -263,7 +280,7 @@ export const AgentProfileView: React.FC<AgentProfileViewProps> = ({
         },
       ]);
 
-      if (txError) console.warn('agent_cash_transactions notice:', txError);
+      if (txError) throw txError;
 
       showToast(`Successfully received ${formatCurrency(amountNum)} cash handover from @${agent.username}.`);
       setIsHandoverModalOpen(false);
@@ -299,11 +316,10 @@ export const AgentProfileView: React.FC<AgentProfileViewProps> = ({
       if (updateError) throw updateError;
 
       // 2. Insert into agent_cash_transactions
-      await supabase.from('agent_cash_transactions').insert([
+      const { error: txError } = await supabase.from('agent_cash_transactions').insert([
         {
           agent_id: agent.id,
           agent_name: agent.full_name,
-          agent_username: agent.username,
           amount: amountNum,
           transaction_type: 'ADVANCE_TAKEN',
           received_by: agent.full_name,
@@ -311,6 +327,8 @@ export const AgentProfileView: React.FC<AgentProfileViewProps> = ({
           created_at: new Date().toISOString(),
         },
       ]);
+
+      if (txError) throw txError;
 
       showToast(`Issued ${formatCurrency(amountNum)} advance to @${agent.username}.`);
       setIsAdvanceModalOpen(false);
@@ -347,11 +365,10 @@ export const AgentProfileView: React.FC<AgentProfileViewProps> = ({
       if (updateError) throw updateError;
 
       // 2. Insert into agent_cash_transactions
-      await supabase.from('agent_cash_transactions').insert([
+      const { error: txError } = await supabase.from('agent_cash_transactions').insert([
         {
           agent_id: agent.id,
           agent_name: agent.full_name,
-          agent_username: agent.username,
           amount: amountNum,
           transaction_type: 'ADVANCE_RETURN',
           received_by: 'Admin / Accounts',
@@ -359,6 +376,8 @@ export const AgentProfileView: React.FC<AgentProfileViewProps> = ({
           created_at: new Date().toISOString(),
         },
       ]);
+
+      if (txError) throw txError;
 
       showToast(`Recorded ${formatCurrency(amountNum)} advance deduction for @${agent.username}.`);
       setIsAdvanceReturnModalOpen(false);
@@ -385,11 +404,10 @@ export const AgentProfileView: React.FC<AgentProfileViewProps> = ({
     setIsSubmitting(true);
     try {
       // Record transaction
-      await supabase.from('agent_cash_transactions').insert([
+      const { error: txError } = await supabase.from('agent_cash_transactions').insert([
         {
           agent_id: agent.id,
           agent_name: agent.full_name,
-          agent_username: agent.username,
           amount: amountNum,
           transaction_type: 'SALARY_PAYOUT',
           received_by: agent.full_name,
@@ -397,6 +415,8 @@ export const AgentProfileView: React.FC<AgentProfileViewProps> = ({
           created_at: new Date().toISOString(),
         },
       ]);
+
+      if (txError) throw txError;
 
       showToast(`Salary of ${formatCurrency(amountNum)} disbursed to @${agent.username}.`);
       setIsSalaryPayoutModalOpen(false);
