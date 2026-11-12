@@ -97,60 +97,67 @@ export const ManagerOperationsDashboard: React.FC<ManagerOperationsDashboardProp
     setTimeout(() => setToastNotice(null), 4000);
   };
 
+  const cleanSector = (sectorFilter || '').toLowerCase();
+  const cleanSearchSub = (searchSubscriber || '').toLowerCase();
+
   // Sector-scoped datasets
-  const scopedOutages = outages.filter((o) =>
-    sectorFilter === 'ALL' ? true : o.areaNode.toLowerCase().includes(sectorFilter.toLowerCase())
+  const scopedOutages = (outages || []).filter((o) =>
+    sectorFilter === 'ALL' ? true : (o?.areaNode || '').toLowerCase().includes(cleanSector)
   );
 
-  const scopedComplaints = complaints.filter((c) =>
+  const scopedComplaints = (complaints || []).filter((c) =>
     sectorFilter === 'ALL'
       ? true
-      : (c.areaNode && c.areaNode.toLowerCase().includes(sectorFilter.toLowerCase())) ||
-        (c.customerAddress && c.customerAddress.toLowerCase().includes(sectorFilter.toLowerCase()))
+      : ((c?.areaNode || '').toLowerCase().includes(cleanSector)) ||
+        ((c?.customerAddress || '').toLowerCase().includes(cleanSector))
   );
 
-  const scopedCustomers = customers.filter((c) =>
+  const scopedCustomers = (customers || []).filter((c) =>
     sectorFilter === 'ALL'
       ? true
-      : c.areaNode && c.areaNode.toLowerCase().includes(sectorFilter.toLowerCase())
+      : (c?.areaNode || '').toLowerCase().includes(cleanSector)
   );
 
-  const scopedAgents = agents.filter((a) =>
+  const scopedAgents = (agents || []).filter((a) =>
     sectorFilter === 'ALL'
       ? true
-      : a.assignedArea && a.assignedArea.toLowerCase().includes(sectorFilter.toLowerCase())
+      : (a?.assignedArea || '').toLowerCase().includes(cleanSector)
   );
 
   // Critical metrics for Manager
-  const activeOutages = scopedOutages.filter((o) => o.status !== 'resolved');
-  const openComplaints = scopedComplaints.filter((c) => c.status !== 'resolved');
-  const totalAgentCashInHand = scopedAgents.reduce((acc, a) => acc + (a.cashInHand || 0), 0);
-  const totalCollectedToday = scopedAgents.reduce((acc, a) => acc + (a.totalCollectedToday || 0), 0);
+  const activeOutages = scopedOutages.filter((o) => (o?.status || '').toLowerCase() !== 'resolved');
+  const openComplaints = scopedComplaints.filter((c) => (c?.status || '').toLowerCase() !== 'resolved');
+  const totalAgentCashInHand = scopedAgents.reduce((acc, a) => acc + (a?.cashInHand || 0), 0);
+  const totalCollectedToday = scopedAgents.reduce((acc, a) => acc + (a?.totalCollectedToday || 0), 0);
 
   const filteredTickets = scopedComplaints.filter((c) => {
-    if (ticketFilter === 'open') return c.status !== 'resolved';
-    if (ticketFilter === 'critical') return c.priority === 'critical' && c.status !== 'resolved';
+    const statusClean = (c?.status || '').toLowerCase();
+    const priorityClean = (c?.priority || '').toLowerCase();
+    if (ticketFilter === 'open') return statusClean !== 'resolved';
+    if (ticketFilter === 'critical') return priorityClean === 'critical' && statusClean !== 'resolved';
     return true;
   });
 
   const filteredSubscribers = scopedCustomers.filter(
     (c) =>
-      c.name.toLowerCase().includes(searchSubscriber.toLowerCase()) ||
-      c.pppoeUsername.toLowerCase().includes(searchSubscriber.toLowerCase()) ||
-      c.accountNumber.toLowerCase().includes(searchSubscriber.toLowerCase()) ||
-      c.phone.includes(searchSubscriber)
+      !cleanSearchSub ||
+      (c?.name || '').toLowerCase().includes(cleanSearchSub) ||
+      (c?.pppoeUsername || '').toLowerCase().includes(cleanSearchSub) ||
+      (c?.accountNumber || '').toLowerCase().includes(cleanSearchSub) ||
+      (c?.phone || '').includes(searchSubscriber || '')
   );
 
   // Handle active session kick
   const handleKickUserSession = async (cust: Customer) => {
-    const session = activeSessions.find(
-      (s) => s.username.toLowerCase() === cust.pppoeUsername.toLowerCase()
+    const custUsername = (cust?.pppoeUsername || '').toLowerCase();
+    const session = (activeSessions || []).find(
+      (s) => (s?.username || '').toLowerCase() === custUsername
     );
     if (session) {
       await kickSession(session.id);
-      showToast(`Terminated active PPPoE session for @${cust.pppoeUsername} on RouterOS.`);
+      showToast(`Terminated active PPPoE session for @${cust?.pppoeUsername} on RouterOS.`);
     } else {
-      showToast(`No active online session found on RouterOS for @${cust.pppoeUsername}.`);
+      showToast(`No active online session found on RouterOS for @${cust?.pppoeUsername}.`);
     }
   };
 
@@ -588,8 +595,9 @@ export const ManagerOperationsDashboard: React.FC<ManagerOperationsDashboardProp
               </thead>
               <tbody className="divide-y divide-slate-800/60">
                 {filteredSubscribers.slice(0, 15).map((cust) => {
-                  const isOnline = activeSessions.some(
-                    (s) => s.username.toLowerCase() === cust.pppoeUsername.toLowerCase()
+                  const custUsername = (cust?.pppoeUsername || '').toLowerCase();
+                  const isOnline = (activeSessions || []).some(
+                    (s) => (s?.username || '').toLowerCase() === custUsername
                   );
 
                   return (

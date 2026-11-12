@@ -79,36 +79,36 @@ export const GlobalSearchBar: React.FC<GlobalSearchBarProps> = ({
   const cleanQ = query.trim().toLowerCase();
 
   const matchingCustomers: Customer[] = cleanQ
-    ? customers.filter((c) => {
+    ? (customers || []).filter((c) => {
         return (
-          c.name.toLowerCase().includes(cleanQ) ||
-          c.assignedIp.toLowerCase().includes(cleanQ) ||
-          c.pppoeUsername.toLowerCase().includes(cleanQ) ||
-          c.accountNumber.toLowerCase().includes(cleanQ) ||
-          c.phone.toLowerCase().includes(cleanQ) ||
-          c.macAddress.toLowerCase().includes(cleanQ) ||
-          c.areaNode.toLowerCase().includes(cleanQ)
+          (c?.name || '').toLowerCase().includes(cleanQ) ||
+          (c?.assignedIp || '').toLowerCase().includes(cleanQ) ||
+          (c?.pppoeUsername || '').toLowerCase().includes(cleanQ) ||
+          (c?.accountNumber || '').toLowerCase().includes(cleanQ) ||
+          (c?.phone || '').toLowerCase().includes(cleanQ) ||
+          (c?.macAddress || '').toLowerCase().includes(cleanQ) ||
+          (c?.areaNode || '').toLowerCase().includes(cleanQ)
         );
       })
     : [];
 
   const matchingInvoices: Invoice[] = cleanQ
-    ? invoices.filter((inv) => {
+    ? (invoices || []).filter((inv) => {
         return (
-          inv.invoiceNumber.toLowerCase().includes(cleanQ) ||
-          inv.customerName.toLowerCase().includes(cleanQ) ||
-          inv.billingMonth.toLowerCase().includes(cleanQ) ||
-          (inv.receiptNumber && inv.receiptNumber.toLowerCase().includes(cleanQ))
+          (inv?.invoiceNumber || (inv as any)?.invoice_no || '').toLowerCase().includes(cleanQ) ||
+          (inv?.customerName || (inv as any)?.subscriber_username || '').toLowerCase().includes(cleanQ) ||
+          (inv?.billingMonth || '').toLowerCase().includes(cleanQ) ||
+          Boolean(inv?.receiptNumber && (inv.receiptNumber || '').toLowerCase().includes(cleanQ))
         );
       })
     : [];
 
   const matchingSessions: ActiveSession[] = cleanQ
-    ? activeSessions.filter((s) => {
+    ? (activeSessions || []).filter((s) => {
         return (
-          s.username.toLowerCase().includes(cleanQ) ||
-          s.address.toLowerCase().includes(cleanQ) ||
-          s.callerId.toLowerCase().includes(cleanQ)
+          (s?.username || '').toLowerCase().includes(cleanQ) ||
+          (s?.address || '').toLowerCase().includes(cleanQ) ||
+          (s?.callerId || '').toLowerCase().includes(cleanQ)
         );
       })
     : [];

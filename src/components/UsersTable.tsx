@@ -126,21 +126,21 @@ export const UsersTable: React.FC<UsersTableProps> = ({
           if (payload.eventType === 'INSERT') {
             setUsers((prev) => {
               const newRow = payload.new as PortalUserRow;
-              const exists = prev.some((u) => u.id === newRow.id || u.username?.toLowerCase() === newRow.username?.toLowerCase());
+              const exists = prev.some((u) => u.id === newRow?.id || (u?.username || '').toLowerCase() === (newRow?.username || '').toLowerCase());
               if (exists) {
-                return prev.map((u) => (u.id === newRow.id ? newRow : u));
+                return prev.map((u) => (u.id === newRow?.id ? newRow : u));
               }
               return [newRow, ...prev];
             });
           } else if (payload.eventType === 'UPDATE') {
             setUsers((prev) => {
               const updatedRow = payload.new as PortalUserRow;
-              return prev.map((u) => (u.id === updatedRow.id ? updatedRow : u));
+              return prev.map((u) => (u.id === updatedRow?.id ? updatedRow : u));
             });
           } else if (payload.eventType === 'DELETE') {
             setUsers((prev) => {
               const deletedRow = payload.old as { id: string };
-              return prev.filter((u) => u.id !== deletedRow.id);
+              return prev.filter((u) => u.id !== deletedRow?.id);
             });
           }
         }
@@ -153,23 +153,24 @@ export const UsersTable: React.FC<UsersTableProps> = ({
   }, [fetchUsers, refreshTrigger]);
 
   // 4. Strict Filter Evaluation
-  const filteredUsers = users.filter((u) => {
+  const cleanSearch = (searchQuery || '').trim().toLowerCase();
+  const filteredUsers = (users || []).filter((u) => {
     // Search filter
-    const displayName = u.full_name || u.fullName || u.displayName || '';
-    const username = u.username || '';
-    const phone = u.phone || '';
+    const displayName = (u?.full_name || u?.fullName || u?.displayName || '').toLowerCase();
+    const username = (u?.username || '').toLowerCase();
+    const phone = u?.phone || '';
 
     const matchesSearch =
-      !searchQuery ||
-      displayName.toLowerCase().includes(searchQuery.toLowerCase()) ||
-      username.toLowerCase().includes(searchQuery.toLowerCase()) ||
-      phone.includes(searchQuery);
+      !cleanSearch ||
+      displayName.includes(cleanSearch) ||
+      username.includes(cleanSearch) ||
+      phone.includes(cleanSearch);
 
     // Strict Role filter (exact match)
-    const userRole = (u.role || '').toUpperCase();
+    const userRole = (u?.role || '').toUpperCase();
     const matchesRole =
       activeTab === 'ALL' ||
-      userRole === activeTab.toUpperCase();
+      userRole === (activeTab || '').toUpperCase();
 
     return matchesSearch && matchesRole;
   });

@@ -155,7 +155,7 @@ export const UserAccountsView: React.FC<UserAccountsViewProps> = ({
       await supabase.from('portal_users').upsert([
         {
           id: newUser.id,
-          username: newUser.username.trim().toLowerCase(),
+          username: (newUser.username || '').trim().toLowerCase(),
           full_name: newUser.fullName,
           phone: newUser.phone,
           role: newUser.role,

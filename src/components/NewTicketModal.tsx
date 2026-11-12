@@ -81,8 +81,8 @@ export const NewTicketModal: React.FC<CreateTicketModalProps> = ({
       setIsSubmitting(false);
 
       if (defaultSubscriberUsername && unifiedSubscribers.length > 0) {
-        const found = unifiedSubscribers.find(
-          (s) => s.username.toLowerCase() === defaultSubscriberUsername.toLowerCase()
+        const found = (unifiedSubscribers || []).find(
+          (s) => (s?.username || '').toLowerCase() === (defaultSubscriberUsername || '').toLowerCase()
         );
         if (found) {
           handleSelectSubscriber(found);
@@ -109,15 +109,15 @@ export const NewTicketModal: React.FC<CreateTicketModalProps> = ({
 
   // Filtered subscribers list
   const filteredSubscribers = useMemo(() => {
-    if (!searchQuery.trim()) return unifiedSubscribers.slice(0, 30);
+    if (!searchQuery.trim()) return (unifiedSubscribers || []).slice(0, 30);
     const q = searchQuery.toLowerCase().trim();
-    return unifiedSubscribers.filter(
+    return (unifiedSubscribers || []).filter(
       (s) =>
-        s.username.toLowerCase().includes(q) ||
-        s.fullName.toLowerCase().includes(q) ||
-        s.phone.toLowerCase().includes(q) ||
-        s.assignedIp.toLowerCase().includes(q) ||
-        s.macAddress.toLowerCase().includes(q)
+        (s?.username || '').toLowerCase().includes(q) ||
+        (s?.fullName || '').toLowerCase().includes(q) ||
+        (s?.phone || '').toLowerCase().includes(q) ||
+        (s?.assignedIp || '').toLowerCase().includes(q) ||
+        (s?.macAddress || '').toLowerCase().includes(q)
     ).slice(0, 30);
   }, [unifiedSubscribers, searchQuery]);
 

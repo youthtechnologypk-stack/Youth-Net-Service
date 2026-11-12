@@ -93,31 +93,32 @@ export const ActivityLogsStudio: React.FC = () => {
       if (searchQuery.trim()) {
         const q = searchQuery.trim().toLowerCase();
         const matches =
-          log.actionTitle.toLowerCase().includes(q) ||
-          log.actionType.toLowerCase().includes(q) ||
-          log.actor.toLowerCase().includes(q) ||
-          (log.target && log.target.toLowerCase().includes(q)) ||
-          (log.ipAddress && log.ipAddress.includes(q)) ||
-          (log.details && log.details.toLowerCase().includes(q));
+          (log?.actionTitle || '').toLowerCase().includes(q) ||
+          (log?.actionType || '').toLowerCase().includes(q) ||
+          (log?.actor || '').toLowerCase().includes(q) ||
+          Boolean(log?.target && (log.target || '').toLowerCase().includes(q)) ||
+          Boolean(log?.ipAddress && log.ipAddress.includes(q)) ||
+          Boolean(log?.details && (log.details || '').toLowerCase().includes(q));
         if (!matches) return false;
       }
 
       // 2. Action Category Filter
       if (selectedCategory !== 'ALL') {
-        if (selectedCategory === 'AUTH' && !log.actionType.startsWith('AUTH_')) return false;
-        if (selectedCategory === 'SUBSCRIBER' && !log.actionType.startsWith('SUBSCRIBER_') && !log.actionType.includes('SESSION')) return false;
-        if (selectedCategory === 'BILLING' && !log.actionType.startsWith('BILLING_')) return false;
-        if (selectedCategory === 'ROUTER' && !log.actionType.startsWith('ROUTER_') && !log.actionType.includes('WALLED')) return false;
-        if (selectedCategory === 'SECURITY' && log.actionType !== 'SECURITY_ALERT') return false;
+        const actionType = log?.actionType || '';
+        if (selectedCategory === 'AUTH' && !actionType.startsWith('AUTH_')) return false;
+        if (selectedCategory === 'SUBSCRIBER' && !actionType.startsWith('SUBSCRIBER_') && !actionType.includes('SESSION')) return false;
+        if (selectedCategory === 'BILLING' && !actionType.startsWith('BILLING_')) return false;
+        if (selectedCategory === 'ROUTER' && !actionType.startsWith('ROUTER_') && !actionType.includes('WALLED')) return false;
+        if (selectedCategory === 'SECURITY' && actionType !== 'SECURITY_ALERT') return false;
       }
 
       // 3. Severity Filter
-      if (selectedSeverity !== 'ALL' && log.severity !== selectedSeverity) {
+      if (selectedSeverity !== 'ALL' && log?.severity !== selectedSeverity) {
         return false;
       }
 
       // 4. Actor Filter
-      if (selectedActor !== 'ALL' && log.actor.toLowerCase() !== selectedActor.toLowerCase()) {
+      if (selectedActor !== 'ALL' && (log?.actor || '').toLowerCase() !== (selectedActor || '').toLowerCase()) {
         return false;
       }
 

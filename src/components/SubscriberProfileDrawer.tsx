@@ -230,10 +230,11 @@ export const SubscriberProfileDrawer: React.FC<SubscriberProfileDrawerProps> = (
   }, [isOpen, username]);
 
   // Find customer in context or fallback to server360Data
+  // Find customer in context or fallback to server360Data
   const customer: Customer | null = useMemo(() => {
     if (!username) return null;
-    const cleanUser = username.trim().toLowerCase();
-    const found = customers.find((c) => c.pppoeUsername.toLowerCase() === cleanUser);
+    const cleanUser = (username || '').trim().toLowerCase();
+    const found = (customers || []).find((c) => (c?.pppoeUsername || '').toLowerCase() === cleanUser);
     if (found) return found;
 
     if (server360Data?.customer) {
@@ -246,8 +247,8 @@ export const SubscriberProfileDrawer: React.FC<SubscriberProfileDrawerProps> = (
   // Find live session in context or activeSessions
   const liveSession: ActiveSession | null = useMemo(() => {
     if (!username) return null;
-    const cleanUser = username.trim().toLowerCase();
-    return activeSessions.find((s) => s.username.toLowerCase() === cleanUser) || null;
+    const cleanUser = (username || '').trim().toLowerCase();
+    return (activeSessions || []).find((s) => (s?.username || '').toLowerCase() === cleanUser) || null;
   }, [activeSessions, username]);
 
   // Is subscriber currently online
@@ -257,14 +258,15 @@ export const SubscriberProfileDrawer: React.FC<SubscriberProfileDrawerProps> = (
   const subscriberPackage: InternetPackage | null = useMemo(() => {
     if (customer?.package) return customer.package;
     if (customer?.packageId) {
-      const match = packages.find((p) => p.id === customer.packageId);
+      const match = (packages || []).find((p) => p.id === customer.packageId);
       if (match) return match;
     }
     if (liveSession?.profileName) {
-      const match = packages.find(
+      const liveProfLower = (liveSession.profileName || '').toLowerCase();
+      const match = (packages || []).find(
         (p) =>
-          p.mikrotikProfile.toLowerCase() === liveSession.profileName.toLowerCase() ||
-          p.name.toLowerCase().includes(liveSession.profileName.toLowerCase())
+          (p?.mikrotikProfile || '').toLowerCase() === liveProfLower ||
+          (p?.name || '').toLowerCase().includes(liveProfLower)
       );
       if (match) return match;
     }
@@ -273,7 +275,8 @@ export const SubscriberProfileDrawer: React.FC<SubscriberProfileDrawerProps> = (
 
   // Invoices for this subscriber (Context + Centralized Storage Engine)
   const subscriberInvoices: Invoice[] = useMemo(() => {
-    const cleanUser = (username || '').toLowerCase();
+    const cleanUser = (username || '').trim().toLowerCase();
+    const custNameLower = (customer?.name || '').toLowerCase();
     const stored = storageService.getInvoicesBySubscriber(cleanUser).map((si) => ({
       id: si.id,
       invoiceNumber: si.invoiceNo,
@@ -282,7 +285,7 @@ export const SubscriberProfileDrawer: React.FC<SubscriberProfileDrawerProps> = (
       customerPhone: customer?.phone || '+92 300 0000000',
       packageId: customer?.packageId || 'pkg-1',
       packageName: subscriberPackage?.name || 'Broadband Fiber',
-      billingMonth: new Date(si.createdDate).toLocaleDateString('en-US', { month: 'long', year: 'numeric' }),
+      billingMonth: si.createdDate ? new Date(si.createdDate).toLocaleDateString('en-US', { month: 'long', year: 'numeric' }) : 'Current Month',
       baseAmount: si.subtotal || si.amount,
       taxAmount: si.taxAmount || 0,
       discountAmount: 0,
@@ -293,13 +296,16 @@ export const SubscriberProfileDrawer: React.FC<SubscriberProfileDrawerProps> = (
       receiptNumber: si.receiptNumber,
     } as Invoice));
 
-    const matched = invoices.filter(
-      (inv) =>
-        (customer && inv.customerId === customer.id) ||
-        inv.invoiceNumber.toLowerCase().includes(cleanUser) ||
-        (customer?.name && inv.customerName.toLowerCase() === customer.name.toLowerCase()) ||
-        (customer?.phone && inv.customerPhone === customer.phone)
-    );
+    const matched = (invoices || []).filter((inv) => {
+      const invNum = (inv?.invoiceNumber || (inv as any)?.invoice_no || '').toLowerCase();
+      const invCustName = (inv?.customerName || (inv as any)?.subscriber_username || '').toLowerCase();
+      return (
+        Boolean(customer?.id && inv?.customerId === customer.id) ||
+        (cleanUser && invNum.includes(cleanUser)) ||
+        Boolean(custNameLower && invCustName === custNameLower) ||
+        Boolean(customer?.phone && inv?.customerPhone === customer.phone)
+      );
+    });
 
     const merged = [...matched];
     stored.forEach((st) => {
@@ -317,7 +323,8 @@ export const SubscriberProfileDrawer: React.FC<SubscriberProfileDrawerProps> = (
 
   // Complaints for this subscriber (Context + Centralized Storage Engine)
   const subscriberComplaints: ComplaintTicket[] = useMemo(() => {
-    const cleanUser = (username || '').toLowerCase();
+    const cleanUser = (username || '').trim().toLowerCase();
+    const custNameLower = (customer?.name || '').toLowerCase();
     const stored = storageService.getTicketsBySubscriber(cleanUser).map((st) => ({
       id: st.id,
       ticketNumber: st.ticketNo,
@@ -327,18 +334,20 @@ export const SubscriberProfileDrawer: React.FC<SubscriberProfileDrawerProps> = (
       title: st.issue,
       description: st.issue,
       category: 'fiber_cut' as any,
-      priority: st.priority.toLowerCase() as any,
+      priority: (st.priority || 'medium').toLowerCase() as any,
       status: st.status === 'RESOLVED' ? 'resolved' : 'open',
       assignedTo: 'Area Field Technician',
       createdAt: st.createdAt,
     } as unknown as ComplaintTicket));
 
-    const matched = complaints.filter(
-      (cmp) =>
-        (customer && cmp.customerId === customer.id) ||
-        (customer?.name && cmp.customerName.toLowerCase() === customer.name.toLowerCase()) ||
-        (customer?.phone && cmp.customerPhone === customer.phone)
-    );
+    const matched = (complaints || []).filter((cmp) => {
+      const cmpCustName = (cmp?.customerName || '').toLowerCase();
+      return (
+        Boolean(customer?.id && cmp?.customerId === customer.id) ||
+        Boolean(custNameLower && cmpCustName === custNameLower) ||
+        Boolean(customer?.phone && cmp?.customerPhone === customer.phone)
+      );
+    });
 
     const merged = [...matched];
     stored.forEach((st) => {
@@ -1378,7 +1387,7 @@ export const SubscriberProfileDrawer: React.FC<SubscriberProfileDrawerProps> = (
                               type="button"
                               onClick={() => {
                                 const cleanPhone = (customer?.phone || '').replace(/[^0-9]/g, '');
-                                const text = `*YOUTH NET ISP - BILLING STATEMENT*\n\nDear *${customer?.name || username}*,\nInvoice: *${inv.invoiceNumber}*\nMonth: ${inv.billingMonth}\nAmount: *Rs. ${Number(inv.totalAmount).toLocaleString()}*\nDue Date: ${inv.dueDate}\nStatus: *${inv.status.toUpperCase()}*\n\nPlease settle your bill before due date to prevent automated RouterOS service suspension.\nThank you!`;
+                                const text = `*YOUTH NET ISP - BILLING STATEMENT*\n\nDear *${customer?.name || username}*,\nInvoice: *${inv?.invoiceNumber || (inv as any)?.invoice_no || 'N/A'}*\nMonth: ${inv?.billingMonth || 'Current'}\nAmount: *Rs. ${Number(inv?.totalAmount || (inv as any)?.amount || 0).toLocaleString()}*\nDue Date: ${inv?.dueDate || 'N/A'}\nStatus: *${(inv?.status || '').toUpperCase()}*\n\nPlease settle your bill before due date to prevent automated RouterOS service suspension.\nThank you!`;
                                 window.open(`https://wa.me/${cleanPhone || '923001234567'}?text=${encodeURIComponent(text)}`, '_blank');
                               }}
                               title="Send WhatsApp Invoice Notice"

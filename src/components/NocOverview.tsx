@@ -88,28 +88,43 @@ export const NocOverview: React.FC<NocOverviewProps> = ({
     };
   }, [currentRouter]);
 
-  const activeCount = activeSessions ? activeSessions.length : 0;
+  const safeInvoices = Array.isArray(invoices) ? invoices : [];
+  const safeComplaints = Array.isArray(complaints) ? complaints : [];
+  const safeSessions = Array.isArray(activeSessions) ? activeSessions : [];
+  const safeCustomers = Array.isArray(customers) ? customers : [];
+  const safeSecrets = Array.isArray(provisionedSecrets) ? provisionedSecrets : [];
+  const safeOnus = Array.isArray(onus) ? onus : [];
+  const safeOlts = Array.isArray(olts) ? olts : [];
+  const safeWhatsAppLogs = Array.isArray(whatsAppLogs) ? whatsAppLogs : [];
+
+  const activeCount = safeSessions.length;
   const totalSubscribersCount =
-    provisionedSecrets && provisionedSecrets.length > 0
-      ? provisionedSecrets.length
+    safeSecrets.length > 0
+      ? safeSecrets.length
       : provisionedSecretsCount > 0
       ? provisionedSecretsCount
-      : customers && customers.length > 0
-      ? customers.length
+      : safeCustomers.length > 0
+      ? safeCustomers.length
       : activeCount;
   const offlineCount = Math.max(0, totalSubscribersCount - activeCount);
-  const totalDueAmount = invoices
-    .filter((i) => i.status !== 'paid')
-    .reduce((sum, i) => sum + (Number(i.totalAmount) || 0), 0);
 
-  const totalMonthlyBilled = invoices.reduce((sum, i) => sum + (Number(i.totalAmount) || 0), 0);
+  const totalDueAmount = safeInvoices
+    .filter((i) => (i?.status || '').toLowerCase() !== 'paid')
+    .reduce((sum, i) => sum + (Number(i?.totalAmount || (i as any)?.amount) || 0), 0);
 
-  const totalCollected = invoices
-    .filter((i) => i.status === 'paid')
-    .reduce((sum, i) => sum + (Number(i.totalAmount) || 0), 0);
+  const totalMonthlyBilled = safeInvoices.reduce(
+    (sum, i) => sum + (Number(i?.totalAmount || (i as any)?.amount) || 0),
+    0
+  );
 
-  const urgentComplaints = complaints.filter(
-    (c) => (c.priority === 'critical' || c.priority === 'high') && c.status !== 'resolved'
+  const totalCollected = safeInvoices
+    .filter((i) => (i?.status || '').toLowerCase() === 'paid')
+    .reduce((sum, i) => sum + (Number(i?.totalAmount || (i as any)?.amount) || 0), 0);
+
+  const urgentComplaints = safeComplaints.filter(
+    (c) =>
+      ((c?.priority || '').toLowerCase() === 'critical' || (c?.priority || '').toLowerCase() === 'high') &&
+      (c?.status || '').toLowerCase() !== 'resolved'
   );
 
   const currentWanRx = bandwidthHistory[bandwidthHistory.length - 1]?.rxMbps || 0;
@@ -187,7 +202,7 @@ export const NocOverview: React.FC<NocOverviewProps> = ({
             <span className="text-slate-700">|</span>
             <span className="flex items-center gap-1">
               <span className="w-1.5 h-1.5 rounded-full bg-indigo-400" />
-              Sessions: <span className="text-indigo-300 font-bold">{activeSessions.filter(s => s.routerId === currentRouter.id).length || currentRouter.activePppoeCount || 0}</span>
+              Sessions: <span className="text-indigo-300 font-bold">{safeSessions.filter(s => s?.routerId === currentRouter.id).length || currentRouter.activePppoeCount || 0}</span>
             </span>
           </div>
         </div>
@@ -277,11 +292,11 @@ export const NocOverview: React.FC<NocOverviewProps> = ({
               {formatCurrency(totalCollected, 0)}
             </span>
             <span className="text-xs text-slate-400 font-mono">
-              {invoices.length > 0 ? `of ${formatCurrency(totalMonthlyBilled, 0)} billed` : 'No invoices generated'}
+              {safeInvoices.length > 0 ? `of ${formatCurrency(totalMonthlyBilled, 0)} billed` : 'No invoices generated'}
             </span>
           </div>
           <div className="mt-3 flex items-center justify-between text-xs text-slate-400 pt-2 border-t border-slate-800">
-            {invoices.length > 0 ? (
+            {safeInvoices.length > 0 ? (
               <>
                 <span className="text-rose-400 font-medium font-mono">
                   Overdue: {formatCurrency(totalDueAmount, 1)}
@@ -310,17 +325,17 @@ export const NocOverview: React.FC<NocOverviewProps> = ({
             <AlertTriangle className="w-4 h-4 text-amber-400" />
           </div>
           <div className="mt-2 flex items-baseline gap-2">
-            <span className="text-2xl font-bold font-mono text-white">{complaints.length}</span>
+            <span className="text-2xl font-bold font-mono text-white">{safeComplaints.length}</span>
             <span className={`text-xs font-semibold ${urgentComplaints.length > 0 ? 'text-rose-400' : 'text-slate-500'}`}>
               {urgentComplaints.length > 0 ? `${urgentComplaints.length} Critical Fiber/LOS` : '0 Critical Issues'}
             </span>
           </div>
           <div className="mt-3 flex items-center justify-between text-xs text-slate-400 pt-2 border-t border-slate-800">
             <span className="text-slate-400">
-              {complaints.length > 0 ? 'SLA Queues Active' : 'All SLA Queues Clear'}
+              {safeComplaints.length > 0 ? 'SLA Queues Active' : 'All SLA Queues Clear'}
             </span>
             <span className="text-cyan-400 cursor-pointer" onClick={() => onNavigateTab('complaints')}>
-              {complaints.length > 0 ? 'Dispatch &rarr;' : '+ Log Ticket'}
+              {safeComplaints.length > 0 ? 'Dispatch &rarr;' : '+ Log Ticket'}
             </span>
           </div>
         </div>
@@ -337,15 +352,15 @@ export const NocOverview: React.FC<NocOverviewProps> = ({
             <Layers className="w-4 h-4 text-cyan-400" />
           </div>
           <div className="mt-2 flex items-baseline gap-2">
-            <span className="text-2xl font-bold font-mono text-white">{onus.length}</span>
+            <span className="text-2xl font-bold font-mono text-white">{safeOnus.length}</span>
             <span className="text-xs text-emerald-400 font-medium">
-              {onus.length > 0 ? `${onus.filter((o) => o.opticalQuality === 'good').length} Optimal` : 'No OLT Connected'}
+              {safeOnus.length > 0 ? `${safeOnus.filter((o) => (o?.opticalQuality || '').toLowerCase() === 'good').length} Optimal` : 'No OLT Connected'}
             </span>
           </div>
           <div className="mt-3 flex items-center justify-between text-xs text-slate-400 pt-2 border-t border-slate-800">
             <span className="text-slate-400">PON Optical Health</span>
             <span className="text-cyan-400 group-hover:translate-x-0.5 transition font-mono">
-              {olts.length > 0 ? `${olts.length} OLTs Online` : 'Configure &rarr;'}
+              {safeOlts.length > 0 ? `${safeOlts.length} OLTs Online` : 'Configure &rarr;'}
             </span>
           </div>
         </div>

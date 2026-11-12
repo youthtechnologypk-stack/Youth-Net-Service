@@ -295,65 +295,66 @@ export const BillingManagement: React.FC<BillingManagementProps> = ({
   }, [invoices, activeTab]);
 
   const filteredMrrSubscribers = useMemo(() => {
-    if (!recurringSearch.trim()) return mrrSubscribers;
+    if (!recurringSearch.trim()) return mrrSubscribers || [];
     const q = recurringSearch.toLowerCase();
-    return mrrSubscribers.filter(
+    return (mrrSubscribers || []).filter(
       (s) =>
-        s.username.toLowerCase().includes(q) ||
-        s.fullName.toLowerCase().includes(q) ||
-        s.phone.toLowerCase().includes(q) ||
-        s.profile.toLowerCase().includes(q) ||
-        s.ponPort?.toLowerCase().includes(q)
+        (s?.username || '').toLowerCase().includes(q) ||
+        (s?.fullName || '').toLowerCase().includes(q) ||
+        (s?.phone || '').toLowerCase().includes(q) ||
+        (s?.profile || '').toLowerCase().includes(q) ||
+        (s?.ponPort || '').toLowerCase().includes(q)
     );
   }, [mrrSubscribers, recurringSearch]);
 
   const filteredLedgerEntries = useMemo(() => {
-    if (!ledgerSearch.trim()) return ledgerEntries;
+    if (!ledgerSearch.trim()) return ledgerEntries || [];
     const q = ledgerSearch.toLowerCase();
-    return ledgerEntries.filter(
+    return (ledgerEntries || []).filter(
       (l) =>
-        l.subscriberUsername.toLowerCase().includes(q) ||
-        l.subscriberName.toLowerCase().includes(q) ||
-        l.referenceNumber.toLowerCase().includes(q) ||
-        l.description.toLowerCase().includes(q)
+        (l?.subscriberUsername || '').toLowerCase().includes(q) ||
+        (l?.subscriberName || '').toLowerCase().includes(q) ||
+        (l?.referenceNumber || '').toLowerCase().includes(q) ||
+        (l?.description || '').toLowerCase().includes(q)
     );
   }, [ledgerEntries, ledgerSearch]);
 
   // Filtered invoices according to all active criteria
   const filteredInvoices = useMemo(() => {
-    return invoices.filter((inv) => {
+    return (invoices || []).filter((inv) => {
       // 1. Billing Cycle Month filter
       if (
         selectedMonth !== 'all' &&
-        inv.billingMonth &&
-        inv.billingMonth.trim().toLowerCase() !== selectedMonth.trim().toLowerCase()
+        inv?.billingMonth &&
+        (inv.billingMonth || '').trim().toLowerCase() !== (selectedMonth || '').trim().toLowerCase()
       ) {
         return false;
       }
 
       // 2. Status Filter
-      if (filterStatus === 'unpaid' && inv.status !== 'unpaid') return false;
-      if (filterStatus === 'paid' && inv.status !== 'paid') return false;
-      if (filterStatus === 'overdue' && inv.status !== 'overdue') return false;
+      const invStatus = (inv?.status || '').toLowerCase();
+      if (filterStatus === 'unpaid' && invStatus !== 'unpaid') return false;
+      if (filterStatus === 'paid' && invStatus !== 'paid') return false;
+      if (filterStatus === 'overdue' && invStatus !== 'overdue') return false;
 
       // 3. Invoice Due Date filter
       if (dueDateFilter === 'today') {
         const todayStr = new Date().toISOString().slice(0, 10);
-        if (inv.dueDate !== todayStr) return false;
+        if (inv?.dueDate !== todayStr) return false;
       } else if (dueDateFilter === 'this_week') {
-        if (!isThisWeek(inv.dueDate)) return false;
+        if (!inv?.dueDate || !isThisWeek(inv.dueDate)) return false;
       } else if (dueDateFilter === 'overdue') {
-        if (inv.status !== 'overdue') return false;
+        if (invStatus !== 'overdue') return false;
       }
 
       // 4. Payment Arrival Date Range filter
       if (paymentStartDate) {
-        if (!inv.paidAt) return false;
+        if (!inv?.paidAt) return false;
         const paidDatePart = inv.paidAt.slice(0, 10);
         if (paidDatePart < paymentStartDate) return false;
       }
       if (paymentEndDate) {
-        if (!inv.paidAt) return false;
+        if (!inv?.paidAt) return false;
         const paidDatePart = inv.paidAt.slice(0, 10);
         if (paidDatePart > paymentEndDate) return false;
       }
@@ -361,11 +362,12 @@ export const BillingManagement: React.FC<BillingManagementProps> = ({
       // 5. Search Query (invoice number, customer name, PPPoE username, phone)
       if (searchQuery.trim()) {
         const query = searchQuery.toLowerCase().trim();
-        const cust = customerMap.get(inv.customerId) || customerMap.get(inv.customerName.toLowerCase());
-        const pppoeUser = cust?.pppoeUsername ? cust.pppoeUsername.toLowerCase() : '';
-        const matchesInv = inv.invoiceNumber.toLowerCase().includes(query);
-        const matchesName = inv.customerName.toLowerCase().includes(query);
-        const matchesPhone = inv.customerPhone.includes(query);
+        const custNameKey = (inv?.customerName || '').toLowerCase();
+        const cust = customerMap.get(inv?.customerId) || (custNameKey ? customerMap.get(custNameKey) : undefined);
+        const pppoeUser = cust?.pppoeUsername ? (cust.pppoeUsername || '').toLowerCase() : '';
+        const matchesInv = (inv?.invoiceNumber || (inv as any)?.invoice_no || '').toLowerCase().includes(query);
+        const matchesName = (inv?.customerName || (inv as any)?.subscriber_username || '').toLowerCase().includes(query);
+        const matchesPhone = (inv?.customerPhone || '').includes(query);
         const matchesPppoe = pppoeUser.includes(query);
 
         if (!matchesInv && !matchesName && !matchesPhone && !matchesPppoe) {
@@ -506,11 +508,12 @@ export const BillingManagement: React.FC<BillingManagementProps> = ({
     });
 
     if (details.sendWhatsAppReceipt) {
-      const linkedCust = customerMap.get(invoice.customerId) || customerMap.get(invoice.customerName.toLowerCase());
+      const custNameKey = (invoice?.customerName || '').toLowerCase();
+      const linkedCust = customerMap.get(invoice?.customerId) || (custNameKey ? customerMap.get(custNameKey) : undefined);
       whatsappBusinessService
         .sendAutomatedPaymentReceipt({
-          customerName: invoice.customerName,
-          customerPhone: invoice.customerPhone || linkedCust?.phone || '+92 300 0000000',
+          customerName: invoice?.customerName || 'Subscriber',
+          customerPhone: invoice?.customerPhone || linkedCust?.phone || '+92 300 0000000',
           invoiceNumber: invoice.invoiceNumber,
           receiptNumber: rcptNumber,
           amountPaid: details.amount,
@@ -1239,11 +1242,12 @@ export const BillingManagement: React.FC<BillingManagementProps> = ({
                     </tr>
                   ) : (
                     filteredInvoices.map((inv) => {
+                      const custNameLower = (inv?.customerName || '').toLowerCase();
                       const linkedCustomer =
-                        customerMap.get(inv.customerId) ||
-                        customerMap.get(inv.customerName.toLowerCase());
-                      const pppoeUsername = linkedCustomer?.pppoeUsername || inv.customerId;
-                      const isPastDue = new Date(inv.dueDate) < new Date();
+                        customerMap.get(inv?.customerId) ||
+                        (custNameLower ? customerMap.get(custNameLower) : undefined);
+                      const pppoeUsername = linkedCustomer?.pppoeUsername || inv?.customerId || 'N/A';
+                      const isPastDue = inv?.dueDate ? new Date(inv.dueDate) < new Date() : false;
 
                       return (
                         <tr key={inv.id} className="hover:bg-slate-800/60 transition group">

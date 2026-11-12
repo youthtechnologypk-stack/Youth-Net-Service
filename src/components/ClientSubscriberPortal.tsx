@@ -44,11 +44,11 @@ export const ClientSubscriberPortal: React.FC<ClientSubscriberPortalProps> = ({
   const { formatCurrency } = useCurrency();
 
   // Find linked customer profile if present in ISPContext, but NEVER fallback to customers[0]
-  const linkedCustomer = customers.find(
+  const linkedCustomer = (customers || []).find(
     (c) =>
-      c.id === currentUser.linkedCustomerId ||
-      c.pppoeUsername.toLowerCase() === currentUser.username.toLowerCase() ||
-      (c.phone && currentUser.phone && c.phone === currentUser.phone)
+      c.id === currentUser?.linkedCustomerId ||
+      (c?.pppoeUsername || '').toLowerCase() === (currentUser?.username || '').toLowerCase() ||
+      (c?.phone && currentUser?.phone && c.phone === currentUser.phone)
   );
 
   // Live profile queried from portal_users
@@ -76,8 +76,8 @@ export const ClientSubscriberPortal: React.FC<ClientSubscriberPortalProps> = ({
   const realUploadNum = Math.max(5, Math.round(realSpeedNum * 0.5));
 
   // Real-time MikroTik telemetry link: ONLY if active session matches currentUser.username
-  const activeSession = activeSessions.find(
-    (s) => s.username.toLowerCase() === subscriberUsername.toLowerCase()
+  const activeSession = (activeSessions || []).find(
+    (s) => (s?.username || '').toLowerCase() === (subscriberUsername || '').toLowerCase()
   );
 
   // Invoices & Tickets loaded directly from Supabase for this subscriber
@@ -136,11 +136,11 @@ export const ClientSubscriberPortal: React.FC<ClientSubscriberPortalProps> = ({
         setClientInvoices(invData.map(mapSupabaseToInvoice));
       } else {
         // Fallback to local context invoices matching subscriber's username or ID
-        const matchedContextInvoices = contextInvoices.filter(
+        const matchedContextInvoices = (contextInvoices || []).filter(
           (i) =>
-            i.customerId === currentUser.id ||
-            i.customerName.toLowerCase() === subscriberUsername.toLowerCase() ||
-            i.customerName.toLowerCase() === subscriberName.toLowerCase()
+            i?.customerId === currentUser?.id ||
+            (i?.customerName || '').toLowerCase() === (subscriberUsername || '').toLowerCase() ||
+            (i?.customerName || '').toLowerCase() === (subscriberName || '').toLowerCase()
         );
         setClientInvoices(matchedContextInvoices);
       }

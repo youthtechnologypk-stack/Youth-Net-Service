@@ -31,11 +31,13 @@ export const RouterInterfacesTable: React.FC<RouterInterfacesTableProps> = ({
 
   const filteredInterfaces = useMemo(() => {
     return interfaces.filter((iface) => {
+      const q = (searchQuery || '').toLowerCase();
       const matchSearch =
-        iface.name.toLowerCase().includes(searchQuery.toLowerCase()) ||
-        (iface.comment && iface.comment.toLowerCase().includes(searchQuery.toLowerCase())) ||
-        iface.type.toLowerCase().includes(searchQuery.toLowerCase()) ||
-        iface.macAddress.toLowerCase().includes(searchQuery.toLowerCase());
+        !q ||
+        (iface?.name || '').toLowerCase().includes(q) ||
+        Boolean(iface?.comment && (iface.comment || '').toLowerCase().includes(q)) ||
+        (iface?.type || '').toLowerCase().includes(q) ||
+        (iface?.macAddress || '').toLowerCase().includes(q);
 
       const matchStatus =
         statusFilter === 'all' ||

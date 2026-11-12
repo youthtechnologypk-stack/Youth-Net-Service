@@ -233,12 +233,12 @@ export const CreateInvoiceModal: React.FC<CreateInvoiceModalProps> = ({
   const filteredSecretOptions = useMemo(() => {
     if (!searchQuery.trim()) return secretOptions;
     const q = searchQuery.toLowerCase().trim();
-    return secretOptions.filter(
+    return (secretOptions || []).filter(
       (opt) =>
-        opt.name.toLowerCase().includes(q) ||
-        opt.profile.toLowerCase().includes(q) ||
-        opt.remoteAddress.toLowerCase().includes(q) ||
-        opt.displayName.toLowerCase().includes(q)
+        (opt?.name || '').toLowerCase().includes(q) ||
+        (opt?.profile || '').toLowerCase().includes(q) ||
+        (opt?.remoteAddress || '').toLowerCase().includes(q) ||
+        (opt?.displayName || '').toLowerCase().includes(q)
     );
   }, [secretOptions, searchQuery]);
 
@@ -458,7 +458,7 @@ export const CreateInvoiceModal: React.FC<CreateInvoiceModalProps> = ({
                       </div>
                     ) : (
                       filteredSecretOptions.map((opt) => {
-                        const isSelected = selectedSubscriberUsername.toLowerCase() === opt.name.toLowerCase();
+                        const isSelected = (selectedSubscriberUsername || '').toLowerCase() === (opt?.name || '').toLowerCase();
                         return (
                           <button
                             key={opt.name}

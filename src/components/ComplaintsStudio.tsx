@@ -88,9 +88,9 @@ export const ComplaintsStudio: React.FC<ComplaintsStudioProps> = ({
     return () => clearInterval(timer);
   }, []);
 
-  const filteredTickets = complaints.filter((tkt) => {
+  const filteredTickets = (complaints || []).filter((tkt) => {
     if (categoryFilter === 'all') return true;
-    return tkt.category === categoryFilter;
+    return (tkt?.category || '').toLowerCase() === (categoryFilter || '').toLowerCase();
   });
 
   const formatRemainingSla = (deadlineIso: string, isResolved: boolean) => {
@@ -214,7 +214,7 @@ export const ComplaintsStudio: React.FC<ComplaintsStudioProps> = ({
 
           <div className="flex items-center gap-2.5 self-end md:self-auto shrink-0 font-mono">
             <span className="text-slate-400 text-[11px]">
-              Unassigned Queue: <strong className="text-amber-300 font-bold">{complaints.filter(c => !c.assignedAgentId && c.status !== 'resolved').length}</strong>
+              Unassigned Queue: <strong className="text-amber-300 font-bold">{(complaints || []).filter(c => !c?.assignedAgentId && (c?.status || '').toLowerCase() !== 'resolved').length}</strong>
             </span>
             <button
               onClick={async () => {

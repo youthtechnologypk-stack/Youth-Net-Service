@@ -131,8 +131,8 @@ export const GenerateInvoiceModal: React.FC<GenerateInvoiceModalProps> = ({
 
       // Check if defaultSubscriberUsername matches
       if (defaultSubscriberUsername && unifiedSubscribers.length > 0) {
-        const found = unifiedSubscribers.find(
-          (s) => s.username.toLowerCase() === defaultSubscriberUsername.toLowerCase()
+        const found = (unifiedSubscribers || []).find(
+          (s) => (s?.username || '').toLowerCase() === (defaultSubscriberUsername || '').toLowerCase()
         );
         if (found) {
           selectSubscriber(found);
@@ -160,17 +160,17 @@ export const GenerateInvoiceModal: React.FC<GenerateInvoiceModalProps> = ({
 
   // Filtered subscribers list
   const filteredSubscribers = useMemo(() => {
-    if (!subscriberSearch.trim()) return unifiedSubscribers.slice(0, 30);
+    if (!subscriberSearch.trim()) return (unifiedSubscribers || []).slice(0, 30);
     const q = subscriberSearch.toLowerCase().trim();
-    return unifiedSubscribers
+    return (unifiedSubscribers || [])
       .filter(
         (s) =>
-          s.username.toLowerCase().includes(q) ||
-          (s.fullName && s.fullName.toLowerCase().includes(q)) ||
-          (s.name && s.name.toLowerCase().includes(q)) ||
-          (s.phone && s.phone.includes(q)) ||
-          (s.assignedIp && s.assignedIp.includes(q)) ||
-          (s.profile && s.profile.toLowerCase().includes(q))
+          (s?.username || '').toLowerCase().includes(q) ||
+          Boolean(s?.fullName && (s.fullName || '').toLowerCase().includes(q)) ||
+          Boolean(s?.name && (s.name || '').toLowerCase().includes(q)) ||
+          Boolean(s?.phone && s.phone.includes(q)) ||
+          Boolean(s?.assignedIp && s.assignedIp.includes(q)) ||
+          Boolean(s?.profile && (s.profile || '').toLowerCase().includes(q))
       )
       .slice(0, 30);
   }, [unifiedSubscribers, subscriberSearch]);
@@ -194,10 +194,10 @@ export const GenerateInvoiceModal: React.FC<GenerateInvoiceModalProps> = ({
     let recommendedPrice = sub.priceMonthly;
     if (!recommendedPrice || recommendedPrice <= 0) {
       // Try to find matching package
-      const matchedPkg = packages.find(
+      const matchedPkg = (packages || []).find(
         (p) =>
-          p.name.toLowerCase() === planProfile.toLowerCase() ||
-          planProfile.toLowerCase().includes(p.name.toLowerCase())
+          (p?.name || '').toLowerCase() === (planProfile || '').toLowerCase() ||
+          (planProfile || '').toLowerCase().includes((p?.name || '').toLowerCase())
       );
       if (matchedPkg) {
         recommendedPrice = matchedPkg.priceMonthly;

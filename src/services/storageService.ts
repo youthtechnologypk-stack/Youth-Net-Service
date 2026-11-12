@@ -687,14 +687,16 @@ class StorageService {
   }
 
   public getProfileByName(name: string): BandwidthProfile | undefined {
+    const cleanName = (name || '').toLowerCase();
     return this.cache.bandwidth_profiles.find(
-      (p) => p.name.toLowerCase() === name.toLowerCase()
+      (p) => (p?.name || '').toLowerCase() === cleanName
     );
   }
 
   public async saveBandwidthProfile(profile: BandwidthProfile): Promise<void> {
+    const cleanName = (profile?.name || '').toLowerCase();
     const index = this.cache.bandwidth_profiles.findIndex(
-      (p) => p.id === profile.id || p.name.toLowerCase() === profile.name.toLowerCase()
+      (p) => p.id === profile?.id || (p?.name || '').toLowerCase() === cleanName
     );
 
     if (index >= 0) {
@@ -1054,18 +1056,19 @@ class StorageService {
         list = list.filter((l) => l.severity === filter.severity);
       }
       if (filter.actor && filter.actor !== 'ALL') {
-        list = list.filter((l) => l.actor.toLowerCase() === filter.actor!.toLowerCase());
+        const targetActor = (filter.actor || '').toLowerCase();
+        list = list.filter((l) => (l?.actor || '').toLowerCase() === targetActor);
       }
       if (filter.search && filter.search.trim()) {
         const q = filter.search.trim().toLowerCase();
         list = list.filter(
           (l) =>
-            l.actionTitle.toLowerCase().includes(q) ||
-            l.actionType.toLowerCase().includes(q) ||
-            l.actor.toLowerCase().includes(q) ||
-            (l.target && l.target.toLowerCase().includes(q)) ||
-            (l.ipAddress && l.ipAddress.includes(q)) ||
-            (l.details && l.details.toLowerCase().includes(q))
+            (l?.actionTitle || '').toLowerCase().includes(q) ||
+            (l?.actionType || '').toLowerCase().includes(q) ||
+            (l?.actor || '').toLowerCase().includes(q) ||
+            Boolean(l?.target && (l.target || '').toLowerCase().includes(q)) ||
+            Boolean(l?.ipAddress && l.ipAddress.includes(q)) ||
+            Boolean(l?.details && (l.details || '').toLowerCase().includes(q))
         );
       }
     }

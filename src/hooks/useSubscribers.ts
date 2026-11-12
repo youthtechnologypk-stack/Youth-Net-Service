@@ -260,7 +260,12 @@ export const useSubscribers = () => {
         const ponPort = billingRec?.ponPort || 'PON-01';
         const feederLine = billingRec?.feederLine || 'Feeder-North-01';
         const priceMonthly = billingRec?.packagePriceMonthly || matchedPkg?.priceMonthly || 2500;
-        const userInvoices = invoices.filter((i) => (i.customerName && i.customerName.toLowerCase() === name.toLowerCase()) || i.invoiceNumber.toLowerCase().includes(uKey));
+        const userInvoices = (invoices || []).filter((i) => {
+          const invNum = (i?.invoiceNumber || (i as any)?.invoice_no || '').toLowerCase();
+          const custName = (i?.customerName || (i as any)?.subscriber_username || '').toLowerCase();
+          const targetName = (name || '').toLowerCase();
+          return (custName && custName === targetName) || (invNum && invNum.includes(uKey));
+        });
 
         const effectiveExpiry = parsed.expiryDate || '2026-11-29';
         const expCheck = calculateRemainingTime(effectiveExpiry);
@@ -310,9 +315,13 @@ export const useSubscribers = () => {
     (portalUsers || []).forEach((pu) => {
       const uKey = (pu.username || '').toLowerCase();
       if (!uKey || subMap.has(uKey)) return;
-
-      const isOnline = (activeSessions || []).some((s) => s.username?.toLowerCase() === uKey);
-      const userInvoices = (invoices || []).filter((i) => (i.customerName && i.customerName.toLowerCase() === (pu.fullName || '').toLowerCase()) || (i.invoiceNumber && i.invoiceNumber.toLowerCase().includes(uKey)));
+      const isOnline = (activeSessions || []).some((s) => (s?.username || '').toLowerCase() === uKey);
+      const userInvoices = (invoices || []).filter((i) => {
+        const invNum = (i?.invoiceNumber || (i as any)?.invoice_no || '').toLowerCase();
+        const custName = (i?.customerName || (i as any)?.subscriber_username || '').toLowerCase();
+        const targetName = (pu.fullName || pu.username || '').toLowerCase();
+        return (custName && custName === targetName) || (invNum && invNum.includes(uKey));
+      });
       const matchedPkg = (packages || []).find((p) => p.mikrotikProfile === pu.profile || p.name === pu.profile);
 
       subMap.set(uKey, {

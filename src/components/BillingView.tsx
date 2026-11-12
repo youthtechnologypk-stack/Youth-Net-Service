@@ -374,13 +374,15 @@ export const BillingView: React.FC<BillingViewProps> = ({
 
   // Filtered Invoices
   const filteredInvoices = useMemo(() => {
+    const searchClean = (searchTerm || '').trim().toLowerCase();
     return (invoices || []).filter((inv) => {
       const matchSearch =
-        inv.invoice_no.toLowerCase().includes(searchTerm.toLowerCase()) ||
-        inv.subscriber_username.toLowerCase().includes(searchTerm.toLowerCase()) ||
-        (inv.assigned_agent_name && inv.assigned_agent_name.toLowerCase().includes(searchTerm.toLowerCase()));
+        !searchClean ||
+        (inv?.invoice_no || '').toLowerCase().includes(searchClean) ||
+        (inv?.subscriber_username || '').toLowerCase().includes(searchClean) ||
+        Boolean(inv?.assigned_agent_name && (inv.assigned_agent_name || '').toLowerCase().includes(searchClean));
 
-      const upperStatus = (inv.status || '').toUpperCase();
+      const upperStatus = (inv?.status || '').toUpperCase();
       const matchStatus =
         statusFilter === 'ALL'
           ? true

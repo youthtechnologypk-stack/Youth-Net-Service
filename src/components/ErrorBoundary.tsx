@@ -38,11 +38,12 @@ export class ErrorBoundary extends Component<Props, State> {
   private handleClearStorage = () => {
     if (typeof window !== 'undefined') {
       try {
-        localStorage.removeItem('isp_routers_initialized');
-        localStorage.removeItem('isp_customers_initialized');
-        localStorage.removeItem('registered_customers');
-      } catch {}
-      window.location.href = '/';
+        localStorage.clear();
+        sessionStorage.clear();
+      } catch (err) {
+        console.warn('Failed to clear storage:', err);
+      }
+      window.location.href = '/admin/noc';
     }
   };
 

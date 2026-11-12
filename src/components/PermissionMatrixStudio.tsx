@@ -137,11 +137,11 @@ export const PermissionMatrixStudio: React.FC<PermissionMatrixStudioProps> = ({
     if (!searchQuery.trim()) return true;
     const q = searchQuery.toLowerCase();
     return (
-      feat.name.toLowerCase().includes(q) ||
-      feat.description.toLowerCase().includes(q) ||
-      feat.module.toLowerCase().includes(q) ||
-      feat.key.toLowerCase().includes(q) ||
-      feat.role.toLowerCase().includes(q)
+      (feat?.name || '').toLowerCase().includes(q) ||
+      (feat?.description || '').toLowerCase().includes(q) ||
+      (feat?.module || '').toLowerCase().includes(q) ||
+      (feat?.key || '').toLowerCase().includes(q) ||
+      (feat?.role || '').toLowerCase().includes(q)
     );
   });
 

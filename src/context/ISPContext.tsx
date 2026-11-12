@@ -775,10 +775,11 @@ export const ISPProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
           // Reconcile agent cash
           setAgents((prev) =>
             prev.map((ag) => {
-              const matched = data.find(
+              const agFirstName = (ag?.name || '').toLowerCase().split(' ')[0];
+              const matched = !agFirstName ? undefined : data.find(
                 (u: any) =>
-                  (u.username && u.username.toLowerCase().includes(ag.name.toLowerCase().split(' ')[0])) ||
-                  (u.full_name && u.full_name.toLowerCase().includes(ag.name.toLowerCase().split(' ')[0]))
+                  Boolean(u?.username && (u.username || '').toLowerCase().includes(agFirstName)) ||
+                  Boolean(u?.full_name && (u.full_name || '').toLowerCase().includes(agFirstName))
               );
               if (matched && matched.cash_in_hand !== undefined && matched.cash_in_hand !== null) {
                 return { ...ag, cashInHand: Number(matched.cash_in_hand) || 0 };
@@ -1606,7 +1607,7 @@ export const ISPProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
           s.id !== sessionId &&
           (s as any)['.id'] !== targetInternalId &&
           (s as any)['.id'] !== sessionId &&
-          s.username?.toLowerCase() !== targetUsername.toLowerCase()
+          (!targetUsername || (s?.username || '').toLowerCase() !== (targetUsername || '').toLowerCase())
       )
     );
 
@@ -1623,7 +1624,7 @@ export const ISPProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
               (s) =>
                 s.id !== targetInternalId &&
                 (s as any)['.id'] !== targetInternalId &&
-                s.username?.toLowerCase() !== targetUsername.toLowerCase()
+                (!targetUsername || (s?.username || '').toLowerCase() !== (targetUsername || '').toLowerCase())
             );
             setActiveSessions([...freshFiltered]);
             setRouters((prev) =>
@@ -2390,7 +2391,7 @@ export const ISPProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
     // 4. Synchronously remove from React state AND localStorage persistent storage
     setCustomers((prev) => {
       const remaining = prev.filter(
-        (c) => c.pppoeUsername.toLowerCase() !== cleanUser && c.id !== username
+        (c) => (c?.pppoeUsername || '').toLowerCase() !== cleanUser && c?.id !== username
       );
       try {
         localStorage.setItem(STORAGE_KEY_CUSTOMERS, JSON.stringify(remaining));
@@ -3435,7 +3436,7 @@ export const ISPProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
     if (created.role === 'AGENT') {
       setAgents((prev) => {
         const existing = prev.find(
-          (a) => a.id === created.linkedAgentId || a.phone === created.phone || a.name.toLowerCase() === created.fullName.toLowerCase()
+          (a) => a.id === created.linkedAgentId || a.phone === created.phone || (a?.name || '').toLowerCase() === (created?.fullName || '').toLowerCase()
         );
         if (!existing) {
           const newAgent: FieldAgent = {
@@ -3666,10 +3667,11 @@ export const ISPProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
           expiredCount++;
 
           if (targetRouter) {
+            const custPppoe = (cust?.pppoeUsername || '').toLowerCase();
             const matchingSec = routerSecrets.find(
-              (s) => (s.name || s.user || '').toLowerCase() === cust.pppoeUsername.toLowerCase()
+              (s) => (s?.name || (s as any)?.user || '').toLowerCase() === custPppoe
             );
-            const secretId = matchingSec ? matchingSec['.id'] || matchingSec.id : cust.pppoeUsername;
+            const secretId = matchingSec ? matchingSec['.id'] || matchingSec.id : cust?.pppoeUsername;
 
             // a) Update RouterOS secret profile/remote-address: POST /api/mikrotik/ppp/secret/set
             await updateMikrotikPppSecretRest(targetRouter, secretId, {
@@ -3679,7 +3681,7 @@ export const ISPProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
 
             // b) Terminate active session so user reconnects into restricted pool: POST /api/mikrotik/ppp/active/remove
             const activeSess = activeSessions.find(
-              (s) => s.username?.toLowerCase() === cust.pppoeUsername.toLowerCase()
+              (s) => (s?.username || '').toLowerCase() === custPppoe
             );
             if (activeSess) {
               await disconnectMikrotikActiveSessionRest(targetRouter, activeSess.id || activeSess.username).catch(() => {});
@@ -3691,7 +3693,7 @@ export const ISPProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
 
     // 2. Scan RouterOS secrets from router for any users with expired JSON comment
     for (const sec of routerSecrets) {
-      const uname = String(sec.name || sec.user || '').trim();
+      const uname = String(sec.name || (sec as any).user || '').trim();
       if (!uname || newlyIsolatedUsernames.includes(uname)) continue;
       const parsed = parseMikrotikComment(sec.comment, uname);
       if (parsed.expiryDate) {
@@ -3705,7 +3707,8 @@ export const ISPProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
               remoteAddress: '16.16.16.0/24',
             }).catch(() => {});
 
-            const activeSess = activeSessions.find((s) => s.username?.toLowerCase() === uname.toLowerCase());
+            const unameLower = uname.toLowerCase();
+            const activeSess = activeSessions.find((s) => (s?.username || '').toLowerCase() === unameLower);
             if (activeSess) {
               await disconnectMikrotikActiveSessionRest(targetRouter, activeSess.id || uname).catch(() => {});
             }
@@ -3736,7 +3739,8 @@ export const ISPProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
     const targetRouter = routers.find((r) => r.id === selectedRouterId) || routers[0];
     const now = new Date();
 
-    const cust = customers.find((c) => c.pppoeUsername.toLowerCase() === username.toLowerCase());
+    const cleanUsername = (username || '').toLowerCase();
+    const cust = customers.find((c) => (c?.pppoeUsername || '').toLowerCase() === cleanUsername);
     let baseDate = now;
     if (cust?.expiryDate) {
       const currentExp = new Date(cust.expiryDate);
@@ -3771,7 +3775,7 @@ export const ISPProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
 
         // Terminate any active session so subscriber reconnects into restored profile immediately
         const activeSess = activeSessions.find(
-          (s) => s.username?.toLowerCase() === username.toLowerCase()
+          (s) => (s?.username || '').toLowerCase() === cleanUsername
         );
         if (activeSess) {
           await disconnectMikrotikActiveSessionRest(targetRouter, activeSess.id || activeSess.username).catch(() => {});
@@ -3784,7 +3788,7 @@ export const ISPProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
     // 2. Update state and localStorage
     setCustomers((prev) =>
       prev.map((c) =>
-        c.pppoeUsername.toLowerCase() === username.toLowerCase()
+        (c?.pppoeUsername || '').toLowerCase() === cleanUsername
           ? {
               ...c,
               status: 'active',
@@ -4059,14 +4063,14 @@ export const ISPProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
   const findBestAgentForTicket = (areaNode: string): FieldAgent | null => {
     if (!agents.length) return null;
 
-    const cleanArea = areaNode.toLowerCase();
+    const cleanArea = (areaNode || '').toLowerCase();
     // 1. Try matching area sector keyword
     const areaKeywords = ['g-11', 'g11', 'i-8', 'i8', 'f-10', 'f10', 'f-11', 'f11', 'e-11', 'e11', 'bahria', 'blue area'];
     const matchedKeyword = areaKeywords.find((kw) => cleanArea.includes(kw));
 
     if (matchedKeyword) {
       const sectorAgents = agents.filter((a) =>
-        a.assignedArea.toLowerCase().includes(matchedKeyword)
+        (a?.assignedArea || '').toLowerCase().includes(matchedKeyword)
       );
       if (sectorAgents.length > 0) {
         // Pick least loaded from sector
