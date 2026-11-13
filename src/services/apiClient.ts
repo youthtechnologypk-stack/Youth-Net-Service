@@ -784,27 +784,35 @@ export async function monitorInterfaceTrafficRest(
   interfaceName: string = 'WAN3',
   signal?: AbortSignal
 ): Promise<{ success: boolean; rxMbps: number; txMbps: number; error?: string }> {
-  const res = await apiClient.post<any[]>(
+  let res = await apiClient.post<any>(
     '/interface/monitor-traffic',
-    { interface: interfaceName, once: 'yes' },
-    { router, signal, timeoutMs: 3000 }
+    { interface: interfaceName, once: '' },
+    { router, signal, timeoutMs: 4000 }
   );
+
+  if (!res.success || !res.data || (Array.isArray(res.data) && res.data.length === 0)) {
+    res = await apiClient.post<any>(
+      '/interface/monitor-traffic',
+      { interface: interfaceName, once: 'yes' },
+      { router, signal, timeoutMs: 4000 }
+    );
+  }
 
   if (!res.success) {
     return { success: false, rxMbps: 0, txMbps: 0, error: res.error };
   }
 
   const raw = Array.isArray(res.data) ? res.data[0] : res.data;
-  if (!raw) {
+  if (!raw || (raw['rx-bits-per-second'] === undefined && raw['tx-bits-per-second'] === undefined && raw['rx-bps'] === undefined)) {
     return { success: false, rxMbps: 0, txMbps: 0 };
   }
 
-  const rxBps = Number(raw['rx-bits-per-second'] || raw['rx-bps'] || 0);
-  const txBps = Number(raw['tx-bits-per-second'] || raw['tx-bps'] || 0);
+  const rxBps = Number(raw['rx-bits-per-second'] ?? raw['rx-bps'] ?? 0);
+  const txBps = Number(raw['tx-bits-per-second'] ?? raw['tx-bps'] ?? 0);
 
   return {
     success: true,
-    rxMbps: Math.round((rxBps / 1_000_000) * 10) / 10,
-    txMbps: Math.round((txBps / 1_000_000) * 10) / 10,
+    rxMbps: Math.round((rxBps / 1_000_000) * 100) / 100,
+    txMbps: Math.round((txBps / 1_000_000) * 100) / 100,
   };
 }

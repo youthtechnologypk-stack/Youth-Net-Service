@@ -48,6 +48,7 @@ import {
   SupabaseSubscriberInventoryLog,
   SupabaseSubscriberSessionLog,
 } from '../services/supabaseClient';
+import { safeMikrotikFetch } from '../services/mikrotikRestClient';
 import { useCurrency } from '../context/CurrencyContext';
 import { useISP } from '../context/ISPContext';
 import { CreateInvoiceModal, resolvePackageRate } from './CreateInvoiceModal';
@@ -326,7 +327,7 @@ export const SubscriberProfileView: React.FC<SubscriberProfileViewProps> = ({
 
       // 1.7b Query MikroTik /ppp/secret strictly for this subscriber's actual PPPoE profile
       try {
-        const secRes = await fetch(`/api/mikrotik/ppp/secret?name=${encodeURIComponent(username)}`);
+        const secRes = await safeMikrotikFetch(`/api/mikrotik/ppp/secret?name=${encodeURIComponent(username)}`);
         if (secRes.ok) {
           const secrets = await secRes.json();
           if (Array.isArray(secrets)) {
@@ -341,9 +342,9 @@ export const SubscriberProfileView: React.FC<SubscriberProfileViewProps> = ({
       // 1.8 Query MikroTik for live active session strictly for this username (read-only)
       try {
         const queryUrl = `/api/mikrotik/ppp/active?name=${encodeURIComponent(username)}`;
-        let res = await fetch(queryUrl);
+        let res = await safeMikrotikFetch(queryUrl);
         if (!res.ok) {
-          res = await fetch('/api/mikrotik/ppp/active');
+          res = await safeMikrotikFetch('/api/mikrotik/ppp/active');
         }
 
         if (res.ok) {
@@ -553,7 +554,7 @@ export const SubscriberProfileView: React.FC<SubscriberProfileViewProps> = ({
       let sessionId = activeSession?.id;
       if (!sessionId) {
         try {
-          const actRes = await fetch(`/api/mikrotik/ppp/active?name=${encodeURIComponent(username)}`);
+          const actRes = await safeMikrotikFetch(`/api/mikrotik/ppp/active?name=${encodeURIComponent(username)}`);
           if (actRes.ok) {
             const actData = await actRes.json();
             if (Array.isArray(actData)) {
@@ -566,7 +567,7 @@ export const SubscriberProfileView: React.FC<SubscriberProfileViewProps> = ({
 
       if (sessionId) {
         // Call router kick endpoint
-        await fetch('/api/mikrotik/ppp/active/remove', {
+        await safeMikrotikFetch('/api/mikrotik/ppp/active/remove', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({ '.id': sessionId }),
@@ -575,7 +576,7 @@ export const SubscriberProfileView: React.FC<SubscriberProfileViewProps> = ({
 
       // Also call server kick helper if configured
       try {
-        await fetch('/api/mikrotik/kick', {
+        await safeMikrotikFetch('/api/mikrotik/kick', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({ username, sessionId: sessionId || '*1' }),
@@ -628,7 +629,7 @@ export const SubscriberProfileView: React.FC<SubscriberProfileViewProps> = ({
 
       // 2. Dispatch update to MikroTik /ppp/secret/set
       try {
-        await fetch('/api/mikrotik/ppp/secret/set', {
+        await safeMikrotikFetch('/api/mikrotik/ppp/secret/set', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({

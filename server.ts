@@ -1812,15 +1812,31 @@ app.all('/api/mikrotik/*', async (req: Request, res: Response) => {
   const targetUrl = `${protocol}://${targetHost}:${targetPort}/rest/${subpath}${queryString}`;
 
   try {
-    let authHeader = req.headers['authorization'];
-    if (!authHeader) {
+    let authHeader = req.headers['authorization'] as string | undefined;
+    if (!authHeader || !authHeader.startsWith('Basic ')) {
       try {
-        const routers = await getAllRouters().catch(() => []);
-        const matched = routers.find((r) => r.ipAddress === targetHost || r.ip === targetHost) || routers[0];
-        const user = matched?.username || 'admin';
-        const pass = matched?.password || 'P@ssword@9595';
+        const routerIdHeader = (req.headers['x-router-id'] || '') as string;
+        let creds = routerIdHeader ? await getRouterCredentials(routerIdHeader).catch(() => null) : null;
+        if (!creds) {
+          const routers = await getAllRouters().catch(() => []);
+          const matched =
+            routers.find((r) => r.ipAddress === targetHost || r.ip === targetHost) || routers[0];
+          if (matched?.id) {
+            creds = await getRouterCredentials(matched.id).catch(() => null);
+          }
+          const user = creds?.username || matched?.username || process.env.MIKROTIK_USER || 'admin';
+          const pass = creds?.password || matched?.password || process.env.MIKROTIK_PASS || 'P@ssword@9595';
+          authHeader = `Basic ${Buffer.from(`${user}:${pass}`).toString('base64')}`;
+        } else {
+          const user = creds.username || process.env.MIKROTIK_USER || 'admin';
+          const pass = creds.password || process.env.MIKROTIK_PASS || 'P@ssword@9595';
+          authHeader = `Basic ${Buffer.from(`${user}:${pass}`).toString('base64')}`;
+        }
+      } catch {
+        const user = process.env.MIKROTIK_USER || 'admin';
+        const pass = process.env.MIKROTIK_PASS || 'P@ssword@9595';
         authHeader = `Basic ${Buffer.from(`${user}:${pass}`).toString('base64')}`;
-      } catch {}
+      }
     }
 
     const fetchHeaders: Record<string, string> = {
@@ -1828,10 +1844,8 @@ app.all('/api/mikrotik/*', async (req: Request, res: Response) => {
       'Connection': 'close',
       'Cache-Control': 'no-cache, no-store, must-revalidate',
       'Pragma': 'no-cache',
+      'Authorization': authHeader,
     };
-    if (authHeader) {
-      fetchHeaders['Authorization'] = authHeader as string;
-    }
     const controller = new AbortController();
     const timeoutId = setTimeout(() => controller.abort(), 7000);
     const fetchOptions: RequestInit = {
@@ -1839,7 +1853,7 @@ app.all('/api/mikrotik/*', async (req: Request, res: Response) => {
       headers: fetchHeaders,
       signal: controller.signal,
     };
-    if (req.method !== 'GET' && req.method !== 'HEAD' && req.body) {
+    if (req.method !== 'GET' && req.method !== 'HEAD' && req.body !== undefined) {
       fetchHeaders['Content-Type'] = 'application/json';
       fetchOptions.body = typeof req.body === 'string' ? req.body : JSON.stringify(req.body);
     }
@@ -1848,11 +1862,14 @@ app.all('/api/mikrotik/*', async (req: Request, res: Response) => {
 
     // CRITICAL: Always strip WWW-Authenticate to strictly forbid browser from showing native HTTP Basic Auth prompt!
     res.removeHeader('www-authenticate');
+    res.removeHeader('WWW-Authenticate');
     res.setHeader('Connection', 'close');
     res.setHeader('Cache-Control', 'no-cache, no-store, must-revalidate');
     res.setHeader('Pragma', 'no-cache');
 
     if (mikrotikRes.status === 401) {
+      res.removeHeader('www-authenticate');
+      res.removeHeader('WWW-Authenticate');
       res.status(401).json({
         success: false,
         authError: true,
@@ -1868,6 +1885,7 @@ app.all('/api/mikrotik/*', async (req: Request, res: Response) => {
     res.send(body);
   } catch (err: any) {
     res.removeHeader('www-authenticate');
+    res.removeHeader('WWW-Authenticate');
     res.status(502).json({
       error: `Proxy to ${targetUrl} failed: ${err.message}`,
     });

@@ -10,6 +10,9 @@ import {
   supabase,
   SupabaseUpstreamCapacityConfig,
 } from '../services/supabaseClient';
+import { safeMikrotikFetch } from '../services/mikrotikRestClient';
+import { useISP } from '../context/ISPContext';
+import { useAuth } from '../context/AuthContext';
 
 export interface MikrotikInterfaceOption {
   '.id'?: string;
@@ -46,6 +49,11 @@ export const EditUpstreamLinkModal: React.FC<EditUpstreamLinkModalProps> = ({
   const [interfaceError, setInterfaceError] = useState<string | null>(null);
   const [isCustomInterface, setIsCustomInterface] = useState<boolean>(false);
 
+  const { routers, selectedRouterId } = useISP();
+  const { currentUser } = useAuth();
+  const activeRouter = routers.find((r) => r.id === selectedRouterId) || routers[0];
+  const isAdmin = !currentUser?.role || currentUser.role.toUpperCase() === 'ADMIN';
+
   const [isSaving, setIsSaving] = useState<boolean>(false);
   const [formError, setFormError] = useState<string | null>(null);
 
@@ -53,7 +61,7 @@ export const EditUpstreamLinkModal: React.FC<EditUpstreamLinkModalProps> = ({
     setIsLoadingInterfaces(true);
     setInterfaceError(null);
     try {
-      const res = await fetch('/api/mikrotik/interface');
+      const res = await safeMikrotikFetch('/api/mikrotik/interface', {}, activeRouter);
       if (!res.ok) {
         throw new Error(`HTTP ${res.status}`);
       }
@@ -82,7 +90,7 @@ export const EditUpstreamLinkModal: React.FC<EditUpstreamLinkModalProps> = ({
     } finally {
       setIsLoadingInterfaces(false);
     }
-  }, [initialInterfaces]);
+  }, [initialInterfaces, activeRouter]);
 
   useEffect(() => {
     if (!isOpen) return;
@@ -94,8 +102,15 @@ export const EditUpstreamLinkModal: React.FC<EditUpstreamLinkModalProps> = ({
     setWanInterfaceName(config.wan_interface_name || 'ether1-WAN');
     setFormError(null);
     setIsCustomInterface(false);
+    const cached = (initialInterfaces || []).filter((item) => {
+      const name = String(item?.name || '').trim();
+      return Boolean(name) && !name.startsWith('<pppoe-');
+    });
+    if (cached.length > 0) {
+      setInterfaces(cached);
+    }
     loadMikrotikInterfaces();
-  }, [isOpen, config, loadMikrotikInterfaces]);
+  }, [isOpen, config, initialInterfaces, loadMikrotikInterfaces]);
 
   if (!isOpen) return null;
 
@@ -107,6 +122,11 @@ export const EditUpstreamLinkModal: React.FC<EditUpstreamLinkModalProps> = ({
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     setFormError(null);
+
+    if (!isAdmin) {
+      setFormError('Administrator privileges are required to modify upstream capacity configuration.');
+      return;
+    }
 
     if (!Number.isFinite(dedicatedNum) || dedicatedNum <= 0) {
       setFormError('Total Dedicated CIR (Mbps) must be greater than 0.');

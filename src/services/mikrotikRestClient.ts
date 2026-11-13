@@ -268,6 +268,22 @@ export async function fetchMikrotikLiveTelemetry(
           routerId: router.id || '',
         };
       });
+
+      // RouterOS /rest/interface returns cumulative byte counters without instantaneous rx-rate/tx-rate.
+      // Query /interface/monitor-traffic for the WAN interface so Aggregate WAN Traffic and graphs stay live.
+      if (options?.pollTraffic !== false && wanRxMbps === 0 && wanTxMbps === 0) {
+        const wanIface =
+          interfaces.find((i) => i.name === router.wanInterface) ||
+          interfaces.find((i) => /wan|ether1|sfp/i.test(i.name) && i.running && !i.name.startsWith('<pppoe-')) ||
+          interfaces.find((i) => !i.name.startsWith('<pppoe-'));
+        if (wanIface?.name) {
+          const mon = await monitorInterfaceTrafficRest(activeRouter, wanIface.name, options?.signal).catch(() => null);
+          if (mon?.success) {
+            wanRxMbps = mon.rxMbps;
+            wanTxMbps = mon.txMbps;
+          }
+        }
+      }
     }
 
     const cpuLoad = rData ? (Number(rData['cpu-load']) || 11) : 11;

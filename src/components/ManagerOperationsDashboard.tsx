@@ -38,8 +38,11 @@ import {
   PARENT_FLEET_ROUTER,
   NetworkAreaNode,
   fetchNetworkAreas,
+  resolveAreaFromUsername,
 } from '../lib/billingAndNetwork';
 import { AreaNodeSelector } from './AreaNodeSelector';
+import { safeMikrotikFetch } from '../services/mikrotikRestClient';
+import { AgentProfileView } from './AgentProfileView';
 
 interface ManagerOperationsDashboardProps {
   onOpenTicketModal: () => void;
@@ -53,8 +56,23 @@ interface LiveMikrotikSession {
   name?: string;
   address?: string;
   uptime?: string;
+  profile?: string;
   'caller-id'?: string;
 }
+
+interface LiveMikrotikSecret {
+  '.id'?: string;
+  name?: string;
+  profile?: string;
+  comment?: string;
+  disabled?: boolean | string;
+  'remote-address'?: string;
+}
+
+type MergedOperationSubscriber = SupabasePortalUser & {
+  isMikrotikOnly?: boolean;
+  mikrotikProfile?: string;
+};
 
 export const ManagerOperationsDashboard: React.FC<ManagerOperationsDashboardProps> = ({
   onOpenTicketModal,
@@ -90,24 +108,27 @@ export const ManagerOperationsDashboard: React.FC<ManagerOperationsDashboardProp
   const [cashLedger, setCashLedger] = useState<SupabaseAgentCashTransaction[]>([]);
   const [networkAreas, setNetworkAreas] = useState<NetworkAreaNode[]>([]);
   const [liveSessions, setLiveSessions] = useState<LiveMikrotikSession[]>([]);
+  const [mikrotikSecrets, setMikrotikSecrets] = useState<LiveMikrotikSecret[]>([]);
   const [isLoading, setIsLoading] = useState<boolean>(true);
   const [isRefreshing, setIsRefreshing] = useState<boolean>(false);
 
-  const [sectorFilter, setSectorFilter] = useState<string>(() =>
-    hasSpecificSector ? managerArea : 'ALL'
-  );
+  // Always default to ALL ("All Sectors — Saddar Fleet Router") for ADMIN & MANAGER
+  const [sectorFilter, setSectorFilter] = useState<string>('ALL');
 
   const [activeSubTab, setActiveSubTab] = useState<
     'tickets' | 'subscribers' | 'agent_cash' | 'outages' | 'olt_telemetry'
   >('tickets');
   const [ticketFilter, setTicketFilter] = useState<'all' | 'open' | 'critical'>('all');
   const [searchSubscriber, setSearchSubscriber] = useState('');
+  const [subPage, setSubPage] = useState(1);
+  const [showAllSubscribers, setShowAllSubscribers] = useState(false);
+  const [selectedAgentLedger, setSelectedAgentLedger] = useState<SupabasePortalUser | null>(null);
   const [toastNotice, setToastNotice] = useState<string | null>(null);
   const [kickingUsername, setKickingUsername] = useState<string | null>(null);
   const [approvingAgentId, setApprovingAgentId] = useState<string | null>(null);
 
   // Edit subscriber state (persisted to Supabase portal_users)
-  const [editingSubscriber, setEditingSubscriber] = useState<SupabasePortalUser | null>(null);
+  const [editingSubscriber, setEditingSubscriber] = useState<MergedOperationSubscriber | null>(null);
   const [editPhone, setEditPhone] = useState('');
   const [editAddress, setEditAddress] = useState('');
   const [editArea, setEditArea] = useState('');
@@ -121,16 +142,25 @@ export const ManagerOperationsDashboard: React.FC<ManagerOperationsDashboardProp
   const fetchOperationsData = useCallback(async (showSpinner = false) => {
     if (showSpinner) setIsRefreshing(true);
     try {
-      const [usersRes, ticketsRes, invoicesRes, paymentsRes, ledgerRes, areasList, sessionsRes] =
-        await Promise.all([
-          supabase.from('portal_users').select('*').order('full_name', { ascending: true }),
-          supabase.from('tickets').select('*').order('created_at', { ascending: false }),
-          supabase.from('invoices').select('*').order('created_at', { ascending: false }),
-          supabase.from('payment_transactions').select('*').order('created_at', { ascending: false }),
-          supabase.from('agent_cash_transactions').select('*').order('created_at', { ascending: false }),
-          fetchNetworkAreas(),
-          fetch('/api/mikrotik/ppp/active').then((r) => (r.ok ? r.json() : [])).catch(() => []),
-        ]);
+      const [
+        usersRes,
+        ticketsRes,
+        invoicesRes,
+        paymentsRes,
+        ledgerRes,
+        areasList,
+        sessionsRes,
+        secretsRes,
+      ] = await Promise.all([
+        supabase.from('portal_users').select('*').order('full_name', { ascending: true }),
+        supabase.from('tickets').select('*').order('created_at', { ascending: false }),
+        supabase.from('invoices').select('*').order('created_at', { ascending: false }),
+        supabase.from('payment_transactions').select('*').order('created_at', { ascending: false }),
+        supabase.from('agent_cash_transactions').select('*').order('created_at', { ascending: false }),
+        fetchNetworkAreas(),
+        safeMikrotikFetch('/api/mikrotik/ppp/active').then((r) => (r.ok ? r.json() : [])).catch(() => []),
+        safeMikrotikFetch('/api/mikrotik/ppp/secret').then((r) => (r.ok ? r.json() : [])).catch(() => []),
+      ]);
 
       if (Array.isArray(usersRes.data)) {
         const allUsers = usersRes.data as SupabasePortalUser[];
@@ -154,6 +184,9 @@ export const ManagerOperationsDashboard: React.FC<ManagerOperationsDashboardProp
       }
       if (Array.isArray(sessionsRes)) {
         setLiveSessions(sessionsRes as LiveMikrotikSession[]);
+      }
+      if (Array.isArray(secretsRes)) {
+        setMikrotikSecrets(secretsRes as LiveMikrotikSecret[]);
       }
     } catch (err) {
       console.warn('Operations dashboard sync notice:', err);
@@ -190,7 +223,7 @@ export const ManagerOperationsDashboard: React.FC<ManagerOperationsDashboardProp
       .subscribe();
 
     const pollTimer = setInterval(() => {
-      fetch('/api/mikrotik/ppp/active')
+      safeMikrotikFetch('/api/mikrotik/ppp/active')
         .then((r) => (r.ok ? r.json() : null))
         .then((data) => {
           if (Array.isArray(data)) setLiveSessions(data as LiveMikrotikSession[]);
@@ -217,15 +250,90 @@ export const ManagerOperationsDashboard: React.FC<ManagerOperationsDashboardProp
     return map;
   }, [liveSessions]);
 
+  // Merge Supabase CLIENT records + MikroTik /ppp/secret + /ppp/active into unified subscriber directory
+  const mergedSubscribers = useMemo<MergedOperationSubscriber[]>(() => {
+    const byUsername = new Map<string, MergedOperationSubscriber>();
+
+    for (const sub of subscribers) {
+      const uname = (sub?.username || '').trim();
+      if (!uname) continue;
+      const key = uname.toLowerCase();
+      const detectedArea = resolveAreaFromUsername(uname, networkAreas);
+      const areaVal =
+        sub.area && sub.area.trim() && sub.area !== 'Unassigned'
+          ? sub.area
+          : detectedArea || 'Saddar Core';
+
+      byUsername.set(key, {
+        ...sub,
+        area: areaVal,
+        isMikrotikOnly: false,
+      });
+    }
+
+    for (const sec of mikrotikSecrets) {
+      const uname = (sec?.name || '').trim();
+      if (!uname) continue;
+      const key = uname.toLowerCase();
+      const isDisabled = sec.disabled === true || sec.disabled === 'true';
+      const existing = byUsername.get(key);
+
+      if (existing) {
+        existing.mikrotikProfile = sec.profile || existing.package_speed || 'default';
+      } else {
+        const detectedArea = resolveAreaFromUsername(uname, networkAreas) || 'Saddar Core';
+        byUsername.set(key, {
+          id: sec['.id'] || `mt-sec-${key}`,
+          username: uname,
+          full_name: sec.comment && sec.comment.trim() ? sec.comment.trim() : uname,
+          role: 'CLIENT',
+          area: detectedArea,
+          phone: '',
+          address: sec['remote-address'] || '',
+          package_speed: sec.profile || 'default',
+          mikrotikProfile: sec.profile || 'default',
+          account_status: isDisabled ? 'SUSPENDED' : 'ACTIVE',
+          isMikrotikOnly: true,
+        });
+      }
+    }
+
+    for (const act of liveSessions) {
+      const uname = (act?.name || '').trim();
+      if (!uname) continue;
+      const key = uname.toLowerCase();
+      if (!byUsername.has(key)) {
+        const detectedArea = resolveAreaFromUsername(uname, networkAreas) || 'Saddar Core';
+        byUsername.set(key, {
+          id: act['.id'] || `mt-act-${key}`,
+          username: uname,
+          full_name: uname,
+          role: 'CLIENT',
+          area: detectedArea,
+          phone: '',
+          address: act.address || '',
+          package_speed: act.profile || 'default',
+          mikrotikProfile: act.profile || 'default',
+          account_status: 'ACTIVE',
+          isMikrotikOnly: true,
+        });
+      }
+    }
+
+    return Array.from(byUsername.values()).sort((a, b) =>
+      (a.full_name || a.username || '').localeCompare(b.full_name || b.username || '')
+    );
+  }, [subscribers, mikrotikSecrets, liveSessions, networkAreas]);
+
   // Map subscriber directory by lowercase username for enriching tickets & balances
   const subscriberMap = useMemo(() => {
-    const map: Record<string, SupabasePortalUser> = {};
-    for (const sub of subscribers) {
+    const map: Record<string, MergedOperationSubscriber> = {};
+    for (const sub of mergedSubscribers) {
       const uname = (sub?.username || '').trim().toLowerCase();
       if (uname) map[uname] = sub;
     }
     return map;
-  }, [subscribers]);
+  }, [mergedSubscribers]);
 
   // Compute unpaid balance due per subscriber strictly from Supabase invoices
   const dueBalanceByUsername = useMemo(() => {
@@ -241,7 +349,7 @@ export const ManagerOperationsDashboard: React.FC<ManagerOperationsDashboardProp
     return map;
   }, [invoices]);
 
-  // Compute live agent cash-in-hand & collected today strictly from payment_transactions + agent_cash_transactions
+  // Compute live agent cash-in-hand & collected today from payment_transactions + paid invoices + agent_cash_transactions
   const agentFinancials = useMemo(() => {
     const todayStr = new Date().toISOString().split('T')[0];
     const map: Record<string, { cashInHand: number; collectedToday: number; openTickets: number }> = {};
@@ -250,20 +358,48 @@ export const ManagerOperationsDashboard: React.FC<ManagerOperationsDashboardProp
       map[ag.id] = { cashInHand: 0, collectedToday: 0, openTickets: 0 };
     }
 
+    const findMatchingAgent = (id?: string | null, name?: string | null) => {
+      if (id) {
+        const byId = agents.find((ag) => ag.id === id);
+        if (byId) return byId;
+      }
+      const cleanName = (name || '').trim().toLowerCase();
+      if (!cleanName) return undefined;
+      return agents.find((ag) => {
+        const agFull = (ag.full_name || '').trim().toLowerCase();
+        const agUser = (ag.username || '').trim().toLowerCase();
+        return (
+          (agFull && (cleanName === agFull || cleanName.includes(agFull) || agFull.includes(cleanName))) ||
+          (agUser && (cleanName === agUser || cleanName.includes(agUser)))
+        );
+      });
+    };
+
     const totalCollectedByAgent: Record<string, number> = {};
+    const recordedInvoiceIds = new Set<string>();
+
     for (const tx of paymentTxns) {
-      const matchedAgent = agents.find(
-        (ag) =>
-          (tx.collected_by_id && ag.id === tx.collected_by_id) ||
-          (tx.collected_by_name &&
-            (ag.full_name || '').toLowerCase() === (tx.collected_by_name || '').toLowerCase())
-      );
+      if (tx.invoice_id) recordedInvoiceIds.add(tx.invoice_id);
+      const matchedAgent = findMatchingAgent(tx.collected_by_id, tx.collected_by_name);
       if (!matchedAgent) continue;
       const amt = Number(tx.amount_paid) || 0;
       totalCollectedByAgent[matchedAgent.id] = (totalCollectedByAgent[matchedAgent.id] || 0) + amt;
       const dtStr = tx.payment_date || tx.created_at || '';
       if (dtStr.startsWith(todayStr)) {
         map[matchedAgent.id].collectedToday += amt;
+      }
+    }
+
+    // Fallback: include paid_amount on invoices assigned to the agent if no payment_transaction row exists for that invoice
+    for (const inv of invoices) {
+      const paidAmt = Number(inv.paid_amount) || 0;
+      if (paidAmt <= 0 || recordedInvoiceIds.has(inv.id)) continue;
+      const matchedAgent = findMatchingAgent(inv.assigned_agent_id, inv.assigned_agent_name);
+      if (!matchedAgent) continue;
+      totalCollectedByAgent[matchedAgent.id] = (totalCollectedByAgent[matchedAgent.id] || 0) + paidAmt;
+      const dtStr = inv.paid_at || inv.created_at || '';
+      if (dtStr.startsWith(todayStr)) {
+        map[matchedAgent.id].collectedToday += paidAmt;
       }
     }
 
@@ -293,7 +429,7 @@ export const ManagerOperationsDashboard: React.FC<ManagerOperationsDashboardProp
     }
 
     return map;
-  }, [agents, paymentTxns, cashLedger, tickets]);
+  }, [agents, paymentTxns, invoices, cashLedger, tickets]);
 
   // Sector-scoped datasets
   const scopedOutages = (outages || []).filter((o) =>
@@ -311,7 +447,7 @@ export const ManagerOperationsDashboard: React.FC<ManagerOperationsDashboardProp
     );
   });
 
-  const scopedSubscribers = subscribers.filter((s) =>
+  const scopedSubscribers = mergedSubscribers.filter((s) =>
     sectorFilter === 'ALL' ? true : (s?.area || '').toLowerCase().includes(cleanSector)
   );
 
@@ -348,6 +484,13 @@ export const ManagerOperationsDashboard: React.FC<ManagerOperationsDashboardProp
       (s?.area || '').toLowerCase().includes(cleanSearchSub) ||
       (s?.phone || '').includes(searchSubscriber || '')
   );
+
+  const pageSize = 50;
+  const totalSubPages = Math.max(1, Math.ceil(filteredSubscribers.length / pageSize));
+  const clampedSubPage = Math.min(subPage, totalSubPages);
+  const displayedSubscribers = showAllSubscribers
+    ? filteredSubscribers
+    : filteredSubscribers.slice((clampedSubPage - 1) * pageSize, clampedSubPage * pageSize);
 
   // Real Supabase Ticket Assignment
   const handleAssignTicket = async (ticket: SupabaseTicket, agentId: string) => {
@@ -396,7 +539,9 @@ export const ManagerOperationsDashboard: React.FC<ManagerOperationsDashboardProp
 
     setKickingUsername(uname);
     try {
-      const lookupRes = await fetch(`/api/mikrotik/ppp/active?name=${encodeURIComponent(uname)}`);
+      const lookupRes = await safeMikrotikFetch(
+        `/api/mikrotik/ppp/active?name=${encodeURIComponent(uname)}`
+      );
       const activeList = lookupRes.ok ? await lookupRes.json() : [];
       const match = Array.isArray(activeList)
         ? activeList.find((s: any) => (s?.name || '').toLowerCase() === uname.toLowerCase())
@@ -407,7 +552,7 @@ export const ManagerOperationsDashboard: React.FC<ManagerOperationsDashboardProp
         return;
       }
 
-      const removeRes = await fetch('/api/mikrotik/ppp/active/remove', {
+      const removeRes = await safeMikrotikFetch('/api/mikrotik/ppp/active/remove', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ '.id': match['.id'], numbers: match['.id'] }),
@@ -462,22 +607,40 @@ export const ManagerOperationsDashboard: React.FC<ManagerOperationsDashboardProp
     }
   };
 
-  // Real Supabase Subscriber Edit
+  // Real Supabase Subscriber Edit (supports updating existing portal_users or syncing MikroTik-only user into Supabase)
   const handleSaveSubscriberEdit = async () => {
     if (!editingSubscriber) return;
     setIsSavingSub(true);
     try {
-      const { error } = await supabase
-        .from('portal_users')
-        .update({
-          phone: editPhone.trim(),
-          address: editAddress.trim(),
-          area: editArea.trim(),
-        })
-        .eq('id', editingSubscriber.id);
+      let errorMsg: string | null = null;
+      if (editingSubscriber.isMikrotikOnly) {
+        const { error } = await supabase.from('portal_users').insert([
+          {
+            username: editingSubscriber.username,
+            full_name: editingSubscriber.full_name || editingSubscriber.username,
+            role: 'CLIENT',
+            phone: editPhone.trim(),
+            address: editAddress.trim(),
+            area: editArea.trim() || 'Saddar Core',
+            package_speed: editingSubscriber.mikrotikProfile || editingSubscriber.package_speed || 'default',
+            account_status: editingSubscriber.account_status || 'ACTIVE',
+          },
+        ]);
+        if (error) errorMsg = error.message;
+      } else {
+        const { error } = await supabase
+          .from('portal_users')
+          .update({
+            phone: editPhone.trim(),
+            address: editAddress.trim(),
+            area: editArea.trim(),
+          })
+          .eq('id', editingSubscriber.id);
+        if (error) errorMsg = error.message;
+      }
 
-      if (error) {
-        showToast(`Failed to update subscriber: ${error.message}`);
+      if (errorMsg) {
+        showToast(`Failed to update subscriber: ${errorMsg}`);
         return;
       }
 
@@ -494,6 +657,19 @@ export const ManagerOperationsDashboard: React.FC<ManagerOperationsDashboardProp
     validOnus.length > 0
       ? (validOnus.reduce((s, o) => s + (o.rxPowerDbm || 0), 0) / validOnus.length).toFixed(1)
       : null;
+
+  if (selectedAgentLedger) {
+    return (
+      <AgentProfileView
+        agentId={selectedAgentLedger.id}
+        username={selectedAgentLedger.username}
+        onBack={() => {
+          setSelectedAgentLedger(null);
+          fetchOperationsData(true);
+        }}
+      />
+    );
+  }
 
   return (
     <div className="space-y-6 text-xs font-sans max-w-7xl mx-auto">
@@ -536,11 +712,14 @@ export const ManagerOperationsDashboard: React.FC<ManagerOperationsDashboardProp
               <MapPin className="w-3.5 h-3.5 text-cyan-400 shrink-0" />
               <select
                 value={sectorFilter}
-                onChange={(e) => setSectorFilter(e.target.value)}
+                onChange={(e) => {
+                  setSectorFilter(e.target.value);
+                  setSubPage(1);
+                }}
                 className="bg-transparent text-slate-200 text-xs font-mono focus:outline-none cursor-pointer"
               >
                 <option value="ALL" className="bg-slate-900">
-                  All Child Area Nodes ({networkAreas.length})
+                  All Sectors — Saddar Fleet Router ({networkAreas.length} Nodes)
                 </option>
                 {hasSpecificSector &&
                   !networkAreas.some((a) => a.area_name.toLowerCase() === managerArea.toLowerCase()) && (
@@ -930,7 +1109,10 @@ export const ManagerOperationsDashboard: React.FC<ManagerOperationsDashboardProp
               <input
                 type="text"
                 value={searchSubscriber}
-                onChange={(e) => setSearchSubscriber(e.target.value)}
+                onChange={(e) => {
+                  setSearchSubscriber(e.target.value);
+                  setSubPage(1);
+                }}
                 placeholder="Search name, PPPoE user, area..."
                 className="w-full bg-slate-950 border border-slate-700 rounded-lg pl-8 pr-3 py-1.5 text-xs text-white focus:outline-none focus:border-cyan-500 font-mono"
               />
@@ -951,14 +1133,14 @@ export const ManagerOperationsDashboard: React.FC<ManagerOperationsDashboardProp
                 </tr>
               </thead>
               <tbody className="divide-y divide-slate-800/60">
-                {filteredSubscribers.length === 0 ? (
+                {displayedSubscribers.length === 0 ? (
                   <tr>
                     <td colSpan={7} className="py-8 text-center text-slate-500">
                       No subscribers match this search or sector filter.
                     </td>
                   </tr>
                 ) : (
-                  filteredSubscribers.slice(0, 30).map((sub) => {
+                  displayedSubscribers.map((sub) => {
                     const subKey = (sub?.username || '').trim().toLowerCase();
                     const liveSess = liveSessionByUsername[subKey];
                     const isOnline = Boolean(liveSess);
@@ -1053,6 +1235,46 @@ export const ManagerOperationsDashboard: React.FC<ManagerOperationsDashboardProp
               </tbody>
             </table>
           </div>
+
+          {filteredSubscribers.length > pageSize && (
+            <div className="flex flex-wrap items-center justify-between gap-3 pt-2 border-t border-slate-800 font-mono text-xs">
+              <span className="text-slate-400">
+                Showing {displayedSubscribers.length} of {filteredSubscribers.length} subscribers
+              </span>
+              <div className="flex items-center gap-2">
+                {!showAllSubscribers && (
+                  <>
+                    <button
+                      type="button"
+                      onClick={() => setSubPage((p) => Math.max(1, p - 1))}
+                      disabled={clampedSubPage <= 1}
+                      className="px-2.5 py-1 rounded bg-slate-800 hover:bg-slate-700 disabled:opacity-40 text-slate-200 cursor-pointer"
+                    >
+                      Prev
+                    </button>
+                    <span className="text-slate-400">
+                      Page {clampedSubPage} / {totalSubPages}
+                    </span>
+                    <button
+                      type="button"
+                      onClick={() => setSubPage((p) => Math.min(totalSubPages, p + 1))}
+                      disabled={clampedSubPage >= totalSubPages}
+                      className="px-2.5 py-1 rounded bg-slate-800 hover:bg-slate-700 disabled:opacity-40 text-slate-200 cursor-pointer"
+                    >
+                      Next
+                    </button>
+                  </>
+                )}
+                <button
+                  type="button"
+                  onClick={() => setShowAllSubscribers((v) => !v)}
+                  className="px-2.5 py-1 rounded bg-cyan-950 hover:bg-cyan-900 text-cyan-300 border border-cyan-800 font-bold cursor-pointer"
+                >
+                  {showAllSubscribers ? 'Paginate (50/page)' : `Show All (${filteredSubscribers.length})`}
+                </button>
+              </div>
+            </div>
+          )}
         </div>
       )}
 
@@ -1101,22 +1323,32 @@ export const ManagerOperationsDashboard: React.FC<ManagerOperationsDashboardProp
                         <span>{agent.phone || 'Not set'}</span>
                       </div>
 
-                      <FeatureGate
-                        feature="manager_manual_cash_approval"
-                        role={activeManager?.role === 'ADMIN' ? 'ADMIN' : 'MANAGER'}
-                        mode="disable"
-                      >
+                      <div className="flex items-center gap-2 pt-2">
                         <button
-                          onClick={() => handleApproveHandover(agent, fin.cashInHand)}
-                          disabled={fin.cashInHand <= 0 || approvingAgentId === agent.id}
-                          className="w-full mt-2 py-1.5 px-3 rounded-lg bg-emerald-600 hover:bg-emerald-500 disabled:opacity-40 text-slate-950 font-bold text-xs flex items-center justify-center gap-1.5 transition cursor-pointer"
+                          type="button"
+                          onClick={() => setSelectedAgentLedger(agent)}
+                          className="px-3 py-1.5 rounded-lg bg-slate-800 hover:bg-slate-700 text-cyan-300 border border-slate-700 font-bold text-xs transition cursor-pointer whitespace-nowrap"
                         >
-                          <CheckCircle2 className="w-3.5 h-3.5" />
-                          <span>
-                            {approvingAgentId === agent.id ? 'Recording...' : 'Approve Cash Handover'}
-                          </span>
+                          360&deg; Ledger
                         </button>
-                      </FeatureGate>
+
+                        <FeatureGate
+                          feature="manager_manual_cash_approval"
+                          role={activeManager?.role === 'ADMIN' ? 'ADMIN' : 'MANAGER'}
+                          mode="disable"
+                        >
+                          <button
+                            onClick={() => handleApproveHandover(agent, fin.cashInHand)}
+                            disabled={fin.cashInHand <= 0 || approvingAgentId === agent.id}
+                            className="flex-1 py-1.5 px-3 rounded-lg bg-emerald-600 hover:bg-emerald-500 disabled:opacity-40 text-slate-950 font-bold text-xs flex items-center justify-center gap-1.5 transition cursor-pointer"
+                          >
+                            <CheckCircle2 className="w-3.5 h-3.5" />
+                            <span>
+                              {approvingAgentId === agent.id ? 'Recording...' : 'Approve Handover'}
+                            </span>
+                          </button>
+                        </FeatureGate>
+                      </div>
                     </div>
                   );
                 })}

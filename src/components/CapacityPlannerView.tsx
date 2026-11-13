@@ -30,6 +30,9 @@ import {
   resolveAreaFromUsername,
 } from '../lib/billingAndNetwork';
 import { EditUpstreamLinkModal } from './EditUpstreamLinkModal';
+import { safeMikrotikFetch } from '../services/mikrotikRestClient';
+import { useISP } from '../context/ISPContext';
+import { useAuth } from '../context/AuthContext';
 
 interface MikrotikInterfaceRow {
   '.id'?: string;
@@ -93,6 +96,11 @@ function normalizePackageTierLabel(raw?: string | null): string {
 }
 
 export const CapacityPlannerView: React.FC = () => {
+  const { routers, selectedRouterId } = useISP();
+  const { currentUser } = useAuth();
+  const activeRouter = routers.find((r) => r.id === selectedRouterId) || routers[0];
+  const isAdmin = !currentUser?.role || currentUser.role.toUpperCase() === 'ADMIN';
+
   // Config state from Supabase `upstream_capacity_config`
   const [config, setConfig] = useState<SupabaseUpstreamCapacityConfig>(DEFAULT_CONFIG);
   const [isLoading, setIsLoading] = useState<boolean>(true);
@@ -137,9 +145,9 @@ export const CapacityPlannerView: React.FC = () => {
         supabase.from('upstream_capacity_config').select('*').limit(1).maybeSingle(),
         supabase.from('portal_users').select('*').eq('role', 'CLIENT'),
         fetchNetworkAreas(),
-        fetch('/api/mikrotik/ppp/secret').then((r) => (r.ok ? r.json() : null)).catch(() => null),
-        fetch('/api/mikrotik/ppp/active').then((r) => (r.ok ? r.json() : null)).catch(() => null),
-        fetch('/api/mikrotik/interface').then((r) => (r.ok ? r.json() : null)).catch(() => null),
+        safeMikrotikFetch('/api/mikrotik/ppp/secret', {}, activeRouter).then((r) => (r.ok ? r.json() : null)).catch(() => null),
+        safeMikrotikFetch('/api/mikrotik/ppp/active', {}, activeRouter).then((r) => (r.ok ? r.json() : null)).catch(() => null),
+        safeMikrotikFetch('/api/mikrotik/interface', {}, activeRouter).then((r) => (r.ok ? r.json() : null)).catch(() => null),
       ]);
 
       if (cfgRes.data) {
@@ -180,7 +188,7 @@ export const CapacityPlannerView: React.FC = () => {
       setIsLoading(false);
       setIsRefreshing(false);
     }
-  }, []);
+  }, [activeRouter]);
 
   useEffect(() => {
     fetchPlannerDatasets();
@@ -235,9 +243,9 @@ export const CapacityPlannerView: React.FC = () => {
     const pollLiveTraffic = async () => {
       try {
         const [wanSample, ifaceList, activeList] = await Promise.all([
-          fetchMikrotikInterfaceTrafficOnce(effectiveWanInterface),
-          fetch('/api/mikrotik/interface').then((r) => (r.ok ? r.json() : null)).catch(() => null),
-          fetch('/api/mikrotik/ppp/active').then((r) => (r.ok ? r.json() : null)).catch(() => null),
+          fetchMikrotikInterfaceTrafficOnce(effectiveWanInterface, activeRouter),
+          safeMikrotikFetch('/api/mikrotik/interface', {}, activeRouter).then((r) => (r.ok ? r.json() : null)).catch(() => null),
+          safeMikrotikFetch('/api/mikrotik/ppp/active', {}, activeRouter).then((r) => (r.ok ? r.json() : null)).catch(() => null),
         ]);
 
         if (!isMounted) return;
@@ -671,14 +679,16 @@ export const CapacityPlannerView: React.FC = () => {
             <span>Sync Pools</span>
           </button>
 
-          <button
-            type="button"
-            onClick={handleOpenEditModal}
-            className="px-4 py-2 rounded-lg bg-cyan-600 hover:bg-cyan-500 text-slate-950 font-bold text-xs flex items-center gap-1.5 transition cursor-pointer whitespace-nowrap"
-          >
-            <Edit3 className="w-3.5 h-3.5" />
-            <span>Edit Upstream Link</span>
-          </button>
+          {isAdmin && (
+            <button
+              type="button"
+              onClick={handleOpenEditModal}
+              className="px-4 py-2 rounded-lg bg-cyan-600 hover:bg-cyan-500 text-slate-950 font-bold text-xs flex items-center gap-1.5 transition cursor-pointer whitespace-nowrap"
+            >
+              <Edit3 className="w-3.5 h-3.5" />
+              <span>Edit Upstream Link</span>
+            </button>
+          )}
         </div>
       </div>
 
@@ -1013,13 +1023,15 @@ export const CapacityPlannerView: React.FC = () => {
             </div>
           </div>
 
-          <button
-            type="button"
-            onClick={handleOpenEditModal}
-            className="px-3.5 py-2 rounded-lg bg-slate-800 hover:bg-slate-700 text-cyan-300 border border-slate-700 font-semibold text-xs shrink-0 transition cursor-pointer whitespace-nowrap"
-          >
-            Adjust CIR / Ratio
-          </button>
+          {isAdmin && (
+            <button
+              type="button"
+              onClick={handleOpenEditModal}
+              className="px-3.5 py-2 rounded-lg bg-slate-800 hover:bg-slate-700 text-cyan-300 border border-slate-700 font-semibold text-xs shrink-0 transition cursor-pointer whitespace-nowrap"
+            >
+              Adjust CIR / Ratio
+            </button>
+          )}
         </div>
 
         {/* Package Contention Matrix Table */}

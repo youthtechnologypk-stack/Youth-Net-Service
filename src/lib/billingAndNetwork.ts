@@ -1,4 +1,6 @@
 import { supabase, SupabaseInvoice } from '../services/supabaseClient';
+import { safeMikrotikFetch } from '../services/mikrotikRestClient';
+import { RouterAuthInfo } from '../services/apiClient';
 
 export const PARENT_FLEET_ROUTER = 'SADDAR FLEET ROUTER';
 
@@ -153,7 +155,7 @@ export async function syncMikrotikSecretProfile(
     // 1. Lookup exact secret .id from RouterOS
     let secretId: string | null = null;
     try {
-      const res = await fetch(`/api/mikrotik/ppp/secret?name=${encodeURIComponent(cleanUser)}`);
+      const res = await safeMikrotikFetch(`/api/mikrotik/ppp/secret?name=${encodeURIComponent(cleanUser)}`);
       if (res.ok) {
         const list = await res.json();
         if (Array.isArray(list)) {
@@ -177,7 +179,7 @@ export async function syncMikrotikSecretProfile(
       payload.numbers = cleanUser;
     }
 
-    const setRes = await fetch('/api/mikrotik/ppp/secret/set', {
+    const setRes = await safeMikrotikFetch('/api/mikrotik/ppp/secret/set', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(payload),
@@ -221,7 +223,7 @@ export async function restoreSubscriberOnInvoicePaid(
     // 3. Determine active MikroTik PPP profile name (match router's existing profile if available)
     let profileToApply = restoredProfile;
     try {
-      const profRes = await fetch('/api/mikrotik/ppp/profile');
+      const profRes = await safeMikrotikFetch('/api/mikrotik/ppp/profile');
       if (profRes.ok) {
         const profiles = await profRes.json();
         if (Array.isArray(profiles) && profiles.length > 0) {
@@ -304,7 +306,7 @@ export async function enforce31DayAutoExpiry(invoices: SupabaseInvoice[]): Promi
     // Resolve EXPIRED or Walled Garden profile name on router if present
     let expiredProfileName = 'EXPIRED';
     try {
-      const profRes = await fetch('/api/mikrotik/ppp/profile');
+      const profRes = await safeMikrotikFetch('/api/mikrotik/ppp/profile');
       if (profRes.ok) {
         const profiles = await profRes.json();
         if (Array.isArray(profiles)) {
@@ -337,52 +339,99 @@ export async function enforce31DayAutoExpiry(invoices: SupabaseInvoice[]): Promi
   }
 }
 
+const prevInterfaceByteCounters: Record<string, { rxBytes: number; txBytes: number; ts: number }> = {};
+
 /**
- * Lightweight, read-only interface traffic fetch using ?once (safe 24/7 polling)
+ * Lightweight, read-only interface traffic fetch using authenticated safeMikrotikFetch
+ * Calls POST /api/mikrotik/interface/monitor-traffic with { interface, once: '' } (and fallback 'yes'),
+ * plus byte-counter delta fallback from /api/mikrotik/interface.
  */
 export async function fetchMikrotikInterfaceTrafficOnce(
-  interfaceName: string
+  interfaceName: string,
+  activeRouter?: RouterAuthInfo
 ): Promise<{ rxMbps: number; txMbps: number; ok: boolean }> {
   if (!interfaceName) return { rxMbps: 0, txMbps: 0, ok: false };
 
-  // Try GET /api/mikrotik/interface/monitor-traffic?interface=...&once=true first
+  const parseMonitorPayload = (data: any): { rxMbps: number; txMbps: number; ok: boolean } | null => {
+    const target = Array.isArray(data) ? data[0] : data;
+    if (
+      target &&
+      (target['rx-bits-per-second'] !== undefined ||
+        target['tx-bits-per-second'] !== undefined ||
+        target['rx-bps'] !== undefined ||
+        target['tx-bps'] !== undefined)
+    ) {
+      const rxBps = Number(target['rx-bits-per-second'] ?? target['rx-bps'] ?? 0);
+      const txBps = Number(target['tx-bits-per-second'] ?? target['tx-bps'] ?? 0);
+      return {
+        rxMbps: Math.round((rxBps / 1_000_000) * 100) / 100,
+        txMbps: Math.round((txBps / 1_000_000) * 100) / 100,
+        ok: true,
+      };
+    }
+    return null;
+  };
+
+  // 1. Standard RouterOS v7 REST POST /interface/monitor-traffic with { interface, once: '' }
   try {
-    const getRes = await fetch(
-      `/api/mikrotik/interface/monitor-traffic?interface=${encodeURIComponent(interfaceName)}&once=true`
+    const postRes = await safeMikrotikFetch(
+      '/api/mikrotik/interface/monitor-traffic',
+      {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ interface: interfaceName, once: '' }),
+      },
+      activeRouter
     );
-    if (getRes.ok) {
-      const data = await getRes.json();
-      const target = Array.isArray(data) ? data[0] : data;
-      if (target && (target['rx-bits-per-second'] !== undefined || target['tx-bits-per-second'] !== undefined)) {
-        const rxBps = Number(target['rx-bits-per-second'] || 0);
-        const txBps = Number(target['tx-bits-per-second'] || 0);
-        return {
-          rxMbps: Math.round((rxBps / 1_000_000) * 100) / 100,
-          txMbps: Math.round((txBps / 1_000_000) * 100) / 100,
-          ok: true,
-        };
-      }
+    if (postRes.ok) {
+      const data = await postRes.json();
+      const parsed = parseMonitorPayload(data);
+      if (parsed) return parsed;
     }
   } catch {}
 
-  // Fallback to RouterOS v7 REST POST /interface/monitor-traffic with { interface, once: 'yes' }
+  // 2. Fallback POST with { interface, once: 'yes' } for older RouterOS v7 builds
   try {
-    const postRes = await fetch('/api/mikrotik/interface/monitor-traffic', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ interface: interfaceName, once: 'yes' }),
-    });
+    const postRes = await safeMikrotikFetch(
+      '/api/mikrotik/interface/monitor-traffic',
+      {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ interface: interfaceName, once: 'yes' }),
+      },
+      activeRouter
+    );
     if (postRes.ok) {
       const data = await postRes.json();
-      const target = Array.isArray(data) ? data[0] : data;
-      if (target && (target['rx-bits-per-second'] !== undefined || target['tx-bits-per-second'] !== undefined)) {
-        const rxBps = Number(target['rx-bits-per-second'] || 0);
-        const txBps = Number(target['tx-bits-per-second'] || 0);
-        return {
-          rxMbps: Math.round((rxBps / 1_000_000) * 100) / 100,
-          txMbps: Math.round((txBps / 1_000_000) * 100) / 100,
-          ok: true,
-        };
+      const parsed = parseMonitorPayload(data);
+      if (parsed) return parsed;
+    }
+  } catch {}
+
+  // 3. Fallback: compute real instantaneous Mbps from /api/mikrotik/interface byte counter deltas
+  try {
+    const ifaceRes = await safeMikrotikFetch(
+      `/api/mikrotik/interface?name=${encodeURIComponent(interfaceName)}`,
+      { method: 'GET' },
+      activeRouter
+    );
+    if (ifaceRes.ok) {
+      const list = await ifaceRes.json();
+      const match = Array.isArray(list)
+        ? list.find((i: any) => (i?.name || '').toLowerCase() === interfaceName.toLowerCase()) || list[0]
+        : list;
+      if (match && (match['rx-byte'] !== undefined || match['tx-byte'] !== undefined)) {
+        const rxBytes = Number(match['rx-byte'] || 0);
+        const txBytes = Number(match['tx-byte'] || 0);
+        const now = Date.now();
+        const prev = prevInterfaceByteCounters[interfaceName];
+        prevInterfaceByteCounters[interfaceName] = { rxBytes, txBytes, ts: now };
+        if (prev && now > prev.ts && rxBytes >= prev.rxBytes && txBytes >= prev.txBytes) {
+          const dtSec = (now - prev.ts) / 1000;
+          const rxMbps = Math.round((((rxBytes - prev.rxBytes) * 8) / (dtSec * 1_000_000)) * 100) / 100;
+          const txMbps = Math.round((((txBytes - prev.txBytes) * 8) / (dtSec * 1_000_000)) * 100) / 100;
+          return { rxMbps, txMbps, ok: true };
+        }
       }
     }
   } catch {}

@@ -4,6 +4,7 @@ import { useISP } from '../context/ISPContext';
 import { useSubscribers, UnifiedSubscriber } from '../hooks/useSubscribers';
 import { TicketCategory, TicketPriority } from '../types/isp';
 import { supabase, SupabasePortalUser } from '../services/supabaseClient';
+import { safeMikrotikFetch } from '../services/mikrotikRestClient';
 
 export interface CreateTicketModalProps {
   isOpen: boolean;
@@ -105,7 +106,7 @@ export const NewTicketModal: React.FC<CreateTicketModalProps> = ({
     try {
       // 2. Query /api/mikrotik/ppp/secret
       try {
-        const secRes = await fetch('/api/mikrotik/ppp/secret');
+        const secRes = await safeMikrotikFetch('/api/mikrotik/ppp/secret');
         if (secRes.ok) {
           const secrets = await secRes.json();
           if (Array.isArray(secrets)) {
@@ -153,7 +154,7 @@ export const NewTicketModal: React.FC<CreateTicketModalProps> = ({
 
       // 3. Query /api/mikrotik/ppp/active
       try {
-        const actRes = await fetch('/api/mikrotik/ppp/active');
+        const actRes = await safeMikrotikFetch('/api/mikrotik/ppp/active');
         if (actRes.ok) {
           const actives = await actRes.json();
           if (Array.isArray(actives)) {

@@ -16,6 +16,7 @@ import {
 } from 'lucide-react';
 import { supabase, SupabasePortalUser } from '../services/supabaseClient';
 import { useCurrency } from '../context/CurrencyContext';
+import { safeMikrotikFetch } from '../services/mikrotikRestClient';
 
 export interface PPPoESecretOption {
   name: string;
@@ -104,7 +105,7 @@ export const CreateInvoiceModal: React.FC<CreateInvoiceModalProps> = ({
     try {
       // 1.1 Fetch MikroTik secrets from REST proxy
       try {
-        const secRes = await fetch('/api/mikrotik/ppp/secret');
+        const secRes = await safeMikrotikFetch('/api/mikrotik/ppp/secret');
         if (secRes.ok) {
           const secretsData = await secRes.json();
           if (Array.isArray(secretsData)) {
@@ -129,7 +130,7 @@ export const CreateInvoiceModal: React.FC<CreateInvoiceModalProps> = ({
 
       // 1.2 Fetch MikroTik active sessions from REST proxy
       try {
-        const actRes = await fetch('/api/mikrotik/ppp/active');
+        const actRes = await safeMikrotikFetch('/api/mikrotik/ppp/active');
         if (actRes.ok) {
           const activeData = await actRes.json();
           if (Array.isArray(activeData)) {

@@ -37,6 +37,7 @@ import {
 import { useISP } from '../context/ISPContext';
 import { ActiveSession, Customer } from '../types/isp';
 import { fetchMikrotikInterfaceTrafficOnce } from '../lib/billingAndNetwork';
+import { safeMikrotikFetch } from '../services/mikrotikRestClient';
 
 interface LiveInterfaceItem {
   id: string;
@@ -54,6 +55,8 @@ interface TrafficSample {
 
 export const UsageAnalytics: React.FC = () => {
   const {
+    routers,
+    selectedRouterId,
     bandwidthHistory,
     activeSessions,
     routerInterfaces,
@@ -62,6 +65,11 @@ export const UsageAnalytics: React.FC = () => {
     isTrafficStreaming,
     setIsTrafficStreaming,
   } = useISP();
+
+  const currentRouter = useMemo(
+    () => (routers || []).find((r) => r.id === selectedRouterId) || (routers || [])[0],
+    [routers, selectedRouterId]
+  );
 
   const [analyticsView, setAnalyticsView] = useState<'interface' | 'subscriber' | 'top_talkers'>('interface');
   const [liveInterfaces, setLiveInterfaces] = useState<LiveInterfaceItem[]>([]);
@@ -73,12 +81,12 @@ export const UsageAnalytics: React.FC = () => {
     activeSessions[0]?.username || ''
   );
 
-  // 1. Dynamically fetch real interfaces from /api/mikrotik/interface
+  // 1. Dynamically fetch real interfaces from /api/mikrotik/interface via authenticated safeMikrotikFetch
   useEffect(() => {
     let isMounted = true;
     const loadInterfaces = async () => {
       try {
-        const res = await fetch('/api/mikrotik/interface');
+        const res = await safeMikrotikFetch('/api/mikrotik/interface', {}, currentRouter);
         if (!res.ok) return;
         const data = await res.json();
         if (!Array.isArray(data) || !isMounted) return;
@@ -100,7 +108,11 @@ export const UsageAnalytics: React.FC = () => {
           setLiveInterfaces(parsed);
           setSelectedInterface((prev) => {
             if (prev && parsed.some((p) => p.name === prev)) return prev;
+            const configuredWan = currentRouter?.wanInterface
+              ? parsed.find((p) => p.name.toLowerCase() === currentRouter.wanInterface!.toLowerCase())
+              : undefined;
             const preferred =
+              configuredWan ||
               parsed.find((p) => /wan|ether1|sfp/i.test(p.name) && p.running !== false) ||
               parsed.find((p) => /ether|sfp|bridge/i.test(p.name)) ||
               parsed[0];
@@ -116,7 +128,7 @@ export const UsageAnalytics: React.FC = () => {
     return () => {
       isMounted = false;
     };
-  }, []);
+  }, [currentRouter]);
 
   // Fallback interface list combining live /api/mikrotik/interface and context routerInterfaces
   const availableInterfaces = useMemo<LiveInterfaceItem[]>(() => {
@@ -144,7 +156,7 @@ export const UsageAnalytics: React.FC = () => {
     }
   }, [availableInterfaces, selectedInterface]);
 
-  // 2. Poll /api/mikrotik/interface/monitor-traffic?interface=${selectedInterface}&once every 3 seconds
+  // 2. Poll /api/mikrotik/interface/monitor-traffic via authenticated safeMikrotikFetch every 3 seconds
   useEffect(() => {
     if (!selectedInterface || !isTrafficStreaming) return;
     let isMounted = true;
@@ -153,7 +165,7 @@ export const UsageAnalytics: React.FC = () => {
     setLiveInterfaceHistory([]);
 
     const pollInterfaceTraffic = async () => {
-      const sample = await fetchMikrotikInterfaceTrafficOnce(selectedInterface);
+      const sample = await fetchMikrotikInterfaceTrafficOnce(selectedInterface, currentRouter);
       if (!isMounted) return;
 
       const nowStr = new Date().toLocaleTimeString([], {
@@ -197,7 +209,7 @@ export const UsageAnalytics: React.FC = () => {
       isMounted = false;
       clearInterval(timer);
     };
-  }, [selectedInterface, isTrafficStreaming]);
+  }, [selectedInterface, isTrafficStreaming, currentRouter]);
 
   const effectiveHistory = useMemo(() => {
     if (liveInterfaceHistory.length > 0) return liveInterfaceHistory;
