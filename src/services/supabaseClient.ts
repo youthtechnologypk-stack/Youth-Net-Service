@@ -104,7 +104,8 @@ export interface SupabaseSubscriberSessionLog {
   bytes_out: number;
   disconnect_reason?: string | null;
   connected_at?: string | null;
-  disconnected_at: string;
+  recorded_at?: string;
+  disconnected_at?: string;
 }
 
 export interface SupabaseAgentCashTransaction {

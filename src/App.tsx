@@ -165,8 +165,20 @@ function ISPAppContent() {
 
   // Handle Logout
   const handleLogout = async () => {
-    await apiLogout();
+    try {
+      await apiLogout();
+    } catch {}
+    try {
+      sessionStorage.clear();
+      localStorage.removeItem('netpulse_active_user');
+      localStorage.removeItem('youthnet_active_session');
+      localStorage.removeItem('auth_token');
+      localStorage.removeItem('auth_user');
+    } catch {}
     setCurrentUser(null);
+    if (typeof window !== 'undefined') {
+      window.location.href = '/login';
+    }
   };
 
   // Handle Role Switching for Testing/Simulation (Guarded strictly to genuine ADMIN sessions)
@@ -271,8 +283,8 @@ function ISPAppContent() {
           onLogout={handleLogout}
         />
 
-        {/* RBAC Role Indicator Banner (ONLY for genuine Admin sessions simulating other roles; REMOVED completely for Client) */}
-        {currentRole !== 'ADMIN' && isOriginalAdmin && !isClient && (
+        {/* RBAC Role Indicator Banner (Strictly hidden for logged-in CLIENT, AGENT, and MANAGER) */}
+        {currentRole !== 'ADMIN' && isOriginalAdmin && currentUser.role === 'ADMIN' && (
           <div className="bg-slate-900 border-b border-indigo-900/60 text-slate-300 text-xs px-4 py-2 font-mono flex items-center justify-between shrink-0">
             <div className="flex items-center gap-2">
               <ShieldAlert className="w-4 h-4 text-cyan-400 shrink-0" />
@@ -295,8 +307,10 @@ function ISPAppContent() {
         {/* Scrollable Main Content Body */}
         <main className="flex-1 overflow-y-auto p-4 sm:p-6 bg-slate-50 dark:bg-[#0B111E] text-slate-900 dark:text-slate-100 transition-colors duration-200">
           <div className="max-w-7xl mx-auto space-y-6">
-            {/* PWA Mobile Install Banner for Agents & Clients */}
-            <PWAInstallPrompt role={currentRole} variant="banner" forceVisibleOnDesktop={false} />
+            {/* PWA Mobile Install Banner (Admin only) */}
+            {currentRole === 'ADMIN' && (
+              <PWAInstallPrompt role={currentRole} variant="banner" forceVisibleOnDesktop={false} />
+            )}
 
             {/* Route Protection Guard: If current role lacks permission, show 403 Forbidden screen */}
             {!isPermitted ? (

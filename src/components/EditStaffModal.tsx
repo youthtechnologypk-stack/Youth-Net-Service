@@ -15,6 +15,7 @@ import {
   AtSign,
 } from 'lucide-react';
 import { supabase } from '../services/supabaseClient';
+import { AreaNodeSelector } from './AreaNodeSelector';
 
 export interface StaffUserRecord {
   id: string;
@@ -63,7 +64,7 @@ export const EditStaffModal: React.FC<EditStaffModalProps> = ({
   const [fullName, setFullName] = useState('');
   const [phone, setPhone] = useState('');
   const [area, setArea] = useState('Saddar Node');
-  const [baseSalary, setBaseSalary] = useState<string>('35000');
+  const [baseSalary, setBaseSalary] = useState<string>('0');
   const [role, setRole] = useState<'AGENT' | 'MANAGER'>('AGENT');
   const [accountStatus, setAccountStatus] = useState<'ACTIVE' | 'SUSPENDED'>('ACTIVE');
   const [newPassword, setNewPassword] = useState('');
@@ -79,7 +80,7 @@ export const EditStaffModal: React.FC<EditStaffModalProps> = ({
       setFullName(name);
       setPhone(staff.phone || '');
       setArea(staff.area || staff.assignedArea || 'Saddar Node');
-      setBaseSalary(staff.base_salary != null ? String(staff.base_salary) : '35000');
+      setBaseSalary(staff.base_salary != null ? String(staff.base_salary) : '0');
       
       const roleUpper = (staff.role || 'AGENT').toUpperCase();
       setRole(roleUpper === 'MANAGER' ? 'MANAGER' : 'AGENT');
@@ -268,28 +269,13 @@ export const EditStaffModal: React.FC<EditStaffModalProps> = ({
           </div>
 
           {/* Area & Base Salary */}
-          <div className="grid grid-cols-1 sm:grid-cols-2 gap-3.5">
-            <div>
-              <label className="text-slate-300 font-semibold block mb-1 flex items-center gap-1">
-                <MapPin className="w-3 h-3 text-cyan-400" />
-                <span>Assigned Area / Node</span>
-              </label>
-              <div className="relative">
-                <input
-                  type="text"
-                  list="area-options"
-                  value={area}
-                  onChange={(e) => setArea(e.target.value)}
-                  placeholder="e.g. Saddar Node"
-                  className="w-full bg-slate-950 border border-slate-700 rounded-xl px-3.5 py-2 text-slate-200 text-xs focus:outline-none focus:border-cyan-500"
-                />
-                <datalist id="area-options">
-                  {COMMON_AREAS.map((a) => (
-                    <option key={a} value={a} />
-                  ))}
-                </datalist>
-              </div>
-            </div>
+          <div className="grid grid-cols-1 sm:grid-cols-2 gap-3.5 items-start">
+            <AreaNodeSelector
+              label="Assigned Area / Child Node"
+              value={area}
+              onChange={setArea}
+              compact
+            />
 
             <div>
               <label className="text-slate-300 font-semibold block mb-1 flex items-center gap-1">

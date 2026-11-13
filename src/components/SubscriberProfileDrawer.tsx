@@ -1122,7 +1122,7 @@ export const SubscriberProfileDrawer: React.FC<SubscriberProfileDrawerProps> = (
                       {formatCurrency(customer?.balanceDue || 0)}
                     </div>
                     <span className="text-[10px] text-slate-500 mt-0.5 block">
-                      Billing cycle: 5th of every month
+                      Billing cycle: 31 Days
                     </span>
                   </div>
 

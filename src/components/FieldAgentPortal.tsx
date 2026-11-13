@@ -30,6 +30,7 @@ import { Invoice } from '../types/isp';
 import { FeatureGate } from './FeatureGate';
 import { PWAInstallPrompt } from './PWAInstallPrompt';
 import { supabase, SupabaseInvoice, SupabaseTicket, SupabaseAgentCashTransaction } from '../services/supabaseClient';
+import { restoreSubscriberOnInvoicePaid, add31DaysDateString } from '../lib/billingAndNetwork';
 
 interface FieldAgentPortalProps {
   currentUser: UserAccount;
@@ -57,11 +58,12 @@ export const FieldAgentPortal: React.FC<FieldAgentPortalProps> = ({
 
   // Agent dynamic state from Supabase
   const [agentCash, setAgentCash] = useState<number>(Number(currentUser.cashInHand || 0));
-  const [agentBaseSalary, setAgentBaseSalary] = useState<number>(Number(currentUser.base_salary || 35000));
+  const [agentBaseSalary, setAgentBaseSalary] = useState<number>(Number(currentUser.base_salary ?? 0));
   const [agentAdvanceBalance, setAgentAdvanceBalance] = useState<number>(Number(currentUser.advance_balance || 0));
   const [agentCashTransactions, setAgentCashTransactions] = useState<SupabaseAgentCashTransaction[]>([]);
   const [assignedTickets, setAssignedTickets] = useState<SupabaseTicket[]>([]);
   const [assignedInvoices, setAssignedInvoices] = useState<SupabaseInvoice[]>([]);
+  const [subscriberDirectory, setSubscriberDirectory] = useState<Record<string, { phone?: string; address?: string; full_name?: string; area?: string }>>({});
   const [isLoadingData, setIsLoadingData] = useState<boolean>(true);
 
   // Modal State for Cash Collection
@@ -75,11 +77,22 @@ export const FieldAgentPortal: React.FC<FieldAgentPortalProps> = ({
     setIsLoadingData(true);
     try {
       // 1. Fetch agent's latest cash_in_hand, advance_balance, base_salary from portal_users
-      const { data: userRow } = await supabase
+      let { data: userRow } = await supabase
         .from('portal_users')
-        .select('cash_in_hand, advance_balance, base_salary, area, full_name')
+        .select('id, cash_in_hand, advance_balance, base_salary, area, full_name')
         .eq('id', currentUser.id)
         .maybeSingle();
+
+      if (!userRow && currentUser.username) {
+        const res = await supabase
+          .from('portal_users')
+          .select('id, cash_in_hand, advance_balance, base_salary, area, full_name')
+          .ilike('username', currentUser.username)
+          .maybeSingle();
+        userRow = res.data;
+      }
+
+      const resolvedAgentId = userRow?.id || currentUser.id;
 
       if (userRow) {
         if (userRow.cash_in_hand !== undefined && userRow.cash_in_hand !== null) {
@@ -89,7 +102,7 @@ export const FieldAgentPortal: React.FC<FieldAgentPortalProps> = ({
           setAgentAdvanceBalance(Number(userRow.advance_balance) || 0);
         }
         if (userRow.base_salary !== undefined && userRow.base_salary !== null) {
-          setAgentBaseSalary(Number(userRow.base_salary) || 35000);
+          setAgentBaseSalary(Number(userRow.base_salary) || 0);
         }
       }
 
@@ -97,7 +110,7 @@ export const FieldAgentPortal: React.FC<FieldAgentPortalProps> = ({
       const { data: cashTxns } = await supabase
         .from('agent_cash_transactions')
         .select('*')
-        .eq('agent_id', currentUser.id)
+        .eq('agent_id', resolvedAgentId)
         .order('created_at', { ascending: false });
 
       if (cashTxns) {
@@ -108,7 +121,7 @@ export const FieldAgentPortal: React.FC<FieldAgentPortalProps> = ({
       const { data: tktData } = await supabase
         .from('tickets')
         .select('*')
-        .or(`assigned_agent_id.eq.${currentUser.id},assigned_agent_name.ilike.%${currentUser.fullName}%`)
+        .or(`assigned_agent_id.eq.${resolvedAgentId},assigned_agent_name.ilike.%${currentUser.fullName}%`)
         .order('created_at', { ascending: false });
 
       if (tktData) {
@@ -119,11 +132,33 @@ export const FieldAgentPortal: React.FC<FieldAgentPortalProps> = ({
       const { data: agentInvoices } = await supabase
         .from('invoices')
         .select('*')
-        .or(`assigned_agent_id.eq.${currentUser.id},assigned_agent_name.ilike.%${currentUser.fullName}%`)
+        .or(`assigned_agent_id.eq.${resolvedAgentId},assigned_agent_name.ilike.%${currentUser.fullName}%`)
         .order('created_at', { ascending: false });
 
       if (agentInvoices) {
         setAssignedInvoices(agentInvoices as SupabaseInvoice[]);
+      }
+
+      // 4. Fetch subscriber phone numbers and addresses from portal_users for Click-to-Call
+      const { data: clientRows } = await supabase
+        .from('portal_users')
+        .select('username, full_name, phone, address, area')
+        .eq('role', 'CLIENT');
+
+      if (clientRows && Array.isArray(clientRows)) {
+        const lookup: Record<string, { phone?: string; address?: string; full_name?: string; area?: string }> = {};
+        clientRows.forEach((c: any) => {
+          const uname = (c.username || '').trim().toLowerCase();
+          if (uname) {
+            lookup[uname] = {
+              phone: c.phone || '',
+              address: c.address || '',
+              full_name: c.full_name || '',
+              area: c.area || '',
+            };
+          }
+        });
+        setSubscriberDirectory(lookup);
       }
     } catch (err) {
       console.warn('FieldAgentPortal fetch error:', err);
@@ -154,7 +189,7 @@ export const FieldAgentPortal: React.FC<FieldAgentPortalProps> = ({
             setAgentAdvanceBalance(Number((payload.new as any).advance_balance) || 0);
           }
           if ((payload.new as any).base_salary !== undefined) {
-            setAgentBaseSalary(Number((payload.new as any).base_salary) || 35000);
+            setAgentBaseSalary(Number((payload.new as any).base_salary) || 0);
           }
         }
       })
@@ -201,12 +236,16 @@ export const FieldAgentPortal: React.FC<FieldAgentPortalProps> = ({
       const finalPaidAmount = remaining <= 0 ? totalAmount : newPaidTotal;
       const nowIso = new Date().toISOString();
 
-      // 1. Update invoice in Supabase: status, paid_amount, paid_at
+      // 1. Update invoice in Supabase: status, paid_amount, paid_at, and 31-day renewal on PAID
       const invoiceUpdateData: Partial<SupabaseInvoice> = {
         status: newStatus,
         paid_amount: finalPaidAmount,
         paid_at: newStatus === 'PAID' ? nowIso : (inv.paid_at || null),
+        cycle_day: 31,
       };
+      if (newStatus === 'PAID') {
+        invoiceUpdateData.due_date = add31DaysDateString(new Date());
+      }
 
       const { error: invErr } = await supabase
         .from('invoices')
@@ -214,6 +253,10 @@ export const FieldAgentPortal: React.FC<FieldAgentPortalProps> = ({
         .eq('id', inv.id);
 
       if (invErr) throw new Error(invErr.message);
+
+      if (newStatus === 'PAID') {
+        await restoreSubscriberOnInvoicePaid(inv.subscriber_username);
+      }
 
       // 2. Increment agent's cash_in_hand in portal_users by ONLY enteredVal
       const { data: agentRecord } = await supabase
@@ -302,9 +345,6 @@ export const FieldAgentPortal: React.FC<FieldAgentPortalProps> = ({
 
   return (
     <div className="max-w-md mx-auto space-y-4 font-sans text-xs pb-12">
-      {/* PWA Mobile Install Banner for Field Agents */}
-      <PWAInstallPrompt role="AGENT" variant="banner" forceVisibleOnDesktop={false} />
-
       {/* Agent Identity & Cash Banner */}
       <div className="bg-gradient-to-r from-slate-900 via-emerald-950/40 to-slate-900 border border-emerald-800/60 rounded-2xl p-4 shadow-xl">
         <div className="flex items-center justify-between">
@@ -315,7 +355,6 @@ export const FieldAgentPortal: React.FC<FieldAgentPortalProps> = ({
             <div>
               <div className="flex items-center gap-2">
                 <h2 className="text-sm font-bold text-white">{currentUser.fullName}</h2>
-                <PWAInstallPrompt role="AGENT" variant="button" />
               </div>
               <span className="text-[11px] text-emerald-400 font-mono flex items-center gap-1">
                 <MapPin className="w-3 h-3" /> {currentUser.area || 'Assigned Zone'}
@@ -403,6 +442,9 @@ export const FieldAgentPortal: React.FC<FieldAgentPortalProps> = ({
 
           {assignedTickets.map((ticket) => {
             const isResolved = ticket.status === 'RESOLVED';
+            const subInfo = subscriberDirectory[(ticket.subscriber_username || '').trim().toLowerCase()];
+            const subPhone = subInfo?.phone || customers.find((c) => c.pppoeUsername?.toLowerCase() === (ticket.subscriber_username || '').toLowerCase())?.phone || '';
+            const subAddress = subInfo?.address || subInfo?.area || '';
             return (
               <div
                 key={ticket.id}
@@ -410,18 +452,42 @@ export const FieldAgentPortal: React.FC<FieldAgentPortalProps> = ({
               >
                 <div className="flex items-start justify-between gap-2">
                   <div>
-                    <span className="font-bold text-white text-xs block">@{ticket.subscriber_username}</span>
-                    <span className="text-[10px] text-slate-400 font-mono">Ticket #{ticket.ticket_no}</span>
+                    <div className="flex items-center gap-2 flex-wrap">
+                      <span className="font-bold text-white text-xs">@{ticket.subscriber_username}</span>
+                      {subInfo?.full_name && (
+                        <span className="text-[11px] text-slate-400">({subInfo.full_name})</span>
+                      )}
+                    </div>
+                    <span className="text-[10px] text-slate-400 font-mono block">Ticket #{ticket.ticket_no}</span>
+                    {subAddress && (
+                      <span className="text-[10px] text-slate-400 flex items-center gap-1 mt-0.5">
+                        <MapPin className="w-3 h-3 text-cyan-400 shrink-0" />
+                        <span>{subAddress}</span>
+                      </span>
+                    )}
                   </div>
-                  <span
-                    className={`px-1.5 py-0.5 rounded font-mono font-bold text-[10px] ${
-                      ticket.priority?.toUpperCase() === 'CRITICAL'
-                        ? 'bg-rose-950 text-rose-300 border border-rose-800'
-                        : 'bg-amber-950 text-amber-300 border border-amber-800'
-                    }`}
-                  >
-                    {ticket.priority || 'MEDIUM'}
-                  </span>
+                  <div className="flex flex-col items-end gap-1.5 shrink-0">
+                    <span
+                      className={`px-1.5 py-0.5 rounded font-mono font-bold text-[10px] ${
+                        ticket.priority?.toUpperCase() === 'CRITICAL'
+                          ? 'bg-rose-950 text-rose-300 border border-rose-800'
+                          : 'bg-amber-950 text-amber-300 border border-amber-800'
+                      }`}
+                    >
+                      {ticket.priority || 'MEDIUM'}
+                    </span>
+                    {subPhone ? (
+                      <a
+                        href={`tel:${subPhone}`}
+                        className="px-2.5 py-1 rounded-lg bg-cyan-600 hover:bg-cyan-500 text-slate-950 font-bold font-mono text-[10px] flex items-center gap-1 shadow transition"
+                      >
+                        <Phone className="w-3 h-3" />
+                        <span>📞 Call Subscriber</span>
+                      </a>
+                    ) : (
+                      <span className="text-[10px] text-slate-500 font-mono">No phone on file</span>
+                    )}
+                  </div>
                 </div>
 
                 <div className="p-2 bg-slate-950 rounded-lg text-slate-300 text-[11px] font-mono leading-relaxed">
@@ -470,15 +536,18 @@ export const FieldAgentPortal: React.FC<FieldAgentPortalProps> = ({
             const alreadyPaid = Number(inv.paid_amount || 0);
             const balanceDue = Math.max(0, totalAmount - alreadyPaid);
             const displayStatus = balanceDue === 0 ? 'PAID' : (inv.status || 'DUE').toUpperCase();
+            const subInfo = subscriberDirectory[(inv.subscriber_username || '').trim().toLowerCase()];
+            const subPhone = subInfo?.phone || customers.find((c) => c.pppoeUsername?.toLowerCase() === (inv.subscriber_username || '').toLowerCase())?.phone || '';
+            const subAddress = subInfo?.address || subInfo?.area || '';
 
             return (
               <div
                 key={inv.id}
                 className="bg-slate-900 border border-slate-800 rounded-xl p-3.5 space-y-2.5 shadow-md"
               >
-                <div className="flex items-start justify-between">
+                <div className="flex items-start justify-between gap-2">
                   <div>
-                    <div className="flex items-center gap-2">
+                    <div className="flex items-center gap-2 flex-wrap">
                       <span className="font-bold text-white text-xs block">@{inv.subscriber_username}</span>
                       {displayStatus === 'PAID' ? (
                         <span className="px-1.5 py-0.5 rounded text-[10px] font-bold bg-emerald-500/20 text-emerald-400 border border-emerald-500/30 flex items-center gap-1">
@@ -496,7 +565,13 @@ export const FieldAgentPortal: React.FC<FieldAgentPortalProps> = ({
                       )}
                     </div>
                     <span className="text-[11px] text-slate-400 font-mono">Invoice #{inv.invoice_no}</span>
-                    <span className="text-[10px] text-slate-500 block">Cycle Day: {inv.cycle_day || 5}th</span>
+                    {subAddress && (
+                      <span className="text-[10px] text-slate-400 flex items-center gap-1 mt-0.5">
+                        <MapPin className="w-3 h-3 text-cyan-400 shrink-0" />
+                        <span>{subAddress}</span>
+                      </span>
+                    )}
+                    <span className="text-[10px] text-slate-500 block">Cycle: {inv.cycle_day || 31} Days</span>
                   </div>
                   <div className="text-right">
                     <span className={`font-bold font-mono text-sm block ${balanceDue > 0 ? 'text-rose-400' : 'text-emerald-400'}`}>
@@ -514,7 +589,19 @@ export const FieldAgentPortal: React.FC<FieldAgentPortalProps> = ({
                   </div>
                 </div>
 
-                <div className="flex items-center justify-end pt-2 border-t border-slate-800">
+                <div className="flex items-center justify-between gap-2 pt-2 border-t border-slate-800 flex-wrap">
+                  {subPhone ? (
+                    <a
+                      href={`tel:${subPhone}`}
+                      className="px-3 py-1.5 rounded-lg bg-cyan-600 hover:bg-cyan-500 text-slate-950 font-bold font-mono text-[11px] flex items-center gap-1.5 shadow transition"
+                    >
+                      <Phone className="w-3.5 h-3.5" />
+                      <span>📞 Call Subscriber</span>
+                    </a>
+                  ) : (
+                    <span className="text-[10px] text-slate-500 font-mono">No phone on file</span>
+                  )}
+
                   {balanceDue > 0 && displayStatus !== 'PAID' ? (
                     <button
                       onClick={() => handleOpenCollectionModal(inv)}
@@ -758,6 +845,11 @@ export const FieldAgentPortal: React.FC<FieldAgentPortalProps> = ({
                   const total = Number(inv.amount) || 0;
                   const remaining = Math.max(0, total - paid);
                   const status = (inv.status || (remaining <= 0 ? 'PAID' : 'DUE')).toUpperCase();
+                  const subKey = (inv.subscriber_username || '').toLowerCase();
+                  const subInfo = subscriberDirectory[subKey];
+                  const subPhone = subInfo?.phone || '';
+                  const subAddress = subInfo?.address || '';
+                  const subFullName = subInfo?.full_name || '';
 
                   return (
                     <div
@@ -765,9 +857,14 @@ export const FieldAgentPortal: React.FC<FieldAgentPortalProps> = ({
                       className="bg-slate-900 border border-slate-800 rounded-xl p-3 space-y-1.5 font-mono text-xs shadow-md"
                     >
                       <div className="flex items-center justify-between">
-                        <span className="font-bold text-white font-sans text-xs">
-                          @{inv.subscriber_username}
-                        </span>
+                        <div>
+                          <span className="font-bold text-white font-sans text-xs block">
+                            {subFullName ? `${subFullName} (@${inv.subscriber_username})` : `@${inv.subscriber_username}`}
+                          </span>
+                          {subAddress && (
+                            <span className="text-[10px] text-slate-400 font-sans block">{subAddress}</span>
+                          )}
+                        </div>
                         <span
                           className={`px-1.5 py-0.5 rounded text-[10px] font-bold ${
                             status === 'PAID'
@@ -794,16 +891,26 @@ export const FieldAgentPortal: React.FC<FieldAgentPortalProps> = ({
                         </span>
                       </div>
 
-                      {remaining > 0 && (
-                        <div className="pt-1">
-                          <button
-                            type="button"
-                            onClick={() => handleOpenCollectionModal(inv)}
-                            className="w-full py-1.5 rounded-lg bg-emerald-600 hover:bg-emerald-500 active:scale-98 text-slate-950 font-bold text-xs transition flex items-center justify-center gap-1.5 shadow-md shadow-emerald-950/40 cursor-pointer"
-                          >
-                            <DollarSign className="w-3.5 h-3.5" />
-                            <span>Collect Cash ({formatCurrency(remaining)})</span>
-                          </button>
+                      {(remaining > 0 || subPhone) && (
+                        <div className="pt-1 flex flex-wrap gap-2">
+                          {subPhone && (
+                            <a
+                              href={`tel:${subPhone}`}
+                              className="flex-1 min-w-[130px] py-1.5 px-2.5 rounded-lg bg-cyan-950 hover:bg-cyan-900 border border-cyan-800 text-cyan-300 font-bold text-xs transition flex items-center justify-center gap-1.5"
+                            >
+                              <span>&#128222; Call Subscriber ({subPhone})</span>
+                            </a>
+                          )}
+                          {remaining > 0 && (
+                            <button
+                              type="button"
+                              onClick={() => handleOpenCollectionModal(inv)}
+                              className="flex-1 min-w-[140px] py-1.5 px-2.5 rounded-lg bg-emerald-600 hover:bg-emerald-500 active:scale-98 text-slate-950 font-bold text-xs transition flex items-center justify-center gap-1.5 shadow-md shadow-emerald-950/40 cursor-pointer"
+                            >
+                              <DollarSign className="w-3.5 h-3.5" />
+                              <span>Collect Cash ({formatCurrency(remaining)})</span>
+                            </button>
+                          )}
                         </div>
                       )}
                     </div>

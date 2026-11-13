@@ -103,7 +103,7 @@ export const Navbar: React.FC<NavbarProps> = ({
             </div>
           </div>
 
-          {/* Right Section: Client Account Name Badge, Install App Button, Logout */}
+          {/* Right Section: Client Account Name Badge & Logout */}
           <div className="flex items-center gap-3">
             {/* Client Account Name Badge */}
             <div className="flex items-center gap-2 bg-slate-950 border border-slate-800 px-3 py-1.5 rounded-xl text-xs font-mono">
@@ -114,15 +114,12 @@ export const Navbar: React.FC<NavbarProps> = ({
               </span>
             </div>
 
-            {/* Install App Button */}
-            <PWAInstallPrompt role="CLIENT" variant="button" />
-
             {/* Logout Button */}
             {onLogout && (
               <button
                 type="button"
                 onClick={onLogout}
-                className="flex items-center gap-1.5 bg-slate-800 hover:bg-rose-950 text-slate-300 hover:text-rose-200 border border-slate-700 px-3 py-1.5 rounded-lg text-xs font-semibold transition cursor-pointer shadow-sm"
+                className="flex items-center gap-1.5 bg-rose-950/80 hover:bg-rose-900 text-rose-300 hover:text-rose-200 border border-rose-800 px-3.5 py-1.5 rounded-xl text-xs font-bold transition cursor-pointer shadow-sm"
                 title="Sign Out of Session"
               >
                 <LogOut className="w-3.5 h-3.5 text-rose-400" />
@@ -260,8 +257,8 @@ export const Navbar: React.FC<NavbarProps> = ({
             </button>
           )}
 
-          {/* Role Switcher (Restricted Strictly to Verified Admin Sessions - Never Client) */}
-          {onSwitchRole && isOriginalAdmin && (
+          {/* Role Switcher (Restricted Strictly to Verified Admin Sessions only) */}
+          {effectiveRole === 'ADMIN' && onSwitchRole && isOriginalAdmin && (
             <div className="flex items-center gap-1 bg-slate-950 border border-slate-800 px-2 py-1 rounded-lg text-[11px]">
               <Shield className="w-3.5 h-3.5 text-indigo-400 shrink-0" />
               <select
@@ -277,14 +274,15 @@ export const Navbar: React.FC<NavbarProps> = ({
             </div>
           )}
 
-          {/* Logout Button */}
+          {/* Prominent Logout Button */}
           {onLogout && (
             <button
               onClick={onLogout}
-              className="p-1.5 rounded-lg bg-slate-950 hover:bg-rose-950 text-slate-400 hover:text-rose-300 border border-slate-800 transition"
-              title="Logout"
+              className="flex items-center gap-1.5 px-3 py-1.5 rounded-xl bg-rose-950/80 hover:bg-rose-900 text-rose-300 hover:text-rose-200 border border-rose-800 text-xs font-bold transition cursor-pointer shadow-sm"
+              title="Sign Out of Session"
             >
-              <LogOut className="w-3.5 h-3.5" />
+              <LogOut className="w-3.5 h-3.5 text-rose-400" />
+              <span>Logout</span>
             </button>
           )}
         </div>

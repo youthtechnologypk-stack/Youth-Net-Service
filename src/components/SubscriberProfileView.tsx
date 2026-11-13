@@ -50,7 +50,17 @@ import {
 } from '../services/supabaseClient';
 import { useCurrency } from '../context/CurrencyContext';
 import { useISP } from '../context/ISPContext';
-import { CreateInvoiceModal } from './CreateInvoiceModal';
+import { CreateInvoiceModal, resolvePackageRate } from './CreateInvoiceModal';
+import { AreaNodeSelector } from './AreaNodeSelector';
+import {
+  fetchMikrotikInterfaceTrafficOnce,
+  restoreSubscriberOnInvoicePaid,
+  add31DaysDateString,
+  fetchNetworkAreas,
+  resolveAreaFromUsername,
+  NetworkAreaNode,
+  PARENT_FLEET_ROUTER,
+} from '../lib/billingAndNetwork';
 
 export interface SubscriberProfileViewProps {
   username: string;
@@ -87,6 +97,18 @@ export const SubscriberProfileView: React.FC<SubscriberProfileViewProps> = ({
     rawBytesOut?: number;
     gbIn?: string;
     gbOut?: string;
+  } | null>(null);
+  const [liveSecretProfile, setLiveSecretProfile] = useState<string>('');
+  const [networkAreas, setNetworkAreas] = useState<NetworkAreaNode[]>([]);
+  const prevSessionRef = useRef<{
+    id?: string;
+    address?: string;
+    callerId?: string;
+    uptime?: string;
+    uptimeSec: number;
+    rawBytesIn: number;
+    rawBytesOut: number;
+    connectedAtIso: string;
   } | null>(null);
 
   const [isGenerateInvoiceModalOpen, setIsGenerateInvoiceModalOpen] = useState<boolean>(false);
@@ -168,6 +190,26 @@ export const SubscriberProfileView: React.FC<SubscriberProfileViewProps> = ({
   const [isSavingTicket, setIsSavingTicket] = useState<boolean>(false);
 
   const speedPollingTimerRef = useRef<any>(null);
+
+  const parseUptimeSeconds = (uptimeStr?: string): number => {
+    if (!uptimeStr) return 0;
+    let total = 0;
+    const w = uptimeStr.match(/(\d+)w/);
+    const d = uptimeStr.match(/(\d+)d/);
+    const h = uptimeStr.match(/(\d+)h/);
+    const m = uptimeStr.match(/(\d+)m/);
+    const s = uptimeStr.match(/(\d+)s/);
+    if (w) total += Number(w[1]) * 604800;
+    if (d) total += Number(d[1]) * 86400;
+    if (h) total += Number(h[1]) * 3600;
+    if (m) total += Number(m[1]) * 60;
+    if (s) total += Number(s[1]);
+    return total;
+  };
+
+  useEffect(() => {
+    fetchNetworkAreas().then(setNetworkAreas).catch(() => {});
+  }, []);
 
   const showToast = (text: string, type: 'success' | 'error' = 'success') => {
     setToastMessage({ text, type });
@@ -255,7 +297,7 @@ export const SubscriberProfileView: React.FC<SubscriberProfileViewProps> = ({
         .from('subscriber_session_logs')
         .select('*')
         .eq('subscriber_username', username)
-        .order('disconnected_at', { ascending: false });
+        .order('recorded_at', { ascending: false });
 
       if (sessLogData) {
         setSessionLogs(sessLogData as SupabaseSubscriberSessionLog[]);
@@ -282,7 +324,21 @@ export const SubscriberProfileView: React.FC<SubscriberProfileViewProps> = ({
         setPortalAgents(agentsData as SupabasePortalUser[]);
       }
 
-      // 1.8 Query MikroTik for live active session strictly for this username
+      // 1.7b Query MikroTik /ppp/secret strictly for this subscriber's actual PPPoE profile
+      try {
+        const secRes = await fetch(`/api/mikrotik/ppp/secret?name=${encodeURIComponent(username)}`);
+        if (secRes.ok) {
+          const secrets = await secRes.json();
+          if (Array.isArray(secrets)) {
+            const secMatch = secrets.find((s: any) => s?.name?.toLowerCase() === username.toLowerCase());
+            if (secMatch?.profile) {
+              setLiveSecretProfile(String(secMatch.profile));
+            }
+          }
+        }
+      } catch {}
+
+      // 1.8 Query MikroTik for live active session strictly for this username (read-only)
       try {
         const queryUrl = `/api/mikrotik/ppp/active?name=${encodeURIComponent(username)}`;
         let res = await fetch(queryUrl);
@@ -293,7 +349,9 @@ export const SubscriberProfileView: React.FC<SubscriberProfileViewProps> = ({
         if (res.ok) {
           const sessions = await res.json();
           if (Array.isArray(sessions)) {
-            const match = sessions.find((s: any) => s.name?.toLowerCase() === username.toLowerCase());
+            const match = sessions.find((s: any) => s?.name?.toLowerCase() === username.toLowerCase());
+            const prev = prevSessionRef.current;
+
             if (match) {
               // Parse standard RouterOS v7 properties without dummy constants
               let rawBytesIn = 0;
@@ -303,46 +361,95 @@ export const SubscriberProfileView: React.FC<SubscriberProfileViewProps> = ({
                 rawBytesIn = Number(parts[0]) || 0;
                 rawBytesOut = Number(parts[1]) || 0;
               } else {
-                rawBytesIn = Number(match['rx-byte'] || match['bytes-in'] || match['rx-bytes'] || (typeof match.bytes === 'string' ? match.bytes.split('/')[0] : 0) || 0);
-                rawBytesOut = Number(match['tx-byte'] || match['bytes-out'] || match['tx-bytes'] || (typeof match.bytes === 'string' ? match.bytes.split('/')[1] : 0) || 0);
+                rawBytesIn = Number(match['rx-byte'] || match['bytes-in'] || match['rx-bytes'] || 0);
+                rawBytesOut = Number(match['tx-byte'] || match['bytes-out'] || match['tx-bytes'] || 0);
               }
 
               const gbIn = (Number(rawBytesIn) / (1024 * 1024 * 1024)).toFixed(2);
               const gbOut = (Number(rawBytesOut) / (1024 * 1024 * 1024)).toFixed(2);
+              const currUptimeSec = parseUptimeSeconds(match.uptime);
+              const currAddress = match.address || '';
+              const currCallerId = match['caller-id'] || '';
 
-              const liveSessionObj = {
+              // Detect session reconnect (uptime dropped or MAC/IP changed) and persist completed session
+              if (
+                prev &&
+                (currUptimeSec + 5 < prev.uptimeSec ||
+                  (prev.callerId && currCallerId && prev.callerId !== currCallerId) ||
+                  (prev.address && currAddress && prev.address !== currAddress))
+              ) {
+                try {
+                  await supabase.from('subscriber_session_logs').insert([
+                    {
+                      subscriber_username: username,
+                      ip_address: prev.address || 'Dynamic IP',
+                      mac_address: prev.callerId || userData?.onu_mac || 'Unknown MAC',
+                      uptime_duration: prev.uptime || 'Completed Session',
+                      bytes_in: prev.rawBytesIn,
+                      bytes_out: prev.rawBytesOut,
+                      disconnect_reason: 'Session Reset / Reconnected',
+                      connected_at: prev.connectedAtIso,
+                      recorded_at: new Date().toISOString(),
+                    },
+                  ]);
+                  const { data: refreshedLogs } = await supabase
+                    .from('subscriber_session_logs')
+                    .select('*')
+                    .eq('subscriber_username', username)
+                    .order('recorded_at', { ascending: false });
+                  if (refreshedLogs) setSessionLogs(refreshedLogs as SupabaseSubscriberSessionLog[]);
+                } catch {}
+              }
+
+              prevSessionRef.current = {
+                id: match['.id'],
+                address: currAddress,
+                callerId: currCallerId,
+                uptime: match.uptime,
+                uptimeSec: currUptimeSec,
+                rawBytesIn,
+                rawBytesOut,
+                connectedAtIso: prev?.connectedAtIso || new Date(Date.now() - currUptimeSec * 1000).toISOString(),
+              };
+
+              setActiveSession({
                 id: match['.id'],
                 name: match.name,
-                address: match.address,
-                callerId: match['caller-id'],
+                address: currAddress,
+                callerId: currCallerId,
                 uptime: match.uptime,
                 service: match.service,
                 rawBytesIn,
                 rawBytesOut,
                 gbIn,
                 gbOut,
-              };
-              setActiveSession(liveSessionObj);
-
-              // 1.9 Automatically persist session telemetry snapshot into subscriber_session_logs
-              try {
-                await supabase.from('subscriber_session_logs').insert([
-                  {
-                    subscriber_username: username,
-                    ip_address: match.address || 'Dynamic IP',
-                    mac_address: match['caller-id'] || user?.onu_mac || 'Live MAC',
-                    uptime_duration: match.uptime || 'Active',
-                    bytes_in: rawBytesIn,
-                    bytes_out: rawBytesOut,
-                    disconnect_reason: 'Active Live Telemetry Snapshot',
-                    disconnected_at: new Date().toISOString(),
-                    connected_at: new Date().toISOString(),
-                  },
-                ]);
-              } catch (sessInsertErr) {
-                console.warn('Session telemetry auto-snapshot notice:', sessInsertErr);
-              }
+              });
             } else {
+              // Session disappeared (disconnected) -> log previous session to subscriber_session_logs
+              if (prev) {
+                try {
+                  await supabase.from('subscriber_session_logs').insert([
+                    {
+                      subscriber_username: username,
+                      ip_address: prev.address || 'Dynamic IP',
+                      mac_address: prev.callerId || userData?.onu_mac || 'Unknown MAC',
+                      uptime_duration: prev.uptime || 'Ended',
+                      bytes_in: prev.rawBytesIn,
+                      bytes_out: prev.rawBytesOut,
+                      disconnect_reason: 'Session Disconnected (PPPoE Drop)',
+                      connected_at: prev.connectedAtIso,
+                      recorded_at: new Date().toISOString(),
+                    },
+                  ]);
+                  const { data: refreshedLogs } = await supabase
+                    .from('subscriber_session_logs')
+                    .select('*')
+                    .eq('subscriber_username', username)
+                    .order('recorded_at', { ascending: false });
+                  if (refreshedLogs) setSessionLogs(refreshedLogs as SupabaseSubscriberSessionLog[]);
+                } catch {}
+                prevSessionRef.current = null;
+              }
               setActiveSession(null);
             }
           }
@@ -361,13 +468,11 @@ export const SubscriberProfileView: React.FC<SubscriberProfileViewProps> = ({
     fetchAllProfileData();
   }, [username]);
 
-  // 2. Real-time Live Speed Gauge Poller (Runs every 3.5 seconds while mounted)
-  // 2. Real-time Live Speed Gauge Poller (Polls monitor-traffic every 3s for online session)
+  // 2. Real-time Live Speed Gauge Poller + Continuous Session Watcher (Runs every 3s, read-only ?once)
   useEffect(() => {
     let isMounted = true;
 
     const pollSpeed = async () => {
-      // If user is offline: Speed Gauge: 0.0 Mbps
       if (!activeSession) {
         if (isMounted) {
           setLiveSpeed({
@@ -382,40 +487,23 @@ export const SubscriberProfileView: React.FC<SubscriberProfileViewProps> = ({
 
       try {
         setLiveSpeed((prev) => ({ ...prev, isPolling: true }));
-        const ifaceName = `<pppoe-${username}>`;
-        const res = await fetch(`/api/mikrotik/interface/monitor-traffic?interface=${encodeURIComponent(ifaceName)}&once=true`);
-        
-        if (res.ok) {
-          const data = await res.json();
-          const target = Array.isArray(data) ? data[0] : data;
-          if (target && target['rx-bits-per-second'] !== undefined) {
-            const rxMbps = Math.round((Number(target['rx-bits-per-second']) / 1000000) * 10) / 10;
-            const txMbps = Math.round((Number(target['tx-bits-per-second']) / 1000000) * 10) / 10;
-            if (isMounted) {
-              setLiveSpeed({
-                rxMbps,
-                txMbps,
-                isPolling: true,
-                lastUpdated: new Date(),
-              });
-            }
-            return;
-          }
+        let result = await fetchMikrotikInterfaceTrafficOnce(`<pppoe-${username}>`);
+        if (!result.ok) {
+          result = await fetchMikrotikInterfaceTrafficOnce(`pppoe-${username}`);
         }
-      } catch {}
 
-      // If online session is quiet or interface name format differs, derive live telemetry from actual package speed
-      if (isMounted && activeSession) {
-        const pkgSpeedNum = parseInt(user?.package_speed || '20', 10) || 20;
-        const liveRx = Math.round((pkgSpeedNum * (0.25 + Math.random() * 0.45)) * 10) / 10;
-        const liveTx = Math.round((pkgSpeedNum * 0.15 * (0.3 + Math.random() * 0.4)) * 10) / 10;
-
-        setLiveSpeed({
-          rxMbps: liveRx,
-          txMbps: liveTx,
-          isPolling: true,
-          lastUpdated: new Date(),
-        });
+        if (isMounted) {
+          setLiveSpeed({
+            rxMbps: result.ok ? result.rxMbps : 0,
+            txMbps: result.ok ? result.txMbps : 0,
+            isPolling: result.ok,
+            lastUpdated: new Date(),
+          });
+        }
+      } catch {
+        if (isMounted) {
+          setLiveSpeed((prev) => ({ ...prev, rxMbps: 0, txMbps: 0, isPolling: false }));
+        }
       }
     };
 
@@ -428,7 +516,7 @@ export const SubscriberProfileView: React.FC<SubscriberProfileViewProps> = ({
         clearInterval(speedPollingTimerRef.current);
       }
     };
-  }, [username, activeSession, user?.package_speed]);
+  }, [username, activeSession]);
 
   // Financial Balances Calculation
   const totalInvoiced = useMemo(() => {
@@ -462,25 +550,49 @@ export const SubscriberProfileView: React.FC<SubscriberProfileViewProps> = ({
   // Action 1: Disconnect / Kick Session
   const handleKickSession = async () => {
     try {
-      const sessionId = activeSession?.id || '*1';
-      // Call router kick endpoint
-      await fetch('/api/mikrotik/ppp/active/remove', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ '.id': sessionId }),
-      }).catch(() => {});
+      let sessionId = activeSession?.id;
+      if (!sessionId) {
+        try {
+          const actRes = await fetch(`/api/mikrotik/ppp/active?name=${encodeURIComponent(username)}`);
+          if (actRes.ok) {
+            const actData = await actRes.json();
+            if (Array.isArray(actData)) {
+              const match = actData.find((s: any) => s.name?.toLowerCase() === username.toLowerCase());
+              if (match) sessionId = match['.id'];
+            }
+          }
+        } catch {}
+      }
+
+      if (sessionId) {
+        // Call router kick endpoint
+        await fetch('/api/mikrotik/ppp/active/remove', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ '.id': sessionId }),
+        }).catch(() => {});
+      }
+
+      // Also call server kick helper if configured
+      try {
+        await fetch('/api/mikrotik/kick', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ username, sessionId: sessionId || '*1' }),
+        });
+      } catch {}
 
       // Record in Supabase subscriber_session_logs
       await supabase.from('subscriber_session_logs').insert([{
         subscriber_username: username,
         ip_address: activeSession?.address || '10.10.42.18',
-        mac_address: activeSession?.callerId || user?.onu_mac || '48:8A:D2:7A:3F:12',
-        uptime_duration: activeSession?.uptime || '3d 12h 45m',
-        bytes_in: 3410000000,
-        bytes_out: 890000000,
-        disconnect_reason: 'admin kick (NOC manual disconnect)',
-        connected_at: new Date(Date.now() - 3600000 * 24).toISOString(),
-        disconnected_at: new Date().toISOString(),
+        mac_address: activeSession?.callerId || user?.onu_mac || 'Live MAC',
+        uptime_duration: activeSession?.uptime || 'Active Session',
+        bytes_in: activeSession?.rawBytesIn || 0,
+        bytes_out: activeSession?.rawBytesOut || 0,
+        disconnect_reason: 'Admin Session Kick (NOC Manual Disconnect)',
+        connected_at: new Date(Date.now() - 3600000 * 2).toISOString(),
+        recorded_at: new Date().toISOString(),
       }]);
 
       setActiveSession(null);
@@ -612,7 +724,7 @@ export const SubscriberProfileView: React.FC<SubscriberProfileViewProps> = ({
           await supabase.from('invoices').update({ amount: newAmount }).eq('id', unpaidInv.id);
         } else {
           const dueD = new Date();
-          dueD.setDate(dueD.getDate() + 7);
+          dueD.setDate(dueD.getDate() + 31);
           await supabase.from('invoices').insert([{
             invoice_no: `INV-MAT-${Math.floor(1000 + Math.random() * 9000)}`,
             subscriber_username: username,
@@ -620,7 +732,7 @@ export const SubscriberProfileView: React.FC<SubscriberProfileViewProps> = ({
             paid_amount: 0,
             status: 'DUE',
             due_date: dueD.toISOString().split('T')[0],
-            cycle_day: 5,
+            cycle_day: 31,
             assigned_agent_name: materialForm.installedByAgent || 'NOC Billing',
           }]);
         }
@@ -703,12 +815,21 @@ export const SubscriberProfileView: React.FC<SubscriberProfileViewProps> = ({
       const finalPaidAmount = remaining <= 0 ? totalAmount : newPaidTotal;
       const nowIso = new Date().toISOString();
 
-      // 1. Update invoice
-      await supabase.from('invoices').update({
+      // 1. Update invoice with 31-day cycle & due_date renewal on PAID
+      const invUpdate: Partial<SupabaseInvoice> = {
         status: newStatus,
         paid_amount: finalPaidAmount,
         paid_at: newStatus === 'PAID' ? nowIso : (inv.paid_at || null),
-      }).eq('id', inv.id);
+        cycle_day: 31,
+      };
+      if (newStatus === 'PAID') {
+        invUpdate.due_date = add31DaysDateString(new Date());
+      }
+      await supabase.from('invoices').update(invUpdate).eq('id', inv.id);
+
+      if (newStatus === 'PAID') {
+        await restoreSubscriberOnInvoicePaid(username);
+      }
 
       // 2. Increment collecting agent cash
       if (collectingAgentInput) {
@@ -768,7 +889,7 @@ export const SubscriberProfileView: React.FC<SubscriberProfileViewProps> = ({
         <div className="flex items-center gap-2">
           <span className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-lg text-xs font-mono font-bold bg-slate-900 border border-slate-800 text-slate-300">
             <Radio className="w-3.5 h-3.5 text-cyan-400 animate-pulse" />
-            <span>Transworld 360° Profile</span>
+            <span>Youth Net 360° Profile</span>
           </span>
 
           <button
@@ -1020,25 +1141,29 @@ export const SubscriberProfileView: React.FC<SubscriberProfileViewProps> = ({
           </div>
         </div>
 
-        {/* TOP RIGHT METRICS (Transworld Card) (7 Columns) */}
+        {/* TOP RIGHT METRICS (Youth Net Card) (7 Columns) */}
         <div className="lg:col-span-7 bg-[#111A2E] border border-slate-800 rounded-2xl p-5 space-y-4 shadow-xl flex flex-col justify-between">
           <div>
             <div className="flex items-center justify-between pb-3 border-b border-slate-800">
               <div className="flex items-center gap-2">
                 <Zap className="w-4 h-4 text-cyan-400" />
                 <h3 className="text-sm font-bold text-white uppercase tracking-wider">
-                  Transworld Carrier Telemetry &amp; Quota
+                  YOUTH NET CARRIER TELEMETRY &amp; QUOTA
                 </h3>
               </div>
 
-              {/* Package Speed Badge */}
+              {/* Package Speed Badge bound from MikroTik /ppp/secret & portal_users */}
               <div className="flex items-center gap-2">
                 <span className="px-3 py-1 rounded-xl bg-indigo-950 text-indigo-300 border border-indigo-800 text-xs font-mono font-bold flex items-center gap-1.5 shadow-sm">
                   <Activity className="w-3.5 h-3.5 text-indigo-400 animate-pulse" />
-                  <span>{user?.package_speed ? `${user.package_speed} Plan` : 'Standard Plan'}</span>
+                  <span>{liveSecretProfile || user?.package_speed || 'Standard Plan'}</span>
                 </span>
                 <span className="text-slate-400 text-xs font-mono">
-                  {user?.monthly_fee !== undefined && user?.monthly_fee !== null ? formatCurrency(user.monthly_fee) : 'Rs. 0'}/mo
+                  {formatCurrency(
+                    user?.monthly_fee !== undefined && user?.monthly_fee !== null && Number(user.monthly_fee) > 0
+                      ? Number(user.monthly_fee)
+                      : resolvePackageRate(liveSecretProfile || user?.package_speed || undefined)
+                  )}/mo
                 </span>
               </div>
             </div>
@@ -1100,7 +1225,7 @@ export const SubscriberProfileView: React.FC<SubscriberProfileViewProps> = ({
                 </div>
               </div>
 
-              {/* REAL-TIME LIVE SPEED GAUGE (Transworld Poller) */}
+              {/* REAL-TIME LIVE SPEED GAUGE (Youth Net Poller) */}
               <div className="p-4 bg-slate-900 rounded-xl border border-slate-800 flex flex-col justify-between">
                 <div className="flex items-center justify-between">
                   <span className="text-[11px] font-sans font-bold text-slate-300 flex items-center gap-1.5">
@@ -1170,7 +1295,7 @@ export const SubscriberProfileView: React.FC<SubscriberProfileViewProps> = ({
         </div>
       </div>
 
-      {/* 3. TABBED SECTIONS (Transworld Layout) */}
+      {/* 3. TABBED SECTIONS (Youth Net Layout) */}
       <div className="bg-[#111A2E] border border-slate-800 rounded-2xl overflow-hidden shadow-xl">
         {/* TAB HEADERS */}
         <div className="flex items-center overflow-x-auto border-b border-slate-800 bg-slate-900/60 p-2 gap-1.5">
@@ -1674,7 +1799,9 @@ export const SubscriberProfileView: React.FC<SubscriberProfileViewProps> = ({
                         return (
                           <tr key={sess.id || Math.random()} className="hover:bg-slate-800/40 transition">
                             <td className="py-3 px-4 font-mono text-slate-400">
-                              {sess.disconnected_at ? new Date(sess.disconnected_at).toLocaleString() : 'N/A'}
+                              {(sess.recorded_at || sess.disconnected_at)
+                                ? new Date(sess.recorded_at || sess.disconnected_at!).toLocaleString()
+                                : 'Live Record'}
                             </td>
                             <td className="py-3 px-4 font-mono text-cyan-400">{sess.ip_address || 'N/A'}</td>
                             <td className="py-3 px-4 font-mono text-slate-300">{sess.mac_address || user?.onu_mac || 'N/A'}</td>
@@ -1960,13 +2087,23 @@ export const SubscriberProfileView: React.FC<SubscriberProfileViewProps> = ({
                 </div>
               </div>
 
-              <div>
-                <label className="block font-medium text-slate-300 mb-1">Installation Address</label>
-                <input
-                  type="text"
-                  value={editForm.address}
-                  onChange={(e) => setEditForm({ ...editForm, address: e.target.value })}
-                  className="w-full px-3 py-2 bg-slate-900 border border-slate-700 rounded-lg text-white focus:outline-none focus:border-cyan-500"
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 items-start">
+                <div>
+                  <label className="block font-medium text-slate-300 mb-1">Installation Address</label>
+                  <input
+                    type="text"
+                    value={editForm.address}
+                    onChange={(e) => setEditForm({ ...editForm, address: e.target.value })}
+                    className="w-full px-3 py-2 bg-slate-900 border border-slate-700 rounded-lg text-white focus:outline-none focus:border-cyan-500"
+                  />
+                </div>
+                <AreaNodeSelector
+                  label="Area / Child Node"
+                  value={editForm.area}
+                  onChange={(area) => setEditForm({ ...editForm, area })}
+                  areas={networkAreas}
+                  onAreasUpdated={setNetworkAreas}
+                  compact
                 />
               </div>
 

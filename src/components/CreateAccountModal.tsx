@@ -32,6 +32,8 @@ import {
   getCachedSubscribers,
 } from '../services/mikrotikSubscriberSync';
 import { supabase } from '../services/supabaseClient';
+import { AreaNodeSelector } from './AreaNodeSelector';
+import { fetchNetworkAreas, resolveAreaFromUsername, NetworkAreaNode } from '../lib/billingAndNetwork';
 
 export interface CreateAccountModalProps {
   isOpen: boolean;
@@ -69,10 +71,24 @@ export const CreateAccountModal: React.FC<CreateAccountModalProps> = ({
   const [subscriberSearchQuery, setSubscriberSearchQuery] = useState('');
   const [isSubscriberSearchOpen, setIsSubscriberSearchOpen] = useState(false);
 
-  // Agent specific fields
-  const [assignedArea, setAssignedArea] = useState('Sector G-11 & G-10 (North Zone)');
+  // Agent & Area specific fields
+  const [networkAreas, setNetworkAreas] = useState<NetworkAreaNode[]>([]);
+  const [assignedArea, setAssignedArea] = useState('Baza Mohallah');
   const [cashLimit, setCashLimit] = useState<number>(50000);
   const [linkedAgentId, setLinkedAgentId] = useState('');
+
+  useEffect(() => {
+    fetchNetworkAreas().then(setNetworkAreas).catch(() => {});
+  }, []);
+
+  const handleUsernameUpdate = (rawVal: string) => {
+    const clean = rawVal.toLowerCase().replace(/\s+/g, '_');
+    setUsername(clean);
+    const matched = resolveAreaFromUsername(clean, networkAreas);
+    if (matched) {
+      setAssignedArea(matched);
+    }
+  };
 
   // Manager specific fields
   const [department, setDepartment] = useState('NOC & Network Operations');
@@ -688,6 +704,15 @@ export const CreateAccountModal: React.FC<CreateAccountModalProps> = ({
                     <span className="w-4 h-4 rounded-full bg-white shadow-md transform transition" />
                   </button>
                 </div>
+
+                <AreaNodeSelector
+                  label="Subscriber Coverage Area / Child Node"
+                  value={assignedArea}
+                  onChange={setAssignedArea}
+                  areas={networkAreas}
+                  onAreasUpdated={setNetworkAreas}
+                  compact
+                />
               </div>
             )}
 
@@ -719,18 +744,15 @@ export const CreateAccountModal: React.FC<CreateAccountModalProps> = ({
                   </div>
                 )}
 
-                <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
-                  <div>
-                    <label className="text-slate-300 font-medium block mb-1">Assigned Area / POP Sector *</label>
-                    <input
-                      type="text"
-                      value={assignedArea}
-                      onChange={(e) => setAssignedArea(e.target.value)}
-                      placeholder="e.g. Sector G-11 & G-10"
-                      required
-                      className="w-full bg-slate-900 border border-slate-700 rounded-xl px-3 py-2 text-slate-200 font-mono text-xs focus:outline-none focus:border-cyan-500"
-                    />
-                  </div>
+                <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 items-start">
+                  <AreaNodeSelector
+                    label="Assigned Area / Child Node *"
+                    value={assignedArea}
+                    onChange={setAssignedArea}
+                    areas={networkAreas}
+                    onAreasUpdated={setNetworkAreas}
+                    compact
+                  />
                   <div>
                     <label className="text-slate-300 font-medium block mb-1">
                       Cash Collection Limit (PKR) *
@@ -823,8 +845,8 @@ export const CreateAccountModal: React.FC<CreateAccountModalProps> = ({
                   <input
                     type="text"
                     value={username}
-                    onChange={(e) => setUsername(e.target.value.toLowerCase().replace(/\s+/g, '_'))}
-                    placeholder="e.g. pppoe_user01"
+                    onChange={(e) => handleUsernameUpdate(e.target.value)}
+                    placeholder="e.g. bz_ahmed, dgi_sana"
                     required
                     className="w-full bg-slate-950 border border-slate-700 rounded-xl px-3 py-2 text-slate-200 font-mono text-xs focus:outline-none focus:border-cyan-500"
                   />

@@ -26,6 +26,11 @@ import { useISP } from '../context/ISPContext';
 import { useCurrency } from '../context/CurrencyContext';
 import { SystemRole, UserAccount } from '../types/auth';
 import { CreateInvoiceModal } from './CreateInvoiceModal';
+import {
+  restoreSubscriberOnInvoicePaid,
+  enforce31DayAutoExpiry,
+  add31DaysDateString,
+} from '../lib/billingAndNetwork';
 
 export interface BillingViewProps {
   currentRole?: SystemRole;
@@ -62,18 +67,14 @@ export const BillingView: React.FC<BillingViewProps> = ({
   // Edit Invoice Form State
   const [editAmount, setEditAmount] = useState<number>(0);
   const [editDueDate, setEditDueDate] = useState<string>('');
-  const [editCycleDay, setEditCycleDay] = useState<number>(5);
+  const [editCycleDay, setEditCycleDay] = useState<number>(31);
   const [editStatus, setEditStatus] = useState<'DUE' | 'PARTIAL' | 'PAID' | 'OVERDUE'>('DUE');
   const [editAssignedAgentId, setEditAssignedAgentId] = useState<string>('');
 
   // New Invoice Form State
   const [newSubUsername, setNewSubUsername] = useState<string>('');
   const [newAmount, setNewAmount] = useState<number>(2500);
-  const [newDueDate, setNewDueDate] = useState<string>(() => {
-    const d = new Date();
-    d.setDate(d.getDate() + 7);
-    return d.toISOString().split('T')[0];
-  });
+  const [newDueDate, setNewDueDate] = useState<string>(() => add31DaysDateString());
   const [newAssignedAgentId, setNewAssignedAgentId] = useState<string>('');
   const [isSubmitting, setIsSubmitting] = useState<boolean>(false);
 
@@ -90,6 +91,8 @@ export const BillingView: React.FC<BillingViewProps> = ({
         console.warn('Error fetching Supabase invoices:', error);
       } else if (data) {
         setInvoices(data as SupabaseInvoice[]);
+        // Enforce 31-day auto-expiry & Walled Garden profile sync asynchronously without dropping active sessions
+        enforce31DayAutoExpiry(data as SupabaseInvoice[]).catch(() => {});
       }
 
       // Also fetch portal_users agents
@@ -150,7 +153,7 @@ export const BillingView: React.FC<BillingViewProps> = ({
         amount: Number(newAmount) || 0,
         due_date: newDueDate,
         status: 'DUE',
-        cycle_day: 5,
+        cycle_day: 31,
         created_at: new Date().toISOString(),
       };
 
@@ -214,12 +217,16 @@ export const BillingView: React.FC<BillingViewProps> = ({
       const finalPaidAmount = remaining <= 0 ? totalAmount : newPaidTotal;
       const nowIso = new Date().toISOString();
 
-      // 1. Update invoice in Supabase: status, paid_amount, paid_at
+      // 1. Update invoice in Supabase: status, paid_amount, paid_at, and extend 31-day expiry when PAID
       const invoiceUpdateData: Partial<SupabaseInvoice> = {
         status: newStatus,
         paid_amount: finalPaidAmount,
         paid_at: newStatus === 'PAID' ? nowIso : (selectedInvoice.paid_at || null),
+        cycle_day: 31,
       };
+      if (newStatus === 'PAID') {
+        invoiceUpdateData.due_date = add31DaysDateString(new Date());
+      }
 
       const { error: invError } = await supabase
         .from('invoices')
@@ -228,6 +235,11 @@ export const BillingView: React.FC<BillingViewProps> = ({
 
       if (invError) {
         throw new Error(invError.message);
+      }
+
+      // Immediately restore subscriber ACTIVE status & MikroTik active PPPoE package profile on PAID
+      if (newStatus === 'PAID') {
+        await restoreSubscriberOnInvoicePaid(selectedInvoice.subscriber_username);
       }
 
       // 2. Update collecting agent's cash_in_hand in portal_users by ONLY enteredVal
@@ -295,7 +307,7 @@ export const BillingView: React.FC<BillingViewProps> = ({
     setInvoiceToEdit(inv);
     setEditAmount(Number(inv.amount) || 0);
     setEditDueDate(inv.due_date || '');
-    setEditCycleDay(inv.cycle_day || 5);
+    setEditCycleDay(inv.cycle_day || 31);
     setEditStatus((inv.status as any) || 'DUE');
     setEditAssignedAgentId(inv.assigned_agent_id || '');
     setIsEditModalOpen(true);
@@ -312,14 +324,17 @@ export const BillingView: React.FC<BillingViewProps> = ({
       const updatedData: Partial<SupabaseInvoice> = {
         amount: Number(editAmount) || 0,
         due_date: editDueDate,
-        cycle_day: Number(editCycleDay) || 5,
+        cycle_day: Number(editCycleDay) || 31,
         status: editStatus as any,
         assigned_agent_id: editAssignedAgentId || null,
         assigned_agent_name: selectedAgent ? selectedAgent.full_name : null,
       };
 
-      if (editStatus === 'PAID' && !invoiceToEdit.paid_at) {
-        updatedData.paid_at = new Date().toISOString();
+      if (editStatus === 'PAID') {
+        if (!invoiceToEdit.paid_at) {
+          updatedData.paid_at = new Date().toISOString();
+        }
+        updatedData.paid_amount = Number(editAmount) || Number(invoiceToEdit.amount) || 0;
       }
 
       const { error } = await supabase
@@ -329,6 +344,10 @@ export const BillingView: React.FC<BillingViewProps> = ({
 
       if (error) {
         throw new Error(error.message);
+      }
+
+      if (editStatus === 'PAID') {
+        await restoreSubscriberOnInvoicePaid(invoiceToEdit.subscriber_username);
       }
 
       // Update local state immediately
@@ -619,7 +638,7 @@ export const BillingView: React.FC<BillingViewProps> = ({
                       <td className="py-3 px-4 font-mono font-semibold text-cyan-400">{inv.invoice_no}</td>
                       <td className="py-3 px-4">
                         <div className="font-semibold text-white">@{inv.subscriber_username}</div>
-                        <div className="text-xs text-slate-500">Cycle Day: {inv.cycle_day || 5}th</div>
+                        <div className="text-xs text-slate-500">Cycle: {inv.cycle_day || 31} Days</div>
                       </td>
                       <td className="py-3 px-4">
                         {inv.assigned_agent_name ? (

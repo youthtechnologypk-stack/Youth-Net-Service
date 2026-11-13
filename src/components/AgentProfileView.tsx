@@ -95,7 +95,7 @@ export const AgentProfileView: React.FC<AgentProfileViewProps> = ({
 
       setAgent(userData as SupabasePortalUser);
       setHandoverAmount(String(userData.cash_in_hand || 0));
-      setSalaryPayoutAmount(String(userData.base_salary || 35000));
+      setSalaryPayoutAmount(String(userData.base_salary ?? 0));
 
       // 1.2 Fetch client collections from payment_transactions matching both ID and full name
       let txns: SupabasePaymentTransaction[] = [];
@@ -204,7 +204,7 @@ export const AgentProfileView: React.FC<AgentProfileViewProps> = ({
 
       setAgent({ ...userData, cash_in_hand: actualCashInHand, advance_balance: actualAdvanceBalance });
       setHandoverAmount(String(actualCashInHand));
-      setSalaryPayoutAmount(String(userData.base_salary || 35000));
+      setSalaryPayoutAmount(String(userData.base_salary ?? 0));
     } catch (err) {
       console.error('Error fetching agent profile:', err);
     } finally {
@@ -238,9 +238,9 @@ export const AgentProfileView: React.FC<AgentProfileViewProps> = ({
   }, [fetchAgentProfile]);
 
   // Derived KPI metrics
-  const cashInHand = agent?.cash_in_hand || 0;
-  const advanceBalance = agent?.advance_balance || 0;
-  const baseSalary = agent?.base_salary || 35000;
+  const cashInHand = Number(agent?.cash_in_hand ?? 0);
+  const advanceBalance = Number(agent?.advance_balance ?? 0);
+  const baseSalary = Number(agent?.base_salary ?? 0);
   const totalCollections = useMemo(() => {
     return (collections || []).reduce((sum, item) => sum + (Number(item.amount_paid) || 0), 0);
   }, [collections]);

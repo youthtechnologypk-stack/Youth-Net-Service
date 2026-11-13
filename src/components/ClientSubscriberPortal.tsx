@@ -308,16 +308,12 @@ export const ClientSubscriberPortal: React.FC<ClientSubscriberPortalProps> = ({
 
   return (
     <div className="max-w-4xl mx-auto space-y-6 font-sans text-xs pb-12">
-      {/* PWA Mobile Install Banner for Clients / Subscribers */}
-      <PWAInstallPrompt role="CLIENT" variant="banner" forceVisibleOnDesktop={false} />
-
       {/* 1. Account & Connection Status Card (STRICTLY BOUND TO currentUser) */}
       <div className="bg-gradient-to-r from-slate-900 via-indigo-950/40 to-slate-900 border border-slate-800 rounded-2xl p-5 shadow-xl">
         <div className="flex flex-col sm:flex-row items-start sm:items-center justify-between gap-4">
           <div className="space-y-1">
             <div className="flex flex-wrap items-center gap-2">
               <span className="text-base font-bold text-white">{subscriberName}</span>
-              <PWAInstallPrompt role="CLIENT" variant="button" />
               <span
                 className={`px-2 py-0.5 rounded-full font-mono text-[10px] font-bold flex items-center gap-1.5 ${
                   activeSession

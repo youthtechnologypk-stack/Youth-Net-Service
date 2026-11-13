@@ -23,6 +23,8 @@ import { useISP } from '../context/ISPContext';
 import { useSubscribers } from '../hooks/useSubscribers';
 import { safeResponseJson } from '../lib/safeFetch';
 import { saveUnifiedPortalUser } from '../lib/userRepository';
+import { AreaNodeSelector } from './AreaNodeSelector';
+import { fetchNetworkAreas, resolveAreaFromUsername, NetworkAreaNode } from '../lib/billingAndNetwork';
 import { getBandwidthProfiles } from '../services/apiClient';
 import {
   fetchMikrotikPppProfiles,
@@ -84,10 +86,24 @@ export const AddUserModal: React.FC<AddUserModalProps> = ({ isOpen, onClose, onS
   const [fullName, setFullName] = useState('');
   const [phone, setPhone] = useState('+92 ');
   const [address, setAddress] = useState('');
-  const [areaNode, setAreaNode] = useState('Sector G-11 (North Zone)');
+  const [networkAreas, setNetworkAreas] = useState<NetworkAreaNode[]>([]);
+  const [areaNode, setAreaNode] = useState('Baza Mohallah');
   const [ponPort, setPonPort] = useState('PON-01');
   const [feederLine, setFeederLine] = useState('Feeder-North-01');
   const [cnic, setCnic] = useState('');
+
+  useEffect(() => {
+    fetchNetworkAreas().then(setNetworkAreas).catch(() => {});
+  }, []);
+
+  const handleUsernameChange = (rawVal: string) => {
+    const clean = rawVal.toLowerCase().replace(/[^a-z0-9_.-]/g, '');
+    setUsername(clean);
+    const matchedArea = resolveAreaFromUsername(clean, networkAreas);
+    if (matchedArea) {
+      setAreaNode(matchedArea);
+    }
+  };
 
   // Subscriber Package Lifecycle state with Router-Level Auto-Expiration
   const [creationDate, setCreationDate] = useState<string>(getTodayFormatted());
@@ -564,12 +580,9 @@ export const AddUserModal: React.FC<AddUserModalProps> = ({ isOpen, onClose, onS
                 <input
                   type="text"
                   required
-                  placeholder="e.g. pppoe_subscriber01"
+                  placeholder="e.g. bz_ahmed, dgi_sana"
                   value={username}
-                  onChange={(e) => {
-                    const clean = e.target.value.toLowerCase().replace(/[^a-z0-9_.-]/g, '');
-                    setUsername(clean);
-                  }}
+                  onChange={(e) => handleUsernameChange(e.target.value)}
                   className="w-full bg-slate-900 border border-slate-700 text-cyan-300 font-mono p-2.5 rounded-lg focus:outline-none focus:border-cyan-500"
                 />
                 <span className="text-[10px] text-slate-500 font-mono mt-0.5 block">
@@ -829,7 +842,7 @@ export const AddUserModal: React.FC<AddUserModalProps> = ({ isOpen, onClose, onS
                     onChange={(e) => {
                       setFullName(e.target.value);
                       if (!username) {
-                        setUsername(e.target.value.toLowerCase().replace(/[^a-z0-9_]/g, ''));
+                        handleUsernameChange(e.target.value.toLowerCase().replace(/[^a-z0-9_]/g, ''));
                       }
                     }}
                     className="w-full bg-slate-950 border border-slate-700 text-slate-100 p-2 rounded-lg focus:outline-none focus:border-cyan-500"
@@ -860,21 +873,14 @@ export const AddUserModal: React.FC<AddUserModalProps> = ({ isOpen, onClose, onS
                   />
                 </div>
 
-                <div>
-                  <label className="block text-slate-400 mb-1">Distribution Area Node</label>
-                  <select
-                    value={areaNode}
-                    onChange={(e) => setAreaNode(e.target.value)}
-                    className="w-full bg-slate-950 border border-slate-700 text-slate-100 p-2 rounded-lg focus:outline-none focus:border-cyan-500 font-sans"
-                  >
-                    <option value="Sector G-11 (North Zone)">Sector G-11 (North Zone)</option>
-                    <option value="Sector F-10 (Commercial Zone)">Sector F-10 (Commercial Zone)</option>
-                    <option value="Sector I-8 (East Zone)">Sector I-8 (East Zone)</option>
-                    <option value="Blue Area (Main Business Hub)">Blue Area (Main Business Hub)</option>
-                    <option value="Sector F-11 (West Zone)">Sector F-11 (West Zone)</option>
-                    <option value="Sector G-10 (South Zone)">Sector G-10 (South Zone)</option>
-                  </select>
-                </div>
+                <AreaNodeSelector
+                  label="Distribution Area / Child Node"
+                  value={areaNode}
+                  onChange={setAreaNode}
+                  areas={networkAreas}
+                  onAreasUpdated={setNetworkAreas}
+                  compact
+                />
               </div>
 
               {/* CNIC and Optical Linkage */}

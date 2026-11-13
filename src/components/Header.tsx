@@ -164,9 +164,6 @@ export const Header: React.FC<HeaderProps> = ({
               </span>
             </div>
 
-            {/* Install App Button */}
-            <PWAInstallPrompt role="CLIENT" variant="button" />
-
             {/* Logout Button */}
             {onLogout && (
               <button
@@ -223,8 +220,6 @@ export const Header: React.FC<HeaderProps> = ({
                 {activeUser?.fullName || activeUser?.username || 'Field Agent'}
               </span>
             </div>
-
-            <PWAInstallPrompt role="AGENT" variant="button" />
 
             {onLogout && (
               <button
@@ -410,8 +405,8 @@ export const Header: React.FC<HeaderProps> = ({
               </>
             )}
 
-            {/* PWA Install Button */}
-            <PWAInstallPrompt role={currentRole} variant="button" />
+            {/* PWA Install Button (Admin only) */}
+            {currentRole === 'ADMIN' && <PWAInstallPrompt role={currentRole} variant="button" />}
 
             {onLogout && (
               <button

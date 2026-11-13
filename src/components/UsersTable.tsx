@@ -384,7 +384,7 @@ export const UsersTable: React.FC<UsersTableProps> = ({
                               {targetName}
                             </span>
                             <span className="text-[11px] text-slate-400 font-mono">
-                              {user.area || user.assignedArea || user.department || (isClient ? 'Transworld FTTH Client' : 'Standard Tier')}
+                              {user.area || user.assignedArea || user.department || (isClient ? 'Youth Net FTTH Client' : 'Standard Tier')}
                             </span>
                           </div>
                         </div>
@@ -465,7 +465,7 @@ export const UsersTable: React.FC<UsersTableProps> = ({
                                 onSelectSubscriber(user.username);
                               }}
                               className="p-1.5 bg-slate-950 hover:bg-cyan-950 border border-slate-800 hover:border-cyan-800 rounded-lg text-slate-400 hover:text-cyan-300 transition cursor-pointer"
-                              title="View Transworld 360° Subscriber Profile"
+                              title="View Youth Net 360° Subscriber Profile"
                             >
                               <Eye className="w-3.5 h-3.5" />
                             </button>

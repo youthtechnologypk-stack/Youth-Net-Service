@@ -3,6 +3,8 @@ import { X, Server, CheckCircle2, ShieldCheck, Zap, Calendar, Clock, DollarSign 
 import { useISP } from '../context/ISPContext';
 import { storageService, BandwidthProfile } from '../services/storageService';
 import { formatRouterOSSchedule, calculateRemainingTime } from '../services/mikrotikSubscriberSync';
+import { AreaNodeSelector } from './AreaNodeSelector';
+import { fetchNetworkAreas, resolveAreaFromUsername, NetworkAreaNode } from '../lib/billingAndNetwork';
 
 interface ProvisionSecretModalProps {
   isOpen: boolean;
@@ -49,7 +51,8 @@ export const ProvisionSecretModal: React.FC<ProvisionSecretModalProps> = ({ isOp
   const [name, setName] = useState('');
   const [phone, setPhone] = useState('+92 ');
   const [address, setAddress] = useState('');
-  const [areaNode, setAreaNode] = useState('Sector G-11 (North Zone)');
+  const [networkAreas, setNetworkAreas] = useState<NetworkAreaNode[]>([]);
+  const [areaNode, setAreaNode] = useState('Baza Mohallah');
   const [pppoeUsername, setPppoeUsername] = useState('');
   const [pppoePassword, setPppoePassword] = useState('fiber1234');
   const [packageId, setPackageId] = useState(defaultProfileName);
@@ -57,6 +60,19 @@ export const ProvisionSecretModal: React.FC<ProvisionSecretModalProps> = ({ isOp
   const [ponPort, setPonPort] = useState('PON-01');
   const [cnic, setCnic] = useState('');
   const [isSubmitting, setIsSubmitting] = useState(false);
+
+  useEffect(() => {
+    fetchNetworkAreas().then(setNetworkAreas).catch(() => {});
+  }, []);
+
+  const handlePppoeUsernameChange = (rawVal: string) => {
+    const clean = rawVal.toLowerCase().replace(/[^a-z0-9_]/g, '');
+    setPppoeUsername(clean);
+    const matchedArea = resolveAreaFromUsername(clean, networkAreas);
+    if (matchedArea) {
+      setAreaNode(matchedArea);
+    }
+  };
 
   // Package Validity section states
   const [validityPreset, setValidityPreset] = useState<ValidityPreset>('1_month');
@@ -238,21 +254,14 @@ export const ProvisionSecretModal: React.FC<ProvisionSecretModalProps> = ({ isOp
           </div>
 
           <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
-            <div>
-              <label className="block text-slate-400 mb-1 font-medium">Area Node</label>
-              <select
-                value={areaNode}
-                onChange={(e) => setAreaNode(e.target.value)}
-                className="w-full bg-slate-950 border border-slate-700 text-slate-100 p-2.5 rounded-lg focus:outline-none focus:border-cyan-500"
-              >
-                <option value="Sector G-11 (North Zone)">Sector G-11 (North Zone)</option>
-                <option value="Sector F-10 (Commercial Zone)">Sector F-10 (Commercial Zone)</option>
-                <option value="Sector I-8 (East Zone)">Sector I-8 (East Zone)</option>
-                <option value="Blue Area (Main Business Hub)">Blue Area (Main Business Hub)</option>
-                <option value="Sector F-11 (West Zone)">Sector F-11 (West Zone)</option>
-                <option value="Sector G-10 (South Zone)">Sector G-10 (South Zone)</option>
-              </select>
-            </div>
+            <AreaNodeSelector
+              label="Area / Child Node"
+              value={areaNode}
+              onChange={setAreaNode}
+              areas={networkAreas}
+              onAreasUpdated={setNetworkAreas}
+              compact
+            />
 
             <div>
               <label className="block text-slate-400 mb-1 font-medium">OLT PON Port</label>
@@ -383,9 +392,9 @@ export const ProvisionSecretModal: React.FC<ProvisionSecretModalProps> = ({ isOp
               <input
                 type="text"
                 required
-                placeholder="user_pppoe"
+                placeholder="e.g. bz_ahmed, dgi_sana"
                 value={pppoeUsername}
-                onChange={(e) => setPppoeUsername(e.target.value.toLowerCase().replace(/[^a-z0-9_]/g, ''))}
+                onChange={(e) => handlePppoeUsernameChange(e.target.value)}
                 className="w-full bg-slate-950 border border-slate-700 text-cyan-300 font-mono p-2.5 rounded-lg focus:outline-none focus:border-cyan-500"
               />
             </div>
@@ -409,7 +418,7 @@ export const ProvisionSecretModal: React.FC<ProvisionSecretModalProps> = ({ isOp
               <span>Automated 5-Step Single-Action Pipeline:</span>
             </div>
             <p className="text-[10px] text-slate-500 leading-relaxed">
-              1. Adds PPPoE Secret with metadata on RouterOS · 2. Creates Client Portal user · 3. Generates Invoice #1 anchored to 5th cycle · 4. Schedules RouterOS `/system/scheduler` expiry script · 5. Dispatches welcome WhatsApp.
+              1. Adds PPPoE Secret with metadata on RouterOS · 2. Creates Client Portal user · 3. Generates Invoice #1 anchored to 31-day cycle · 4. Schedules RouterOS `/system/scheduler` expiry script · 5. Dispatches welcome WhatsApp.
             </p>
           </div>
 

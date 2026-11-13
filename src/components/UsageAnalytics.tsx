@@ -36,6 +36,21 @@ import {
 } from 'lucide-react';
 import { useISP } from '../context/ISPContext';
 import { ActiveSession, Customer } from '../types/isp';
+import { fetchMikrotikInterfaceTrafficOnce } from '../lib/billingAndNetwork';
+
+interface LiveInterfaceItem {
+  id: string;
+  name: string;
+  type: string;
+  comment?: string;
+  running?: boolean;
+}
+
+interface TrafficSample {
+  time: string;
+  rxMbps: number;
+  txMbps: number;
+}
 
 export const UsageAnalytics: React.FC = () => {
   const {
@@ -49,14 +64,145 @@ export const UsageAnalytics: React.FC = () => {
   } = useISP();
 
   const [analyticsView, setAnalyticsView] = useState<'interface' | 'subscriber' | 'top_talkers'>('interface');
-  const [selectedInterface, setSelectedInterface] = useState<string>(() => {
-    return routerInterfaces[0]?.name || 'WAN3';
-  });
+  const [liveInterfaces, setLiveInterfaces] = useState<LiveInterfaceItem[]>([]);
+  const [selectedInterface, setSelectedInterface] = useState<string>('');
+  const [liveInterfaceHistory, setLiveInterfaceHistory] = useState<TrafficSample[]>([]);
   const [timeRange, setTimeRange] = useState<'realtime' | '1h' | '24h' | '7d'>('realtime');
   const [searchQuery, setSearchQuery] = useState('');
   const [selectedSubscriberUsername, setSelectedSubscriberUsername] = useState<string>(
     activeSessions[0]?.username || ''
   );
+
+  // 1. Dynamically fetch real interfaces from /api/mikrotik/interface
+  useEffect(() => {
+    let isMounted = true;
+    const loadInterfaces = async () => {
+      try {
+        const res = await fetch('/api/mikrotik/interface');
+        if (!res.ok) return;
+        const data = await res.json();
+        if (!Array.isArray(data) || !isMounted) return;
+
+        const parsed: LiveInterfaceItem[] = data
+          .filter((item: any) => {
+            const name = String(item?.name || '').trim();
+            return Boolean(name) && !name.startsWith('<pppoe-');
+          })
+          .map((item: any, idx: number) => ({
+            id: item['.id'] || `iface-${idx}`,
+            name: String(item.name || '').trim(),
+            type: String(item.type || 'ether'),
+            comment: item.comment || undefined,
+            running: item.running === 'true' || item.running === true,
+          }));
+
+        if (parsed.length > 0) {
+          setLiveInterfaces(parsed);
+          setSelectedInterface((prev) => {
+            if (prev && parsed.some((p) => p.name === prev)) return prev;
+            const preferred =
+              parsed.find((p) => /wan|ether1|sfp/i.test(p.name) && p.running !== false) ||
+              parsed.find((p) => /ether|sfp|bridge/i.test(p.name)) ||
+              parsed[0];
+            return preferred.name;
+          });
+        }
+      } catch (err) {
+        console.warn('Could not load /api/mikrotik/interface:', err);
+      }
+    };
+
+    loadInterfaces();
+    return () => {
+      isMounted = false;
+    };
+  }, []);
+
+  // Fallback interface list combining live /api/mikrotik/interface and context routerInterfaces
+  const availableInterfaces = useMemo<LiveInterfaceItem[]>(() => {
+    if (liveInterfaces.length > 0) return liveInterfaces;
+    if (routerInterfaces && routerInterfaces.length > 0) {
+      return routerInterfaces
+        .filter((i) => i?.name && !i.name.startsWith('<pppoe-'))
+        .map((i) => ({
+          id: i.id,
+          name: i.name,
+          type: i.type,
+          comment: i.comment,
+        }));
+    }
+    return [
+      { id: 'if-1', name: 'ether1-WAN', type: 'ether', comment: 'Primary Uplink' },
+      { id: 'if-2', name: 'sfp-sfpplus1', type: 'ether', comment: '10G Fiber Trunk' },
+      { id: 'if-3', name: 'bridge', type: 'bridge', comment: 'Local Bridge' },
+    ];
+  }, [liveInterfaces, routerInterfaces]);
+
+  useEffect(() => {
+    if (!selectedInterface && availableInterfaces.length > 0) {
+      setSelectedInterface(availableInterfaces[0].name);
+    }
+  }, [availableInterfaces, selectedInterface]);
+
+  // 2. Poll /api/mikrotik/interface/monitor-traffic?interface=${selectedInterface}&once every 3 seconds
+  useEffect(() => {
+    if (!selectedInterface || !isTrafficStreaming) return;
+    let isMounted = true;
+
+    // Reset series when switching port so graph clearly reflects new interface
+    setLiveInterfaceHistory([]);
+
+    const pollInterfaceTraffic = async () => {
+      const sample = await fetchMikrotikInterfaceTrafficOnce(selectedInterface);
+      if (!isMounted) return;
+
+      const nowStr = new Date().toLocaleTimeString([], {
+        hour: '2-digit',
+        minute: '2-digit',
+        second: '2-digit',
+      });
+
+      if (sample.ok) {
+        setLiveInterfaceHistory((prev) => {
+          const next = [
+            ...prev,
+            {
+              time: nowStr,
+              rxMbps: sample.rxMbps,
+              txMbps: sample.txMbps,
+            },
+          ];
+          return next.slice(-30);
+        });
+      } else if (bandwidthHistory && bandwidthHistory.length > 0) {
+        const last = bandwidthHistory[bandwidthHistory.length - 1];
+        setLiveInterfaceHistory((prev) => {
+          const next = [
+            ...prev,
+            {
+              time: nowStr,
+              rxMbps: Number(last?.rxMbps || 0),
+              txMbps: Number(last?.txMbps || 0),
+            },
+          ];
+          return next.slice(-30);
+        });
+      }
+    };
+
+    pollInterfaceTraffic();
+    const timer = setInterval(pollInterfaceTraffic, 3000);
+
+    return () => {
+      isMounted = false;
+      clearInterval(timer);
+    };
+  }, [selectedInterface, isTrafficStreaming]);
+
+  const effectiveHistory = useMemo(() => {
+    if (liveInterfaceHistory.length > 0) return liveInterfaceHistory;
+    return bandwidthHistory || [];
+  }, [liveInterfaceHistory, bandwidthHistory]);
 
   // Selected session & matching customer & package
   const currentSession = activeSessions.find((s) => s.username === selectedSubscriberUsername) || activeSessions[0] || null;
@@ -65,28 +211,28 @@ export const UsageAnalytics: React.FC = () => {
 
   // Calculate 95th percentile and peak for interface
   const stats = useMemo(() => {
-    const rxValues = bandwidthHistory.map((d) => d.rxMbps).sort((a, b) => a - b);
-    const txValues = bandwidthHistory.map((d) => d.txMbps).sort((a, b) => a - b);
-    const p95Index = Math.floor(rxValues.length * 0.95);
-    const p95Rx = rxValues[p95Index] || 0;
-    const p95Tx = txValues[p95Index] || 0;
-    const peakRx = Math.max(...bandwidthHistory.map((d) => d.rxMbps), 0);
-    const peakTx = Math.max(...bandwidthHistory.map((d) => d.txMbps), 0);
-    const currentRx = bandwidthHistory[bandwidthHistory.length - 1]?.rxMbps || 0;
-    const currentTx = bandwidthHistory[bandwidthHistory.length - 1]?.txMbps || 0;
+    const rxValues = effectiveHistory.map((d) => Number(d.rxMbps) || 0).sort((a, b) => a - b);
+    const txValues = effectiveHistory.map((d) => Number(d.txMbps) || 0).sort((a, b) => a - b);
+    const p95Index = rxValues.length > 0 ? Math.min(rxValues.length - 1, Math.floor(rxValues.length * 0.95)) : 0;
+    const p95Rx = Number((rxValues[p95Index] || 0).toFixed(2));
+    const p95Tx = Number((txValues[p95Index] || 0).toFixed(2));
+    const peakRx = Number(Math.max(...effectiveHistory.map((d) => Number(d.rxMbps) || 0), 0).toFixed(2));
+    const peakTx = Number(Math.max(...effectiveHistory.map((d) => Number(d.txMbps) || 0), 0).toFixed(2));
+    const currentRx = Number((effectiveHistory[effectiveHistory.length - 1]?.rxMbps || 0).toFixed(2));
+    const currentTx = Number((effectiveHistory[effectiveHistory.length - 1]?.txMbps || 0).toFixed(2));
 
     return { p95Rx, p95Tx, peakRx, peakTx, currentRx, currentTx };
-  }, [bandwidthHistory]);
+  }, [effectiveHistory]);
 
   // Real interface chart data derived strictly from live bandwidth telemetry
   const interfaceChartData = useMemo(() => {
-    return bandwidthHistory.map((d) => ({
+    return effectiveHistory.map((d) => ({
       time: d.time,
       rx: d.rxMbps,
       tx: d.txMbps,
-      total: d.rxMbps + d.txMbps,
+      total: Number(((Number(d.rxMbps) || 0) + (Number(d.txMbps) || 0)).toFixed(2)),
     }));
-  }, [bandwidthHistory]);
+  }, [effectiveHistory]);
 
   // Real data for the selected individual PPPoE subscriber session
   const subscriberChartData = useMemo(() => {
@@ -380,19 +526,11 @@ export const UsageAnalytics: React.FC = () => {
                 onChange={(e) => setSelectedInterface(e.target.value)}
                 className="bg-slate-950 border border-slate-700 text-cyan-300 font-mono text-xs px-2.5 py-1.5 rounded-lg focus:outline-none focus:border-cyan-500"
               >
-                {routerInterfaces && routerInterfaces.length > 0 ? (
-                  routerInterfaces.map((iface) => (
-                    <option key={iface.id} value={iface.name}>
-                      {iface.name} ({iface.linkSpeed || '1Gbps'} - {iface.comment || iface.type})
-                    </option>
-                  ))
-                ) : (
-                  <>
-                    <option value="sfp-sfpplus1">sfp-sfpplus1 (10G WAN Uplink - Cogent Transit)</option>
-                    <option value="sfp-sfpplus2">sfp-sfpplus2 (10G Dark Fiber Metro Ring)</option>
-                    <option value="ether1">ether1 (Local Aggregation Subnet - Sector G-11)</option>
-                  </>
-                )}
+                {availableInterfaces.map((iface) => (
+                  <option key={iface.id} value={iface.name}>
+                    {iface.name} ({iface.type}{iface.comment ? ` - ${iface.comment}` : ''})
+                  </option>
+                ))}
               </select>
             </div>
 
@@ -570,10 +708,10 @@ export const UsageAnalytics: React.FC = () => {
 
             <div className="flex items-center gap-3 font-mono text-[11px]">
               <span className="text-slate-400">Assigned IP:</span>
-              <span className="text-cyan-400">{currentSession?.address || currentCustomer.assignedIp}</span>
+              <span className="text-cyan-400">{currentSession?.address || currentCustomer?.assignedIp || 'N/A'}</span>
               <span className="text-slate-600">|</span>
               <span className="text-slate-400">ONT Signal:</span>
-              <span className="text-emerald-400 font-bold">{currentCustomer.ontSignalDbm} dBm</span>
+              <span className="text-emerald-400 font-bold">{currentCustomer?.ontSignalDbm ?? 'N/A'} dBm</span>
             </div>
           </div>
 

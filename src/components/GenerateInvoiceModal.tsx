@@ -112,7 +112,7 @@ export const GenerateInvoiceModal: React.FC<GenerateInvoiceModalProps> = ({
 
   const getSevenDaysLater = () => {
     const d = new Date();
-    d.setDate(d.getDate() + 7);
+    d.setDate(d.getDate() + 31);
     return d.toISOString().split('T')[0];
   };
 
@@ -326,7 +326,7 @@ export const GenerateInvoiceModal: React.FC<GenerateInvoiceModalProps> = ({
               amount: Number(totalAmount) || 0,
               due_date: dueDate,
               status: status === 'paid' ? 'PAID' : 'DUE',
-              cycle_day: 5,
+              cycle_day: 31,
               paid_at: status === 'paid' ? new Date().toISOString() : null,
               created_at: new Date().toISOString(),
             },

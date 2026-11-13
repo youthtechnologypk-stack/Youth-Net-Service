@@ -14,6 +14,7 @@ import {
 import { UserAccount, SystemRole } from '../types/auth';
 import { useISP } from '../context/ISPContext';
 import { supabase } from '../services/supabaseClient';
+import { AreaNodeSelector } from './AreaNodeSelector';
 import { fetchMikrotikPppSecrets } from '../services/mikrotikRestClient';
 import { MikrotikPppSecret } from '../types/isp';
 
@@ -232,16 +233,13 @@ export const EditUserModal: React.FC<EditUserModalProps> = ({
                 <Briefcase className="w-3.5 h-3.5" />
                 <span>Field Agent Settings</span>
               </div>
-              <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
-                <div>
-                  <label className="text-slate-300 font-medium block mb-1">Assigned Area</label>
-                  <input
-                    type="text"
-                    value={assignedArea}
-                    onChange={(e) => setAssignedArea(e.target.value)}
-                    className="w-full bg-slate-900 border border-slate-700 rounded-xl px-3 py-2 text-slate-200 font-mono text-xs focus:outline-none focus:border-cyan-500"
-                  />
-                </div>
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 items-start">
+                <AreaNodeSelector
+                  label="Assigned Area / Child Node"
+                  value={assignedArea}
+                  onChange={setAssignedArea}
+                  compact
+                />
                 <div>
                   <label className="text-slate-300 font-medium block mb-1">Cash Limit (PKR)</label>
                   <input

@@ -55,7 +55,7 @@ export const UserAccountsView: React.FC<UserAccountsViewProps> = ({
     admins: 0,
   });
 
-  // Selected username for Transworld 360° Profile View
+  // Selected username for Youth Net 360° Profile View
   const [selectedProfileUsername, setSelectedProfileUsername] = useState<string | null>(null);
 
   // Selected username for Agent Financial 360° Profile View
@@ -287,7 +287,7 @@ export const UserAccountsView: React.FC<UserAccountsViewProps> = ({
     }
   };
 
-  // Render Transworld 360° Profile View if selected
+  // Render Youth Net 360° Profile View if selected
   if (selectedProfileUsername) {
     return (
       <SubscriberProfileView

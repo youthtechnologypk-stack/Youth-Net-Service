@@ -33,6 +33,30 @@ export interface CreateInvoiceModalProps {
   onSuccess?: (invoice?: any) => void;
 }
 
+export const PACKAGE_RATE_MAP: Record<string, number> = {
+  '10M': 1500,
+  '15M': 2000,
+  '20M': 2500,
+  '30M': 3000,
+  '50M': 3500,
+  '100M': 5000,
+};
+
+export const resolvePackageRate = (profileOrSpeed?: string, monthlyFee?: number): number => {
+  if (monthlyFee && Number(monthlyFee) > 0) return Number(monthlyFee);
+  if (!profileOrSpeed) return 2000;
+  const p = profileOrSpeed.toUpperCase();
+  for (const [key, rate] of Object.entries(PACKAGE_RATE_MAP)) {
+    if (p.includes(key)) return rate;
+  }
+  if (p.includes('10')) return 1500;
+  if (p.includes('15')) return 2000;
+  if (p.includes('20')) return 2500;
+  if (p.includes('30')) return 3000;
+  if (p.includes('50')) return 3500;
+  return 2000;
+};
+
 export const CreateInvoiceModal: React.FC<CreateInvoiceModalProps> = ({
   isOpen,
   onClose,
@@ -46,12 +70,12 @@ export const CreateInvoiceModal: React.FC<CreateInvoiceModalProps> = ({
   const lockedSubscriber = defaultSubscriberUsername || defaultCustomerId || '';
   const isLocked = Boolean(lockedSubscriber);
 
-  // Form states
+  // Form states - default cycle strictly 31 days
   const [selectedSubscriberUsername, setSelectedSubscriberUsername] = useState<string>(lockedSubscriber);
-  const [amount, setAmount] = useState<number | string>(2500);
+  const [amount, setAmount] = useState<number | string>(2000);
   const [dueDate, setDueDate] = useState<string>(() => {
     const d = new Date();
-    d.setDate(d.getDate() + 7);
+    d.setDate(d.getDate() + 31);
     return d.toISOString().split('T')[0];
   });
   const [selectedAgentId, setSelectedAgentId] = useState<string>('');
@@ -201,6 +225,28 @@ export const CreateInvoiceModal: React.FC<CreateInvoiceModalProps> = ({
     }
   };
 
+  // Auto-fill rate helper
+  const autoFillRateForSubscriber = async (subUsername: string, fallbackProfile?: string) => {
+    try {
+      const clean = subUsername.trim().toLowerCase();
+      const { data } = await supabase
+        .from('portal_users')
+        .select('monthly_fee, package_speed')
+        .eq('username', clean)
+        .maybeSingle();
+
+      if (data?.monthly_fee && Number(data.monthly_fee) > 0) {
+        setAmount(Number(data.monthly_fee));
+        return;
+      }
+
+      const rate = resolvePackageRate(data?.package_speed || fallbackProfile);
+      setAmount(rate);
+    } catch {
+      setAmount(resolvePackageRate(fallbackProfile));
+    }
+  };
+
   // Initialize on open
   useEffect(() => {
     if (isOpen) {
@@ -211,6 +257,7 @@ export const CreateInvoiceModal: React.FC<CreateInvoiceModalProps> = ({
       if (lockedSubscriber) {
         setSelectedSubscriberUsername(lockedSubscriber);
         setSearchQuery(lockedSubscriber);
+        autoFillRateForSubscriber(lockedSubscriber);
       }
 
       loadSubscribersAndSecrets();
@@ -242,11 +289,12 @@ export const CreateInvoiceModal: React.FC<CreateInvoiceModalProps> = ({
     );
   }, [secretOptions, searchQuery]);
 
-  // Handle subscriber selection
+  // Handle subscriber selection with auto package rate populate
   const handleSelectOption = (opt: PPPoESecretOption) => {
     setSelectedSubscriberUsername(opt.name);
     setSearchQuery(opt.displayName);
     setIsDropdownOpen(false);
+    autoFillRateForSubscriber(opt.name, opt.profile);
   };
 
   // Form submission: Direct Supabase insert
@@ -283,7 +331,7 @@ export const CreateInvoiceModal: React.FC<CreateInvoiceModalProps> = ({
       // 2. Identify assigned agent name
       const selectedAgent = portalAgents.find((a) => a.id === selectedAgentId);
 
-      // 3. Exact database schema payload
+      // 3. Exact database schema payload - strictly 31-day cycle
       const invoicePayload = {
         invoice_no: generatedInvoiceNo,
         subscriber_username: subUsername,
@@ -293,7 +341,7 @@ export const CreateInvoiceModal: React.FC<CreateInvoiceModalProps> = ({
         paid_amount: 0,
         status: 'DUE',
         due_date: dueDate, // YYYY-MM-DD
-        cycle_day: 5,
+        cycle_day: 31,
       };
 
       // 4. Supabase Insert
@@ -527,7 +575,7 @@ export const CreateInvoiceModal: React.FC<CreateInvoiceModalProps> = ({
                 />
               </div>
               <span className="text-[10px] text-slate-500 font-mono mt-0.5 block">
-                Default: +7 days grace period
+                Default: 31-day billing cycle
               </span>
             </div>
           </div>
@@ -566,7 +614,7 @@ export const CreateInvoiceModal: React.FC<CreateInvoiceModalProps> = ({
               <span className="px-2 py-0.5 rounded text-[10px] font-mono font-bold bg-rose-950 text-rose-300 border border-rose-800">
                 Initial Status: DUE
               </span>
-              <span className="text-[10px] text-slate-500 font-mono block mt-1">Cycle Day: 5th</span>
+              <span className="text-[10px] text-slate-500 font-mono block mt-1">Cycle: 31 Days</span>
             </div>
           </div>
 
