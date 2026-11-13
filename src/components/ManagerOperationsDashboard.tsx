@@ -180,7 +180,13 @@ export const ManagerOperationsDashboard: React.FC<ManagerOperationsDashboardProp
         setAgents(allUsers.filter((u) => (u?.role || '').toUpperCase() === 'AGENT'));
       }
       if (Array.isArray(ticketsRes.data)) {
-        setTickets(ticketsRes.data as SupabaseTicket[]);
+        const seenTicketIds = new Set<string>();
+        const uniqueTickets = (ticketsRes.data as SupabaseTicket[]).filter((t) => {
+          if (!t?.id || seenTicketIds.has(t.id)) return false;
+          seenTicketIds.add(t.id);
+          return true;
+        });
+        setTickets(uniqueTickets);
       }
       if (Array.isArray(invoicesRes.data)) {
         setInvoices(invoicesRes.data as SupabaseInvoice[]);
@@ -214,8 +220,23 @@ export const ManagerOperationsDashboard: React.FC<ManagerOperationsDashboardProp
     // Realtime Supabase subscriptions for zero-stale operational dispatch
     const ch = supabase
       .channel('public:ops_dispatch_live')
-      .on('postgres_changes', { event: '*', schema: 'public', table: 'tickets' }, () => {
-        fetchOperationsData();
+      .on('postgres_changes', { event: '*', schema: 'public', table: 'tickets' }, (payload) => {
+        if (payload.eventType === 'INSERT' && payload.new) {
+          const newTicket = payload.new as SupabaseTicket;
+          setTickets((prev) =>
+            prev.some((t) => t.id === newTicket.id) ? prev : [newTicket, ...prev]
+          );
+        } else if (payload.eventType === 'UPDATE' && payload.new) {
+          const updatedTicket = payload.new as SupabaseTicket;
+          setTickets((prev) =>
+            prev.map((t) => (t.id === updatedTicket.id ? updatedTicket : t))
+          );
+        } else if (payload.eventType === 'DELETE' && payload.old) {
+          const deletedId = (payload.old as any).id;
+          setTickets((prev) => prev.filter((t) => t.id !== deletedId));
+        } else {
+          fetchOperationsData();
+        }
       })
       .on('postgres_changes', { event: '*', schema: 'public', table: 'portal_users' }, () => {
         fetchOperationsData();

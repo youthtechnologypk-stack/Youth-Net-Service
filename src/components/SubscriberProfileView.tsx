@@ -304,7 +304,13 @@ export const SubscriberProfileView: React.FC<SubscriberProfileViewProps> = ({
         .order('created_at', { ascending: false });
 
       if (tktData) {
-        setTickets(tktData as SupabaseTicket[]);
+        const seenTicketIds = new Set<string>();
+        const uniqueTickets = (tktData as SupabaseTicket[]).filter((t) => {
+          if (!t?.id || seenTicketIds.has(t.id)) return false;
+          seenTicketIds.add(t.id);
+          return true;
+        });
+        setTickets(uniqueTickets);
       }
 
       // 1.7 Fetch Portal Agents for assignment dropdowns
@@ -763,6 +769,7 @@ export const SubscriberProfileView: React.FC<SubscriberProfileViewProps> = ({
   // Action 5: Log New Complaint / Service Ticket (Tab 4)
   const handleSaveTicket = async (e: React.FormEvent) => {
     e.preventDefault();
+    if (isSavingTicket) return;
     if (!ticketForm.issue.trim()) {
       showToast('Please enter complaint details', 'error');
       return;
@@ -770,20 +777,31 @@ export const SubscriberProfileView: React.FC<SubscriberProfileViewProps> = ({
 
     setIsSavingTicket(true);
     try {
-      const ticketNo = `TKT-${Math.floor(1000 + Math.random() * 9000)}`;
+      const selectedAgent =
+        portalAgents.find(
+          (ag) =>
+            ag.full_name === ticketForm.assignedAgentName ||
+            ag.id === ticketForm.assignedAgentName
+        ) || (ticketForm.assignedAgentName ? undefined : portalAgents[0]);
+      const resolvedAgentId = selectedAgent?.id || null;
+      const resolvedAgentName =
+        selectedAgent?.full_name || ticketForm.assignedAgentName || 'NOC Support';
+
+      const ticketNo = `TKT-${Math.floor(100000 + Math.random() * 900000)}`;
       const { error } = await supabase.from('tickets').insert([{
         ticket_no: ticketNo,
         subscriber_username: username,
         issue: ticketForm.issue.trim(),
         priority: ticketForm.priority,
-        status: 'OPEN',
-        assigned_agent_name: ticketForm.assignedAgentName || portalAgents[0]?.full_name || 'NOC Support',
+        status: resolvedAgentId ? 'IN_PROGRESS' : 'OPEN',
+        assigned_agent_id: resolvedAgentId,
+        assigned_agent_name: resolvedAgentName,
         created_at: new Date().toISOString(),
       }]);
 
       if (error) throw new Error(error.message);
 
-      showToast(`Ticket #${ticketNo} logged successfully! Assigned to technician.`);
+      showToast(`Ticket #${ticketNo} logged successfully! Assigned to ${resolvedAgentName}.`);
       setIsNewTicketModalOpen(false);
       setTicketForm({
         issue: '',

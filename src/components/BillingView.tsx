@@ -20,14 +20,27 @@ import {
   Users,
   Edit2,
   Trash2,
+  Landmark,
+  MessageSquare,
+  Send,
+  Copy,
+  Check,
 } from 'lucide-react';
-import { supabase, SupabaseInvoice, SupabasePortalUser, SupabasePaymentTransaction } from '../services/supabaseClient';
+import {
+  supabase,
+  SupabaseInvoice,
+  SupabasePortalUser,
+  SupabasePaymentTransaction,
+  SupabasePaymentAccount,
+  SupabaseWhatsappBillingConfig,
+} from '../services/supabaseClient';
 import { useISP } from '../context/ISPContext';
 import { useCurrency } from '../context/CurrencyContext';
 import { SystemRole, UserAccount } from '../types/auth';
 import { CreateInvoiceModal } from './CreateInvoiceModal';
 import { DateFilterToolbar } from './DateFilterToolbar';
 import { ReceivingVsDuesChart } from './ReceivingVsDuesChart';
+import { WhatsAppBillingCenter } from './WhatsAppBillingCenter';
 import {
   DateFilterState,
   createDefaultDateFilter,
@@ -39,6 +52,18 @@ import {
   enforce31DayAutoExpiry,
   add31DaysDateString,
 } from '../lib/billingAndNetwork';
+import {
+  DEFAULT_SUPPORT_WHATSAPP,
+  WHATSAPP_CONFIG_UPDATED_EVENT,
+  buildInstantPaymentReceiptMessage,
+  buildPreExpiryReminderMessage,
+  buildPreExpiryReminderQueue,
+  computeDaysUntilDate,
+  fetchPaymentAccounts,
+  fetchWhatsappBillingConfig,
+  getDefaultWhatsappConfig,
+  openWhatsAppLink,
+} from '../lib/whatsappBilling';
 
 export interface BillingViewProps {
   currentRole?: SystemRole;
@@ -57,6 +82,25 @@ export const BillingView: React.FC<BillingViewProps> = ({
   const [invoices, setInvoices] = useState<SupabaseInvoice[]>([]);
   const [paymentTransactions, setPaymentTransactions] = useState<SupabasePaymentTransaction[]>([]);
   const [portalAgents, setPortalAgents] = useState<SupabasePortalUser[]>([]);
+  const [portalClients, setPortalClients] = useState<SupabasePortalUser[]>([]);
+  const [paymentAccounts, setPaymentAccounts] = useState<SupabasePaymentAccount[]>([]);
+  const [whatsappConfig, setWhatsappConfig] = useState<SupabaseWhatsappBillingConfig>(() =>
+    getDefaultWhatsappConfig()
+  );
+  const [isPaymentAccountsOpen, setIsPaymentAccountsOpen] = useState<boolean>(false);
+  const [copiedReminderKey, setCopiedReminderKey] = useState<string | null>(null);
+  const [lastPaidReceiptPayload, setLastPaidReceiptPayload] = useState<{
+    username: string;
+    fullName: string;
+    phone: string;
+    invoiceNo: string;
+    amountPaid: number;
+    totalAmount: number;
+    remainingBalance: number;
+    paymentMethod: string;
+    collectorName: string;
+    nextExpiryDate: string;
+  } | null>(null);
   const [isLoading, setIsLoading] = useState<boolean>(true);
   const [searchTerm, setSearchTerm] = useState<string>('');
   const [statusFilter, setStatusFilter] = useState<'ALL' | 'DUE' | 'PARTIAL' | 'PAID'>('ALL');
@@ -105,18 +149,32 @@ export const BillingView: React.FC<BillingViewProps> = ({
         enforce31DayAutoExpiry(data as SupabaseInvoice[]).catch(() => {});
       }
 
-      // Also fetch portal_users agents and payment_transactions
-      const [{ data: agentUsers }, { data: paymentRows }] = await Promise.all([
+      // Also fetch portal_users agents/clients, payment_transactions, payment_accounts & whatsapp config
+      const [
+        { data: agentUsers },
+        { data: clientUsers },
+        { data: paymentRows },
+        loadedAccounts,
+        loadedWaConfig,
+      ] = await Promise.all([
         supabase.from('portal_users').select('*').eq('role', 'AGENT'),
+        supabase.from('portal_users').select('*').eq('role', 'CLIENT'),
         supabase.from('payment_transactions').select('*').order('created_at', { ascending: false }),
+        fetchPaymentAccounts(),
+        fetchWhatsappBillingConfig(),
       ]);
 
       if (agentUsers) {
         setPortalAgents(agentUsers as SupabasePortalUser[]);
       }
+      if (clientUsers) {
+        setPortalClients(clientUsers as SupabasePortalUser[]);
+      }
       if (paymentRows) {
         setPaymentTransactions(paymentRows as SupabasePaymentTransaction[]);
       }
+      setPaymentAccounts(loadedAccounts);
+      setWhatsappConfig(loadedWaConfig);
     } catch (err) {
       console.warn('Supabase fetch invoices failed:', err);
     } finally {
@@ -126,6 +184,12 @@ export const BillingView: React.FC<BillingViewProps> = ({
 
   useEffect(() => {
     fetchInvoices();
+
+    const handleWaConfigUpdated = (e: Event) => {
+      const detail = (e as CustomEvent)?.detail;
+      if (detail) setWhatsappConfig(detail);
+    };
+    window.addEventListener(WHATSAPP_CONFIG_UPDATED_EVENT, handleWaConfigUpdated);
 
     // 2. Enable Supabase Realtime Subscriptions
     const channel = supabase
@@ -137,6 +201,9 @@ export const BillingView: React.FC<BillingViewProps> = ({
       .on('postgres_changes', { event: '*', schema: 'public', table: 'payment_transactions' }, () => {
         fetchInvoices();
       })
+      .on('postgres_changes', { event: '*', schema: 'public', table: 'payment_accounts' }, () => {
+        fetchPaymentAccounts().then(setPaymentAccounts).catch(() => {});
+      })
       .on('postgres_changes', { event: '*', schema: 'public', table: 'portal_users' }, (payload) => {
         console.log('[Supabase Realtime] Portal users table change detected:', payload);
         fetchInvoices();
@@ -144,6 +211,7 @@ export const BillingView: React.FC<BillingViewProps> = ({
       .subscribe();
 
     return () => {
+      window.removeEventListener(WHATSAPP_CONFIG_UPDATED_EVENT, handleWaConfigUpdated);
       supabase.removeChannel(channel);
     };
   }, []);
@@ -301,13 +369,34 @@ export const BillingView: React.FC<BillingViewProps> = ({
         console.warn('payment_transactions insert notice:', txError.message);
       }
 
+      const clientMatch = portalClients.find(
+        (c) =>
+          (c.username || '').trim().toLowerCase() ===
+          (selectedInvoice.subscriber_username || '').trim().toLowerCase()
+      );
+      const nextExpiryStr =
+        invoiceUpdateData.due_date || selectedInvoice.due_date || add31DaysDateString(new Date());
+
+      setLastPaidReceiptPayload({
+        username: selectedInvoice.subscriber_username,
+        fullName: clientMatch?.full_name || selectedInvoice.subscriber_username,
+        phone: clientMatch?.phone || '',
+        invoiceNo: selectedInvoice.invoice_no,
+        amountPaid: enteredVal,
+        totalAmount,
+        remainingBalance: Math.max(0, totalAmount - finalPaidAmount),
+        paymentMethod: paidPaymentMethod,
+        collectorName,
+        nextExpiryDate: nextExpiryStr,
+      });
+
       setActionNotice(
         `Recorded ${formatCurrency(enteredVal)} for Invoice #${selectedInvoice.invoice_no}! Status: ${newStatus}.${
           targetAgentId ? ` Credited to ${targetAgentName}'s Cash-in-Hand.` : ''
         }`
       );
 
-      setTimeout(() => setActionNotice(null), 5000);
+      setTimeout(() => setActionNotice(null), 10000);
       setIsMarkPaidModalOpen(false);
       setSelectedInvoice(null);
       await fetchInvoices();
@@ -462,6 +551,103 @@ export const BillingView: React.FC<BillingViewProps> = ({
     .reduce((acc, i) => acc + Math.max(0, (Number(i.amount) || 0) - (Number(i.paid_amount) || 0)), 0);
   const totalAgentCash = (portalAgents || []).reduce((acc, a) => acc + (Number(a.cash_in_hand) || 0), 0);
 
+  const activePaymentAccounts = useMemo(
+    () => (paymentAccounts || []).filter((acc) => acc.is_active !== false),
+    [paymentAccounts]
+  );
+
+  const clientByUsername = useMemo(() => {
+    const map: Record<string, SupabasePortalUser> = {};
+    for (const c of portalClients) {
+      const key = (c.username || '').trim().toLowerCase();
+      if (key) map[key] = c;
+    }
+    return map;
+  }, [portalClients]);
+
+  const preExpiryReminderQueue = useMemo(
+    () =>
+      buildPreExpiryReminderQueue({
+        subscribers: portalClients,
+        invoices,
+        maxDays: whatsappConfig.auto_remind_days_before ?? 3,
+      }),
+    [portalClients, invoices, whatsappConfig.auto_remind_days_before]
+  );
+
+  const supportWhatsapp = whatsappConfig.support_whatsapp || DEFAULT_SUPPORT_WHATSAPP;
+
+  const handleSendPreExpiryReminder = (item: (typeof preExpiryReminderQueue)[number]) => {
+    const msg = buildPreExpiryReminderMessage({
+      fullName: item.fullName,
+      username: item.username,
+      packageSpeed: item.packageSpeed,
+      daysRemaining: item.daysRemaining,
+      expiryDate: item.expiryDate,
+      invoiceNo: item.invoiceNo,
+      amountDue: item.amountDue,
+      activePaymentAccounts,
+      supportWhatsapp,
+    });
+    openWhatsAppLink(item.phone, msg);
+  };
+
+  const handleCopyPreExpiryReminder = (item: (typeof preExpiryReminderQueue)[number]) => {
+    const msg = buildPreExpiryReminderMessage({
+      fullName: item.fullName,
+      username: item.username,
+      packageSpeed: item.packageSpeed,
+      daysRemaining: item.daysRemaining,
+      expiryDate: item.expiryDate,
+      invoiceNo: item.invoiceNo,
+      amountDue: item.amountDue,
+      activePaymentAccounts,
+      supportWhatsapp,
+    });
+    navigator.clipboard?.writeText(msg);
+    setCopiedReminderKey(item.key);
+    setTimeout(() => setCopiedReminderKey((prev) => (prev === item.key ? null : prev)), 2000);
+  };
+
+  const handleSendInvoiceWhatsApp = (inv: SupabaseInvoice) => {
+    const client = clientByUsername[(inv.subscriber_username || '').trim().toLowerCase()];
+    const totalAmount = Number(inv.amount) || 0;
+    const paidAmount = Number(inv.paid_amount) || 0;
+    const balanceDue = Math.max(0, totalAmount - paidAmount);
+    const isPaid = balanceDue <= 0 || (inv.status || '').toUpperCase() === 'PAID';
+
+    if (isPaid) {
+      const receiptMsg = buildInstantPaymentReceiptMessage({
+        fullName: client?.full_name || inv.subscriber_username,
+        username: inv.subscriber_username,
+        invoiceNo: inv.invoice_no,
+        amountPaid: paidAmount > 0 ? paidAmount : totalAmount,
+        totalAmount,
+        remainingBalance: 0,
+        paymentMethod: 'Verified Payment',
+        collectorName: inv.assigned_agent_name || 'Youth Net NOC',
+        nextExpiryDate: inv.due_date,
+        activePaymentAccounts,
+        supportWhatsapp,
+      });
+      openWhatsAppLink(client?.phone, receiptMsg);
+    } else {
+      const daysLeft = computeDaysUntilDate(inv.due_date);
+      const reminderMsg = buildPreExpiryReminderMessage({
+        fullName: client?.full_name || inv.subscriber_username,
+        username: inv.subscriber_username,
+        packageSpeed: client?.package_speed || 'Fiber Broadband',
+        daysRemaining: daysLeft !== null ? Math.max(0, daysLeft) : 0,
+        expiryDate: inv.due_date,
+        invoiceNo: inv.invoice_no,
+        amountDue: balanceDue,
+        activePaymentAccounts,
+        supportWhatsapp,
+      });
+      openWhatsAppLink(client?.phone, reminderMsg);
+    }
+  };
+
   return (
     <div className="space-y-6">
       {/* Header */}
@@ -482,12 +668,22 @@ export const BillingView: React.FC<BillingViewProps> = ({
           </p>
         </div>
 
-        <div className="flex items-center gap-3">
+        <div className="flex flex-wrap items-center gap-2.5 shrink-0">
+          <button
+            type="button"
+            onClick={() => setIsPaymentAccountsOpen(true)}
+            className="px-3.5 py-2.5 rounded-xl border border-emerald-700/60 bg-emerald-950/50 hover:bg-emerald-900/60 text-emerald-300 font-semibold text-xs flex items-center gap-2 transition cursor-pointer whitespace-nowrap shrink-0"
+            title="Manage Bank/Wallet Accounts & Support WhatsApp Config"
+          >
+            <Landmark className="w-4 h-4 text-emerald-400 shrink-0" />
+            <span>Payment Accounts &amp; WhatsApp</span>
+          </button>
+
           <button
             type="button"
             onClick={fetchInvoices}
             disabled={isLoading}
-            className="p-2.5 rounded-xl border border-slate-700 bg-slate-800/80 hover:bg-slate-700 text-slate-300 hover:text-white transition cursor-pointer"
+            className="p-2.5 rounded-xl border border-slate-700 bg-slate-800/80 hover:bg-slate-700 text-slate-300 hover:text-white transition cursor-pointer shrink-0"
             title="Refresh Invoices from Supabase"
           >
             <RefreshCw className={`w-4 h-4 ${isLoading ? 'animate-spin text-cyan-400' : ''}`} />
@@ -496,7 +692,7 @@ export const BillingView: React.FC<BillingViewProps> = ({
           <button
             type="button"
             onClick={() => setIsGenerateModalOpen(true)}
-            className="px-4 py-2.5 bg-cyan-600 hover:bg-cyan-500 text-slate-950 font-bold rounded-xl transition flex items-center gap-2 shadow-lg shadow-cyan-950/50 cursor-pointer active:scale-95"
+            className="px-4 py-2.5 bg-cyan-600 hover:bg-cyan-500 text-slate-950 font-bold rounded-xl transition flex items-center gap-2 shadow-lg shadow-cyan-950/50 cursor-pointer active:scale-95 whitespace-nowrap shrink-0"
           >
             <Plus className="w-4 h-4 stroke-[3]" />
             <span>+ Generate Invoice</span>
@@ -504,20 +700,44 @@ export const BillingView: React.FC<BillingViewProps> = ({
         </div>
       </div>
 
-      {/* Action Notification Banner */}
+      {/* Action Notification Banner with 1-Click Instant WhatsApp Receipt */}
       {actionNotice && (
-        <div className="p-3.5 bg-emerald-950/80 border border-emerald-800 rounded-xl text-emerald-300 text-sm flex items-center justify-between shadow-lg">
+        <div className="p-3.5 bg-emerald-950/80 border border-emerald-800 rounded-xl text-emerald-300 text-sm flex flex-wrap items-center justify-between gap-3 shadow-lg">
           <div className="flex items-center gap-2">
             <CheckCircle2 className="w-5 h-5 text-emerald-400 shrink-0" />
             <span>{actionNotice}</span>
           </div>
-          <button
-            type="button"
-            onClick={() => setActionNotice(null)}
-            className="text-emerald-400 hover:text-white transition"
-          >
-            <X className="w-4 h-4" />
-          </button>
+          <div className="flex items-center gap-2">
+            {lastPaidReceiptPayload && (
+              <button
+                type="button"
+                onClick={() =>
+                  openWhatsAppLink(
+                    lastPaidReceiptPayload.phone,
+                    buildInstantPaymentReceiptMessage({
+                      ...lastPaidReceiptPayload,
+                      activePaymentAccounts,
+                      supportWhatsapp,
+                    })
+                  )
+                }
+                className="px-3 py-1.5 rounded-lg bg-emerald-600 hover:bg-emerald-500 text-slate-950 font-bold text-xs flex items-center gap-1.5 transition cursor-pointer whitespace-nowrap shrink-0"
+              >
+                <Send className="w-3.5 h-3.5" />
+                <span>Send Instant WhatsApp Receipt</span>
+              </button>
+            )}
+            <button
+              type="button"
+              onClick={() => {
+                setActionNotice(null);
+                setLastPaidReceiptPayload(null);
+              }}
+              className="text-emerald-400 hover:text-white transition cursor-pointer"
+            >
+              <X className="w-4 h-4" />
+            </button>
+          </div>
         </div>
       )}
 
@@ -581,6 +801,102 @@ export const BillingView: React.FC<BillingViewProps> = ({
         paymentTransactions={dateFilteredPayments}
         filter={dateFilter}
       />
+
+      {/* 3-Day Pre-Expiry WhatsApp Reminder Queue */}
+      <div className="p-4 rounded-xl border border-slate-800 bg-[#111A2E] space-y-3">
+        <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2 pb-2.5 border-b border-slate-800">
+          <div>
+            <h3 className="text-sm font-bold text-white flex items-center gap-2">
+              <MessageSquare className="w-4 h-4 text-emerald-400 shrink-0" />
+              <span>3-Day Pre-Expiry WhatsApp Reminder Queue ({preExpiryReminderQueue.length})</span>
+            </h3>
+            <p className="text-xs text-slate-400 mt-0.5 font-mono tabular-nums">
+              Expiring within 0&ndash;{whatsappConfig.auto_remind_days_before ?? 3} days &middot; {activePaymentAccounts.length} active payment account{activePaymentAccounts.length === 1 ? '' : 's'} &middot; Support: {supportWhatsapp}
+            </p>
+          </div>
+          <button
+            type="button"
+            onClick={() => setIsPaymentAccountsOpen(true)}
+            className="px-3 py-1.5 rounded-lg bg-slate-900 hover:bg-slate-800 text-cyan-300 border border-slate-700 text-xs font-semibold flex items-center gap-1.5 transition cursor-pointer whitespace-nowrap shrink-0 self-start sm:self-auto"
+          >
+            <Landmark className="w-3.5 h-3.5 text-emerald-400" />
+            <span>Edit Accounts ({activePaymentAccounts.length} Active)</span>
+          </button>
+        </div>
+
+        {preExpiryReminderQueue.length === 0 ? (
+          <div className="py-5 px-4 rounded-lg bg-slate-950/70 border border-slate-800/80 text-xs text-slate-400 flex items-center justify-between gap-3">
+            <span>
+              No active subscribers are expiring within the next {whatsappConfig.auto_remind_days_before ?? 3} days.
+            </span>
+            <span className="font-mono text-emerald-400 shrink-0">Queue Clear</span>
+          </div>
+        ) : (
+          <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+            {preExpiryReminderQueue.map((item) => (
+              <div
+                key={item.key}
+                className="p-3.5 rounded-xl bg-slate-950 border border-slate-800 flex flex-col justify-between gap-2.5 text-xs"
+              >
+                <div className="flex items-start justify-between gap-2">
+                  <div className="min-w-0">
+                    <div className="font-bold text-white truncate">
+                      {item.fullName}{' '}
+                      <span className="font-mono text-cyan-400 font-normal">@{item.username}</span>
+                    </div>
+                    <div className="text-[11px] text-slate-400 font-mono mt-0.5">
+                      {item.packageSpeed} &middot; {item.invoiceNo} &middot; {item.phone || 'No phone'}
+                    </div>
+                  </div>
+                  <div className="text-right font-mono tabular-nums shrink-0">
+                    <div className="font-bold text-amber-400">
+                      {formatCurrency(item.amountDue, 0)}
+                    </div>
+                    <div
+                      className={`text-[11px] font-semibold ${
+                        item.daysRemaining === 0 ? 'text-rose-400' : 'text-amber-300'
+                      }`}
+                    >
+                      {item.daysRemaining === 0
+                        ? 'Expires Today'
+                        : `${item.daysRemaining} day(s) left · ${item.expiryDate}`}
+                    </div>
+                  </div>
+                </div>
+
+                <div className="flex items-center justify-end gap-2 pt-2 border-t border-slate-800/80">
+                  <button
+                    type="button"
+                    onClick={() => handleCopyPreExpiryReminder(item)}
+                    className="px-2.5 py-1.5 rounded-lg bg-slate-800 hover:bg-slate-700 text-slate-200 border border-slate-700 text-xs font-semibold flex items-center gap-1 transition cursor-pointer whitespace-nowrap"
+                  >
+                    {copiedReminderKey === item.key ? (
+                      <>
+                        <Check className="w-3.5 h-3.5 text-emerald-400" />
+                        <span className="text-emerald-400">Copied</span>
+                      </>
+                    ) : (
+                      <>
+                        <Copy className="w-3.5 h-3.5" />
+                        <span>Copy Message</span>
+                      </>
+                    )}
+                  </button>
+
+                  <button
+                    type="button"
+                    onClick={() => handleSendPreExpiryReminder(item)}
+                    className="px-3 py-1.5 rounded-lg bg-emerald-600 hover:bg-emerald-500 text-slate-950 font-bold text-xs flex items-center gap-1.5 transition cursor-pointer whitespace-nowrap"
+                  >
+                    <Send className="w-3.5 h-3.5" />
+                    <span>Send WhatsApp Reminder</span>
+                  </button>
+                </div>
+              </div>
+            ))}
+          </div>
+        )}
+      </div>
 
       {/* Search and Filters Bar */}
       <div className="flex flex-col sm:flex-row items-stretch sm:items-center justify-between gap-3 p-3 bg-[#111A2E] rounded-xl border border-slate-800">
@@ -725,21 +1041,41 @@ export const BillingView: React.FC<BillingViewProps> = ({
                       <td className="py-3 px-4 text-right whitespace-nowrap">
                         <div className="flex items-center justify-end gap-1.5">
                           {balanceDue > 0 && displayStatus !== 'PAID' ? (
-                            <button
-                              type="button"
-                              onClick={() => handleOpenMarkPaid(inv)}
-                              className="px-2.5 py-1.5 bg-emerald-600 hover:bg-emerald-500 text-slate-950 font-bold rounded-lg text-xs flex items-center gap-1 transition active:scale-95 shadow cursor-pointer"
-                              title="Record Payment & Credit Field Agent"
-                            >
-                              <DollarSign className="w-3.5 h-3.5" />
-                              <span>{isPartial ? 'Add Payment' : 'Mark Paid'}</span>
-                            </button>
+                            <div className="flex items-center gap-1.5">
+                              <button
+                                type="button"
+                                onClick={() => handleOpenMarkPaid(inv)}
+                                className="px-2.5 py-1.5 bg-emerald-600 hover:bg-emerald-500 text-slate-950 font-bold rounded-lg text-xs flex items-center gap-1 transition active:scale-95 shadow cursor-pointer"
+                                title="Record Payment & Credit Field Agent"
+                              >
+                                <DollarSign className="w-3.5 h-3.5" />
+                                <span>{isPartial ? 'Add Payment' : 'Mark Paid'}</span>
+                              </button>
+                              <button
+                                type="button"
+                                onClick={() => handleSendInvoiceWhatsApp(inv)}
+                                className="px-2 py-1.5 bg-emerald-950/60 hover:bg-emerald-900/70 text-emerald-300 border border-emerald-700/60 rounded-lg text-xs flex items-center gap-1 transition cursor-pointer"
+                                title="Send WhatsApp Payment Reminder with Active Bank/Wallet Accounts"
+                              >
+                                <Send className="w-3 h-3" />
+                                <span>Remind</span>
+                              </button>
+                            </div>
                           ) : (
                             <div className="flex items-center gap-1.5">
                               <span className="text-emerald-400 font-mono text-[11px] font-semibold flex items-center gap-1 px-2 py-1 rounded-md bg-emerald-950/40 border border-emerald-800/60">
                                 <CheckCircle2 className="w-3.5 h-3.5 text-emerald-400" />
                                 <span>✓ Settled / Paid in Full</span>
                               </span>
+                              <button
+                                type="button"
+                                onClick={() => handleSendInvoiceWhatsApp(inv)}
+                                className="px-2.5 py-1.5 bg-emerald-950/60 hover:bg-emerald-900/70 text-emerald-300 border border-emerald-700/60 rounded-lg text-xs flex items-center gap-1 transition cursor-pointer"
+                                title="Send Instant WhatsApp Payment Receipt"
+                              >
+                                <Send className="w-3.5 h-3.5" />
+                                <span>WA Receipt</span>
+                              </button>
                               <button
                                 type="button"
                                 onClick={() => onOpenReceiptModal?.(inv)}
@@ -1168,6 +1504,16 @@ export const BillingView: React.FC<BillingViewProps> = ({
           </div>
         </div>
       )}
+
+      {/* Payment Accounts & WhatsApp Billing Center Drawer */}
+      <WhatsAppBillingCenter
+        isOpen={isPaymentAccountsOpen}
+        onClose={() => setIsPaymentAccountsOpen(false)}
+        onAccountsOrConfigChanged={(updatedAccounts, updatedConfig) => {
+          setPaymentAccounts(updatedAccounts);
+          setWhatsappConfig(updatedConfig);
+        }}
+      />
     </div>
   );
 };

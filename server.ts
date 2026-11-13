@@ -55,6 +55,10 @@ import {
 import { INITIAL_PACKAGES } from './src/data/initialData.ts';
 import { RouterOSAPI } from 'node-routeros';
 import { MikrotikRouter } from './src/types/isp.ts';
+import {
+  processIncomingWhatsAppMessage,
+  verifyWebhookChallenge,
+} from './src/server/whatsappBotEngine.ts';
 
 dotenv.config();
 
@@ -63,6 +67,7 @@ const app = express();
 const PORT = 3000;
 
 app.use(express.json());
+app.use(express.urlencoded({ extended: false }));
 
 // Initialize Database (PostgreSQL if available, synchronized with persistent disk storage)
 initPostgres()
@@ -2069,6 +2074,63 @@ app.post('/api/subscribers/:username/reset-mac', async (req: Request, res: Respo
     res.status(500).json({ success: false, error: err.message || 'Failed to reset MAC binding' });
   }
 });
+
+// ============================================================================
+// WHATSAPP AI SUPPORT & COMPLAINT CHATBOT WEBHOOK ROUTES
+// Mirrors netlify/functions/whatsapp-webhook.ts for local dev, simulator & Node
+// ============================================================================
+
+const handleWhatsappWebhookGet = async (req: Request, res: Response) => {
+  try {
+    const query: Record<string, string | undefined> = {};
+    for (const [k, v] of Object.entries(req.query || {})) {
+      query[k] = Array.isArray(v) ? String(v[0]) : v !== undefined ? String(v) : undefined;
+    }
+    const result = await verifyWebhookChallenge(query);
+    res.status(result.statusCode).type('text/plain').send(result.body);
+  } catch (err: any) {
+    res.status(500).send(err?.message || 'Verification error');
+  }
+};
+
+const handleWhatsappWebhookPost = async (req: Request, res: Response) => {
+  try {
+    const result = await processIncomingWhatsAppMessage(req.body || {});
+    const contentType = String(req.headers['content-type'] || '');
+
+    if (
+      result.provider === 'twilio' &&
+      contentType.includes('application/x-www-form-urlencoded')
+    ) {
+      const escapeXml = (s: string) =>
+        s
+          .replace(/&/g, '&amp;')
+          .replace(/</g, '&lt;')
+          .replace(/>/g, '&gt;')
+          .replace(/"/g, '&quot;')
+          .replace(/'/g, '&apos;');
+      const twiml = result.reply
+        ? `<?xml version="1.0" encoding="UTF-8"?><Response><Message>${escapeXml(
+            result.reply
+          )}</Message></Response>`
+        : '<?xml version="1.0" encoding="UTF-8"?><Response></Response>';
+      return res.status(200).type('text/xml').send(twiml);
+    }
+
+    return res.status(200).json(result);
+  } catch (err: any) {
+    console.error('[WhatsApp Webhook Error]:', err);
+    return res.status(500).json({
+      success: false,
+      error: err?.message || 'WhatsApp webhook processing error',
+    });
+  }
+};
+
+app.get('/api/whatsapp/webhook', handleWhatsappWebhookGet);
+app.post('/api/whatsapp/webhook', handleWhatsappWebhookPost);
+app.get('/.netlify/functions/whatsapp-webhook', handleWhatsappWebhookGet);
+app.post('/.netlify/functions/whatsapp-webhook', handleWhatsappWebhookPost);
 
 // ============================================================================
 // API ROUTE JSON GUARANTEE & ERROR MIDDLEWARE

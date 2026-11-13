@@ -20,6 +20,7 @@ import {
   Network,
   ShieldAlert,
   Gauge,
+  Wallet,
 } from 'lucide-react';
 import { ActiveTab } from './Header';
 import { SystemRole, UserAccount } from '../types/auth';
@@ -104,6 +105,15 @@ export const Sidebar: React.FC<SidebarProps> = ({
       icon: CreditCard,
       badge: `${currencySymbol} Recv`,
       badgeColor: 'bg-indigo-950 text-indigo-300 border-indigo-800',
+      roles: ['ADMIN', 'MANAGER'],
+    },
+    {
+      id: 'profit_expenses' as ActiveTab,
+      label: 'Profit & Expenses',
+      subtitle: 'Net P&L, Upstream & Salaries',
+      icon: Wallet,
+      badge: 'P&L Ledger',
+      badgeColor: 'bg-emerald-950 text-emerald-300 border-emerald-800',
       roles: ['ADMIN', 'MANAGER'],
     },
     {

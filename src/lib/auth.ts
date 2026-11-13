@@ -52,6 +52,7 @@ export function getTabFromPath(path: string): string | null {
   if (clean === 'capacity' || clean === 'capacity-pools' || clean === 'admin/capacity') return 'capacity';
   if (clean === 'manager/dashboard' || clean === 'manager' || clean === 'dashboard/operations' || clean === 'operations') return 'operations';
   if (clean === 'billing') return 'billing';
+  if (clean === 'profit-expenses' || clean === 'profit_expenses') return 'profit_expenses';
   if (clean === 'complaints') return 'complaints';
   if (clean === 'mikrotik') return 'mikrotik';
   if (clean === 'olt') return 'olt';
@@ -75,6 +76,8 @@ export function getPathFromTab(tab: string): string {
       return '/admin/noc';
     case 'operations':
       return '/manager/dashboard';
+    case 'profit_expenses':
+      return '/profit-expenses';
     case 'logs':
       return '/logs';
     default:
@@ -104,6 +107,8 @@ export function isRouteAllowedForRole(role: SystemRole, routeOrTab: string): boo
       'complaints',
       'subscribers',
       'billing', // Can view collections & agent cash
+      'profit_expenses',
+      'profit-expenses',
       'olt', // Can view optical status
       'logs', // Can view audit trail
     ];

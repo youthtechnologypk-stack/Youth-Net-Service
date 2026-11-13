@@ -23,6 +23,7 @@ import {
   LogOut,
   User,
   Gauge,
+  Wallet,
 } from 'lucide-react';
 import { useISP } from '../context/ISPContext';
 import { SystemRole, UserAccount } from '../types/auth';
@@ -39,6 +40,7 @@ export type ActiveTab =
   | 'mikrotik'
   | 'olt'
   | 'billing'
+  | 'profit_expenses'
   | 'complaints'
   | 'mobile'
   | 'users'
@@ -489,6 +491,14 @@ export const Header: React.FC<HeaderProps> = ({
               </button>
 
               <button
+                onClick={() => setActiveTab('profit_expenses')}
+                className={`flex items-center gap-2 px-3 py-2 text-xs sm:text-sm font-medium rounded-lg transition whitespace-nowrap shrink-0 ${getTabClassName('profit_expenses')}`}
+              >
+                <Wallet className="w-4 h-4 text-emerald-500 dark:text-emerald-400" />
+                Profit &amp; Expenses
+              </button>
+
+              <button
                 onClick={() => setActiveTab('complaints')}
                 className={`flex items-center gap-2 px-3 py-2 text-xs sm:text-sm font-medium rounded-lg transition whitespace-nowrap ${getTabClassName('complaints')}`}
               >
@@ -605,6 +615,14 @@ export const Header: React.FC<HeaderProps> = ({
               >
                 <CreditCard className="w-4 h-4" />
                 Agent Cash &amp; Billing
+              </button>
+
+              <button
+                onClick={() => setActiveTab('profit_expenses')}
+                className={`flex items-center gap-2 px-3 py-2 text-xs sm:text-sm font-medium rounded-lg transition whitespace-nowrap shrink-0 ${getTabClassName('profit_expenses', 'indigo')}`}
+              >
+                <Wallet className="w-4 h-4 text-emerald-500 dark:text-emerald-400" />
+                Profit &amp; Expenses
               </button>
             </>
           )}

@@ -29,8 +29,26 @@ import { UserAccount } from '../types/auth';
 import { Invoice } from '../types/isp';
 import { FeatureGate } from './FeatureGate';
 import { PWAInstallPrompt } from './PWAInstallPrompt';
-import { supabase, SupabaseInvoice, SupabaseTicket, SupabaseAgentCashTransaction } from '../services/supabaseClient';
+import {
+  supabase,
+  SupabaseInvoice,
+  SupabaseTicket,
+  SupabaseAgentCashTransaction,
+  SupabasePaymentAccount,
+  SupabaseWhatsappBillingConfig,
+} from '../services/supabaseClient';
 import { restoreSubscriberOnInvoicePaid, add31DaysDateString } from '../lib/billingAndNetwork';
+import {
+  DEFAULT_SUPPORT_WHATSAPP,
+  WHATSAPP_CONFIG_UPDATED_EVENT,
+  buildInstantPaymentReceiptMessage,
+  buildPreExpiryReminderMessage,
+  computeDaysUntilDate,
+  fetchPaymentAccounts,
+  fetchWhatsappBillingConfig,
+  getDefaultWhatsappConfig,
+  openWhatsAppLink,
+} from '../lib/whatsappBilling';
 
 interface FieldAgentPortalProps {
   currentUser: UserAccount;
@@ -63,7 +81,19 @@ export const FieldAgentPortal: React.FC<FieldAgentPortalProps> = ({
   const [agentCashTransactions, setAgentCashTransactions] = useState<SupabaseAgentCashTransaction[]>([]);
   const [assignedTickets, setAssignedTickets] = useState<SupabaseTicket[]>([]);
   const [assignedInvoices, setAssignedInvoices] = useState<SupabaseInvoice[]>([]);
-  const [subscriberDirectory, setSubscriberDirectory] = useState<Record<string, { phone?: string; address?: string; full_name?: string; area?: string }>>({});
+  const [subscriberDirectory, setSubscriberDirectory] = useState<Record<string, { phone?: string; address?: string; full_name?: string; area?: string; package_speed?: string }>>({});
+  const [paymentAccounts, setPaymentAccounts] = useState<SupabasePaymentAccount[]>([]);
+  const [whatsappConfig, setWhatsappConfig] = useState<SupabaseWhatsappBillingConfig>(() => getDefaultWhatsappConfig());
+  const [lastCollectedReceipt, setLastCollectedReceipt] = useState<{
+    phone: string;
+    fullName: string;
+    username: string;
+    invoiceNo: string;
+    amountPaid: number;
+    totalAmount: number;
+    remainingBalance: number;
+    nextExpiryDate: string;
+  } | null>(null);
   const [isLoadingData, setIsLoadingData] = useState<boolean>(true);
 
   // Modal State for Cash Collection
@@ -125,7 +155,13 @@ export const FieldAgentPortal: React.FC<FieldAgentPortalProps> = ({
         .order('created_at', { ascending: false });
 
       if (tktData) {
-        setAssignedTickets(tktData as SupabaseTicket[]);
+        const seenTicketIds = new Set<string>();
+        const uniqueTickets = (tktData as SupabaseTicket[]).filter((t) => {
+          if (!t?.id || seenTicketIds.has(t.id)) return false;
+          seenTicketIds.add(t.id);
+          return true;
+        });
+        setAssignedTickets(uniqueTickets);
       }
 
       // 3. Fetch recovery invoices strictly assigned to this agent (by UUID and Name)
@@ -139,14 +175,18 @@ export const FieldAgentPortal: React.FC<FieldAgentPortalProps> = ({
         setAssignedInvoices(agentInvoices as SupabaseInvoice[]);
       }
 
-      // 4. Fetch subscriber phone numbers and addresses from portal_users for Click-to-Call
-      const { data: clientRows } = await supabase
-        .from('portal_users')
-        .select('username, full_name, phone, address, area')
-        .eq('role', 'CLIENT');
+      // 4. Fetch subscriber phone numbers and addresses from portal_users for Click-to-Call & WhatsApp
+      const [{ data: clientRows }, loadedAccounts, loadedWaConfig] = await Promise.all([
+        supabase
+          .from('portal_users')
+          .select('username, full_name, phone, address, area, package_speed')
+          .eq('role', 'CLIENT'),
+        fetchPaymentAccounts(),
+        fetchWhatsappBillingConfig(),
+      ]);
 
       if (clientRows && Array.isArray(clientRows)) {
-        const lookup: Record<string, { phone?: string; address?: string; full_name?: string; area?: string }> = {};
+        const lookup: Record<string, { phone?: string; address?: string; full_name?: string; area?: string; package_speed?: string }> = {};
         clientRows.forEach((c: any) => {
           const uname = (c.username || '').trim().toLowerCase();
           if (uname) {
@@ -155,11 +195,14 @@ export const FieldAgentPortal: React.FC<FieldAgentPortalProps> = ({
               address: c.address || '',
               full_name: c.full_name || '',
               area: c.area || '',
+              package_speed: c.package_speed || '',
             };
           }
         });
         setSubscriberDirectory(lookup);
       }
+      setPaymentAccounts(loadedAccounts);
+      setWhatsappConfig(loadedWaConfig);
     } catch (err) {
       console.warn('FieldAgentPortal fetch error:', err);
     } finally {
@@ -170,14 +213,37 @@ export const FieldAgentPortal: React.FC<FieldAgentPortalProps> = ({
   useEffect(() => {
     fetchAgentData();
 
+    const handleWaConfigUpdated = (e: Event) => {
+      const detail = (e as CustomEvent)?.detail;
+      if (detail) setWhatsappConfig(detail);
+    };
+    window.addEventListener(WHATSAPP_CONFIG_UPDATED_EVENT, handleWaConfigUpdated);
+
     // Realtime subscriptions for agent portal
     const channel = supabase
       .channel(`public:agent_${currentUser.id}`)
-      .on('postgres_changes', { event: '*', schema: 'public', table: 'tickets' }, () => {
-        fetchAgentData();
+      .on('postgres_changes', { event: '*', schema: 'public', table: 'tickets' }, (payload) => {
+        if (payload.eventType === 'INSERT' && payload.new) {
+          const newTicket = payload.new as SupabaseTicket;
+          const matchesAgent =
+            newTicket.assigned_agent_id === currentUser.id ||
+            (newTicket.assigned_agent_name || '').toLowerCase().includes((currentUser.fullName || '').toLowerCase());
+          if (matchesAgent) {
+            setAssignedTickets((prev) =>
+              prev.some((t) => t.id === newTicket.id) ? prev : [newTicket, ...prev]
+            );
+          } else {
+            fetchAgentData();
+          }
+        } else {
+          fetchAgentData();
+        }
       })
       .on('postgres_changes', { event: '*', schema: 'public', table: 'invoices' }, () => {
         fetchAgentData();
+      })
+      .on('postgres_changes', { event: '*', schema: 'public', table: 'payment_accounts' }, () => {
+        fetchPaymentAccounts().then(setPaymentAccounts).catch(() => {});
       })
       .on('postgres_changes', { event: '*', schema: 'public', table: 'agent_cash_transactions' }, () => {
         fetchAgentData();
@@ -196,6 +262,7 @@ export const FieldAgentPortal: React.FC<FieldAgentPortalProps> = ({
       .subscribe();
 
     return () => {
+      window.removeEventListener(WHATSAPP_CONFIG_UPDATED_EVENT, handleWaConfigUpdated);
       supabase.removeChannel(channel);
     };
   }, [currentUser.id]);
@@ -297,10 +364,28 @@ export const FieldAgentPortal: React.FC<FieldAgentPortalProps> = ({
         await collectAgentCashPayment(inv.id, currentUser.id, enteredVal);
       } catch {}
 
+      const subKey = (inv.subscriber_username || '').trim().toLowerCase();
+      const subInfo = subscriberDirectory[subKey];
+      const subPhone =
+        subInfo?.phone ||
+        customers.find((c) => c.pppoeUsername?.toLowerCase() === subKey)?.phone ||
+        '';
+
+      setLastCollectedReceipt({
+        phone: subPhone,
+        fullName: subInfo?.full_name || inv.subscriber_username,
+        username: inv.subscriber_username,
+        invoiceNo: inv.invoice_no,
+        amountPaid: enteredVal,
+        totalAmount,
+        remainingBalance: Math.max(0, totalAmount - finalPaidAmount),
+        nextExpiryDate: invoiceUpdateData.due_date || inv.due_date || add31DaysDateString(new Date()),
+      });
+
       setCollectionSuccessToast(
         `Collected ${formatCurrency(enteredVal)} from @${inv.subscriber_username}! Status: ${newStatus}. Credited to Wallet.`
       );
-      setTimeout(() => setCollectionSuccessToast(null), 5000);
+      setTimeout(() => setCollectionSuccessToast(null), 10000);
       setIsCollectModalOpen(false);
       setSelectedInvForCollection(null);
       await fetchAgentData();
@@ -334,6 +419,57 @@ export const FieldAgentPortal: React.FC<FieldAgentPortalProps> = ({
       o.macAddress.toLowerCase().includes(ontSearchQuery.toLowerCase()) ||
       o.customerName.toLowerCase().includes(ontSearchQuery.toLowerCase())
   );
+
+  const activePaymentAccounts = useMemo(
+    () => (paymentAccounts || []).filter((acc) => acc.is_active !== false),
+    [paymentAccounts]
+  );
+
+  const supportWhatsapp = whatsappConfig.support_whatsapp || DEFAULT_SUPPORT_WHATSAPP;
+
+  const handleSendAgentInvoiceWhatsApp = (inv: SupabaseInvoice) => {
+    const subKey = (inv.subscriber_username || '').trim().toLowerCase();
+    const subInfo = subscriberDirectory[subKey];
+    const subPhone =
+      subInfo?.phone ||
+      customers.find((c) => c.pppoeUsername?.toLowerCase() === subKey)?.phone ||
+      '';
+    const totalAmount = Number(inv.amount || 0);
+    const paidAmount = Number(inv.paid_amount || 0);
+    const balanceDue = Math.max(0, totalAmount - paidAmount);
+    const isPaid = balanceDue <= 0 || (inv.status || '').toUpperCase() === 'PAID';
+
+    if (isPaid) {
+      const msg = buildInstantPaymentReceiptMessage({
+        fullName: subInfo?.full_name || inv.subscriber_username,
+        username: inv.subscriber_username,
+        invoiceNo: inv.invoice_no,
+        amountPaid: paidAmount > 0 ? paidAmount : totalAmount,
+        totalAmount,
+        remainingBalance: 0,
+        paymentMethod: 'Cash Handover',
+        collectorName: currentUser.fullName,
+        nextExpiryDate: inv.due_date,
+        activePaymentAccounts,
+        supportWhatsapp,
+      });
+      openWhatsAppLink(subPhone, msg);
+    } else {
+      const daysLeft = computeDaysUntilDate(inv.due_date);
+      const msg = buildPreExpiryReminderMessage({
+        fullName: subInfo?.full_name || inv.subscriber_username,
+        username: inv.subscriber_username,
+        packageSpeed: subInfo?.package_speed || 'Fiber Broadband',
+        daysRemaining: daysLeft !== null ? Math.max(0, daysLeft) : 0,
+        expiryDate: inv.due_date,
+        invoiceNo: inv.invoice_no,
+        amountDue: balanceDue,
+        activePaymentAccounts,
+        supportWhatsapp,
+      });
+      openWhatsAppLink(subPhone, msg);
+    }
+  };
 
   const allAreaSubscribers = customers.filter(
     (c) =>
@@ -371,11 +507,52 @@ export const FieldAgentPortal: React.FC<FieldAgentPortalProps> = ({
         </div>
       </div>
 
-      {/* Success Notification Banner */}
+      {/* Success Notification Banner with 1-Click Instant WhatsApp Receipt */}
       {collectionSuccessToast && (
-        <div className="p-3 bg-emerald-950/90 border border-emerald-700 rounded-xl text-emerald-300 text-xs flex items-center gap-2 shadow-lg animate-fadeIn">
-          <CheckCircle2 className="w-4 h-4 text-emerald-400 shrink-0" />
-          <span>{collectionSuccessToast}</span>
+        <div className="p-3 bg-emerald-950/90 border border-emerald-700 rounded-xl text-emerald-300 text-xs space-y-2 shadow-lg animate-fadeIn">
+          <div className="flex items-center justify-between gap-2">
+            <div className="flex items-center gap-2">
+              <CheckCircle2 className="w-4 h-4 text-emerald-400 shrink-0" />
+              <span>{collectionSuccessToast}</span>
+            </div>
+            <button
+              type="button"
+              onClick={() => {
+                setCollectionSuccessToast(null);
+                setLastCollectedReceipt(null);
+              }}
+              className="text-emerald-400 hover:text-white cursor-pointer"
+            >
+              <X className="w-3.5 h-3.5" />
+            </button>
+          </div>
+          {lastCollectedReceipt && (
+            <button
+              type="button"
+              onClick={() =>
+                openWhatsAppLink(
+                  lastCollectedReceipt.phone,
+                  buildInstantPaymentReceiptMessage({
+                    fullName: lastCollectedReceipt.fullName,
+                    username: lastCollectedReceipt.username,
+                    invoiceNo: lastCollectedReceipt.invoiceNo,
+                    amountPaid: lastCollectedReceipt.amountPaid,
+                    totalAmount: lastCollectedReceipt.totalAmount,
+                    remainingBalance: lastCollectedReceipt.remainingBalance,
+                    paymentMethod: 'Cash Handover',
+                    collectorName: currentUser.fullName,
+                    nextExpiryDate: lastCollectedReceipt.nextExpiryDate,
+                    activePaymentAccounts,
+                    supportWhatsapp,
+                  })
+                )
+              }
+              className="w-full py-2 px-3 rounded-lg bg-emerald-600 hover:bg-emerald-500 text-slate-950 font-bold text-xs flex items-center justify-center gap-1.5 transition cursor-pointer"
+            >
+              <Send className="w-3.5 h-3.5" />
+              <span>Send Instant WhatsApp Receipt to Subscriber</span>
+            </button>
+          )}
         </div>
       )}
 
@@ -603,18 +780,40 @@ export const FieldAgentPortal: React.FC<FieldAgentPortalProps> = ({
                   )}
 
                   {balanceDue > 0 && displayStatus !== 'PAID' ? (
-                    <button
-                      onClick={() => handleOpenCollectionModal(inv)}
-                      className="px-3 py-1.5 rounded-lg bg-emerald-600 hover:bg-emerald-500 text-slate-950 font-bold font-mono text-xs flex items-center gap-1.5 shadow transition cursor-pointer"
-                    >
-                      <DollarSign className="w-3.5 h-3.5" />
-                      <span>Collect Payment / Mark Paid</span>
-                    </button>
+                    <div className="flex items-center gap-1.5 flex-wrap">
+                      <button
+                        type="button"
+                        onClick={() => handleSendAgentInvoiceWhatsApp(inv)}
+                        className="px-2.5 py-1.5 rounded-lg bg-emerald-950/70 hover:bg-emerald-900 text-emerald-300 border border-emerald-700/70 font-bold font-mono text-[11px] flex items-center gap-1 transition cursor-pointer"
+                        title="Send WhatsApp Billing Reminder with Active Accounts"
+                      >
+                        <Send className="w-3 h-3" />
+                        <span>WA Remind</span>
+                      </button>
+                      <button
+                        onClick={() => handleOpenCollectionModal(inv)}
+                        className="px-3 py-1.5 rounded-lg bg-emerald-600 hover:bg-emerald-500 text-slate-950 font-bold font-mono text-xs flex items-center gap-1.5 shadow transition cursor-pointer"
+                      >
+                        <DollarSign className="w-3.5 h-3.5" />
+                        <span>Collect Payment / Mark Paid</span>
+                      </button>
+                    </div>
                   ) : (
-                    <span className="text-emerald-400 font-mono text-[11px] font-semibold flex items-center gap-1.5 py-1 px-2.5 rounded-lg bg-emerald-950/60 border border-emerald-800/80">
-                      <CheckCircle2 className="w-3.5 h-3.5 text-emerald-400" />
-                      <span>✓ Settled / Paid in Full</span>
-                    </span>
+                    <div className="flex items-center gap-1.5 flex-wrap">
+                      <span className="text-emerald-400 font-mono text-[11px] font-semibold flex items-center gap-1.5 py-1 px-2.5 rounded-lg bg-emerald-950/60 border border-emerald-800/80">
+                        <CheckCircle2 className="w-3.5 h-3.5 text-emerald-400" />
+                        <span>✓ Settled</span>
+                      </span>
+                      <button
+                        type="button"
+                        onClick={() => handleSendAgentInvoiceWhatsApp(inv)}
+                        className="px-2.5 py-1.5 rounded-lg bg-emerald-600 hover:bg-emerald-500 text-slate-950 font-bold font-mono text-[11px] flex items-center gap-1 transition cursor-pointer"
+                        title="Send Instant WhatsApp Payment Receipt"
+                      >
+                        <Send className="w-3 h-3" />
+                        <span>WA Receipt</span>
+                      </button>
+                    </div>
                   )}
                 </div>
               </div>
@@ -891,28 +1090,34 @@ export const FieldAgentPortal: React.FC<FieldAgentPortalProps> = ({
                         </span>
                       </div>
 
-                      {(remaining > 0 || subPhone) && (
-                        <div className="pt-1 flex flex-wrap gap-2">
-                          {subPhone && (
-                            <a
-                              href={`tel:${subPhone}`}
-                              className="flex-1 min-w-[130px] py-1.5 px-2.5 rounded-lg bg-cyan-950 hover:bg-cyan-900 border border-cyan-800 text-cyan-300 font-bold text-xs transition flex items-center justify-center gap-1.5"
-                            >
-                              <span>&#128222; Call Subscriber ({subPhone})</span>
-                            </a>
-                          )}
-                          {remaining > 0 && (
-                            <button
-                              type="button"
-                              onClick={() => handleOpenCollectionModal(inv)}
-                              className="flex-1 min-w-[140px] py-1.5 px-2.5 rounded-lg bg-emerald-600 hover:bg-emerald-500 active:scale-98 text-slate-950 font-bold text-xs transition flex items-center justify-center gap-1.5 shadow-md shadow-emerald-950/40 cursor-pointer"
-                            >
-                              <DollarSign className="w-3.5 h-3.5" />
-                              <span>Collect Cash ({formatCurrency(remaining)})</span>
-                            </button>
-                          )}
-                        </div>
-                      )}
+                      <div className="pt-1 flex flex-wrap gap-2">
+                        {subPhone && (
+                          <a
+                            href={`tel:${subPhone}`}
+                            className="flex-1 min-w-[120px] py-1.5 px-2.5 rounded-lg bg-cyan-950 hover:bg-cyan-900 border border-cyan-800 text-cyan-300 font-bold text-xs transition flex items-center justify-center gap-1.5"
+                          >
+                            <span>&#128222; Call ({subPhone})</span>
+                          </a>
+                        )}
+                        <button
+                          type="button"
+                          onClick={() => handleSendAgentInvoiceWhatsApp(inv)}
+                          className="flex-1 min-w-[120px] py-1.5 px-2.5 rounded-lg bg-emerald-950/70 hover:bg-emerald-900 border border-emerald-700/70 text-emerald-300 font-bold text-xs transition flex items-center justify-center gap-1.5 cursor-pointer"
+                        >
+                          <Send className="w-3.5 h-3.5" />
+                          <span>{remaining > 0 ? 'WA Remind' : 'WA Receipt'}</span>
+                        </button>
+                        {remaining > 0 && (
+                          <button
+                            type="button"
+                            onClick={() => handleOpenCollectionModal(inv)}
+                            className="flex-1 min-w-[140px] py-1.5 px-2.5 rounded-lg bg-emerald-600 hover:bg-emerald-500 active:scale-98 text-slate-950 font-bold text-xs transition flex items-center justify-center gap-1.5 shadow-md shadow-emerald-950/40 cursor-pointer"
+                          >
+                            <DollarSign className="w-3.5 h-3.5" />
+                            <span>Collect Cash ({formatCurrency(remaining)})</span>
+                          </button>
+                        )}
+                      </div>
                     </div>
                   );
                 })

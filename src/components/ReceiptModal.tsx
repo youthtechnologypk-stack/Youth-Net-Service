@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useState, useEffect } from 'react';
 import {
   Printer,
   CheckCircle2,
@@ -16,6 +16,14 @@ import {
 } from 'lucide-react';
 import { Invoice } from '../types/isp';
 import { useCurrency } from '../context/CurrencyContext';
+import { SupabasePaymentAccount } from '../services/supabaseClient';
+import {
+  DEFAULT_SUPPORT_WHATSAPP,
+  fetchPaymentAccounts,
+  fetchWhatsappBillingConfig,
+  formatPaymentAccountsBulletList,
+  openWhatsAppLink,
+} from '../lib/whatsappBilling';
 
 interface ReceiptModalProps {
   invoice: Invoice | null;
@@ -25,6 +33,23 @@ interface ReceiptModalProps {
 export const ReceiptModal: React.FC<ReceiptModalProps> = ({ invoice, onClose }) => {
   const { formatCurrency, currencySymbol } = useCurrency();
   const [copied, setCopied] = useState(false);
+  const [activeAccounts, setActiveAccounts] = useState<SupabasePaymentAccount[]>([]);
+  const [supportWhatsapp, setSupportWhatsapp] = useState<string>(DEFAULT_SUPPORT_WHATSAPP);
+
+  useEffect(() => {
+    if (!invoice) return;
+    let mounted = true;
+    Promise.all([fetchPaymentAccounts(), fetchWhatsappBillingConfig()])
+      .then(([accs, cfg]) => {
+        if (!mounted) return;
+        setActiveAccounts((accs || []).filter((a) => a.is_active !== false));
+        setSupportWhatsapp(cfg.support_whatsapp || DEFAULT_SUPPORT_WHATSAPP);
+      })
+      .catch(() => {});
+    return () => {
+      mounted = false;
+    };
+  }, [invoice]);
 
   if (!invoice) return null;
 
@@ -38,6 +63,11 @@ export const ReceiptModal: React.FC<ReceiptModalProps> = ({ invoice, onClose }) 
 
   // If no explicit line items were saved, treat package base as recurring item
   const hasLineItems = Boolean(invoice.lineItems && invoice.lineItems.length > 0);
+
+  const accountsBlock =
+    activeAccounts.length > 0
+      ? `\n\n*Online Payment Accounts:*\n${formatPaymentAccountsBulletList(activeAccounts)}`
+      : '';
 
   // WhatsApp shareable text
   const shareText = `*YOUTH NET SERVICE - OFFICIAL DIGITAL RECEIPT*
@@ -63,21 +93,13 @@ ${invoice.taxAmount > 0 ? `Tax (GST 16%): ${formatCurrency(invoice.taxAmount)}\n
 }*TOTAL PAID: ${formatCurrency(invoice.totalAmount)}*
 Status: ${invoice.status.toUpperCase()}
 Collector: ${invoice.agentName || 'Authorized Field Staff'}
-Verification: ROS-7-${invoice.id.slice(-6)}
+Verification: ROS-7-${invoice.id.slice(-6)}${accountsBlock}
 
-_Thank you for choosing Youth Net Fiber Network!_`;
+For support or billing queries, WhatsApp *${supportWhatsapp}*.
+_Thank you for choosing Youth Net Service NOC!_`;
 
   const handleShareWhatsApp = () => {
-    const encoded = encodeURIComponent(shareText);
-    const cleanPhone = (invoice.customerPhone || '').replace(/[^0-9]/g, '');
-    const url = `https://wa.me/${cleanPhone}?text=${encoded}`;
-    const link = document.createElement('a');
-    link.href = url;
-    link.target = '_blank';
-    link.rel = 'noopener noreferrer';
-    document.body.appendChild(link);
-    link.click();
-    document.body.removeChild(link);
+    openWhatsAppLink(invoice.customerPhone, shareText);
   };
 
   const handleCopyText = () => {

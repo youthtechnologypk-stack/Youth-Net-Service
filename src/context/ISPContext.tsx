@@ -233,7 +233,13 @@ interface ISPContextType {
   // Complaints & SLA Actions
   createComplaintTicket: (
     ticket: Omit<ComplaintTicket, 'id' | 'ticketNumber' | 'createdAt' | 'slaDeadline' | 'slaTargetHours'>,
-    autoAssignNow?: boolean
+    autoAssignNow?: boolean,
+    options?: {
+      skipSupabaseInsert?: boolean;
+      existingId?: string;
+      existingTicketNumber?: string;
+      existingCreatedAt?: string;
+    }
   ) => ComplaintTicket;
   assignTicketToAgent: (ticketId: string, agentId: string) => void;
   autoAssignTicket: (ticketId: string, reason?: string) => Promise<{ agent: FieldAgent; ticket: ComplaintTicket } | null>;
@@ -715,6 +721,33 @@ export const ISPProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
       }
     };
 
+    const mapSupabaseTicketRow = (t: any): ComplaintTicket => ({
+      id: t.id,
+      ticketNumber: t.ticket_no,
+      customerId: t.subscriber_username,
+      customerName: t.subscriber_username,
+      customerPhone: '+92 300 0000000',
+      customerAddress: 'Islamabad Federal Division',
+      areaNode: 'Sector G-11',
+      category: 'router_issue',
+      priority: (t.priority || 'medium').toLowerCase() as any,
+      status: (() => {
+        const st = (t.status || 'OPEN').toUpperCase();
+        if (st === 'RESOLVED') return 'resolved';
+        if (st === 'IN_PROGRESS') return 'in_progress';
+        if (st === 'ASSIGNED') return 'assigned';
+        return 'open';
+      })(),
+      title: t.issue?.split(':')[0] || 'Technical SLA Ticket',
+      description: t.issue || 'Broadband maintenance issue',
+      assignedAgentId: t.assigned_agent_id || undefined,
+      assignedAgentName: t.assigned_agent_name || undefined,
+      slaTargetHours: 4,
+      createdAt: t.created_at || new Date().toISOString(),
+      slaDeadline: new Date(new Date(t.created_at || Date.now()).getTime() + 4 * 3600 * 1000).toISOString(),
+      routerId: 'router-ccr2004-core',
+    });
+
     const fetchSupabaseTickets = async () => {
       try {
         const { data } = await supabase
@@ -723,32 +756,13 @@ export const ISPProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
           .order('created_at', { ascending: false });
 
         if (data && data.length > 0) {
-          const mapped: ComplaintTicket[] = data.map((t: any) => ({
-            id: t.id,
-            ticketNumber: t.ticket_no,
-            customerId: t.subscriber_username,
-            customerName: t.subscriber_username,
-            customerPhone: '+92 300 0000000',
-            customerAddress: 'Islamabad Federal Division',
-            areaNode: 'Sector G-11',
-            category: 'router_issue',
-            priority: (t.priority || 'medium').toLowerCase() as any,
-            status: (() => {
-              const st = (t.status || 'OPEN').toUpperCase();
-              if (st === 'RESOLVED') return 'resolved';
-              if (st === 'IN_PROGRESS') return 'in_progress';
-              if (st === 'ASSIGNED') return 'assigned';
-              return 'open';
-            })(),
-            title: t.issue?.split(':')[0] || 'Technical SLA Ticket',
-            description: t.issue || 'Broadband maintenance issue',
-            assignedAgentId: t.assigned_agent_id || undefined,
-            assignedAgentName: t.assigned_agent_name || undefined,
-            slaTargetHours: 4,
-            createdAt: t.created_at || new Date().toISOString(),
-            slaDeadline: new Date(new Date(t.created_at || Date.now()).getTime() + 4 * 3600 * 1000).toISOString(),
-            routerId: 'router-ccr2004-core',
-          }));
+          const seenIds = new Set<string>();
+          const mapped: ComplaintTicket[] = [];
+          for (const row of data) {
+            if (!row?.id || seenIds.has(row.id)) continue;
+            seenIds.add(row.id);
+            mapped.push(mapSupabaseTicketRow(row));
+          }
           setComplaints(mapped);
         }
       } catch (err) {
@@ -811,8 +825,35 @@ export const ISPProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
       .on('postgres_changes', { event: '*', schema: 'public', table: 'invoices' }, () => {
         fetchSupabaseInvoices();
       })
-      .on('postgres_changes', { event: '*', schema: 'public', table: 'tickets' }, () => {
-        fetchSupabaseTickets();
+      .on('postgres_changes', { event: '*', schema: 'public', table: 'tickets' }, (payload) => {
+        if (payload.eventType === 'INSERT' && payload.new) {
+          const mapped = mapSupabaseTicketRow(payload.new);
+          setComplaints((prev) =>
+            prev.some((t) => t.id === mapped.id || (mapped.ticketNumber && t.ticketNumber === mapped.ticketNumber))
+              ? prev.map((t) =>
+                  t.id === mapped.id || (mapped.ticketNumber && t.ticketNumber === mapped.ticketNumber)
+                    ? { ...t, ...mapped }
+                    : t
+                )
+              : [mapped, ...prev]
+          );
+        } else if (payload.eventType === 'UPDATE' && payload.new) {
+          const mapped = mapSupabaseTicketRow(payload.new);
+          setComplaints((prev) =>
+            prev.some((t) => t.id === mapped.id || (mapped.ticketNumber && t.ticketNumber === mapped.ticketNumber))
+              ? prev.map((t) =>
+                  t.id === mapped.id || (mapped.ticketNumber && t.ticketNumber === mapped.ticketNumber)
+                    ? { ...t, ...mapped }
+                    : t
+                )
+              : prev
+          );
+        } else if (payload.eventType === 'DELETE' && payload.old) {
+          const deletedId = (payload.old as any).id;
+          setComplaints((prev) => prev.filter((t) => t.id !== deletedId));
+        } else {
+          fetchSupabaseTickets();
+        }
       })
       .on('postgres_changes', { event: '*', schema: 'public', table: 'portal_users' }, () => {
         fetchSupabaseUsers();
@@ -4042,10 +4083,16 @@ export const ISPProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
   // Complaints & SLA actions
   const createComplaintTicket = (
     ticket: Omit<ComplaintTicket, 'id' | 'ticketNumber' | 'createdAt' | 'slaDeadline' | 'slaTargetHours'>,
-    autoAssignNow?: boolean
+    autoAssignNow?: boolean,
+    options?: {
+      skipSupabaseInsert?: boolean;
+      existingId?: string;
+      existingTicketNumber?: string;
+      existingCreatedAt?: string;
+    }
   ): ComplaintTicket => {
     const slaTarget = ticket.category === 'fiber_cut' ? 2 : ticket.category === 'no_internet' ? 3 : 4;
-    const now = new Date();
+    const now = options?.existingCreatedAt ? new Date(options.existingCreatedAt) : new Date();
     const deadline = new Date(now.getTime() + slaTarget * 60 * 60 * 1000);
 
     let assignedAgentId = ticket.assignedAgentId;
@@ -4066,8 +4113,8 @@ export const ISPProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
 
     const newTkt: ComplaintTicket = {
       ...ticket,
-      id: `tkt-${Date.now()}`,
-      ticketNumber: `TKT-${Math.floor(4900 + Math.random() * 5000)}`,
+      id: options?.existingId || `tkt-${Date.now()}`,
+      ticketNumber: options?.existingTicketNumber || `TKT-${Math.floor(100000 + Math.random() * 900000)}`,
       createdAt: now.toISOString(),
       slaTargetHours: slaTarget,
       slaDeadline: deadline.toISOString(),
@@ -4078,7 +4125,21 @@ export const ISPProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
       autoAssignedAt: wasAutoAssigned ? now.toISOString() : undefined,
     };
 
-    setComplaints((prev) => [newTkt, ...prev]);
+    setComplaints((prev) => {
+      const exists = prev.some(
+        (t) =>
+          t.id === newTkt.id ||
+          (newTkt.ticketNumber && t.ticketNumber === newTkt.ticketNumber)
+      );
+      if (exists) {
+        return prev.map((t) =>
+          t.id === newTkt.id || (newTkt.ticketNumber && t.ticketNumber === newTkt.ticketNumber)
+            ? newTkt
+            : t
+        );
+      }
+      return [newTkt, ...prev];
+    });
 
     if (wasAutoAssigned && assignedAgentId) {
       setAgents((prev) =>
@@ -4093,22 +4154,25 @@ export const ISPProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
       );
     }
 
-    // Direct INSERT into Supabase PostgreSQL tickets table
-    try {
-      const newTicketPayload = {
-        ticket_no: newTkt.ticketNumber,
-        subscriber_username: (newTkt.pppoeUsername || newTkt.customerName || newTkt.customerId || '').trim().toLowerCase(),
-        assigned_agent_id: assignedAgentId || null,
-        issue: `${newTkt.title}: ${newTkt.description}`,
-        priority: (newTkt.priority || 'MEDIUM').toUpperCase(),
-        status: (status || 'OPEN').toUpperCase() === 'RESOLVED' ? 'RESOLVED' : 'OPEN',
-        created_at: now.toISOString(),
-      };
-      supabase.from('tickets').insert([newTicketPayload]).then(({ error }) => {
-        if (error) console.warn('Supabase ticket insert error:', error);
-      });
-    } catch (e) {
-      console.warn('Supabase createComplaintTicket error:', e);
+    // Only insert into Supabase when caller has NOT already performed the single insert
+    if (!options?.skipSupabaseInsert) {
+      try {
+        const newTicketPayload = {
+          ticket_no: newTkt.ticketNumber,
+          subscriber_username: (newTkt.pppoeUsername || newTkt.customerName || newTkt.customerId || '').trim().toLowerCase(),
+          assigned_agent_id: assignedAgentId || null,
+          assigned_agent_name: assignedAgentName || null,
+          issue: `${newTkt.title}: ${newTkt.description}`,
+          priority: (newTkt.priority || 'MEDIUM').toUpperCase(),
+          status: (status || 'OPEN').toUpperCase() === 'RESOLVED' ? 'RESOLVED' : assignedAgentId ? 'IN_PROGRESS' : 'OPEN',
+          created_at: now.toISOString(),
+        };
+        supabase.from('tickets').insert([newTicketPayload]).then(({ error }) => {
+          if (error) console.warn('Supabase ticket insert error:', error);
+        });
+      } catch (e) {
+        console.warn('Supabase createComplaintTicket error:', e);
+      }
     }
 
     return newTkt;

@@ -192,8 +192,23 @@ export const ClientSubscriberPortal: React.FC<ClientSubscriberPortalProps> = ({
           table: 'tickets',
           filter: `subscriber_username=eq.${subscriberUsername}`,
         },
-        () => {
-          loadSubscriberData();
+        (payload) => {
+          if (payload.eventType === 'INSERT' && payload.new) {
+            const newRow = payload.new as SupabaseTicket;
+            setClientTickets((prev) =>
+              prev.some((t) => t.id === newRow.id) ? prev : [newRow, ...prev]
+            );
+          } else if (payload.eventType === 'UPDATE' && payload.new) {
+            const updatedRow = payload.new as SupabaseTicket;
+            setClientTickets((prev) =>
+              prev.map((t) => (t.id === updatedRow.id ? updatedRow : t))
+            );
+          } else if (payload.eventType === 'DELETE' && payload.old) {
+            const deletedId = (payload.old as any).id;
+            setClientTickets((prev) => prev.filter((t) => t.id !== deletedId));
+          } else {
+            loadSubscriberData();
+          }
         }
       )
       .subscribe();
@@ -242,48 +257,64 @@ export const ClientSubscriberPortal: React.FC<ClientSubscriberPortalProps> = ({
 
   const handleCreateTicket = async (e: React.FormEvent) => {
     e.preventDefault();
+    if (isSubmittingTicket) return;
     if (!complaintText.trim()) return;
 
     setIsSubmittingTicket(true);
     const newTicketNo = `TKT-${Math.floor(100000 + Math.random() * 900000)}`;
+    const createdAtIso = new Date().toISOString();
 
     try {
-      // 1. Insert into Supabase tickets table
-      const { error } = await supabase.from('tickets').insert([
-        {
-          ticket_no: newTicketNo,
-          subscriber_username: subscriberUsername,
-          assigned_agent_id: null,
-          issue: `${complaintCategory.replace(/_/g, ' ').toUpperCase()}: ${complaintText}`,
-          priority: complaintCategory === 'no_internet' ? 'CRITICAL' : 'MEDIUM',
-          status: 'OPEN',
-          created_at: new Date().toISOString(),
-        },
-      ]);
+      // 1. Single insert into Supabase tickets table
+      const { data: insertedRow, error } = await supabase
+        .from('tickets')
+        .insert([
+          {
+            ticket_no: newTicketNo,
+            subscriber_username: subscriberUsername,
+            assigned_agent_id: null,
+            assigned_agent_name: null,
+            issue: `${complaintCategory.replace(/_/g, ' ').toUpperCase()}: ${complaintText}`,
+            priority: complaintCategory === 'no_internet' ? 'CRITICAL' : 'MEDIUM',
+            status: 'OPEN',
+            created_at: createdAtIso,
+          },
+        ])
+        .select()
+        .single();
 
       if (error) {
         console.warn('Supabase ticket creation failed, recording to local context:', error.message);
       }
 
-      // 2. Also register in local context for NOC immediate visibility
-      createComplaintTicket({
-        customerId: currentUser.id,
-        customerName: subscriberName,
-        customerPhone: subscriberPhone,
-        customerAddress: subscriberArea,
-        areaNode: subscriberArea,
-        category:
-          complaintCategory === 'no_internet'
-            ? 'fiber_cut'
-            : complaintCategory === 'billing_inquiry'
-            ? 'billing_issue'
-            : 'slow_speed',
-        priority: complaintCategory === 'no_internet' ? 'high' : 'medium',
-        status: 'open',
-        title: complaintCategory.replace(/_/g, ' ').toUpperCase(),
-        description: complaintText,
-        routerId: 'router-ccr2004-core',
-      });
+      // 2. Also register in local context for NOC immediate visibility (without duplicate Supabase insert)
+      createComplaintTicket(
+        {
+          customerId: currentUser.id,
+          customerName: subscriberName,
+          customerPhone: subscriberPhone,
+          customerAddress: subscriberArea,
+          areaNode: subscriberArea,
+          category:
+            complaintCategory === 'no_internet'
+              ? 'fiber_cut'
+              : complaintCategory === 'billing_inquiry'
+              ? 'billing_issue'
+              : 'slow_speed',
+          priority: complaintCategory === 'no_internet' ? 'high' : 'medium',
+          status: 'open',
+          title: complaintCategory.replace(/_/g, ' ').toUpperCase(),
+          description: complaintText,
+          routerId: 'router-ccr2004-core',
+        },
+        false,
+        {
+          skipSupabaseInsert: !error,
+          existingId: insertedRow?.id,
+          existingTicketNumber: insertedRow?.ticket_no || newTicketNo,
+          existingCreatedAt: insertedRow?.created_at || createdAtIso,
+        }
+      );
 
       setTicketSuccessNotice(`Support ticket #${newTicketNo} submitted to NOC Desk! An on-duty technician will respond shortly.`);
       setComplaintText('');

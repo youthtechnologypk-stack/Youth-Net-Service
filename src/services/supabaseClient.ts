@@ -39,6 +39,8 @@ export interface SupabasePortalUser {
   drop_wire_meters?: number | null;
   patch_cord_qty?: number | null;
   installation_date?: string | null;
+  expiry_date?: string | null;
+  package_profile_name?: string | null;
   created_at?: string;
 }
 
@@ -131,6 +133,72 @@ export interface SupabaseUpstreamCapacityConfig {
   warning_threshold_pct: number;
   critical_threshold_pct: number;
   wan_interface_name: string;
+  updated_at?: string;
+}
+
+export type IspExpenseCategory =
+  | 'UPSTREAM_BANDWIDTH'
+  | 'FIBER_HARDWARE'
+  | 'POWER_SOLAR_UPS'
+  | 'FIELD_MAINTENANCE'
+  | 'OFFICE_RENT_UTILS'
+  | 'OTHER';
+
+export type IspExpensePaymentMethod =
+  | 'BANK_TRANSFER'
+  | 'CASH'
+  | 'JAZZCASH_EASYPAISA';
+
+export interface SupabaseIspExpense {
+  id?: string;
+  expense_category: IspExpenseCategory | string;
+  title: string;
+  amount: number;
+  payment_method: IspExpensePaymentMethod | string;
+  expense_date: string;
+  notes?: string | null;
+  recorded_by?: string | null;
+  created_at?: string;
+}
+
+export type PaymentAccountType = 'BANK' | 'JAZZCASH' | 'EASYPAISA' | 'RAST';
+
+export interface SupabasePaymentAccount {
+  id: string;
+  account_type: PaymentAccountType | string;
+  provider_name: string;
+  account_title: string;
+  account_number_or_iban: string;
+  is_active: boolean;
+  created_at?: string;
+  updated_at?: string;
+}
+
+export interface SupabaseWhatsappBillingConfig {
+  id?: string;
+  company_name?: string | null;
+  support_whatsapp: string;
+  cloud_api_enabled?: boolean;
+  webhook_url?: string | null;
+  phone_number_id?: string | null;
+  auto_remind_days_before?: number;
+  bot_enabled?: boolean;
+  webhook_verify_token?: string | null;
+  ai_bot_system_prompt?: string | null;
+  api_gateway_url?: string | null;
+  api_token?: string | null;
+  auto_api_enabled?: boolean;
+  updated_at?: string;
+}
+
+export interface SupabaseWhatsappBotSession {
+  id: string;
+  sender_phone: string;
+  subscriber_username?: string | null;
+  conversation_state?: string | null;
+  last_message_in?: string | null;
+  last_bot_reply?: string | null;
+  created_ticket_no?: string | null;
   updated_at?: string;
 }
 

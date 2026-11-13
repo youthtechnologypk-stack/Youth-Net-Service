@@ -48,6 +48,7 @@ export const NewTicketModal: React.FC<CreateTicketModalProps> = ({
 
   const [isSubmitting, setIsSubmitting] = useState(false);
   const [statusMessage, setStatusMessage] = useState<string | null>(null);
+  const [errorMessage, setErrorMessage] = useState<string | null>(null);
 
   const dropdownRef = useRef<HTMLDivElement>(null);
 
@@ -278,6 +279,7 @@ export const NewTicketModal: React.FC<CreateTicketModalProps> = ({
       fetchPortalAgents();
       fetchLiveSubscribers();
       setStatusMessage(null);
+      setErrorMessage(null);
       setIsSubmitting(false);
     }
   }, [isOpen, fetchLiveSubscribers]);
@@ -317,10 +319,12 @@ export const NewTicketModal: React.FC<CreateTicketModalProps> = ({
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (!title || !customerName) return;
+    if (isSubmitting) return;
+    if (!title.trim() || !customerName.trim()) return;
 
     setIsSubmitting(true);
     setStatusMessage(null);
+    setErrorMessage(null);
 
     const isAutoImmediate = assignedAgentId === 'AUTO';
     let specificAgent: SupabasePortalUser | undefined;
@@ -335,27 +339,32 @@ export const NewTicketModal: React.FC<CreateTicketModalProps> = ({
     const assignedId = specificAgent?.id || null;
     const assignedName = specificAgent?.full_name || null;
     const ticketNo = `TKT-${Math.floor(100000 + Math.random() * 900000)}`;
+    const createdAtIso = new Date().toISOString();
 
     try {
-      // 1. Write strictly into Supabase `tickets` table with both ID and Name
-      const { error: sbErr } = await supabase.from('tickets').insert([
-        {
-          ticket_no: ticketNo,
-          subscriber_username: pppoeUsername || customerName.toLowerCase().replace(/\s+/g, '.'),
-          assigned_agent_id: assignedId,
-          assigned_agent_name: assignedName,
-          issue: `[${category.toUpperCase()}] ${title}: ${description}`,
-          priority: priority.toUpperCase(),
-          status: specificAgent ? 'IN_PROGRESS' : 'OPEN',
-          created_at: new Date().toISOString(),
-        },
-      ]);
+      // 1. SINGLE Database Insert strictly inside NewTicketModal with both assigned_agent_id AND assigned_agent_name
+      const { data: insertedRow, error: sbErr } = await supabase
+        .from('tickets')
+        .insert([
+          {
+            ticket_no: ticketNo,
+            subscriber_username: pppoeUsername || customerName.toLowerCase().replace(/\s+/g, '.'),
+            assigned_agent_id: assignedId,
+            assigned_agent_name: assignedName,
+            issue: `[${category.toUpperCase()}] ${title.trim()}: ${description.trim()}`,
+            priority: priority.toUpperCase(),
+            status: specificAgent ? 'IN_PROGRESS' : 'OPEN',
+            created_at: createdAtIso,
+          },
+        ])
+        .select()
+        .single();
 
       if (sbErr) {
-        console.error('Failed to insert ticket into Supabase:', sbErr);
+        throw new Error(sbErr.message || 'Failed to save ticket to Supabase');
       }
 
-      // 2. Also register in ISPContext for instant NOC visibility
+      // 2. Sync ISPContext in-memory state ONLY (skipSupabaseInsert prevents duplicate DB row)
       createComplaintTicket(
         {
           customerId: selectedSubscriber?.id || `cust-${pppoeUsername || Date.now()}`,
@@ -365,9 +374,9 @@ export const NewTicketModal: React.FC<CreateTicketModalProps> = ({
           areaNode,
           category,
           priority,
-          status: specificAgent ? 'assigned' : 'open',
-          title,
-          description,
+          status: specificAgent ? 'in_progress' : 'open',
+          title: title.trim(),
+          description: description.trim(),
           assignedAgentId: assignedId || undefined,
           assignedAgentName: assignedName || undefined,
           routerId: selectedRouterId,
@@ -376,17 +385,27 @@ export const NewTicketModal: React.FC<CreateTicketModalProps> = ({
           pppoeUsername,
           assignedIp,
         },
-        isAutoImmediate
+        false,
+        {
+          skipSupabaseInsert: true,
+          existingId: insertedRow?.id,
+          existingTicketNumber: insertedRow?.ticket_no || ticketNo,
+          existingCreatedAt: insertedRow?.created_at || createdAtIso,
+        }
       );
 
       setStatusMessage(`Ticket ${ticketNo} dispatched successfully to ${assignedName || 'Unassigned Queue'}!`);
+      setTitle('');
+      setDescription('');
+      setAssignedAgentId('');
       if (onSuccess) onSuccess();
 
       setTimeout(() => {
         onClose();
-      }, 700);
+      }, 650);
     } catch (err: any) {
       console.error('Error dispatching ticket:', err);
+      setErrorMessage(err?.message || 'Unable to create ticket. Please try again.');
     } finally {
       setIsSubmitting(false);
     }
@@ -418,11 +437,17 @@ export const NewTicketModal: React.FC<CreateTicketModalProps> = ({
           </button>
         </div>
 
-        {/* Status Toast */}
+        {/* Status & Error Banners */}
         {statusMessage && (
           <div className="p-3 bg-emerald-950 border-b border-emerald-800 text-emerald-300 text-xs font-mono flex items-center gap-2">
             <CheckCircle2 className="w-4 h-4 text-emerald-400 shrink-0" />
             <span>{statusMessage}</span>
+          </div>
+        )}
+        {errorMessage && (
+          <div className="p-3 bg-rose-950 border-b border-rose-800 text-rose-300 text-xs font-mono flex items-center gap-2">
+            <AlertTriangle className="w-4 h-4 text-rose-400 shrink-0" />
+            <span>{errorMessage}</span>
           </div>
         )}
 

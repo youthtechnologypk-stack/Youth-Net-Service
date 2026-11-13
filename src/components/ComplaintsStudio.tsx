@@ -15,11 +15,13 @@ import {
   Send,
   Users,
   Edit,
+  Bot,
 } from 'lucide-react';
 import { useISP } from '../context/ISPContext';
 import { ComplaintTicket, TicketCategory, TicketPriority } from '../types/isp';
 import { supabase, SupabasePortalUser } from '../services/supabaseClient';
 import { EditTicketModal } from './EditTicketModal';
+import { WhatsAppBotMonitor } from './WhatsAppBotMonitor';
 import { DateFilterToolbar } from './DateFilterToolbar';
 import {
   DateFilterState,
@@ -48,6 +50,7 @@ export const ComplaintsStudio: React.FC<ComplaintsStudioProps> = ({
     resolveTicket,
   } = useISP();
 
+  const [activeSubTab, setActiveSubTab] = useState<'tickets' | 'whatsapp_bot'>('tickets');
   const [categoryFilter, setCategoryFilter] = useState<string>('all');
   const [statusFilter, setStatusFilter] = useState<'all' | 'open' | 'in_progress' | 'resolved'>('all');
   const [dateFilter, setDateFilter] = useState<DateFilterState>(() => createDefaultDateFilter('month'));
@@ -228,10 +231,36 @@ export const ComplaintsStudio: React.FC<ComplaintsStudioProps> = ({
             </p>
           </div>
 
-          <div className="flex items-center gap-2">
+          <div className="flex flex-wrap items-center gap-2">
+            <div className="inline-flex rounded-lg bg-slate-950 p-1 border border-slate-800">
+              <button
+                type="button"
+                onClick={() => setActiveSubTab('tickets')}
+                className={`px-3 py-1.5 rounded-md text-xs font-semibold transition cursor-pointer ${
+                  activeSubTab === 'tickets'
+                    ? 'bg-cyan-600 text-slate-950 font-bold shadow'
+                    : 'text-slate-300 hover:text-white'
+                }`}
+              >
+                SLA Tickets Queue
+              </button>
+              <button
+                type="button"
+                onClick={() => setActiveSubTab('whatsapp_bot')}
+                className={`flex items-center gap-1.5 px-3 py-1.5 rounded-md text-xs font-semibold transition cursor-pointer ${
+                  activeSubTab === 'whatsapp_bot'
+                    ? 'bg-emerald-500 text-slate-950 font-bold shadow'
+                    : 'text-emerald-300 hover:text-white'
+                }`}
+              >
+                <Bot className="w-3.5 h-3.5" />
+                <span>🤖 AI WhatsApp Bot</span>
+              </button>
+            </div>
+
             <button
               onClick={onOpenTicketModal}
-              className="flex items-center gap-1.5 bg-cyan-600 hover:bg-cyan-500 text-slate-950 font-semibold text-xs px-3.5 py-2 rounded-lg transition"
+              className="flex items-center gap-1.5 bg-cyan-600 hover:bg-cyan-500 text-slate-950 font-semibold text-xs px-3.5 py-2 rounded-lg transition cursor-pointer"
             >
               <Plus className="w-3.5 h-3.5" />
               <span>+ Raise Ticket</span>
@@ -239,7 +268,7 @@ export const ComplaintsStudio: React.FC<ComplaintsStudioProps> = ({
 
             <button
               onClick={onOpenOutageModal}
-              className="flex items-center gap-1.5 bg-rose-600 hover:bg-rose-500 text-white font-semibold text-xs px-3.5 py-2 rounded-lg transition"
+              className="flex items-center gap-1.5 bg-rose-600 hover:bg-rose-500 text-white font-semibold text-xs px-3.5 py-2 rounded-lg transition cursor-pointer"
             >
               <Megaphone className="w-3.5 h-3.5" />
               <span>Broadcast Area Outage</span>
@@ -327,10 +356,14 @@ export const ComplaintsStudio: React.FC<ComplaintsStudioProps> = ({
         )}
       </div>
 
-      {/* Month-Wise & Custom Date Range Filter Toolbar */}
-      <DateFilterToolbar
-        value={dateFilter}
-        onChange={setDateFilter}
+      {activeSubTab === 'whatsapp_bot' ? (
+        <WhatsAppBotMonitor />
+      ) : (
+        <>
+          {/* Month-Wise & Custom Date Range Filter Toolbar */}
+          <DateFilterToolbar
+            value={dateFilter}
+            onChange={setDateFilter}
         totalCount={(complaints || []).length}
         filteredCount={dateFilteredTickets.length}
         recordLabel="tickets"
@@ -762,6 +795,8 @@ export const ComplaintsStudio: React.FC<ComplaintsStudioProps> = ({
           );
         })}
         </div>
+      )}
+        </>
       )}
 
       {/* Resolution Modal */}

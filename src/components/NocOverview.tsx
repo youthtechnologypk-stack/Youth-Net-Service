@@ -18,6 +18,9 @@ import {
   Layers,
   ExternalLink,
   RefreshCw,
+  Wallet,
+  TrendingUp,
+  TrendingDown,
 } from 'lucide-react';
 import { useISP } from '../context/ISPContext';
 import { useCurrency } from '../context/CurrencyContext';
@@ -26,6 +29,15 @@ import { UsageAnalytics } from './UsageAnalytics';
 import { ReceivingVsDuesChart } from './ReceivingVsDuesChart';
 import { OutageBanner } from './OutageBanner';
 import { fetchMikrotikPppSecrets } from '../services/mikrotikRestClient';
+import {
+  supabase,
+  SupabaseAgentCashTransaction,
+  SupabaseInvoice,
+  SupabaseIspExpense,
+  SupabasePaymentTransaction,
+} from '../services/supabaseClient';
+import { createDefaultDateFilter } from '../lib/dateFilter';
+import { computeProfitLossSummary } from '../lib/profitLoss';
 
 interface NocOverviewProps {
   onNavigateTab: (tab: ActiveTab) => void;
@@ -72,6 +84,70 @@ export const NocOverview: React.FC<NocOverviewProps> = ({
   const currentRouter = routers.find((r) => r.id === selectedRouterId) || routers[0];
 
   const [provisionedSecretsCount, setProvisionedSecretsCount] = useState<number>(0);
+  const [monthlyNetProfitState, setMonthlyNetProfitState] = useState<{
+    loaded: boolean;
+    netProfit: number;
+    marginPct: number;
+    collections: number;
+    outgoing: number;
+  }>({
+    loaded: false,
+    netProfit: 0,
+    marginPct: 0,
+    collections: 0,
+    outgoing: 0,
+  });
+
+  useEffect(() => {
+    let isMounted = true;
+    const loadMonthlyNetProfit = async () => {
+      try {
+        const [expRes, invRes, payRes, salRes] = await Promise.all([
+          supabase
+            .from('isp_expenses')
+            .select('id,expense_category,title,amount,payment_method,expense_date,notes,recorded_by,created_at'),
+          supabase.from('invoices').select('*'),
+          supabase.from('payment_transactions').select('*'),
+          supabase
+            .from('agent_cash_transactions')
+            .select('*')
+            .eq('transaction_type', 'SALARY_PAYOUT'),
+        ]);
+        if (!isMounted) return;
+        const summary = computeProfitLossSummary({
+          invoices: (invRes.data as SupabaseInvoice[]) || [],
+          paymentTransactions: (payRes.data as SupabasePaymentTransaction[]) || [],
+          expenses: (expRes.data as SupabaseIspExpense[]) || [],
+          salaryTransactions: (salRes.data as SupabaseAgentCashTransaction[]) || [],
+          filter: createDefaultDateFilter('month'),
+        });
+        setMonthlyNetProfitState({
+          loaded: true,
+          netProfit: summary.netProfit,
+          marginPct: summary.marginPct,
+          collections: summary.totalCollections,
+          outgoing: summary.totalOutgoing,
+        });
+      } catch {
+        // ignore network hiccup on overview card
+      }
+    };
+
+    loadMonthlyNetProfit();
+
+    const pnlChannel = supabase
+      .channel('public:noc_overview_monthly_pnl')
+      .on('postgres_changes', { event: '*', schema: 'public', table: 'isp_expenses' }, loadMonthlyNetProfit)
+      .on('postgres_changes', { event: '*', schema: 'public', table: 'payment_transactions' }, loadMonthlyNetProfit)
+      .on('postgres_changes', { event: '*', schema: 'public', table: 'invoices' }, loadMonthlyNetProfit)
+      .on('postgres_changes', { event: '*', schema: 'public', table: 'agent_cash_transactions' }, loadMonthlyNetProfit)
+      .subscribe();
+
+    return () => {
+      isMounted = false;
+      supabase.removeChannel(pnlChannel);
+    };
+  }, []);
 
   useEffect(() => {
     let isMounted = true;
@@ -225,8 +301,8 @@ export const NocOverview: React.FC<NocOverviewProps> = ({
       {/* Active Outage Warning Banner if any active (with minimize and full update modal) */}
       <OutageBanner onNavigateTab={onNavigateTab} />
 
-      {/* Top 5 Carrier Metric Cards */}
-      <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-5 gap-3.5">
+      {/* Top 6 Carrier Metric Cards */}
+      <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-6 gap-3.5">
         {/* Card 1: PPPoE Subscribers - Primary: Total Registered Secrets, Subtext: Active Online & Offline */}
         <div className="bg-slate-900/90 border border-slate-800 p-4 rounded-xl relative overflow-hidden">
           <div className="flex items-center justify-between">
@@ -362,6 +438,53 @@ export const NocOverview: React.FC<NocOverviewProps> = ({
             <span className="text-slate-400">PON Optical Health</span>
             <span className="text-cyan-400 group-hover:translate-x-0.5 transition font-mono">
               {safeOlts.length > 0 ? `${safeOlts.length} OLTs Online` : 'Configure &rarr;'}
+            </span>
+          </div>
+        </div>
+
+        {/* Card 6: Monthly Net Profit (Links directly to Profit & Expenses Ledger) */}
+        <div
+          onClick={() => onNavigateTab('profit_expenses')}
+          className={`p-4 rounded-xl border relative overflow-hidden transition cursor-pointer group ${
+            monthlyNetProfitState.netProfit >= 0
+              ? 'bg-slate-900/90 border-emerald-500/30 hover:border-emerald-400/60'
+              : 'bg-slate-900/90 border-rose-500/35 hover:border-rose-400/60'
+          }`}
+        >
+          <div className="flex items-center justify-between">
+            <span className="text-xs font-semibold text-slate-400 uppercase tracking-wider group-hover:text-white transition">
+              Monthly Net Profit
+            </span>
+            {monthlyNetProfitState.netProfit >= 0 ? (
+              <TrendingUp className="w-4 h-4 text-emerald-400 shrink-0" />
+            ) : (
+              <TrendingDown className="w-4 h-4 text-rose-400 shrink-0" />
+            )}
+          </div>
+          <div className="mt-2 flex items-baseline gap-2">
+            <span
+              className={`text-xl font-bold font-mono tabular-nums ${
+                monthlyNetProfitState.netProfit >= 0 ? 'text-emerald-400' : 'text-rose-400'
+              }`}
+            >
+              {monthlyNetProfitState.loaded
+                ? formatCurrency(monthlyNetProfitState.netProfit, 0)
+                : '—'}
+            </span>
+          </div>
+          <div className="mt-3 flex items-center justify-between text-xs text-slate-400 pt-2 border-t border-slate-800 font-mono tabular-nums">
+            <span
+              className={
+                monthlyNetProfitState.netProfit >= 0 ? 'text-emerald-400' : 'text-rose-400'
+              }
+            >
+              {monthlyNetProfitState.netProfit >= 0
+                ? `${monthlyNetProfitState.marginPct.toFixed(1)}% Margin`
+                : 'Net Deficit'}
+            </span>
+            <span className="text-cyan-400 group-hover:translate-x-0.5 transition flex items-center gap-1">
+              <Wallet className="w-3 h-3" />
+              <span>Ledger &rarr;</span>
             </span>
           </div>
         </div>
