@@ -21,11 +21,19 @@ import {
   Edit2,
   Trash2,
 } from 'lucide-react';
-import { supabase, SupabaseInvoice, SupabasePortalUser } from '../services/supabaseClient';
+import { supabase, SupabaseInvoice, SupabasePortalUser, SupabasePaymentTransaction } from '../services/supabaseClient';
 import { useISP } from '../context/ISPContext';
 import { useCurrency } from '../context/CurrencyContext';
 import { SystemRole, UserAccount } from '../types/auth';
 import { CreateInvoiceModal } from './CreateInvoiceModal';
+import { DateFilterToolbar } from './DateFilterToolbar';
+import { ReceivingVsDuesChart } from './ReceivingVsDuesChart';
+import {
+  DateFilterState,
+  createDefaultDateFilter,
+  describeDateFilter,
+  matchesDateFilter,
+} from '../lib/dateFilter';
 import {
   restoreSubscriberOnInvoicePaid,
   enforce31DayAutoExpiry,
@@ -47,10 +55,12 @@ export const BillingView: React.FC<BillingViewProps> = ({
   const { customers, agents } = useISP();
 
   const [invoices, setInvoices] = useState<SupabaseInvoice[]>([]);
+  const [paymentTransactions, setPaymentTransactions] = useState<SupabasePaymentTransaction[]>([]);
   const [portalAgents, setPortalAgents] = useState<SupabasePortalUser[]>([]);
   const [isLoading, setIsLoading] = useState<boolean>(true);
   const [searchTerm, setSearchTerm] = useState<string>('');
   const [statusFilter, setStatusFilter] = useState<'ALL' | 'DUE' | 'PARTIAL' | 'PAID'>('ALL');
+  const [dateFilter, setDateFilter] = useState<DateFilterState>(() => createDefaultDateFilter('month'));
   const [actionNotice, setActionNotice] = useState<string | null>(null);
 
   // Modal States
@@ -95,14 +105,17 @@ export const BillingView: React.FC<BillingViewProps> = ({
         enforce31DayAutoExpiry(data as SupabaseInvoice[]).catch(() => {});
       }
 
-      // Also fetch portal_users agents
-      const { data: agentUsers } = await supabase
-        .from('portal_users')
-        .select('*')
-        .eq('role', 'AGENT');
+      // Also fetch portal_users agents and payment_transactions
+      const [{ data: agentUsers }, { data: paymentRows }] = await Promise.all([
+        supabase.from('portal_users').select('*').eq('role', 'AGENT'),
+        supabase.from('payment_transactions').select('*').order('created_at', { ascending: false }),
+      ]);
 
       if (agentUsers) {
         setPortalAgents(agentUsers as SupabasePortalUser[]);
+      }
+      if (paymentRows) {
+        setPaymentTransactions(paymentRows as SupabasePaymentTransaction[]);
       }
     } catch (err) {
       console.warn('Supabase fetch invoices failed:', err);
@@ -119,6 +132,9 @@ export const BillingView: React.FC<BillingViewProps> = ({
       .channel('public:billing_view_invoices')
       .on('postgres_changes', { event: '*', schema: 'public', table: 'invoices' }, (payload) => {
         console.log('[Supabase Realtime] Invoices table change detected:', payload);
+        fetchInvoices();
+      })
+      .on('postgres_changes', { event: '*', schema: 'public', table: 'payment_transactions' }, () => {
         fetchInvoices();
       })
       .on('postgres_changes', { event: '*', schema: 'public', table: 'portal_users' }, (payload) => {
@@ -398,10 +414,23 @@ export const BillingView: React.FC<BillingViewProps> = ({
     }
   };
 
-  // Filtered Invoices
+  // Date-filtered Invoices & Payments
+  const dateFilteredInvoices = useMemo(() => {
+    return (invoices || []).filter((inv) =>
+      matchesDateFilter([inv.created_at, inv.due_date, inv.paid_at], dateFilter)
+    );
+  }, [invoices, dateFilter]);
+
+  const dateFilteredPayments = useMemo(() => {
+    return (paymentTransactions || []).filter((tx) =>
+      matchesDateFilter(tx.payment_date || tx.created_at, dateFilter)
+    );
+  }, [paymentTransactions, dateFilter]);
+
+  // Filtered Invoices (Date + Search + Status)
   const filteredInvoices = useMemo(() => {
     const searchClean = (searchTerm || '').trim().toLowerCase();
-    return (invoices || []).filter((inv) => {
+    return dateFilteredInvoices.filter((inv) => {
       const matchSearch =
         !searchClean ||
         (inv?.invoice_no || '').toLowerCase().includes(searchClean) ||
@@ -421,15 +450,15 @@ export const BillingView: React.FC<BillingViewProps> = ({
 
       return matchSearch && matchStatus;
     });
-  }, [invoices, searchTerm, statusFilter]);
+  }, [dateFilteredInvoices, searchTerm, statusFilter]);
 
-  // Aggregate Metrics
-  const totalBilled = (invoices || []).reduce((acc, i) => acc + (Number(i.amount) || 0), 0);
-  const totalPaid = (invoices || []).reduce(
+  // Dynamic Period Aggregate Metrics
+  const totalBilled = dateFilteredInvoices.reduce((acc, i) => acc + (Number(i.amount) || 0), 0);
+  const totalPaid = dateFilteredInvoices.reduce(
     (acc, i) => acc + (Number(i.paid_amount) || ((i.status || '').toUpperCase() === 'PAID' ? Number(i.amount) : 0)),
     0
   );
-  const totalDue = (invoices || [])
+  const totalDue = dateFilteredInvoices
     .reduce((acc, i) => acc + Math.max(0, (Number(i.amount) || 0) - (Number(i.paid_amount) || 0)), 0);
   const totalAgentCash = (portalAgents || []).reduce((acc, a) => acc + (Number(a.cash_in_hand) || 0), 0);
 
@@ -492,38 +521,47 @@ export const BillingView: React.FC<BillingViewProps> = ({
         </div>
       )}
 
+      {/* Date Filter Toolbar */}
+      <DateFilterToolbar
+        value={dateFilter}
+        onChange={setDateFilter}
+        totalCount={invoices.length}
+        filteredCount={dateFilteredInvoices.length}
+        recordLabel="invoices"
+      />
+
       {/* KPI Cards */}
       <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
         <div className="p-4 rounded-xl bg-[#111A2E] border border-slate-800">
           <div className="flex items-center justify-between text-slate-400 text-xs">
-            <span>TOTAL BILLED</span>
+            <span>TOTAL BILLED ({describeDateFilter(dateFilter).toUpperCase()})</span>
             <FileText className="w-4 h-4 text-cyan-400" />
           </div>
-          <div className="text-2xl font-bold text-white mt-2 font-mono">{formatCurrency(totalBilled)}</div>
-          <div className="text-slate-500 text-xs mt-1">{invoices.length} total generated invoices</div>
+          <div className="text-2xl font-bold text-white mt-2 font-mono tabular-nums">{formatCurrency(totalBilled)}</div>
+          <div className="text-slate-500 text-xs mt-1 font-mono tabular-nums">{dateFilteredInvoices.length} invoices in period</div>
         </div>
 
         <div className="p-4 rounded-xl bg-[#111A2E] border border-slate-800">
           <div className="flex items-center justify-between text-slate-400 text-xs">
-            <span>COLLECTED REVENUE</span>
+            <span>TOTAL RECEIVED</span>
             <CheckCircle2 className="w-4 h-4 text-emerald-400" />
           </div>
-          <div className="text-2xl font-bold text-emerald-400 mt-2 font-mono">{formatCurrency(totalPaid)}</div>
-          <div className="text-slate-500 text-xs mt-1">
-            {invoices.filter((i) => (i.status || '').toUpperCase() === 'PAID').length} fully settled
-            {invoices.filter((i) => (i.status || '').toUpperCase() === 'PARTIAL').length > 0 &&
-              ` • ${invoices.filter((i) => (i.status || '').toUpperCase() === 'PARTIAL').length} partial`}
+          <div className="text-2xl font-bold text-emerald-400 mt-2 font-mono tabular-nums">{formatCurrency(totalPaid)}</div>
+          <div className="text-slate-500 text-xs mt-1 font-mono tabular-nums">
+            {dateFilteredInvoices.filter((i) => (i.status || '').toUpperCase() === 'PAID').length} settled
+            {dateFilteredInvoices.filter((i) => (i.status || '').toUpperCase() === 'PARTIAL').length > 0 &&
+              ` · ${dateFilteredInvoices.filter((i) => (i.status || '').toUpperCase() === 'PARTIAL').length} partial`}
           </div>
         </div>
 
         <div className="p-4 rounded-xl bg-[#111A2E] border border-slate-800">
           <div className="flex items-center justify-between text-slate-400 text-xs">
-            <span>UNPAID / OUTSTANDING</span>
+            <span>PENDING DUES</span>
             <Clock className="w-4 h-4 text-amber-400" />
           </div>
-          <div className="text-2xl font-bold text-amber-400 mt-2 font-mono">{formatCurrency(totalDue)}</div>
-          <div className="text-slate-500 text-xs mt-1">
-            {invoices.filter((i) => (i.status || '').toUpperCase() !== 'PAID').length} pending collection / arrears
+          <div className="text-2xl font-bold text-amber-400 mt-2 font-mono tabular-nums">{formatCurrency(totalDue)}</div>
+          <div className="text-slate-500 text-xs mt-1 font-mono tabular-nums">
+            {dateFilteredInvoices.filter((i) => (i.status || '').toUpperCase() !== 'PAID').length} pending collection / arrears
           </div>
         </div>
 
@@ -532,10 +570,17 @@ export const BillingView: React.FC<BillingViewProps> = ({
             <span>FIELD AGENT CASH-IN-HAND</span>
             <Users className="w-4 h-4 text-purple-400" />
           </div>
-          <div className="text-2xl font-bold text-purple-400 mt-2 font-mono">{formatCurrency(totalAgentCash)}</div>
-          <div className="text-slate-500 text-xs mt-1">{portalAgents.length} active field collection agents</div>
+          <div className="text-2xl font-bold text-purple-400 mt-2 font-mono tabular-nums">{formatCurrency(totalAgentCash)}</div>
+          <div className="text-slate-500 text-xs mt-1 font-mono tabular-nums">{portalAgents.length} active field collection agents</div>
         </div>
       </div>
+
+      {/* Receiving vs. Pending Dues Analytics Graph */}
+      <ReceivingVsDuesChart
+        invoices={dateFilteredInvoices}
+        paymentTransactions={dateFilteredPayments}
+        filter={dateFilter}
+      />
 
       {/* Search and Filters Bar */}
       <div className="flex flex-col sm:flex-row items-stretch sm:items-center justify-between gap-3 p-3 bg-[#111A2E] rounded-xl border border-slate-800">
@@ -554,46 +599,46 @@ export const BillingView: React.FC<BillingViewProps> = ({
           <button
             type="button"
             onClick={() => setStatusFilter('ALL')}
-            className={`px-3 py-1.5 rounded-lg text-xs font-semibold transition ${
+            className={`px-3 py-1.5 rounded-lg text-xs font-semibold transition cursor-pointer whitespace-nowrap ${
               statusFilter === 'ALL'
                 ? 'bg-cyan-600 text-slate-950 font-bold'
                 : 'bg-slate-800 text-slate-300 hover:bg-slate-700'
             }`}
           >
-            All ({invoices.length})
+            All ({dateFilteredInvoices.length})
           </button>
           <button
             type="button"
             onClick={() => setStatusFilter('DUE')}
-            className={`px-3 py-1.5 rounded-lg text-xs font-semibold transition ${
+            className={`px-3 py-1.5 rounded-lg text-xs font-semibold transition cursor-pointer whitespace-nowrap ${
               statusFilter === 'DUE'
                 ? 'bg-rose-600 text-white font-bold'
                 : 'bg-slate-800 text-slate-300 hover:bg-slate-700'
             }`}
           >
-            Due ({invoices.filter((i) => (i.status || '').toUpperCase() === 'DUE').length})
+            Due ({dateFilteredInvoices.filter((i) => (i.status || '').toUpperCase() === 'DUE').length})
           </button>
           <button
             type="button"
             onClick={() => setStatusFilter('PARTIAL')}
-            className={`px-3 py-1.5 rounded-lg text-xs font-semibold transition ${
+            className={`px-3 py-1.5 rounded-lg text-xs font-semibold transition cursor-pointer whitespace-nowrap ${
               statusFilter === 'PARTIAL'
                 ? 'bg-amber-600 text-slate-950 font-bold'
                 : 'bg-slate-800 text-slate-300 hover:bg-slate-700'
             }`}
           >
-            Partial ({invoices.filter((i) => (i.status || '').toUpperCase() === 'PARTIAL').length})
+            Partial ({dateFilteredInvoices.filter((i) => (i.status || '').toUpperCase() === 'PARTIAL').length})
           </button>
           <button
             type="button"
             onClick={() => setStatusFilter('PAID')}
-            className={`px-3 py-1.5 rounded-lg text-xs font-semibold transition ${
+            className={`px-3 py-1.5 rounded-lg text-xs font-semibold transition cursor-pointer whitespace-nowrap ${
               statusFilter === 'PAID'
                 ? 'bg-emerald-600 text-slate-950 font-bold'
                 : 'bg-slate-800 text-slate-300 hover:bg-slate-700'
             }`}
           >
-            Paid ({invoices.filter((i) => (i.status || '').toUpperCase() === 'PAID').length})
+            Paid ({dateFilteredInvoices.filter((i) => (i.status || '').toUpperCase() === 'PAID').length})
           </button>
         </div>
       </div>

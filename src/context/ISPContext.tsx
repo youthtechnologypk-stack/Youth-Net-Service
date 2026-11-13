@@ -732,7 +732,13 @@ export const ISPProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
             areaNode: 'Sector G-11',
             category: 'router_issue',
             priority: (t.priority || 'medium').toLowerCase() as any,
-            status: (t.status || 'open').toLowerCase() === 'resolved' ? 'resolved' : 'open',
+            status: (() => {
+              const st = (t.status || 'OPEN').toUpperCase();
+              if (st === 'RESOLVED') return 'resolved';
+              if (st === 'IN_PROGRESS') return 'in_progress';
+              if (st === 'ASSIGNED') return 'assigned';
+              return 'open';
+            })(),
             title: t.issue?.split(':')[0] || 'Technical SLA Ticket',
             description: t.issue || 'Broadband maintenance issue',
             assignedAgentId: t.assigned_agent_id || undefined,

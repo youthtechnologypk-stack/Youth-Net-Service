@@ -20,6 +20,13 @@ import { useISP } from '../context/ISPContext';
 import { ComplaintTicket, TicketCategory, TicketPriority } from '../types/isp';
 import { supabase, SupabasePortalUser } from '../services/supabaseClient';
 import { EditTicketModal } from './EditTicketModal';
+import { DateFilterToolbar } from './DateFilterToolbar';
+import {
+  DateFilterState,
+  createDefaultDateFilter,
+  describeDateFilter,
+  matchesDateFilter,
+} from '../lib/dateFilter';
 
 interface ComplaintsStudioProps {
   onOpenTicketModal: () => void;
@@ -42,6 +49,8 @@ export const ComplaintsStudio: React.FC<ComplaintsStudioProps> = ({
   } = useISP();
 
   const [categoryFilter, setCategoryFilter] = useState<string>('all');
+  const [statusFilter, setStatusFilter] = useState<'all' | 'open' | 'in_progress' | 'resolved'>('all');
+  const [dateFilter, setDateFilter] = useState<DateFilterState>(() => createDefaultDateFilter('month'));
   const [selectedTicketForResolve, setSelectedTicketForResolve] = useState<ComplaintTicket | null>(null);
   const [selectedTicketForEdit, setSelectedTicketForEdit] = useState<ComplaintTicket | null>(null);
   const [isEditModalOpen, setIsEditModalOpen] = useState<boolean>(false);
@@ -137,9 +146,36 @@ export const ComplaintsStudio: React.FC<ComplaintsStudioProps> = ({
     return () => clearInterval(timer);
   }, []);
 
-  const filteredTickets = (complaints || []).filter((tkt) => {
-    if (categoryFilter === 'all') return true;
-    return (tkt?.category || '').toLowerCase() === (categoryFilter || '').toLowerCase();
+  const dateFilteredTickets = (complaints || []).filter((tkt) =>
+    matchesDateFilter(tkt?.createdAt, dateFilter)
+  );
+
+  const ticketStatusCounts = dateFilteredTickets.reduce(
+    (acc, tkt) => {
+      const st = (tkt?.status || 'open').toLowerCase();
+      if (st === 'resolved' || st === 'closed') {
+        acc.resolved += 1;
+      } else if (st === 'in_progress' || st === 'assigned') {
+        acc.inProgress += 1;
+      } else {
+        acc.open += 1;
+      }
+      return acc;
+    },
+    { open: 0, inProgress: 0, resolved: 0 }
+  );
+
+  const filteredTickets = dateFilteredTickets.filter((tkt) => {
+    const matchCategory =
+      categoryFilter === 'all' ||
+      (tkt?.category || '').toLowerCase() === (categoryFilter || '').toLowerCase();
+    if (!matchCategory) return false;
+
+    const st = (tkt?.status || 'open').toLowerCase();
+    if (statusFilter === 'open') return st === 'open';
+    if (statusFilter === 'in_progress') return st === 'in_progress' || st === 'assigned';
+    if (statusFilter === 'resolved') return st === 'resolved' || st === 'closed';
+    return true;
   });
 
   const formatRemainingSla = (deadlineIso: string, isResolved: boolean) => {
@@ -291,6 +327,80 @@ export const ComplaintsStudio: React.FC<ComplaintsStudioProps> = ({
         )}
       </div>
 
+      {/* Month-Wise & Custom Date Range Filter Toolbar */}
+      <DateFilterToolbar
+        value={dateFilter}
+        onChange={setDateFilter}
+        totalCount={(complaints || []).length}
+        filteredCount={dateFilteredTickets.length}
+        recordLabel="tickets"
+      />
+
+      {/* Period Status KPI & Filter Strip (Open, In-Progress, Resolved) */}
+      <div className="grid grid-cols-2 lg:grid-cols-4 gap-3">
+        <button
+          type="button"
+          onClick={() => setStatusFilter('all')}
+          className={`p-3.5 rounded-xl border text-left transition cursor-pointer ${
+            statusFilter === 'all'
+              ? 'bg-cyan-950/50 border-cyan-500/60'
+              : 'bg-slate-900/90 border-slate-800 hover:border-slate-700'
+          }`}
+        >
+          <div className="text-[11px] font-mono uppercase text-slate-400">
+            Total ({describeDateFilter(dateFilter)})
+          </div>
+          <div className="text-xl font-bold font-mono tabular-nums text-white mt-1">
+            {dateFilteredTickets.length}
+          </div>
+        </button>
+
+        <button
+          type="button"
+          onClick={() => setStatusFilter('open')}
+          className={`p-3.5 rounded-xl border text-left transition cursor-pointer ${
+            statusFilter === 'open'
+              ? 'bg-rose-950/60 border-rose-500/70'
+              : 'bg-slate-900/90 border-slate-800 hover:border-slate-700'
+          }`}
+        >
+          <div className="text-[11px] font-mono uppercase text-slate-400">Open Tickets</div>
+          <div className="text-xl font-bold font-mono tabular-nums text-rose-400 mt-1">
+            {ticketStatusCounts.open}
+          </div>
+        </button>
+
+        <button
+          type="button"
+          onClick={() => setStatusFilter('in_progress')}
+          className={`p-3.5 rounded-xl border text-left transition cursor-pointer ${
+            statusFilter === 'in_progress'
+              ? 'bg-amber-950/60 border-amber-500/70'
+              : 'bg-slate-900/90 border-slate-800 hover:border-slate-700'
+          }`}
+        >
+          <div className="text-[11px] font-mono uppercase text-slate-400">In-Progress</div>
+          <div className="text-xl font-bold font-mono tabular-nums text-amber-400 mt-1">
+            {ticketStatusCounts.inProgress}
+          </div>
+        </button>
+
+        <button
+          type="button"
+          onClick={() => setStatusFilter('resolved')}
+          className={`p-3.5 rounded-xl border text-left transition cursor-pointer ${
+            statusFilter === 'resolved'
+              ? 'bg-emerald-950/60 border-emerald-500/70'
+              : 'bg-slate-900/90 border-slate-800 hover:border-slate-700'
+          }`}
+        >
+          <div className="text-[11px] font-mono uppercase text-slate-400">Resolved</div>
+          <div className="text-xl font-bold font-mono tabular-nums text-emerald-400 mt-1">
+            {ticketStatusCounts.resolved}
+          </div>
+        </button>
+      </div>
+
       {/* Category Filter Chips */}
       <div className="flex items-center gap-2 overflow-x-auto pb-1 text-xs scrollbar-none">
         <span className="text-slate-400 font-semibold pr-1">Filter Category:</span>
@@ -305,7 +415,7 @@ export const ComplaintsStudio: React.FC<ComplaintsStudioProps> = ({
           <button
             key={item.id}
             onClick={() => setCategoryFilter(item.id)}
-            className={`px-3 py-1.5 rounded-lg font-medium whitespace-nowrap transition ${
+            className={`px-3 py-1.5 rounded-lg font-medium whitespace-nowrap transition cursor-pointer ${
               categoryFilter === item.id
                 ? 'bg-cyan-600 text-slate-950 font-bold'
                 : 'bg-slate-900 text-slate-400 hover:text-slate-200 border border-slate-800'

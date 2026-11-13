@@ -33,7 +33,12 @@ import {
 } from '../services/mikrotikSubscriberSync';
 import { supabase } from '../services/supabaseClient';
 import { AreaNodeSelector } from './AreaNodeSelector';
-import { fetchNetworkAreas, resolveAreaFromUsername, NetworkAreaNode } from '../lib/billingAndNetwork';
+import {
+  fetchNetworkAreas,
+  resolveAreaFromUsername,
+  NetworkAreaNode,
+  NETWORK_AREAS_UPDATED_EVENT,
+} from '../lib/billingAndNetwork';
 
 export interface CreateAccountModalProps {
   isOpen: boolean;
@@ -78,8 +83,13 @@ export const CreateAccountModal: React.FC<CreateAccountModalProps> = ({
   const [linkedAgentId, setLinkedAgentId] = useState('');
 
   useEffect(() => {
-    fetchNetworkAreas().then(setNetworkAreas).catch(() => {});
-  }, []);
+    const loadAreas = () => {
+      fetchNetworkAreas().then(setNetworkAreas).catch(() => {});
+    };
+    loadAreas();
+    window.addEventListener(NETWORK_AREAS_UPDATED_EVENT, loadAreas);
+    return () => window.removeEventListener(NETWORK_AREAS_UPDATED_EVENT, loadAreas);
+  }, [isOpen]);
 
   const handleUsernameUpdate = (rawVal: string) => {
     const clean = rawVal.toLowerCase().replace(/\s+/g, '_');

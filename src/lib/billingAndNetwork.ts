@@ -85,9 +85,17 @@ export function resolveAreaFromUsername(
   return null;
 }
 
+export const NETWORK_AREAS_UPDATED_EVENT = 'youthnet_network_areas_updated';
+
+export function emitNetworkAreasUpdated(): void {
+  if (typeof window !== 'undefined') {
+    window.dispatchEvent(new CustomEvent(NETWORK_AREAS_UPDATED_EVENT));
+  }
+}
+
 /**
  * Fetches child areas from Supabase `network_areas` under `SADDAR FLEET ROUTER`,
- * merging smoothly with default child nodes.
+ * ordered by area_name ASC, falling back to default nodes if table is empty.
  */
 export async function fetchNetworkAreas(): Promise<NetworkAreaNode[]> {
   try {
@@ -110,20 +118,22 @@ export async function fetchNetworkAreas(): Promise<NetworkAreaNode[]> {
  */
 export async function createChildNetworkArea(
   areaName: string,
-  prefixCode?: string
+  prefixCode?: string,
+  parentRouter: string = PARENT_FLEET_ROUTER
 ): Promise<{ success: boolean; data?: NetworkAreaNode; error?: string }> {
   const cleanName = areaName.trim();
   if (!cleanName) {
     return { success: false, error: 'Area name cannot be empty.' };
   }
-  const cleanPrefix = (prefixCode || cleanName.slice(0, 3)).trim().toLowerCase();
+  const cleanParent = (parentRouter || PARENT_FLEET_ROUTER).trim() || PARENT_FLEET_ROUTER;
+  const cleanPrefix = (prefixCode || '').trim().toLowerCase();
 
   try {
     const { data, error } = await supabase
       .from('network_areas')
       .insert([
         {
-          parent_router: PARENT_FLEET_ROUTER,
+          parent_router: cleanParent,
           area_name: cleanName,
           prefix_code: cleanPrefix,
         },
@@ -134,9 +144,60 @@ export async function createChildNetworkArea(
     if (error) {
       return { success: false, error: error.message };
     }
+    emitNetworkAreasUpdated();
     return { success: true, data: data as NetworkAreaNode };
   } catch (err: any) {
     return { success: false, error: err.message || 'Failed to insert area.' };
+  }
+}
+
+/**
+ * Updates an existing network area by id and cascades renamed area_name onto portal_users.
+ */
+export async function updateNetworkArea(
+  id: string,
+  oldAreaName: string,
+  updates: {
+    parent_router?: string;
+    area_name: string;
+    prefix_code?: string;
+  }
+): Promise<{ success: boolean; data?: NetworkAreaNode; error?: string }> {
+  const cleanNewName = updates.area_name.trim();
+  if (!cleanNewName) {
+    return { success: false, error: 'Area / Mohallah name is required.' };
+  }
+  const cleanParent = (updates.parent_router || PARENT_FLEET_ROUTER).trim() || PARENT_FLEET_ROUTER;
+  const cleanPrefix = (updates.prefix_code || '').trim().toLowerCase();
+
+  try {
+    const { data, error } = await supabase
+      .from('network_areas')
+      .update({
+        parent_router: cleanParent,
+        area_name: cleanNewName,
+        prefix_code: cleanPrefix,
+        updated_at: new Date().toISOString(),
+      })
+      .eq('id', id)
+      .select()
+      .single();
+
+    if (error) {
+      return { success: false, error: error.message };
+    }
+
+    if (oldAreaName && oldAreaName.trim() !== cleanNewName) {
+      await supabase
+        .from('portal_users')
+        .update({ area: cleanNewName })
+        .eq('area', oldAreaName.trim());
+    }
+
+    emitNetworkAreasUpdated();
+    return { success: true, data: data as NetworkAreaNode };
+  } catch (err: any) {
+    return { success: false, error: err.message || 'Failed to update area.' };
   }
 }
 

@@ -23,6 +23,7 @@ import { useISP } from '../context/ISPContext';
 import { useCurrency } from '../context/CurrencyContext';
 import { ActiveTab } from './Header';
 import { UsageAnalytics } from './UsageAnalytics';
+import { ReceivingVsDuesChart } from './ReceivingVsDuesChart';
 import { OutageBanner } from './OutageBanner';
 import { fetchMikrotikPppSecrets } from '../services/mikrotikRestClient';
 
@@ -368,6 +369,9 @@ export const NocOverview: React.FC<NocOverviewProps> = ({
 
       {/* Usage Analytics Component with Recharts */}
       <UsageAnalytics />
+
+      {/* Monthly / Date-Range Receiving vs. Pending Dues Analytics */}
+      <ReceivingVsDuesChart autoFetch showFilterToolbar />
 
       {/* Quick Automation CRON Execution Bar */}
       <div className="bg-slate-900 border border-slate-800 p-4 rounded-xl flex flex-wrap items-center justify-between gap-4 shadow-lg">

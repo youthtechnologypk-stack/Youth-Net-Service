@@ -4,7 +4,12 @@ import { useISP } from '../context/ISPContext';
 import { storageService, BandwidthProfile } from '../services/storageService';
 import { formatRouterOSSchedule, calculateRemainingTime } from '../services/mikrotikSubscriberSync';
 import { AreaNodeSelector } from './AreaNodeSelector';
-import { fetchNetworkAreas, resolveAreaFromUsername, NetworkAreaNode } from '../lib/billingAndNetwork';
+import {
+  fetchNetworkAreas,
+  resolveAreaFromUsername,
+  NetworkAreaNode,
+  NETWORK_AREAS_UPDATED_EVENT,
+} from '../lib/billingAndNetwork';
 
 interface ProvisionSecretModalProps {
   isOpen: boolean;
@@ -62,8 +67,13 @@ export const ProvisionSecretModal: React.FC<ProvisionSecretModalProps> = ({ isOp
   const [isSubmitting, setIsSubmitting] = useState(false);
 
   useEffect(() => {
-    fetchNetworkAreas().then(setNetworkAreas).catch(() => {});
-  }, []);
+    const loadAreas = () => {
+      fetchNetworkAreas().then(setNetworkAreas).catch(() => {});
+    };
+    loadAreas();
+    window.addEventListener(NETWORK_AREAS_UPDATED_EVENT, loadAreas);
+    return () => window.removeEventListener(NETWORK_AREAS_UPDATED_EVENT, loadAreas);
+  }, [isOpen]);
 
   const handlePppoeUsernameChange = (rawVal: string) => {
     const clean = rawVal.toLowerCase().replace(/[^a-z0-9_]/g, '');

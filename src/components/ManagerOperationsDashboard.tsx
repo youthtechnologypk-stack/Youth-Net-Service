@@ -36,11 +36,20 @@ import {
 } from '../services/supabaseClient';
 import {
   PARENT_FLEET_ROUTER,
+  NETWORK_AREAS_UPDATED_EVENT,
   NetworkAreaNode,
   fetchNetworkAreas,
   resolveAreaFromUsername,
 } from '../lib/billingAndNetwork';
 import { AreaNodeSelector } from './AreaNodeSelector';
+import { AreaNodeManagerModal } from './AreaNodeManagerModal';
+import { DateFilterToolbar } from './DateFilterToolbar';
+import {
+  DateFilterState,
+  createDefaultDateFilter,
+  describeDateFilter,
+  matchesDateFilter,
+} from '../lib/dateFilter';
 import { safeMikrotikFetch } from '../services/mikrotikRestClient';
 import { AgentProfileView } from './AgentProfileView';
 
@@ -123,6 +132,8 @@ export const ManagerOperationsDashboard: React.FC<ManagerOperationsDashboardProp
   const [subPage, setSubPage] = useState(1);
   const [showAllSubscribers, setShowAllSubscribers] = useState(false);
   const [selectedAgentLedger, setSelectedAgentLedger] = useState<SupabasePortalUser | null>(null);
+  const [dateFilter, setDateFilter] = useState<DateFilterState>(() => createDefaultDateFilter('month'));
+  const [isAreaManagerOpen, setIsAreaManagerOpen] = useState<boolean>(false);
   const [toastNotice, setToastNotice] = useState<string | null>(null);
   const [kickingUsername, setKickingUsername] = useState<string | null>(null);
   const [approvingAgentId, setApprovingAgentId] = useState<string | null>(null);
@@ -222,6 +233,11 @@ export const ManagerOperationsDashboard: React.FC<ManagerOperationsDashboardProp
       })
       .subscribe();
 
+    const handleAreasUpdated = () => {
+      fetchNetworkAreas().then(setNetworkAreas).catch(() => {});
+    };
+    window.addEventListener(NETWORK_AREAS_UPDATED_EVENT, handleAreasUpdated);
+
     const pollTimer = setInterval(() => {
       safeMikrotikFetch('/api/mikrotik/ppp/active')
         .then((r) => (r.ok ? r.json() : null))
@@ -233,6 +249,7 @@ export const ManagerOperationsDashboard: React.FC<ManagerOperationsDashboardProp
 
     return () => {
       supabase.removeChannel(ch);
+      window.removeEventListener(NETWORK_AREAS_UPDATED_EVENT, handleAreasUpdated);
       clearInterval(pollTimer);
     };
   }, [fetchOperationsData]);
@@ -349,13 +366,46 @@ export const ManagerOperationsDashboard: React.FC<ManagerOperationsDashboardProp
     return map;
   }, [invoices]);
 
-  // Compute live agent cash-in-hand & collected today from payment_transactions + paid invoices + agent_cash_transactions
+  // Date-filtered transactions, tickets, and ledger rows
+  const dateFilteredTickets = useMemo(() => {
+    return (tickets || []).filter((t) => matchesDateFilter(t.created_at, dateFilter));
+  }, [tickets, dateFilter]);
+
+  const dateFilteredPayments = useMemo(() => {
+    return (paymentTxns || []).filter((tx) =>
+      matchesDateFilter(tx.payment_date || tx.created_at, dateFilter)
+    );
+  }, [paymentTxns, dateFilter]);
+
+  const dateFilteredInvoices = useMemo(() => {
+    return (invoices || []).filter((inv) =>
+      matchesDateFilter([inv.created_at, inv.due_date, inv.paid_at], dateFilter)
+    );
+  }, [invoices, dateFilter]);
+
+  const dateFilteredCashLedger = useMemo(() => {
+    return (cashLedger || []).filter((row) => matchesDateFilter(row.created_at, dateFilter));
+  }, [cashLedger, dateFilter]);
+
+  // Compute cumulative Cash-in-Hand + period-filtered recovery & handover totals per agent
   const agentFinancials = useMemo(() => {
-    const todayStr = new Date().toISOString().split('T')[0];
-    const map: Record<string, { cashInHand: number; collectedToday: number; openTickets: number }> = {};
+    const map: Record<
+      string,
+      {
+        cashInHand: number;
+        collectedInPeriod: number;
+        handedOverInPeriod: number;
+        openTickets: number;
+      }
+    > = {};
 
     for (const ag of agents) {
-      map[ag.id] = { cashInHand: 0, collectedToday: 0, openTickets: 0 };
+      map[ag.id] = {
+        cashInHand: 0,
+        collectedInPeriod: 0,
+        handedOverInPeriod: 0,
+        openTickets: 0,
+      };
     }
 
     const findMatchingAgent = (id?: string | null, name?: string | null) => {
@@ -375,32 +425,25 @@ export const ManagerOperationsDashboard: React.FC<ManagerOperationsDashboardProp
       });
     };
 
+    // Cumulative vault math (true pending Cash in Hand)
     const totalCollectedByAgent: Record<string, number> = {};
-    const recordedInvoiceIds = new Set<string>();
+    const recordedInvoiceIdsAll = new Set<string>();
 
     for (const tx of paymentTxns) {
-      if (tx.invoice_id) recordedInvoiceIds.add(tx.invoice_id);
+      if (tx.invoice_id) recordedInvoiceIdsAll.add(tx.invoice_id);
       const matchedAgent = findMatchingAgent(tx.collected_by_id, tx.collected_by_name);
       if (!matchedAgent) continue;
-      const amt = Number(tx.amount_paid) || 0;
-      totalCollectedByAgent[matchedAgent.id] = (totalCollectedByAgent[matchedAgent.id] || 0) + amt;
-      const dtStr = tx.payment_date || tx.created_at || '';
-      if (dtStr.startsWith(todayStr)) {
-        map[matchedAgent.id].collectedToday += amt;
-      }
+      totalCollectedByAgent[matchedAgent.id] =
+        (totalCollectedByAgent[matchedAgent.id] || 0) + (Number(tx.amount_paid) || 0);
     }
 
-    // Fallback: include paid_amount on invoices assigned to the agent if no payment_transaction row exists for that invoice
     for (const inv of invoices) {
       const paidAmt = Number(inv.paid_amount) || 0;
-      if (paidAmt <= 0 || recordedInvoiceIds.has(inv.id)) continue;
+      if (paidAmt <= 0 || recordedInvoiceIdsAll.has(inv.id)) continue;
       const matchedAgent = findMatchingAgent(inv.assigned_agent_id, inv.assigned_agent_name);
       if (!matchedAgent) continue;
-      totalCollectedByAgent[matchedAgent.id] = (totalCollectedByAgent[matchedAgent.id] || 0) + paidAmt;
-      const dtStr = inv.paid_at || inv.created_at || '';
-      if (dtStr.startsWith(todayStr)) {
-        map[matchedAgent.id].collectedToday += paidAmt;
-      }
+      totalCollectedByAgent[matchedAgent.id] =
+        (totalCollectedByAgent[matchedAgent.id] || 0) + paidAmt;
     }
 
     const totalHandoverByAgent: Record<string, number> = {};
@@ -414,6 +457,33 @@ export const ManagerOperationsDashboard: React.FC<ManagerOperationsDashboardProp
       }
     }
 
+    // Period-filtered recovery & handovers
+    const recordedPeriodInvoiceIds = new Set<string>();
+    for (const tx of dateFilteredPayments) {
+      if (tx.invoice_id) recordedPeriodInvoiceIds.add(tx.invoice_id);
+      const matchedAgent = findMatchingAgent(tx.collected_by_id, tx.collected_by_name);
+      if (!matchedAgent) continue;
+      map[matchedAgent.id].collectedInPeriod += Number(tx.amount_paid) || 0;
+    }
+
+    for (const inv of dateFilteredInvoices) {
+      const paidAmt = Number(inv.paid_amount) || 0;
+      if (paidAmt <= 0 || recordedPeriodInvoiceIds.has(inv.id)) continue;
+      const matchedAgent = findMatchingAgent(inv.assigned_agent_id, inv.assigned_agent_name);
+      if (!matchedAgent) continue;
+      map[matchedAgent.id].collectedInPeriod += paidAmt;
+    }
+
+    for (const row of dateFilteredCashLedger) {
+      const agId = row?.agent_id;
+      if (!agId || !map[agId]) continue;
+      const amt = Number(row?.amount) || 0;
+      const t = (row?.transaction_type || '').toUpperCase();
+      if (t === 'CASH_HANDOVER' || t === 'HANDOVER') {
+        map[agId].handedOverInPeriod += amt;
+      }
+    }
+
     for (const ag of agents) {
       map[ag.id].cashInHand = Math.max(
         0,
@@ -421,7 +491,7 @@ export const ManagerOperationsDashboard: React.FC<ManagerOperationsDashboardProp
       );
     }
 
-    for (const t of tickets) {
+    for (const t of dateFilteredTickets) {
       const st = (t?.status || '').toUpperCase();
       if (st !== 'RESOLVED' && t?.assigned_agent_id && map[t.assigned_agent_id]) {
         map[t.assigned_agent_id].openTickets += 1;
@@ -429,14 +499,23 @@ export const ManagerOperationsDashboard: React.FC<ManagerOperationsDashboardProp
     }
 
     return map;
-  }, [agents, paymentTxns, invoices, cashLedger, tickets]);
+  }, [
+    agents,
+    paymentTxns,
+    invoices,
+    cashLedger,
+    dateFilteredPayments,
+    dateFilteredInvoices,
+    dateFilteredCashLedger,
+    dateFilteredTickets,
+  ]);
 
-  // Sector-scoped datasets
+  // Sector-scoped + period-filtered datasets
   const scopedOutages = (outages || []).filter((o) =>
     sectorFilter === 'ALL' ? true : (o?.areaNode || '').toLowerCase().includes(cleanSector)
   );
 
-  const scopedTickets = tickets.filter((t) => {
+  const scopedTickets = dateFilteredTickets.filter((t) => {
     if (sectorFilter === 'ALL') return true;
     const sub = subscriberMap[(t?.subscriber_username || '').toLowerCase()];
     const subArea = sub?.area || '';
@@ -462,8 +541,8 @@ export const ManagerOperationsDashboard: React.FC<ManagerOperationsDashboardProp
     (acc, a) => acc + Math.max(0, agentFinancials[a.id]?.cashInHand || 0),
     0
   );
-  const totalCollectedToday = scopedAgents.reduce(
-    (acc, a) => acc + (agentFinancials[a.id]?.collectedToday || 0),
+  const totalCollectedInPeriod = scopedAgents.reduce(
+    (acc, a) => acc + (agentFinancials[a.id]?.collectedInPeriod || 0),
     0
   );
 
@@ -737,6 +816,15 @@ export const ManagerOperationsDashboard: React.FC<ManagerOperationsDashboardProp
 
             <button
               type="button"
+              onClick={() => setIsAreaManagerOpen(true)}
+              className="px-3 py-1.5 rounded-lg bg-slate-800 hover:bg-slate-700 text-emerald-300 border border-slate-700 font-mono text-xs flex items-center gap-1.5 transition cursor-pointer"
+            >
+              <MapPin className="w-3.5 h-3.5 text-emerald-400" />
+              <span>Manage Areas</span>
+            </button>
+
+            <button
+              type="button"
               onClick={() => fetchOperationsData(true)}
               disabled={isRefreshing}
               className="px-3 py-1.5 rounded-lg bg-slate-800 hover:bg-slate-700 text-cyan-300 border border-slate-700 font-mono text-xs flex items-center gap-1.5 transition cursor-pointer disabled:opacity-50"
@@ -807,11 +895,20 @@ export const ManagerOperationsDashboard: React.FC<ManagerOperationsDashboardProp
         </div>
       </div>
 
+      {/* Month-Wise & Custom Date Range Filter Toolbar */}
+      <DateFilterToolbar
+        value={dateFilter}
+        onChange={setDateFilter}
+        totalCount={tickets.length}
+        filteredCount={scopedTickets.length}
+        recordLabel="tickets"
+      />
+
       {/* Live KPI Status Strip */}
       <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
         <div className="bg-slate-900/90 border border-slate-800 p-4 rounded-xl">
           <span className="text-slate-400 text-[10px] uppercase font-mono block">Online PPPoE Sessions</span>
-          <div className="text-xl font-bold font-mono text-emerald-400 mt-1 flex items-center justify-between">
+          <div className="text-xl font-bold font-mono tabular-nums text-emerald-400 mt-1 flex items-center justify-between">
             <span>{liveSessions.length}</span>
             <Activity className="w-4 h-4 text-emerald-500" />
           </div>
@@ -822,12 +919,12 @@ export const ManagerOperationsDashboard: React.FC<ManagerOperationsDashboardProp
 
         <div className="bg-slate-900/90 border border-slate-800 p-4 rounded-xl">
           <span className="text-slate-400 text-[10px] uppercase font-mono block">Pending SLA Tickets</span>
-          <div className="text-xl font-bold font-mono text-amber-400 mt-1 flex items-center justify-between">
+          <div className="text-xl font-bold font-mono tabular-nums text-amber-400 mt-1 flex items-center justify-between">
             <span>{openTickets.length}</span>
             <Clock className="w-4 h-4 text-amber-500" />
           </div>
           <span className="text-[10px] text-slate-500 mt-0.5 block">
-            {scopedTickets.length} total in Supabase
+            {scopedTickets.length} in {describeDateFilter(dateFilter)}
           </span>
         </div>
 
@@ -847,7 +944,7 @@ export const ManagerOperationsDashboard: React.FC<ManagerOperationsDashboardProp
         >
           <div className="bg-slate-900/90 border border-slate-800 p-4 rounded-xl">
             <span className="text-slate-400 text-[10px] uppercase font-mono block">Agent Cash In Hand</span>
-            <div className="text-xl font-bold font-mono text-cyan-300 mt-1 flex items-center justify-between">
+            <div className="text-xl font-bold font-mono tabular-nums text-cyan-300 mt-1 flex items-center justify-between">
               <span>{formatCurrency(totalAgentCashInHand)}</span>
               <CreditCard className="w-4 h-4 text-cyan-400" />
             </div>
@@ -862,7 +959,7 @@ export const ManagerOperationsDashboard: React.FC<ManagerOperationsDashboardProp
           role={activeManager?.role === 'ADMIN' ? 'ADMIN' : 'MANAGER'}
           fallback={
             <div className="bg-slate-900/90 border border-slate-800 p-4 rounded-xl opacity-60">
-              <span className="text-slate-400 text-[10px] uppercase font-mono block">Collected Today</span>
+              <span className="text-slate-400 text-[10px] uppercase font-mono block">Recovery ({describeDateFilter(dateFilter)})</span>
               <div className="text-sm font-bold font-mono text-slate-500 mt-2 flex items-center gap-1.5">
                 <Lock className="w-3.5 h-3.5 text-amber-400" />
                 <span>Restricted by Admin</span>
@@ -872,9 +969,11 @@ export const ManagerOperationsDashboard: React.FC<ManagerOperationsDashboardProp
           }
         >
           <div className="bg-slate-900/90 border border-slate-800 p-4 rounded-xl">
-            <span className="text-slate-400 text-[10px] uppercase font-mono block">Collected Today</span>
-            <div className="text-xl font-bold font-mono text-emerald-400 mt-1 flex items-center justify-between">
-              <span>{formatCurrency(totalCollectedToday)}</span>
+            <span className="text-slate-400 text-[10px] uppercase font-mono block">
+              Recovery ({describeDateFilter(dateFilter)})
+            </span>
+            <div className="text-xl font-bold font-mono tabular-nums text-emerald-400 mt-1 flex items-center justify-between">
+              <span>{formatCurrency(totalCollectedInPeriod)}</span>
               <TrendingUp className="w-4 h-4 text-emerald-400" />
             </div>
             <span className="text-[10px] text-slate-500 mt-0.5 block">Live Supabase ledger recoveries</span>
@@ -896,7 +995,12 @@ export const ManagerOperationsDashboard: React.FC<ManagerOperationsDashboardProp
           </div>
           <div className="flex flex-wrap gap-2">
             {scopedAgents.map((ag) => {
-              const stats = agentFinancials[ag.id] || { openTickets: 0, cashInHand: 0, collectedToday: 0 };
+              const stats = agentFinancials[ag.id] || {
+                openTickets: 0,
+                cashInHand: 0,
+                collectedInPeriod: 0,
+                handedOverInPeriod: 0,
+              };
               return (
                 <div
                   key={ag.id}
@@ -1301,7 +1405,12 @@ export const ManagerOperationsDashboard: React.FC<ManagerOperationsDashboardProp
             ) : (
               <div className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-3 gap-3">
                 {scopedAgents.map((agent) => {
-                  const fin = agentFinancials[agent.id] || { cashInHand: 0, collectedToday: 0, openTickets: 0 };
+                  const fin = agentFinancials[agent.id] || {
+                    cashInHand: 0,
+                    collectedInPeriod: 0,
+                    handedOverInPeriod: 0,
+                    openTickets: 0,
+                  };
                   return (
                     <div key={agent.id} className="bg-slate-950 border border-slate-800 rounded-xl p-4 space-y-3">
                       <div className="flex items-center justify-between">
@@ -1310,13 +1419,17 @@ export const ManagerOperationsDashboard: React.FC<ManagerOperationsDashboardProp
                           {agent.area || 'Field'}
                         </span>
                       </div>
-                      <div className="flex justify-between font-mono text-xs pt-1 border-t border-slate-800">
-                        <span className="text-slate-400">Cash in Hand:</span>
+                      <div className="flex justify-between font-mono text-xs tabular-nums pt-1 border-t border-slate-800">
+                        <span className="text-slate-400">Cash in Hand (Vault):</span>
                         <span className="text-cyan-300 font-bold">{formatCurrency(Math.max(0, fin.cashInHand))}</span>
                       </div>
-                      <div className="flex justify-between font-mono text-xs">
-                        <span className="text-slate-400">Collected Today:</span>
-                        <span className="text-emerald-400 font-bold">{formatCurrency(fin.collectedToday)}</span>
+                      <div className="flex justify-between font-mono text-xs tabular-nums">
+                        <span className="text-slate-400">Collected ({describeDateFilter(dateFilter)}):</span>
+                        <span className="text-emerald-400 font-bold">{formatCurrency(fin.collectedInPeriod)}</span>
+                      </div>
+                      <div className="flex justify-between font-mono text-xs tabular-nums">
+                        <span className="text-slate-400">Handed Over ({describeDateFilter(dateFilter)}):</span>
+                        <span className="text-purple-300 font-bold">{formatCurrency(fin.handedOverInPeriod)}</span>
                       </div>
                       <div className="flex justify-between font-mono text-xs text-slate-500">
                         <span>Phone:</span>
@@ -1624,6 +1737,15 @@ export const ManagerOperationsDashboard: React.FC<ManagerOperationsDashboardProp
           </div>
         </div>
       )}
+
+      <AreaNodeManagerModal
+        isOpen={isAreaManagerOpen}
+        onClose={() => setIsAreaManagerOpen(false)}
+        onAreasUpdated={(updated) => {
+          setNetworkAreas(updated);
+          fetchOperationsData();
+        }}
+      />
     </div>
   );
 };

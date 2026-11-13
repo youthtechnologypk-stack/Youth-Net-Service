@@ -29,7 +29,20 @@ import {
   fetchMikrotikInterfaceTrafficOnce,
   resolveAreaFromUsername,
 } from '../lib/billingAndNetwork';
+import {
+  ResponsiveContainer,
+  ComposedChart,
+  Area,
+  Line,
+  XAxis,
+  YAxis,
+  CartesianGrid,
+  Tooltip,
+  Legend,
+  ReferenceLine,
+} from 'recharts';
 import { EditUpstreamLinkModal } from './EditUpstreamLinkModal';
+import { AreaNodeManagerModal } from './AreaNodeManagerModal';
 import { safeMikrotikFetch } from '../services/mikrotikRestClient';
 import { useISP } from '../context/ISPContext';
 import { useAuth } from '../context/AuthContext';
@@ -64,6 +77,13 @@ interface InterfaceByteSnapshot {
   rxBytes: number;
   txBytes: number;
   timestampMs: number;
+}
+
+interface WanTrafficPoint {
+  time: string;
+  rxMbps: number;
+  txMbps: number;
+  totalTrafficMbps: number;
 }
 
 const DEFAULT_CONFIG: SupabaseUpstreamCapacityConfig = {
@@ -106,8 +126,9 @@ export const CapacityPlannerView: React.FC = () => {
   const [isLoading, setIsLoading] = useState<boolean>(true);
   const [isRefreshing, setIsRefreshing] = useState<boolean>(false);
 
-  // Edit Upstream Link modal state
+  // Edit Upstream Link & Area Manager modal state
   const [isEditModalOpen, setIsEditModalOpen] = useState<boolean>(false);
+  const [isAreaManagerOpen, setIsAreaManagerOpen] = useState<boolean>(false);
   const [saveNotice, setSaveNotice] = useState<{ text: string; type: 'success' | 'error' } | null>(null);
 
   // Live MikroTik & Supabase datasets
@@ -117,10 +138,11 @@ export const CapacityPlannerView: React.FC = () => {
   const [portalClients, setPortalClients] = useState<SupabasePortalUser[]>([]);
   const [networkAreas, setNetworkAreas] = useState<NetworkAreaNode[]>([]);
 
-  // Live WAN throughput & per-user rate deltas
+  // Live WAN throughput, rolling 30-point chart series, & per-user rate deltas
   const [liveDownloadMbps, setLiveDownloadMbps] = useState<number>(0);
   const [liveUploadMbps, setLiveUploadMbps] = useState<number>(0);
   const [peakDownloadMbps, setPeakDownloadMbps] = useState<number>(0);
+  const [trafficSeries, setTrafficSeries] = useState<WanTrafficPoint[]>([]);
   const [lastPolledAt, setLastPolledAt] = useState<string>('');
   const [mikrotikReachable, setMikrotikReachable] = useState<boolean>(true);
 
@@ -137,32 +159,44 @@ export const CapacityPlannerView: React.FC = () => {
     setTimeout(() => setSaveNotice(null), 4000);
   };
 
+  // Dedicated Supabase fetch for upstream_capacity_config (no localStorage override)
+  const fetchUpstreamConfig = useCallback(async () => {
+    const { data, error } = await supabase
+      .from('upstream_capacity_config')
+      .select('*')
+      .order('updated_at', { ascending: false })
+      .limit(1)
+      .maybeSingle();
+
+    if (data && !error) {
+      const loaded = data as SupabaseUpstreamCapacityConfig;
+      setConfig({
+        id: loaded.id,
+        provider_name: loaded.provider_name ?? DEFAULT_CONFIG.provider_name,
+        total_dedicated_mbps: Number(loaded.total_dedicated_mbps) || DEFAULT_CONFIG.total_dedicated_mbps,
+        contention_ratio: Number(loaded.contention_ratio) || DEFAULT_CONFIG.contention_ratio,
+        warning_threshold_pct: Number(loaded.warning_threshold_pct) || DEFAULT_CONFIG.warning_threshold_pct,
+        critical_threshold_pct: Number(loaded.critical_threshold_pct) || DEFAULT_CONFIG.critical_threshold_pct,
+        wan_interface_name: (loaded.wan_interface_name || DEFAULT_CONFIG.wan_interface_name)
+          .replace(/\s*\(Configured\)\s*$/i, '')
+          .trim(),
+        updated_at: loaded.updated_at,
+      });
+    }
+  }, []);
+
   // Load Supabase config, portal_users, network_areas, and MikroTik secrets/active
   const fetchPlannerDatasets = useCallback(async (showSpinner = false) => {
     if (showSpinner) setIsRefreshing(true);
     try {
-      const [cfgRes, usersRes, areasRes, secretsRes, activeRes, ifaceRes] = await Promise.all([
-        supabase.from('upstream_capacity_config').select('*').limit(1).maybeSingle(),
+      const [, usersRes, areasRes, secretsRes, activeRes, ifaceRes] = await Promise.all([
+        fetchUpstreamConfig(),
         supabase.from('portal_users').select('*').eq('role', 'CLIENT'),
         fetchNetworkAreas(),
         safeMikrotikFetch('/api/mikrotik/ppp/secret', {}, activeRouter).then((r) => (r.ok ? r.json() : null)).catch(() => null),
         safeMikrotikFetch('/api/mikrotik/ppp/active', {}, activeRouter).then((r) => (r.ok ? r.json() : null)).catch(() => null),
         safeMikrotikFetch('/api/mikrotik/interface', {}, activeRouter).then((r) => (r.ok ? r.json() : null)).catch(() => null),
       ]);
-
-      if (cfgRes.data) {
-        const loaded = cfgRes.data as SupabaseUpstreamCapacityConfig;
-        setConfig({
-          id: loaded.id,
-          provider_name: loaded.provider_name || DEFAULT_CONFIG.provider_name,
-          total_dedicated_mbps: Number(loaded.total_dedicated_mbps) || 50,
-          contention_ratio: Number(loaded.contention_ratio) || 6,
-          warning_threshold_pct: Number(loaded.warning_threshold_pct) || 80,
-          critical_threshold_pct: Number(loaded.critical_threshold_pct) || 92,
-          wan_interface_name: loaded.wan_interface_name || DEFAULT_CONFIG.wan_interface_name,
-          updated_at: loaded.updated_at,
-        });
-      }
 
       if (Array.isArray(usersRes.data)) {
         setPortalClients(usersRes.data as SupabasePortalUser[]);
@@ -188,7 +222,7 @@ export const CapacityPlannerView: React.FC = () => {
       setIsLoading(false);
       setIsRefreshing(false);
     }
-  }, [activeRouter]);
+  }, [activeRouter, fetchUpstreamConfig]);
 
   useEffect(() => {
     fetchPlannerDatasets();
@@ -196,7 +230,7 @@ export const CapacityPlannerView: React.FC = () => {
     const ch = supabase
       .channel('public:capacity_planner_sync')
       .on('postgres_changes', { event: '*', schema: 'public', table: 'upstream_capacity_config' }, () => {
-        fetchPlannerDatasets();
+        fetchUpstreamConfig();
       })
       .on('postgres_changes', { event: '*', schema: 'public', table: 'portal_users' }, () => {
         fetchPlannerDatasets();
@@ -209,9 +243,9 @@ export const CapacityPlannerView: React.FC = () => {
     return () => {
       supabase.removeChannel(ch);
     };
-  }, [fetchPlannerDatasets]);
+  }, [fetchPlannerDatasets, fetchUpstreamConfig]);
 
-  // Determine the active WAN interface name to monitor
+  // Determine the active WAN interface name to monitor (strictly honoring saved Supabase config)
   const physicalInterfaces = useMemo(() => {
     return interfaces.filter((iface) => {
       const name = String(iface?.name || '').trim();
@@ -220,25 +254,29 @@ export const CapacityPlannerView: React.FC = () => {
   }, [interfaces]);
 
   const effectiveWanInterface = useMemo(() => {
-    const configured = (config.wan_interface_name || '').trim();
-    if (physicalInterfaces.length === 0) return configured || 'ether1-WAN';
+    const configured = (config.wan_interface_name || '')
+      .replace(/\s*\(Configured\)\s*$/i, '')
+      .trim();
 
-    const exact = physicalInterfaces.find(
-      (i) => (i.name || '').toLowerCase() === configured.toLowerCase()
-    );
-    if (exact?.name) return exact.name;
+    if (configured) {
+      const exact = physicalInterfaces.find(
+        (i) => (i.name || '').toLowerCase() === configured.toLowerCase()
+      );
+      return exact?.name || configured;
+    }
 
     const preferred =
       physicalInterfaces.find((i) => /wan|ether1|sfp/i.test(i.name || '') && i.running !== 'false' && i.running !== false) ||
       physicalInterfaces.find((i) => /ether|sfp|bridge/i.test(i.name || '')) ||
       physicalInterfaces[0];
 
-    return preferred?.name || configured || 'ether1-WAN';
+    return preferred?.name || 'ether1-WAN';
   }, [config.wan_interface_name, physicalInterfaces]);
 
   // Poll live WAN traffic every 3 seconds + compute per-PPPoE session rates via interface byte counters
   useEffect(() => {
     let isMounted = true;
+    setTrafficSeries([]);
 
     const pollLiveTraffic = async () => {
       try {
@@ -251,11 +289,29 @@ export const CapacityPlannerView: React.FC = () => {
         if (!isMounted) return;
 
         if (wanSample.ok) {
+          const rxMbps = Number(wanSample.rxMbps) || 0;
+          const txMbps = Number(wanSample.txMbps) || 0;
+          const totalTrafficMbps = Math.round((rxMbps + txMbps) * 100) / 100;
+          const nowTimeStr = new Date().toLocaleTimeString([], {
+            hour: '2-digit',
+            minute: '2-digit',
+            second: '2-digit',
+          });
+
           setMikrotikReachable(true);
-          setLiveDownloadMbps(wanSample.rxMbps);
-          setLiveUploadMbps(wanSample.txMbps);
-          setPeakDownloadMbps((prev) => Math.max(prev, wanSample.rxMbps));
-          setLastPolledAt(new Date().toLocaleTimeString());
+          setLiveDownloadMbps(rxMbps);
+          setLiveUploadMbps(txMbps);
+          setPeakDownloadMbps((prev) => Math.max(prev, rxMbps));
+          setLastPolledAt(nowTimeStr);
+          setTrafficSeries((prev) => [
+            ...prev.slice(-29),
+            {
+              time: nowTimeStr,
+              rxMbps,
+              txMbps,
+              totalTrafficMbps,
+            },
+          ]);
         }
 
         if (Array.isArray(activeList)) {
@@ -814,6 +870,178 @@ export const CapacityPlannerView: React.FC = () => {
             </span>
           </div>
         </div>
+
+        {/* Real-Time Recharts Bandwidth Usage vs CIR Limit */}
+        {(() => {
+          const warningLimitMbps = Number(((totalDedicatedMbps * warningThreshold) / 100).toFixed(2));
+          const peakTraffic = trafficSeries.reduce(
+            (max, p) => Math.max(max, p.totalTrafficMbps, p.rxMbps, p.txMbps),
+            0
+          );
+          const yAxisUpper = Math.ceil(Math.max(totalDedicatedMbps * 1.15, peakTraffic * 1.15));
+          const latestPoint = trafficSeries[trafficSeries.length - 1];
+          const liveTotalMbps = latestPoint
+            ? latestPoint.totalTrafficMbps
+            : Math.round((liveDownloadMbps + liveUploadMbps) * 100) / 100;
+
+          return (
+            <div className="pt-4 border-t border-slate-800 space-y-3">
+              <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2">
+                <div>
+                  <h3 className="text-sm font-bold text-white flex items-center gap-2">
+                    <Activity className="w-4 h-4 text-cyan-400" />
+                    <span>Real-Time WAN Throughput vs. Dedicated CIR Limit</span>
+                  </h3>
+                  <p className="text-xs text-slate-400 font-mono tabular-nums mt-0.5">
+                    Polling <strong className="text-cyan-300">{effectiveWanInterface}</strong> every 3s · Rolling 30 samples · Current RX+TX:{' '}
+                    <strong className="text-white">{liveTotalMbps.toFixed(2)} Mbps</strong> vs {totalDedicatedMbps} Mbps CIR
+                  </p>
+                </div>
+                <span className="text-[11px] font-mono tabular-nums text-slate-400">
+                  Warning Line: {warningLimitMbps.toFixed(1)} Mbps ({warningThreshold}%)
+                </span>
+              </div>
+
+              {trafficSeries.length === 0 ? (
+                <div className="h-[320px] rounded-xl bg-slate-950/80 border border-slate-800 flex flex-col items-center justify-center text-center p-6 space-y-2">
+                  <Radio className="w-6 h-6 text-cyan-400 animate-pulse" />
+                  <p className="text-xs font-mono text-slate-300">
+                    Waiting for live /interface/monitor-traffic telemetry on {effectiveWanInterface}...
+                  </p>
+                  <p className="text-[11px] font-mono text-slate-500">
+                    Dedicated CIR Limit configured at {totalDedicatedMbps} Mbps (Warning at {warningLimitMbps} Mbps).
+                  </p>
+                </div>
+              ) : (
+                <div className="bg-slate-950/80 border border-slate-800 rounded-xl p-4 h-[320px]">
+                  <ResponsiveContainer width="100%" height={288}>
+                    <ComposedChart
+                      data={trafficSeries}
+                      margin={{ top: 14, right: 18, left: 0, bottom: 4 }}
+                    >
+                      <defs>
+                        <linearGradient id="capTotalTrafficGrad" x1="0" y1="0" x2="0" y2="1">
+                          <stop offset="5%" stopColor="#06b6d4" stopOpacity={0.38} />
+                          <stop offset="95%" stopColor="#06b6d4" stopOpacity={0.02} />
+                        </linearGradient>
+                        <linearGradient id="capRxGrad" x1="0" y1="0" x2="0" y2="1">
+                          <stop offset="5%" stopColor="#10b981" stopOpacity={0.35} />
+                          <stop offset="95%" stopColor="#10b981" stopOpacity={0.0} />
+                        </linearGradient>
+                      </defs>
+                      <CartesianGrid stroke="#1e293b" strokeDasharray="3 3" opacity={0.65} />
+                      <XAxis
+                        dataKey="time"
+                        stroke="#64748b"
+                        fontSize={10}
+                        tickLine={false}
+                        fontFamily="monospace"
+                      />
+                      <YAxis
+                        domain={[0, yAxisUpper]}
+                        stroke="#64748b"
+                        fontSize={10}
+                        tickLine={false}
+                        fontFamily="monospace"
+                        tickFormatter={(val: number) => `${val}M`}
+                      />
+                      <Tooltip
+                        content={({ active, payload, label }) => {
+                          if (!active || !payload || !payload.length) return null;
+                          const pt = payload[0]?.payload as WanTrafficPoint | undefined;
+                          if (!pt) return null;
+                          const cirPct = Math.round((pt.totalTrafficMbps / totalDedicatedMbps) * 1000) / 10;
+                          return (
+                            <div className="bg-slate-950 border border-slate-700 rounded-xl p-3 shadow-2xl text-xs font-mono tabular-nums space-y-1 min-w-[215px]">
+                              <div className="text-slate-300 font-bold border-b border-slate-800 pb-1 flex items-center justify-between gap-3">
+                                <span>{label}</span>
+                                <span className="text-cyan-400">{effectiveWanInterface}</span>
+                              </div>
+                              <div className="flex justify-between gap-4 text-cyan-300">
+                                <span>Total (RX+TX):</span>
+                                <span className="font-bold">{pt.totalTrafficMbps.toFixed(2)} Mbps</span>
+                              </div>
+                              <div className="flex justify-between gap-4 text-emerald-400">
+                                <span>Download (RX):</span>
+                                <span className="font-bold">{pt.rxMbps.toFixed(2)} Mbps</span>
+                              </div>
+                              <div className="flex justify-between gap-4 text-indigo-300">
+                                <span>Upload (TX):</span>
+                                <span className="font-bold">{pt.txMbps.toFixed(2)} Mbps</span>
+                              </div>
+                              <div className="pt-1 border-t border-slate-800 flex justify-between gap-4 text-rose-300">
+                                <span>CIR Limit ({totalDedicatedMbps}M):</span>
+                                <span className="font-bold">{cirPct.toFixed(1)}% Used</span>
+                              </div>
+                            </div>
+                          );
+                        }}
+                      />
+                      <Legend
+                        verticalAlign="top"
+                        align="right"
+                        wrapperStyle={{ fontSize: '11px', fontFamily: 'monospace', paddingBottom: '8px' }}
+                      />
+                      <ReferenceLine
+                        y={totalDedicatedMbps}
+                        stroke="#ef4444"
+                        strokeDasharray="6 4"
+                        strokeWidth={2}
+                        label={{
+                          value: `Dedicated CIR Limit (${totalDedicatedMbps} Mbps)`,
+                          fill: '#fca5a5',
+                          fontSize: 11,
+                          fontFamily: 'monospace',
+                          position: 'insideTopRight',
+                        }}
+                      />
+                      <ReferenceLine
+                        y={warningLimitMbps}
+                        stroke="#f59e0b"
+                        strokeDasharray="4 4"
+                        strokeWidth={1.5}
+                        label={{
+                          value: `Warning (${warningThreshold}% · ${warningLimitMbps} Mbps)`,
+                          fill: '#fcd34d',
+                          fontSize: 10,
+                          fontFamily: 'monospace',
+                          position: 'insideBottomRight',
+                        }}
+                      />
+                      <Area
+                        type="monotone"
+                        dataKey="totalTrafficMbps"
+                        name="Total Traffic (RX+TX)"
+                        stroke="#06b6d4"
+                        strokeWidth={2.5}
+                        fill="url(#capTotalTrafficGrad)"
+                        isAnimationActive={false}
+                      />
+                      <Area
+                        type="monotone"
+                        dataKey="rxMbps"
+                        name="Download (RX)"
+                        stroke="#10b981"
+                        strokeWidth={2}
+                        fill="url(#capRxGrad)"
+                        isAnimationActive={false}
+                      />
+                      <Line
+                        type="monotone"
+                        dataKey="txMbps"
+                        name="Upload (TX)"
+                        stroke="#6366f1"
+                        strokeWidth={2}
+                        dot={false}
+                        isAnimationActive={false}
+                      />
+                    </ComposedChart>
+                  </ResponsiveContainer>
+                </div>
+              )}
+            </div>
+          );
+        })()}
       </div>
 
       {/* 2. MOHALLAH / AREA BANDWIDTH CONSUMPTION BREAKDOWN */}
@@ -830,6 +1058,15 @@ export const CapacityPlannerView: React.FC = () => {
           </div>
 
           <div className="flex flex-wrap items-center gap-2">
+            <button
+              type="button"
+              onClick={() => setIsAreaManagerOpen(true)}
+              className="px-3 py-1.5 rounded-lg bg-slate-800 hover:bg-slate-700 text-cyan-300 border border-slate-700 font-semibold text-xs flex items-center gap-1.5 transition cursor-pointer whitespace-nowrap"
+            >
+              <MapPin className="w-3.5 h-3.5" />
+              <span>Manage Areas</span>
+            </button>
+
             <div className="flex items-center gap-1 p-1 bg-slate-950 border border-slate-800 rounded-lg font-mono text-[11px]">
               <button
                 type="button"
@@ -1117,13 +1354,21 @@ export const CapacityPlannerView: React.FC = () => {
         onClose={() => setIsEditModalOpen(false)}
         config={config}
         initialInterfaces={physicalInterfaces}
-        onSaved={(updated) => {
+        onSaved={async (updated) => {
           setConfig(updated);
           setPeakDownloadMbps(0);
+          await fetchUpstreamConfig();
           showToast(
             `Upstream capacity saved (${updated.total_dedicated_mbps} Mbps CIR · 1:${updated.contention_ratio} · ${updated.wan_interface_name}).`
           );
         }}
+      />
+
+      {/* Area & Node Manager Modal */}
+      <AreaNodeManagerModal
+        isOpen={isAreaManagerOpen}
+        onClose={() => setIsAreaManagerOpen(false)}
+        onAreasUpdated={(updated) => setNetworkAreas(updated)}
       />
     </div>
   );

@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useCallback } from 'react';
+import React, { useState, useEffect, useCallback, useRef } from 'react';
 import {
   AlertTriangle,
   Network,
@@ -27,7 +27,7 @@ export interface EditUpstreamLinkModalProps {
   onClose: () => void;
   config: SupabaseUpstreamCapacityConfig;
   initialInterfaces?: MikrotikInterfaceOption[];
-  onSaved: (updated: SupabaseUpstreamCapacityConfig) => void;
+  onSaved: (updated: SupabaseUpstreamCapacityConfig) => void | Promise<void>;
 }
 
 export const EditUpstreamLinkModal: React.FC<EditUpstreamLinkModalProps> = ({
@@ -57,6 +57,12 @@ export const EditUpstreamLinkModal: React.FC<EditUpstreamLinkModalProps> = ({
   const [isSaving, setIsSaving] = useState<boolean>(false);
   const [formError, setFormError] = useState<string | null>(null);
 
+  const wasOpenRef = useRef<boolean>(false);
+  const initialInterfacesRef = useRef<MikrotikInterfaceOption[]>(initialInterfaces);
+  useEffect(() => {
+    initialInterfacesRef.current = initialInterfaces;
+  }, [initialInterfaces]);
+
   const loadMikrotikInterfaces = useCallback(async () => {
     setIsLoadingInterfaces(true);
     setInterfaceError(null);
@@ -78,7 +84,7 @@ export const EditUpstreamLinkModal: React.FC<EditUpstreamLinkModalProps> = ({
         setIsCustomInterface(true);
       }
     } catch {
-      const fallback = (initialInterfaces || []).filter((item) => {
+      const fallback = (initialInterfacesRef.current || []).filter((item) => {
         const name = String(item?.name || '').trim();
         return Boolean(name) && !name.startsWith('<pppoe-');
       });
@@ -90,19 +96,32 @@ export const EditUpstreamLinkModal: React.FC<EditUpstreamLinkModalProps> = ({
     } finally {
       setIsLoadingInterfaces(false);
     }
-  }, [initialInterfaces, activeRouter]);
+  }, [activeRouter]);
 
+  // Initialize form fields ONLY when the modal transitions from closed -> open
+  // so 3s background telemetry polling never overwrites user edits.
   useEffect(() => {
-    if (!isOpen) return;
+    if (!isOpen) {
+      wasOpenRef.current = false;
+      return;
+    }
+    if (wasOpenRef.current) return;
+    wasOpenRef.current = true;
+
+    const cleanWan = (config.wan_interface_name || 'ether1-WAN')
+      .replace(/\s*\(Configured\)\s*$/i, '')
+      .trim();
+
     setProviderName(config.provider_name || 'Multinet Dedicated CIR');
     setTotalDedicatedMbps(String(config.total_dedicated_mbps || 50));
     setContentionRatio(String(config.contention_ratio || 6));
     setWarningThresholdPct(String(config.warning_threshold_pct || 80));
     setCriticalThresholdPct(String(config.critical_threshold_pct || 92));
-    setWanInterfaceName(config.wan_interface_name || 'ether1-WAN');
+    setWanInterfaceName(cleanWan || 'ether1-WAN');
     setFormError(null);
     setIsCustomInterface(false);
-    const cached = (initialInterfaces || []).filter((item) => {
+
+    const cached = (initialInterfacesRef.current || []).filter((item) => {
       const name = String(item?.name || '').trim();
       return Boolean(name) && !name.startsWith('<pppoe-');
     });
@@ -110,7 +129,7 @@ export const EditUpstreamLinkModal: React.FC<EditUpstreamLinkModalProps> = ({
       setInterfaces(cached);
     }
     loadMikrotikInterfaces();
-  }, [isOpen, config, initialInterfaces, loadMikrotikInterfaces]);
+  }, [isOpen, config, loadMikrotikInterfaces]);
 
   if (!isOpen) return null;
 
@@ -128,6 +147,8 @@ export const EditUpstreamLinkModal: React.FC<EditUpstreamLinkModalProps> = ({
       return;
     }
 
+    const cleanWanName = wanInterfaceName.replace(/\s*\(Configured\)\s*$/i, '').trim();
+
     if (!Number.isFinite(dedicatedNum) || dedicatedNum <= 0) {
       setFormError('Total Dedicated CIR (Mbps) must be greater than 0.');
       return;
@@ -144,7 +165,7 @@ export const EditUpstreamLinkModal: React.FC<EditUpstreamLinkModalProps> = ({
       setFormError('Critical threshold must be greater than Warning threshold and at most 100%.');
       return;
     }
-    if (!wanInterfaceName.trim()) {
+    if (!cleanWanName) {
       setFormError('Please select or enter a WAN interface name.');
       return;
     }
@@ -153,17 +174,17 @@ export const EditUpstreamLinkModal: React.FC<EditUpstreamLinkModalProps> = ({
     try {
       const payload = {
         provider_name: providerName.trim() || 'Multinet Dedicated CIR',
-        total_dedicated_mbps: dedicatedNum,
-        contention_ratio: ratioNum,
-        warning_threshold_pct: warnNum,
-        critical_threshold_pct: critNum,
-        wan_interface_name: wanInterfaceName.trim(),
+        total_dedicated_mbps: Number(dedicatedNum),
+        contention_ratio: Number(ratioNum),
+        warning_threshold_pct: Number(warnNum),
+        critical_threshold_pct: Number(critNum),
+        wan_interface_name: cleanWanName,
         updated_at: new Date().toISOString(),
       };
 
       let savedRecord: SupabaseUpstreamCapacityConfig | null = null;
 
-      if (config.id) {
+      if (config?.id) {
         const { data, error } = await supabase
           .from('upstream_capacity_config')
           .update(payload)
@@ -171,10 +192,9 @@ export const EditUpstreamLinkModal: React.FC<EditUpstreamLinkModalProps> = ({
           .select()
           .single();
 
-        if (error) throw new Error(error.message);
+        if (error) throw new Error(`Database Save Error: ${error.message}`);
         savedRecord = data as SupabaseUpstreamCapacityConfig;
       } else {
-        // Check if a row already exists before inserting
         const { data: existing } = await supabase
           .from('upstream_capacity_config')
           .select('id')
@@ -189,7 +209,7 @@ export const EditUpstreamLinkModal: React.FC<EditUpstreamLinkModalProps> = ({
             .select()
             .single();
 
-          if (error) throw new Error(error.message);
+          if (error) throw new Error(`Database Save Error: ${error.message}`);
           savedRecord = data as SupabaseUpstreamCapacityConfig;
         } else {
           const { data, error } = await supabase
@@ -198,13 +218,13 @@ export const EditUpstreamLinkModal: React.FC<EditUpstreamLinkModalProps> = ({
             .select()
             .single();
 
-          if (error) throw new Error(error.message);
+          if (error) throw new Error(`Database Save Error: ${error.message}`);
           savedRecord = data as SupabaseUpstreamCapacityConfig;
         }
       }
 
       if (savedRecord) {
-        onSaved(savedRecord);
+        await onSaved(savedRecord);
       }
       onClose();
     } catch (err: any) {

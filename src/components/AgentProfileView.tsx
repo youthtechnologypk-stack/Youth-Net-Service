@@ -23,6 +23,13 @@ import {
 import { supabase, SupabasePortalUser, SupabasePaymentTransaction, SupabaseAgentCashTransaction } from '../services/supabaseClient';
 import { useCurrency } from '../context/CurrencyContext';
 import { EditStaffModal } from './EditStaffModal';
+import { DateFilterToolbar } from './DateFilterToolbar';
+import {
+  DateFilterState,
+  createDefaultDateFilter,
+  describeDateFilter,
+  matchesDateFilter,
+} from '../lib/dateFilter';
 
 export interface AgentProfileViewProps {
   username?: string;
@@ -43,6 +50,7 @@ export const AgentProfileView: React.FC<AgentProfileViewProps> = ({
   const [cashTransactions, setCashTransactions] = useState<SupabaseAgentCashTransaction[]>([]);
   const [isLoading, setIsLoading] = useState<boolean>(true);
   const [activeTab, setActiveTab] = useState<'collections' | 'ledger'>('collections');
+  const [dateFilter, setDateFilter] = useState<DateFilterState>(() => createDefaultDateFilter('month'));
   const [toastMessage, setToastMessage] = useState<{ text: string; type: 'success' | 'error' } | null>(null);
 
   // Modals
@@ -237,13 +245,34 @@ export const AgentProfileView: React.FC<AgentProfileViewProps> = ({
     };
   }, [fetchAgentProfile]);
 
-  // Derived KPI metrics
+  // Period-filtered collections & cash ledger
+  const filteredCollections = useMemo(() => {
+    return (collections || []).filter((tx) =>
+      matchesDateFilter(tx.payment_date || tx.created_at, dateFilter)
+    );
+  }, [collections, dateFilter]);
+
+  const filteredCashTransactions = useMemo(() => {
+    return (cashTransactions || []).filter((tx) =>
+      matchesDateFilter(tx.created_at, dateFilter)
+    );
+  }, [cashTransactions, dateFilter]);
+
+  // Derived KPI metrics (cumulative cash/advance balances + period-filtered recovery)
   const cashInHand = Number(agent?.cash_in_hand ?? 0);
   const advanceBalance = Number(agent?.advance_balance ?? 0);
   const baseSalary = Number(agent?.base_salary ?? 0);
   const totalCollections = useMemo(() => {
-    return (collections || []).reduce((sum, item) => sum + (Number(item.amount_paid) || 0), 0);
-  }, [collections]);
+    return filteredCollections.reduce((sum, item) => sum + (Number(item.amount_paid) || 0), 0);
+  }, [filteredCollections]);
+  const periodHandedOverTotal = useMemo(() => {
+    return filteredCashTransactions
+      .filter((t) => {
+        const type = (t.transaction_type || '').toUpperCase();
+        return type === 'CASH_HANDOVER' || type === 'HANDOVER';
+      })
+      .reduce((sum, item) => sum + (Number(item.amount) || 0), 0);
+  }, [filteredCashTransactions]);
 
   // ACTION 1: Handover Cash
   const handleHandoverCash = async (e: React.FormEvent) => {
@@ -624,21 +653,30 @@ export const AgentProfileView: React.FC<AgentProfileViewProps> = ({
             </span>
           </div>
 
-          {/* 4. Total Client Collections */}
+          {/* 4. Period Client Collections */}
           <div className="p-4 rounded-xl bg-slate-950 border border-slate-800 space-y-1">
             <span className="text-[10px] text-slate-400 font-mono uppercase block flex items-center justify-between">
-              <span>Total Client Collections</span>
+              <span>Recovery ({describeDateFilter(dateFilter)})</span>
               <TrendingUp className="w-3.5 h-3.5 text-cyan-400" />
             </span>
-            <div className="text-2xl font-bold font-mono text-cyan-300">
+            <div className="text-2xl font-bold font-mono tabular-nums text-cyan-300">
               {formatCurrency(totalCollections)}
             </div>
-            <span className="text-[10px] text-slate-500 font-mono block">
-              {collections.length} verified invoice transactions
+            <span className="text-[10px] text-slate-500 font-mono tabular-nums block">
+              {filteredCollections.length} txns · Handed over: {formatCurrency(periodHandedOverTotal)}
             </span>
           </div>
         </div>
       </div>
+
+      {/* Month-Wise & Custom Date Range Filter Toolbar */}
+      <DateFilterToolbar
+        value={dateFilter}
+        onChange={setDateFilter}
+        totalCount={collections.length + cashTransactions.length}
+        filteredCount={filteredCollections.length + filteredCashTransactions.length}
+        recordLabel="ledger entries"
+      />
 
       {/* Financial Navigation Tabs */}
       <div className="flex items-center gap-2 border-b border-slate-800 pb-2 font-mono">
@@ -651,7 +689,7 @@ export const AgentProfileView: React.FC<AgentProfileViewProps> = ({
           }`}
         >
           <Receipt className="w-3.5 h-3.5" />
-          <span>Client Collections Breakdown ({collections.length})</span>
+          <span>Client Collections Breakdown ({filteredCollections.length})</span>
         </button>
 
         <button
@@ -663,7 +701,7 @@ export const AgentProfileView: React.FC<AgentProfileViewProps> = ({
           }`}
         >
           <FileText className="w-3.5 h-3.5" />
-          <span>Handover &amp; Settlement Audit Ledger ({cashTransactions.length})</span>
+          <span>Handover &amp; Settlement Audit Ledger ({filteredCashTransactions.length})</span>
         </button>
       </div>
 
@@ -683,14 +721,14 @@ export const AgentProfileView: React.FC<AgentProfileViewProps> = ({
                 </tr>
               </thead>
               <tbody className="divide-y divide-slate-800/80 font-mono">
-                {collections.length === 0 ? (
+                {filteredCollections.length === 0 ? (
                   <tr>
                     <td colSpan={6} className="py-12 text-center text-slate-500 font-mono">
-                      No customer collections recorded yet for this field agent.
+                      No customer collections recorded in {describeDateFilter(dateFilter)} for this field agent.
                     </td>
                   </tr>
                 ) : (
-                  collections.map((tx) => (
+                  filteredCollections.map((tx) => (
                     <tr key={tx.id || Math.random()} className="hover:bg-slate-950/50 transition">
                       <td className="py-3.5 px-4 text-slate-400">
                         {tx.created_at ? new Date(tx.created_at).toLocaleString() : 'Recent'}
@@ -701,7 +739,7 @@ export const AgentProfileView: React.FC<AgentProfileViewProps> = ({
                       <td className="py-3.5 px-4 text-slate-300">
                         {tx.invoice_id || 'Direct'}
                       </td>
-                      <td className="py-3.5 px-4 font-bold text-emerald-400">
+                      <td className="py-3.5 px-4 font-bold text-emerald-400 tabular-nums">
                         {formatCurrency(Number(tx.amount_paid) || 0)}
                       </td>
                       <td className="py-3.5 px-4">
@@ -736,14 +774,14 @@ export const AgentProfileView: React.FC<AgentProfileViewProps> = ({
                 </tr>
               </thead>
               <tbody className="divide-y divide-slate-800/80 font-mono">
-                {cashTransactions.length === 0 ? (
+                {filteredCashTransactions.length === 0 ? (
                   <tr>
                     <td colSpan={5} className="py-12 text-center text-slate-500 font-mono">
-                      No cash handovers or advance transactions recorded in ledger.
+                      No cash handovers or advance transactions recorded in {describeDateFilter(dateFilter)}.
                     </td>
                   </tr>
                 ) : (
-                  cashTransactions.map((tx) => {
+                  filteredCashTransactions.map((tx) => {
                     const isHandover = tx.transaction_type === 'CASH_HANDOVER';
                     const isAdvanceTaken = tx.transaction_type === 'ADVANCE_TAKEN';
                     const isAdvanceReturn = tx.transaction_type === 'ADVANCE_RETURN';

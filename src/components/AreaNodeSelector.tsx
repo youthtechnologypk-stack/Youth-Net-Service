@@ -1,12 +1,15 @@
-import React, { useState, useEffect } from 'react';
-import { MapPin, Plus, Check, X, Server, RefreshCw } from 'lucide-react';
+import React, { useState, useEffect, useCallback } from 'react';
+import { MapPin, Plus, Check, X, Server, RefreshCw, Edit3 } from 'lucide-react';
 import {
   NetworkAreaNode,
   PARENT_FLEET_ROUTER,
   DEFAULT_NETWORK_AREAS,
+  NETWORK_AREAS_UPDATED_EVENT,
   fetchNetworkAreas,
   createChildNetworkArea,
 } from '../lib/billingAndNetwork';
+import { supabase } from '../services/supabaseClient';
+import { AreaNodeManagerModal } from './AreaNodeManagerModal';
 
 export interface AreaNodeSelectorProps {
   value: string;
@@ -31,6 +34,7 @@ export const AreaNodeSelector: React.FC<AreaNodeSelectorProps> = ({
     externalAreas && externalAreas.length > 0 ? externalAreas : DEFAULT_NETWORK_AREAS
   );
   const [isAddingArea, setIsAddingArea] = useState(false);
+  const [isManagerOpen, setIsManagerOpen] = useState(false);
   const [newAreaName, setNewAreaName] = useState('');
   const [newPrefixCode, setNewPrefixCode] = useState('');
   const [isSaving, setIsSaving] = useState(false);
@@ -38,16 +42,37 @@ export const AreaNodeSelector: React.FC<AreaNodeSelectorProps> = ({
 
   const areaList = externalAreas && externalAreas.length > 0 ? externalAreas : internalAreas;
 
+  const refreshAreas = useCallback(() => {
+    fetchNetworkAreas()
+      .then((rows) => {
+        setInternalAreas(rows);
+        if (onAreasUpdated) onAreasUpdated(rows);
+      })
+      .catch(() => {});
+  }, [onAreasUpdated]);
+
   useEffect(() => {
     if (!externalAreas || externalAreas.length === 0) {
-      fetchNetworkAreas()
-        .then((rows) => {
-          setInternalAreas(rows);
-          if (onAreasUpdated) onAreasUpdated(rows);
-        })
-        .catch(() => {});
+      refreshAreas();
     }
-  }, [externalAreas]);
+  }, [externalAreas, refreshAreas]);
+
+  useEffect(() => {
+    const onUpdatedEvent = () => refreshAreas();
+    window.addEventListener(NETWORK_AREAS_UPDATED_EVENT, onUpdatedEvent);
+
+    const ch = supabase
+      .channel('public:area_node_selector_sync')
+      .on('postgres_changes', { event: '*', schema: 'public', table: 'network_areas' }, () => {
+        refreshAreas();
+      })
+      .subscribe();
+
+    return () => {
+      window.removeEventListener(NETWORK_AREAS_UPDATED_EVENT, onUpdatedEvent);
+      supabase.removeChannel(ch);
+    };
+  }, [refreshAreas]);
 
   const handleAddChildArea = async () => {
     const cleanName = newAreaName.trim();
@@ -85,22 +110,33 @@ export const AreaNodeSelector: React.FC<AreaNodeSelectorProps> = ({
 
   return (
     <div className={`space-y-1.5 ${className}`}>
-      <div className="flex items-center justify-between gap-2">
+      <div className="flex flex-wrap items-center justify-between gap-2">
         <label className="text-slate-400 font-medium text-xs flex items-center gap-1.5">
           <MapPin className="w-3.5 h-3.5 text-cyan-400" />
           <span>{label}</span>
         </label>
-        <button
-          type="button"
-          onClick={() => {
-            setIsAddingArea((prev) => !prev);
-            setErrorMsg(null);
-          }}
-          className="text-[11px] font-mono text-cyan-400 hover:text-cyan-300 flex items-center gap-1 cursor-pointer"
-        >
-          <Plus className="w-3 h-3" />
-          <span>{isAddingArea ? 'Cancel' : '+ Add New Child Area'}</span>
-        </button>
+        <div className="flex items-center gap-2.5">
+          <button
+            type="button"
+            onClick={() => setIsManagerOpen(true)}
+            className="text-[11px] font-mono text-indigo-300 hover:text-indigo-200 flex items-center gap-1 cursor-pointer"
+            title="Open Area & Node Manager to add or edit mohallahs"
+          >
+            <Edit3 className="w-3 h-3" />
+            <span>Manage Areas</span>
+          </button>
+          <button
+            type="button"
+            onClick={() => {
+              setIsAddingArea((prev) => !prev);
+              setErrorMsg(null);
+            }}
+            className="text-[11px] font-mono text-cyan-400 hover:text-cyan-300 flex items-center gap-1 cursor-pointer"
+          >
+            <Plus className="w-3 h-3" />
+            <span>{isAddingArea ? 'Cancel' : '+ Add New Child Area'}</span>
+          </button>
+        </div>
       </div>
 
       <div className="relative">
@@ -111,7 +147,7 @@ export const AreaNodeSelector: React.FC<AreaNodeSelectorProps> = ({
             compact ? 'p-2 text-xs' : 'p-2.5 text-xs'
           }`}
         >
-          <optgroup label={`📡 ${PARENT_FLEET_ROUTER} (Parent Fleet Node)`}>
+          <optgroup label={`${PARENT_FLEET_ROUTER} (Parent Fleet Node)`}>
             {!hasCurrentValueInList && value && (
               <option value={value}>{value}</option>
             )}
@@ -172,6 +208,15 @@ export const AreaNodeSelector: React.FC<AreaNodeSelectorProps> = ({
           </div>
         </div>
       )}
+
+      <AreaNodeManagerModal
+        isOpen={isManagerOpen}
+        onClose={() => setIsManagerOpen(false)}
+        onAreasUpdated={(updated) => {
+          setInternalAreas(updated);
+          if (onAreasUpdated) onAreasUpdated(updated);
+        }}
+      />
     </div>
   );
 };
