@@ -38,6 +38,7 @@ export interface FetchRouterLiveResult {
   };
   activeSessions: ActiveSession[];
   interfaces: RouterInterface[];
+  sessionsPolledOk?: boolean;
   traffic?: {
     rxMbps: number;
     txMbps: number;
@@ -312,6 +313,7 @@ export async function fetchMikrotikLiveTelemetry(
       },
       activeSessions,
       interfaces,
+      sessionsPolledOk: Boolean(sessionsRes.success),
       traffic: {
         rxMbps: wanRxMbps,
         txMbps: wanTxMbps,

@@ -79,6 +79,7 @@ import {
 import { storageService } from '../services/storageService';
 import { saveUnifiedPortalUser, USERS_STORAGE_KEY } from '../lib/userRepository';
 import { supabase } from '../services/supabaseClient';
+import { sessionSyncEngine } from '../services/sessionSyncEngine';
 
 interface BandwidthDataPoint {
   time: string;
@@ -998,6 +999,7 @@ export const ISPProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
   }, [activeViewTab]);
 
   const lastSessionsPollTimeRef = useRef(0);
+  const lastInterfaceSyncTimeRef = useRef(0);
 
   // RouterOS PPPoE Total Provisioned Secrets loaded from /rest/ppp/secret
   const [provisionedSecrets, setProvisionedSecrets] = useState<MikrotikPppSecret[]>([]);
@@ -1139,6 +1141,17 @@ export const ISPProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
 
         setActiveSessions(telemetryResult.activeSessions);
         setRouterInterfaces(telemetryResult.interfaces);
+        if (telemetryResult.interfaces && telemetryResult.interfaces.length > 0) {
+          lastInterfaceSyncTimeRef.current = Date.now();
+        }
+        if (telemetryResult.sessionsPolledOk !== false) {
+          void sessionSyncEngine.syncCycle(
+            telemetryResult.activeSessions,
+            telemetryResult.interfaces && telemetryResult.interfaces.length > 0
+              ? telemetryResult.interfaces
+              : routerInterfacesRef.current
+          );
+        }
 
         if (telemetryResult.traffic) {
           const nowStr = new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' });
@@ -1397,11 +1410,14 @@ export const ISPProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
         const isViewingTrafficWidget =
           activeViewTabRef.current === 'noc' ||
           activeViewTabRef.current === 'mikrotik';
+        const nowCheck = Date.now();
+        const shouldPollInterfaces =
+          isViewingTrafficWidget || nowCheck - lastInterfaceSyncTimeRef.current >= 55000;
 
-        // 1. Relaxed Background Telemetry Poll: only query interface traffic if user is viewing traffic widget
+        // 1. Background Telemetry Poll: fetch /ppp/active every cycle and /interface at least every 60s for byte counters
         const result = await fetchMikrotikLiveTelemetry(targetRouter, {
           signal: abortController.signal,
-          pollTraffic: isViewingTrafficWidget,
+          pollTraffic: shouldPollInterfaces,
           pollSessions: true,
           cachedSessions: [],
           cachedInterfaces: routerInterfacesRef.current,
@@ -1447,8 +1463,20 @@ export const ISPProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
           setActiveSessions([...result.activeSessions]);
           updateRollingSessionHistory(result.activeSessions);
 
+          const effectiveInterfaces =
+            result.interfaces && result.interfaces.length > 0
+              ? result.interfaces
+              : routerInterfacesRef.current;
+
           if (result.interfaces && result.interfaces.length > 0) {
             setRouterInterfaces(result.interfaces);
+            if (shouldPollInterfaces) {
+              lastInterfaceSyncTimeRef.current = now;
+            }
+          }
+
+          if (result.sessionsPolledOk !== false) {
+            void sessionSyncEngine.syncCycle(result.activeSessions, effectiveInterfaces);
           }
 
           if (result.traffic && isViewingTrafficWidget) {
@@ -1464,6 +1492,9 @@ export const ISPProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
             setRouterError(null);
             setIsSslOrCorsBlocked(false);
             setActiveSessions([...result.activeSessions]);
+            if (result.sessionsPolledOk !== false) {
+              void sessionSyncEngine.syncCycle(result.activeSessions, routerInterfacesRef.current);
+            }
           } else {
             const errorMsg =
               result.error ||
@@ -1619,6 +1650,23 @@ export const ISPProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
     );
 
     try {
+      // Finalize Supabase session log as KICKED before disconnecting on RouterOS
+      await sessionSyncEngine.finalizeSessionKick(
+        targetUsername,
+        targetSession
+          ? {
+              id: targetInternalId,
+              username: targetUsername,
+              address: targetSession.address,
+              callerId: targetSession.callerId,
+              uptime: targetSession.uptime,
+              rawBytesIn: targetSession.rawBytesIn,
+              rawBytesOut: targetSession.rawBytesOut,
+            }
+          : { id: targetInternalId, username: targetUsername },
+        routerInterfacesRef.current
+      );
+
       // b) RouterOS v7 POST /api/mikrotik/ppp/active/remove with { ".id": session[".id"] }
       const restResult = await disconnectMikrotikActiveSessionRest(targetRouter, targetInternalId);
 

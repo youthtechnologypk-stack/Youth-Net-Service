@@ -47,6 +47,8 @@ import {
   parseMikrotikComment,
   calculateExpirationMetrics,
 } from '../services/mikrotikSubscriberSync';
+import { supabase, SupabaseSubscriberSessionLog } from '../services/supabaseClient';
+import { formatBytesTransfer } from '../services/sessionSyncEngine';
 
 interface MikrotikStudioProps {
   onOpenProvisionModal: () => void;
@@ -86,8 +88,11 @@ export const MikrotikStudio: React.FC<MikrotikStudioProps> = ({
   } = useISP();
   const { formatCurrency, currencySymbol } = useCurrency();
 
-  const [activeSubTab, setActiveSubTab] = useState<'sessions' | 'interfaces' | 'secrets' | 'profiles' | 'routers'>('sessions');
+  const [activeSubTab, setActiveSubTab] = useState<'sessions' | 'session_logs' | 'interfaces' | 'secrets' | 'profiles' | 'routers'>('sessions');
   const [searchQuery, setSearchQuery] = useState('');
+  const [sessionLogStatusFilter, setSessionLogStatusFilter] = useState<'ALL' | 'ACTIVE' | 'RECONNECTED' | 'KICKED' | 'DISCONNECTED'>('ALL');
+  const [persistedSessionLogs, setPersistedSessionLogs] = useState<SupabaseSubscriberSessionLog[]>([]);
+  const [isLoadingSessionLogs, setIsLoadingSessionLogs] = useState(false);
   const [selectedSubscriberUsername, setSelectedSubscriberUsername] = useState<string | null>(null);
   const [isKicking, setIsKicking] = useState<string | null>(null);
   const [isRenewing, setIsRenewing] = useState<string | null>(null);
@@ -164,6 +169,41 @@ export const MikrotikStudio: React.FC<MikrotikStudioProps> = ({
     }
   }, []);
 
+  const fetchPersistedSessionLogs = async () => {
+    setIsLoadingSessionLogs(true);
+    try {
+      const { data } = await supabase
+        .from('subscriber_session_logs')
+        .select('*')
+        .order('recorded_at', { ascending: false })
+        .limit(100);
+      if (Array.isArray(data)) {
+        setPersistedSessionLogs(data as SupabaseSubscriberSessionLog[]);
+      }
+    } finally {
+      setIsLoadingSessionLogs(false);
+    }
+  };
+
+  useEffect(() => {
+    void fetchPersistedSessionLogs();
+
+    const channel = supabase
+      .channel('mikrotik-studio-session-logs')
+      .on(
+        'postgres_changes',
+        { event: '*', schema: 'public', table: 'subscriber_session_logs' },
+        () => {
+          void fetchPersistedSessionLogs();
+        }
+      )
+      .subscribe();
+
+    return () => {
+      void supabase.removeChannel(channel);
+    };
+  }, []);
+
   const currentRouter = routers.find((r) => r.id === selectedRouterId) || routers[0];
 
   const hasLiveSecrets = Boolean(provisionedSecrets && provisionedSecrets.length > 0);
@@ -199,6 +239,25 @@ export const MikrotikStudio: React.FC<MikrotikStudioProps> = ({
       s.address.includes(searchQuery) ||
       s.callerId.toLowerCase().includes(searchQuery.toLowerCase())
   );
+
+  const filteredPersistedSessionLogs = persistedSessionLogs.filter((log) => {
+    const derivedStatus = (
+      log.session_status ||
+      (log.disconnected_at ? 'DISCONNECTED' : 'ACTIVE')
+    ).toUpperCase();
+    if (sessionLogStatusFilter !== 'ALL' && derivedStatus !== sessionLogStatusFilter) {
+      return false;
+    }
+    const q = searchQuery.trim().toLowerCase();
+    if (!q) return true;
+    return (
+      (log.subscriber_username || '').toLowerCase().includes(q) ||
+      (log.ip_address || '').toLowerCase().includes(q) ||
+      (log.mac_address || '').toLowerCase().includes(q) ||
+      (log.disconnect_reason || '').toLowerCase().includes(q) ||
+      derivedStatus.toLowerCase().includes(q)
+    );
+  });
 
   const filteredCustomers = customers.filter(
     (c) =>
@@ -488,6 +547,18 @@ export const MikrotikStudio: React.FC<MikrotikStudioProps> = ({
           </button>
 
           <button
+            onClick={() => setActiveSubTab('session_logs')}
+            className={`px-3 py-1.5 text-xs font-medium rounded-md transition flex items-center gap-1.5 ${
+              activeSubTab === 'session_logs'
+                ? 'bg-slate-800 text-cyan-400 border border-cyan-600/40 shadow-sm'
+                : 'text-slate-400 hover:text-slate-200'
+            }`}
+          >
+            <Hourglass className="w-3.5 h-3.5" />
+            Session Logs ({persistedSessionLogs.length})
+          </button>
+
+          <button
             onClick={() => setActiveSubTab('interfaces')}
             className={`px-3 py-1.5 text-xs font-medium rounded-md transition flex items-center gap-1.5 ${
               activeSubTab === 'interfaces'
@@ -563,6 +634,144 @@ export const MikrotikStudio: React.FC<MikrotikStudioProps> = ({
           }}
           isKickingId={isKicking}
         />
+      )}
+
+      {/* SUB-TAB 1B: Persisted Supabase Session History Logs */}
+      {activeSubTab === 'session_logs' && (
+        <div className="bg-slate-900 border border-slate-800 rounded-xl overflow-hidden shadow-lg">
+          <div className="p-4 border-b border-slate-800 flex flex-col sm:flex-row sm:items-center justify-between gap-3">
+            <div>
+              <h3 className="text-sm font-bold text-white flex items-center gap-2">
+                <Hourglass className="w-4 h-4 text-cyan-400" />
+                <span>Automated PPPoE Session Audit Log (`subscriber_session_logs`)</span>
+              </h3>
+              <p className="text-xs text-slate-400 mt-0.5">
+                Live Supabase persistence of connects, 60s telemetry updates, reconnects, drops, and manual NOC kicks.
+              </p>
+            </div>
+            <div className="flex items-center flex-wrap gap-2">
+              {(['ALL', 'ACTIVE', 'RECONNECTED', 'KICKED', 'DISCONNECTED'] as const).map((st) => (
+                <button
+                  key={st}
+                  type="button"
+                  onClick={() => setSessionLogStatusFilter(st)}
+                  className={`px-2.5 py-1 rounded-md text-[11px] font-mono font-bold transition border cursor-pointer ${
+                    sessionLogStatusFilter === st
+                      ? 'bg-cyan-950 text-cyan-300 border-cyan-700'
+                      : 'bg-slate-950 text-slate-400 border-slate-800 hover:text-slate-200'
+                  }`}
+                >
+                  {st}
+                </button>
+              ))}
+              <button
+                type="button"
+                onClick={() => void fetchPersistedSessionLogs()}
+                className="px-2.5 py-1 rounded-md bg-slate-800 hover:bg-slate-700 text-slate-200 border border-slate-700 text-[11px] font-mono flex items-center gap-1 cursor-pointer"
+              >
+                <RefreshCw className={`w-3 h-3 text-cyan-400 ${isLoadingSessionLogs ? 'animate-spin' : ''}`} />
+                <span>Refresh</span>
+              </button>
+            </div>
+          </div>
+
+          <div className="overflow-x-auto">
+            <table className="w-full text-left text-xs">
+              <thead className="bg-slate-950 text-slate-400 uppercase tracking-wider text-[11px] font-mono border-b border-slate-800">
+                <tr>
+                  <th className="py-3 px-4">Subscriber</th>
+                  <th className="py-3 px-4">Status</th>
+                  <th className="py-3 px-4">Connected / Disconnected</th>
+                  <th className="py-3 px-4">Assigned IP &amp; MAC</th>
+                  <th className="py-3 px-4">Uptime</th>
+                  <th className="py-3 px-4 text-right">Data Consumed (DL / UL)</th>
+                  <th className="py-3 px-4">Event / Reason</th>
+                </tr>
+              </thead>
+              <tbody className="divide-y divide-slate-800 text-slate-300">
+                {filteredPersistedSessionLogs.length === 0 ? (
+                  <tr>
+                    <td colSpan={7} className="py-10 text-center text-slate-500 font-mono">
+                      No persisted PPPoE session records match the current filter.
+                    </td>
+                  </tr>
+                ) : (
+                  filteredPersistedSessionLogs.map((log) => {
+                    const derivedStatus = (
+                      log.session_status ||
+                      (log.disconnected_at ? 'DISCONNECTED' : 'ACTIVE')
+                    ).toUpperCase();
+                    const badgeStyle =
+                      derivedStatus === 'ACTIVE'
+                        ? 'bg-emerald-950/90 text-emerald-300 border-emerald-700/80'
+                        : derivedStatus === 'RECONNECTED'
+                        ? 'bg-amber-950/90 text-amber-300 border-amber-700/80'
+                        : derivedStatus === 'KICKED'
+                        ? 'bg-rose-950/90 text-rose-300 border-rose-700/80'
+                        : 'bg-slate-800 text-slate-300 border-slate-700';
+
+                    return (
+                      <tr
+                        key={log.id || `${log.subscriber_username}-${log.recorded_at}`}
+                        onClick={() => setSelectedSubscriberUsername(log.subscriber_username)}
+                        className="hover:bg-slate-800/60 transition cursor-pointer"
+                        title="Open Subscriber 360° Drawer"
+                      >
+                        <td className="py-3 px-4 font-mono font-bold text-cyan-300">
+                          @{log.subscriber_username}
+                        </td>
+                        <td className="py-3 px-4 whitespace-nowrap">
+                          <span className={`px-2 py-0.5 rounded text-[10px] font-mono font-bold inline-flex items-center gap-1.5 border ${badgeStyle}`}>
+                            {derivedStatus === 'ACTIVE' && (
+                              <span className="w-1.5 h-1.5 rounded-full bg-emerald-400 animate-pulse" />
+                            )}
+                            {derivedStatus === 'ACTIVE' ? 'ACTIVE (ONLINE)' : derivedStatus}
+                          </span>
+                        </td>
+                        <td className="py-3 px-4 font-mono text-[11px] whitespace-nowrap">
+                          <div className="text-slate-200">
+                            {log.connected_at
+                              ? new Date(log.connected_at).toLocaleString()
+                              : log.recorded_at
+                              ? new Date(log.recorded_at).toLocaleString()
+                              : 'Live'}
+                          </div>
+                          <div className="text-[10px] text-slate-500">
+                            {log.disconnected_at
+                              ? `Ended: ${new Date(log.disconnected_at).toLocaleString()}`
+                              : derivedStatus === 'ACTIVE'
+                              ? 'Live Telemetry (60s sync)'
+                              : `Recorded: ${log.recorded_at ? new Date(log.recorded_at).toLocaleString() : '—'}`}
+                          </div>
+                        </td>
+                        <td className="py-3 px-4 font-mono text-[11px] whitespace-nowrap">
+                          <div className="text-cyan-400">{log.ip_address || 'Dynamic IP'}</div>
+                          <div className="text-slate-400 text-[10px]">{log.mac_address || 'N/A'}</div>
+                        </td>
+                        <td className="py-3 px-4 font-mono text-white font-semibold whitespace-nowrap">
+                          {log.uptime_duration || '0s'}
+                        </td>
+                        <td className="py-3 px-4 text-right font-mono tabular-nums whitespace-nowrap">
+                          <div className="font-bold text-cyan-400">
+                            ↓ {formatBytesTransfer(log.bytes_in)}
+                          </div>
+                          <div className="text-[11px] text-purple-400">
+                            ↑ {formatBytesTransfer(log.bytes_out)}
+                          </div>
+                        </td>
+                        <td className="py-3 px-4">
+                          <span className="px-2 py-0.5 rounded text-[10px] font-mono bg-slate-800/90 text-slate-300 border border-slate-700">
+                            {log.disconnect_reason || 'PPPoE Session Recorded'}
+                          </span>
+                        </td>
+                      </tr>
+                    );
+                  })
+                )}
+              </tbody>
+            </table>
+          </div>
+        </div>
       )}
 
       {/* SUB-TAB: Hardware Port & Interface Status (/interface) */}

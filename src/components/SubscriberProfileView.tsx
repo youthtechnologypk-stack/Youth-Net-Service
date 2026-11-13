@@ -49,6 +49,7 @@ import {
   SupabaseSubscriberSessionLog,
 } from '../services/supabaseClient';
 import { safeMikrotikFetch } from '../services/mikrotikRestClient';
+import { sessionSyncEngine, formatBytesTransfer } from '../services/sessionSyncEngine';
 import { useCurrency } from '../context/CurrencyContext';
 import { useISP } from '../context/ISPContext';
 import { CreateInvoiceModal, resolvePackageRate } from './CreateInvoiceModal';
@@ -101,16 +102,6 @@ export const SubscriberProfileView: React.FC<SubscriberProfileViewProps> = ({
   } | null>(null);
   const [liveSecretProfile, setLiveSecretProfile] = useState<string>('');
   const [networkAreas, setNetworkAreas] = useState<NetworkAreaNode[]>([]);
-  const prevSessionRef = useRef<{
-    id?: string;
-    address?: string;
-    callerId?: string;
-    uptime?: string;
-    uptimeSec: number;
-    rawBytesIn: number;
-    rawBytesOut: number;
-    connectedAtIso: string;
-  } | null>(null);
 
   const [isGenerateInvoiceModalOpen, setIsGenerateInvoiceModalOpen] = useState<boolean>(false);
 
@@ -293,12 +284,13 @@ export const SubscriberProfileView: React.FC<SubscriberProfileViewProps> = ({
         setInventoryLogs(invLogData as SupabaseSubscriberInventoryLog[]);
       }
 
-      // 1.5 Fetch Session Logs
+      // 1.5 Fetch Session Logs (last 50 records ordered by recorded_at DESC)
       const { data: sessLogData } = await supabase
         .from('subscriber_session_logs')
         .select('*')
-        .eq('subscriber_username', username)
-        .order('recorded_at', { ascending: false });
+        .in('subscriber_username', [username, username.toLowerCase()])
+        .order('recorded_at', { ascending: false })
+        .limit(50);
 
       if (sessLogData) {
         setSessionLogs(sessLogData as SupabaseSubscriberSessionLog[]);
@@ -351,10 +343,8 @@ export const SubscriberProfileView: React.FC<SubscriberProfileViewProps> = ({
           const sessions = await res.json();
           if (Array.isArray(sessions)) {
             const match = sessions.find((s: any) => s?.name?.toLowerCase() === username.toLowerCase());
-            const prev = prevSessionRef.current;
 
             if (match) {
-              // Parse standard RouterOS v7 properties without dummy constants
               let rawBytesIn = 0;
               let rawBytesOut = 0;
               if (match.bytes && typeof match.bytes === 'string' && match.bytes.includes('/')) {
@@ -366,58 +356,34 @@ export const SubscriberProfileView: React.FC<SubscriberProfileViewProps> = ({
                 rawBytesOut = Number(match['tx-byte'] || match['bytes-out'] || match['tx-bytes'] || 0);
               }
 
+              // Check <pppoe-username> interface counters for exact TX/RX byte totals
+              try {
+                const ifaceRes = await safeMikrotikFetch(
+                  `/api/mikrotik/interface?name=${encodeURIComponent(`<pppoe-${username}>`)}`
+                );
+                if (ifaceRes.ok) {
+                  const ifaces = await ifaceRes.json();
+                  const ifaceMatch = Array.isArray(ifaces)
+                    ? ifaces.find((i: any) => {
+                        const n = (i?.name || '').toLowerCase();
+                        return n === `<pppoe-${username.toLowerCase()}>` || n === `pppoe-${username.toLowerCase()}`;
+                      }) || ifaces[0]
+                    : ifaces;
+                  if (ifaceMatch) {
+                    rawBytesIn = Math.max(rawBytesIn, Number(ifaceMatch['rx-byte'] || 0));
+                    rawBytesOut = Math.max(rawBytesOut, Number(ifaceMatch['tx-byte'] || 0));
+                  }
+                }
+              } catch {}
+
               const gbIn = (Number(rawBytesIn) / (1024 * 1024 * 1024)).toFixed(2);
               const gbOut = (Number(rawBytesOut) / (1024 * 1024 * 1024)).toFixed(2);
-              const currUptimeSec = parseUptimeSeconds(match.uptime);
-              const currAddress = match.address || '';
-              const currCallerId = match['caller-id'] || '';
-
-              // Detect session reconnect (uptime dropped or MAC/IP changed) and persist completed session
-              if (
-                prev &&
-                (currUptimeSec + 5 < prev.uptimeSec ||
-                  (prev.callerId && currCallerId && prev.callerId !== currCallerId) ||
-                  (prev.address && currAddress && prev.address !== currAddress))
-              ) {
-                try {
-                  await supabase.from('subscriber_session_logs').insert([
-                    {
-                      subscriber_username: username,
-                      ip_address: prev.address || 'Dynamic IP',
-                      mac_address: prev.callerId || userData?.onu_mac || 'Unknown MAC',
-                      uptime_duration: prev.uptime || 'Completed Session',
-                      bytes_in: prev.rawBytesIn,
-                      bytes_out: prev.rawBytesOut,
-                      disconnect_reason: 'Session Reset / Reconnected',
-                      connected_at: prev.connectedAtIso,
-                      recorded_at: new Date().toISOString(),
-                    },
-                  ]);
-                  const { data: refreshedLogs } = await supabase
-                    .from('subscriber_session_logs')
-                    .select('*')
-                    .eq('subscriber_username', username)
-                    .order('recorded_at', { ascending: false });
-                  if (refreshedLogs) setSessionLogs(refreshedLogs as SupabaseSubscriberSessionLog[]);
-                } catch {}
-              }
-
-              prevSessionRef.current = {
-                id: match['.id'],
-                address: currAddress,
-                callerId: currCallerId,
-                uptime: match.uptime,
-                uptimeSec: currUptimeSec,
-                rawBytesIn,
-                rawBytesOut,
-                connectedAtIso: prev?.connectedAtIso || new Date(Date.now() - currUptimeSec * 1000).toISOString(),
-              };
 
               setActiveSession({
                 id: match['.id'],
                 name: match.name,
-                address: currAddress,
-                callerId: currCallerId,
+                address: match.address || '',
+                callerId: match['caller-id'] || '',
                 uptime: match.uptime,
                 service: match.service,
                 rawBytesIn,
@@ -426,31 +392,6 @@ export const SubscriberProfileView: React.FC<SubscriberProfileViewProps> = ({
                 gbOut,
               });
             } else {
-              // Session disappeared (disconnected) -> log previous session to subscriber_session_logs
-              if (prev) {
-                try {
-                  await supabase.from('subscriber_session_logs').insert([
-                    {
-                      subscriber_username: username,
-                      ip_address: prev.address || 'Dynamic IP',
-                      mac_address: prev.callerId || userData?.onu_mac || 'Unknown MAC',
-                      uptime_duration: prev.uptime || 'Ended',
-                      bytes_in: prev.rawBytesIn,
-                      bytes_out: prev.rawBytesOut,
-                      disconnect_reason: 'Session Disconnected (PPPoE Drop)',
-                      connected_at: prev.connectedAtIso,
-                      recorded_at: new Date().toISOString(),
-                    },
-                  ]);
-                  const { data: refreshedLogs } = await supabase
-                    .from('subscriber_session_logs')
-                    .select('*')
-                    .eq('subscriber_username', username)
-                    .order('recorded_at', { ascending: false });
-                  if (refreshedLogs) setSessionLogs(refreshedLogs as SupabaseSubscriberSessionLog[]);
-                } catch {}
-                prevSessionRef.current = null;
-              }
               setActiveSession(null);
             }
           }
@@ -467,6 +408,44 @@ export const SubscriberProfileView: React.FC<SubscriberProfileViewProps> = ({
 
   useEffect(() => {
     fetchAllProfileData();
+  }, [username]);
+
+  // Real-time Supabase subscription for subscriber_session_logs
+  useEffect(() => {
+    if (!username) return;
+    const refreshSessionLogsOnly = async () => {
+      const { data } = await supabase
+        .from('subscriber_session_logs')
+        .select('*')
+        .in('subscriber_username', [username, username.toLowerCase()])
+        .order('recorded_at', { ascending: false })
+        .limit(50);
+      if (Array.isArray(data)) {
+        setSessionLogs(data as SupabaseSubscriberSessionLog[]);
+      }
+    };
+
+    const channel = supabase
+      .channel(`profile-session-logs-${username.toLowerCase()}`)
+      .on(
+        'postgres_changes',
+        { event: '*', schema: 'public', table: 'subscriber_session_logs' },
+        (payload: any) => {
+          const changedUser = (
+            payload?.new?.subscriber_username ||
+            payload?.old?.subscriber_username ||
+            ''
+          ).toLowerCase();
+          if (changedUser === username.toLowerCase()) {
+            void refreshSessionLogsOnly();
+          }
+        }
+      )
+      .subscribe();
+
+    return () => {
+      void supabase.removeChannel(channel);
+    };
   }, [username]);
 
   // 2. Real-time Live Speed Gauge Poller + Continuous Session Watcher (Runs every 3s, read-only ?once)
@@ -532,20 +511,43 @@ export const SubscriberProfileView: React.FC<SubscriberProfileViewProps> = ({
 
   const netBalance = Math.max(0, totalInvoiced - totalPaid);
 
-  // Data Usage Calculations for Donut Chart
+  // Data Usage Calculations for Donut Chart (Current Billing Cycle from subscriber_session_logs)
   const packageTotalGb = user?.package_volume_gb || 1500;
   const consumedGb = useMemo(() => {
-    const liveSessionBytes = (activeSession?.rawBytesIn || 0) + (activeSession?.rawBytesOut || 0);
-    const fromLogsBytes = (sessionLogs || []).reduce(
-      (acc, s) => acc + (Number(s.bytes_in || 0) + Number(s.bytes_out || 0)),
-      0
-    );
-    const totalBytes = fromLogsBytes + liveSessionBytes;
-    const fromTotalGb = Math.round(totalBytes / (1024 * 1024 * 1024));
-    return Math.min(fromTotalGb, packageTotalGb);
-  }, [sessionLogs, activeSession, packageTotalGb]);
+    const now = new Date();
+    const paidInvoices = (invoices || []).filter((i) => i.status === 'PAID' && (i.paid_at || i.created_at));
+    const cycleStartMs =
+      paidInvoices.length > 0
+        ? Math.max(
+            new Date(paidInvoices[0].paid_at || paidInvoices[0].created_at || 0).getTime(),
+            now.getTime() - 31 * 86400 * 1000
+          )
+        : new Date(now.getFullYear(), now.getMonth(), 1).getTime();
 
-  const remainingGb = Math.max(0, packageTotalGb - consumedGb);
+    const cycleLogs = (sessionLogs || []).filter((s) => {
+      const ts = new Date(s.connected_at || s.recorded_at || 0).getTime();
+      return !Number.isNaN(ts) && ts >= cycleStartMs;
+    });
+
+    const liveSessionBytes = (activeSession?.rawBytesIn || 0) + (activeSession?.rawBytesOut || 0);
+    let hasActiveLogRow = false;
+
+    const fromLogsBytes = cycleLogs.reduce((acc, s) => {
+      const rowBytes = Number(s.bytes_in || 0) + Number(s.bytes_out || 0);
+      const isRowActive = (s.session_status || '').toUpperCase() === 'ACTIVE' && !s.disconnected_at;
+      if (isRowActive && !hasActiveLogRow) {
+        hasActiveLogRow = true;
+        return acc + Math.max(rowBytes, liveSessionBytes);
+      }
+      return acc + rowBytes;
+    }, 0);
+
+    const totalBytes = hasActiveLogRow ? fromLogsBytes : fromLogsBytes + liveSessionBytes;
+    const fromTotalGb = Number((totalBytes / (1024 * 1024 * 1024)).toFixed(2));
+    return Math.min(fromTotalGb, packageTotalGb);
+  }, [sessionLogs, activeSession, invoices, packageTotalGb]);
+
+  const remainingGb = Number(Math.max(0, packageTotalGb - consumedGb).toFixed(2));
   const usagePercentage = Math.min(100, Math.round((consumedGb / packageTotalGb) * 100));
 
   // Action 1: Disconnect / Kick Session
@@ -565,6 +567,20 @@ export const SubscriberProfileView: React.FC<SubscriberProfileViewProps> = ({
         } catch {}
       }
 
+      // Finalize active session log in Supabase as KICKED before disconnecting on RouterOS
+      await sessionSyncEngine.finalizeSessionKick(
+        username,
+        {
+          id: sessionId,
+          username,
+          address: activeSession?.address,
+          callerId: activeSession?.callerId,
+          uptime: activeSession?.uptime,
+          rawBytesIn: activeSession?.rawBytesIn,
+          rawBytesOut: activeSession?.rawBytesOut,
+        }
+      );
+
       if (sessionId) {
         // Call router kick endpoint
         await safeMikrotikFetch('/api/mikrotik/ppp/active/remove', {
@@ -582,19 +598,6 @@ export const SubscriberProfileView: React.FC<SubscriberProfileViewProps> = ({
           body: JSON.stringify({ username, sessionId: sessionId || '*1' }),
         });
       } catch {}
-
-      // Record in Supabase subscriber_session_logs
-      await supabase.from('subscriber_session_logs').insert([{
-        subscriber_username: username,
-        ip_address: activeSession?.address || '10.10.42.18',
-        mac_address: activeSession?.callerId || user?.onu_mac || 'Live MAC',
-        uptime_duration: activeSession?.uptime || 'Active Session',
-        bytes_in: activeSession?.rawBytesIn || 0,
-        bytes_out: activeSession?.rawBytesOut || 0,
-        disconnect_reason: 'Admin Session Kick (NOC Manual Disconnect)',
-        connected_at: new Date(Date.now() - 3600000 * 2).toISOString(),
-        recorded_at: new Date().toISOString(),
-      }]);
 
       setActiveSession(null);
       setIsKickModalOpen(false);
@@ -1764,54 +1767,111 @@ export const SubscriberProfileView: React.FC<SubscriberProfileViewProps> = ({
             </div>
 
             {/* Historical Session Logs */}
-            <div className="space-y-2">
-              <h4 className="text-sm font-bold text-white flex items-center gap-2">
-                <History className="w-4 h-4 text-purple-400" />
-                <span>Historical Session Disconnect Records (`subscriber_session_logs`)</span>
-              </h4>
+            <div className="space-y-3">
+              <div className="flex flex-wrap items-center justify-between gap-2">
+                <div>
+                  <h4 className="text-sm font-bold text-white flex items-center gap-2">
+                    <History className="w-4 h-4 text-purple-400" />
+                    <span>Persisted PPPoE Session Audit Log (`subscriber_session_logs`)</span>
+                  </h4>
+                  <p className="text-[11px] text-slate-400 mt-0.5">
+                    Real-time connect, 60s telemetry checkpoint, reconnect, disconnect, and NOC kick records.
+                  </p>
+                </div>
+                <button
+                  type="button"
+                  onClick={fetchAllProfileData}
+                  className="px-3 py-1.5 rounded-lg bg-slate-900 hover:bg-slate-800 border border-slate-700 text-slate-300 text-xs font-mono flex items-center gap-1.5 cursor-pointer transition"
+                >
+                  <RefreshCw className={`w-3.5 h-3.5 text-cyan-400 ${isLoading ? 'animate-spin' : ''}`} />
+                  <span>Refresh Logs</span>
+                </button>
+              </div>
 
-              <div className="rounded-xl border border-slate-800 overflow-hidden bg-slate-900/60">
+              <div className="rounded-xl border border-slate-800 overflow-x-auto bg-slate-900/60">
                 <table className="w-full text-left text-xs text-slate-300">
                   <thead className="bg-slate-900 text-slate-400 border-b border-slate-800 uppercase font-mono text-[11px]">
                     <tr>
-                      <th className="py-3 px-4">Disconnected At</th>
-                      <th className="py-3 px-4">IP Address</th>
-                      <th className="py-3 px-4">MAC Address</th>
-                      <th className="py-3 px-4">Duration</th>
-                      <th className="py-3 px-4 text-right">Data In (DL)</th>
-                      <th className="py-3 px-4 text-right">Data Out (UL)</th>
-                      <th className="py-3 px-4">Termination Reason</th>
+                      <th className="py-3 px-4">Status</th>
+                      <th className="py-3 px-4">Connected / Disconnected Time</th>
+                      <th className="py-3 px-4">Assigned IP</th>
+                      <th className="py-3 px-4">ONT / Router MAC</th>
+                      <th className="py-3 px-4">Session Uptime</th>
+                      <th className="py-3 px-4 text-right">Data Consumed (DL / UL)</th>
+                      <th className="py-3 px-4">Event / Reason</th>
                     </tr>
                   </thead>
                   <tbody className="divide-y divide-slate-800/60 font-sans">
                     {sessionLogs.length === 0 ? (
                       <tr>
                         <td colSpan={7} className="py-8 text-center text-slate-500 font-mono">
-                          No previous disconnection logs recorded for @{username}.
+                          No persisted session logs recorded yet for @{username}.
                         </td>
                       </tr>
                     ) : (
                       sessionLogs.map((sess) => {
                         const rawBytesIn = Number(sess.bytes_in || 0);
                         const rawBytesOut = Number(sess.bytes_out || 0);
-                        const inGb = (rawBytesIn / (1024 * 1024 * 1024)).toFixed(2);
-                        const outGb = (rawBytesOut / (1024 * 1024 * 1024)).toFixed(2);
+                        const derivedStatus = (
+                          sess.session_status ||
+                          (sess.disconnected_at ? 'DISCONNECTED' : 'ACTIVE')
+                        ).toUpperCase();
+
+                        const badgeStyle =
+                          derivedStatus === 'ACTIVE'
+                            ? 'bg-emerald-950/90 text-emerald-300 border-emerald-700/80'
+                            : derivedStatus === 'RECONNECTED'
+                            ? 'bg-amber-950/90 text-amber-300 border-amber-700/80'
+                            : derivedStatus === 'KICKED'
+                            ? 'bg-rose-950/90 text-rose-300 border-rose-700/80'
+                            : 'bg-slate-800 text-slate-300 border-slate-700';
 
                         return (
-                          <tr key={sess.id || Math.random()} className="hover:bg-slate-800/40 transition">
-                            <td className="py-3 px-4 font-mono text-slate-400">
-                              {(sess.recorded_at || sess.disconnected_at)
-                                ? new Date(sess.recorded_at || sess.disconnected_at!).toLocaleString()
-                                : 'Live Record'}
+                          <tr key={sess.id || `${sess.recorded_at}-${sess.session_id}`} className="hover:bg-slate-800/40 transition">
+                            <td className="py-3 px-4 whitespace-nowrap">
+                              <span className={`px-2 py-0.5 rounded text-[10px] font-mono font-bold inline-flex items-center gap-1.5 border ${badgeStyle}`}>
+                                {derivedStatus === 'ACTIVE' && (
+                                  <span className="w-1.5 h-1.5 rounded-full bg-emerald-400 animate-pulse" />
+                                )}
+                                {derivedStatus === 'ACTIVE' ? 'ACTIVE (ONLINE)' : derivedStatus}
+                              </span>
                             </td>
-                            <td className="py-3 px-4 font-mono text-cyan-400">{sess.ip_address || 'N/A'}</td>
-                            <td className="py-3 px-4 font-mono text-slate-300">{sess.mac_address || user?.onu_mac || 'N/A'}</td>
-                            <td className="py-3 px-4 font-mono text-white">{sess.uptime_duration || 'N/A'}</td>
-                            <td className="py-3 px-4 text-right font-mono font-bold text-cyan-400">{inGb} GB</td>
-                            <td className="py-3 px-4 text-right font-mono font-bold text-purple-400">{outGb} GB</td>
+                            <td className="py-3 px-4 font-mono text-[11px] whitespace-nowrap">
+                              <div className="text-slate-200">
+                                {sess.connected_at
+                                  ? new Date(sess.connected_at).toLocaleString()
+                                  : sess.recorded_at
+                                  ? new Date(sess.recorded_at).toLocaleString()
+                                  : 'Live'}
+                              </div>
+                              <div className="text-[10px] text-slate-500 mt-0.5">
+                                {sess.disconnected_at
+                                  ? `Ended: ${new Date(sess.disconnected_at).toLocaleString()}`
+                                  : derivedStatus === 'ACTIVE'
+                                  ? 'Active Telemetry (60s sync)'
+                                  : `Updated: ${sess.recorded_at ? new Date(sess.recorded_at).toLocaleString() : '—'}`}
+                              </div>
+                            </td>
+                            <td className="py-3 px-4 font-mono text-cyan-400 whitespace-nowrap">
+                              {sess.ip_address || 'Dynamic IP'}
+                            </td>
+                            <td className="py-3 px-4 font-mono text-slate-300 whitespace-nowrap">
+                              {sess.mac_address || user?.onu_mac || 'N/A'}
+                            </td>
+                            <td className="py-3 px-4 font-mono text-white font-semibold whitespace-nowrap">
+                              {sess.uptime_duration || '0s'}
+                            </td>
+                            <td className="py-3 px-4 text-right font-mono tabular-nums whitespace-nowrap">
+                              <div className="font-bold text-cyan-400">
+                                ↓ {formatBytesTransfer(rawBytesIn)}
+                              </div>
+                              <div className="text-[11px] text-purple-400">
+                                ↑ {formatBytesTransfer(rawBytesOut)}
+                              </div>
+                            </td>
                             <td className="py-3 px-4">
-                              <span className="px-2 py-0.5 rounded text-[10px] font-mono bg-slate-800 text-slate-300 border border-slate-700">
-                                {sess.disconnect_reason || 'Normal Session End'}
+                              <span className="px-2 py-0.5 rounded text-[10px] font-mono bg-slate-800/90 text-slate-300 border border-slate-700">
+                                {sess.disconnect_reason || 'PPPoE Session Recorded'}
                               </span>
                             </td>
                           </tr>

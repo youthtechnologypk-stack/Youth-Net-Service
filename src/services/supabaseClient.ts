@@ -97,15 +97,18 @@ export interface SupabaseSubscriberInventoryLog {
 export interface SupabaseSubscriberSessionLog {
   id?: string;
   subscriber_username: string;
+  session_id?: string | null;
   ip_address?: string | null;
   mac_address?: string | null;
   uptime_duration?: string | null;
+  uptime_seconds?: number | null;
   bytes_in: number;
   bytes_out: number;
+  session_status?: 'ACTIVE' | 'DISCONNECTED' | 'RECONNECTED' | 'KICKED' | string | null;
   disconnect_reason?: string | null;
   connected_at?: string | null;
   recorded_at?: string;
-  disconnected_at?: string;
+  disconnected_at?: string | null;
 }
 
 export interface SupabaseAgentCashTransaction {

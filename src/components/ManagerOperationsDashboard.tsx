@@ -43,6 +43,7 @@ import {
 } from '../lib/billingAndNetwork';
 import { AreaNodeSelector } from './AreaNodeSelector';
 import { AreaNodeManagerModal } from './AreaNodeManagerModal';
+import { sessionSyncEngine } from '../services/sessionSyncEngine';
 import { DateFilterToolbar } from './DateFilterToolbar';
 import {
   DateFilterState,
@@ -630,6 +631,14 @@ export const ManagerOperationsDashboard: React.FC<ManagerOperationsDashboardProp
         showToast(`No active online session found on RouterOS for @${uname}.`);
         return;
       }
+
+      await sessionSyncEngine.finalizeSessionKick(uname, {
+        id: match['.id'],
+        username: uname,
+        address: match.address,
+        callerId: match['caller-id'],
+        uptime: match.uptime,
+      });
 
       const removeRes = await safeMikrotikFetch('/api/mikrotik/ppp/active/remove', {
         method: 'POST',
