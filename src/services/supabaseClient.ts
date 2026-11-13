@@ -119,3 +119,15 @@ export interface SupabaseAgentCashTransaction {
   notes?: string | null;
   created_at?: string;
 }
+
+export interface SupabaseUpstreamCapacityConfig {
+  id: string;
+  provider_name: string;
+  total_dedicated_mbps: number;
+  contention_ratio: number;
+  warning_threshold_pct: number;
+  critical_threshold_pct: number;
+  wan_interface_name: string;
+  updated_at?: string;
+}
+

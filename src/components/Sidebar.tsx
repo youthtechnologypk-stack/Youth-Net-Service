@@ -19,6 +19,7 @@ import {
   LogOut,
   Network,
   ShieldAlert,
+  Gauge,
 } from 'lucide-react';
 import { ActiveTab } from './Header';
 import { SystemRole, UserAccount } from '../types/auth';
@@ -76,6 +77,15 @@ export const Sidebar: React.FC<SidebarProps> = ({
       icon: Activity,
       badge: `${(activeSessions || []).length} Online`,
       badgeColor: 'bg-emerald-950 text-emerald-300 border-emerald-800',
+      roles: ['ADMIN', 'MANAGER'],
+    },
+    {
+      id: 'capacity' as ActiveTab,
+      label: 'Capacity & Pools',
+      subtitle: '1:6 Contention & CIR Planner',
+      icon: Gauge,
+      badge: '1:6 CIR',
+      badgeColor: 'bg-cyan-950 text-cyan-300 border-cyan-800',
       roles: ['ADMIN', 'MANAGER'],
     },
     {

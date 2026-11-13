@@ -22,6 +22,7 @@ import {
   X,
   LogOut,
   User,
+  Gauge,
 } from 'lucide-react';
 import { useISP } from '../context/ISPContext';
 import { SystemRole, UserAccount } from '../types/auth';
@@ -33,6 +34,7 @@ import { getStoredUser } from '../lib/auth';
 
 export type ActiveTab =
   | 'noc'
+  | 'capacity'
   | 'operations'
   | 'mikrotik'
   | 'olt'
@@ -441,6 +443,14 @@ export const Header: React.FC<HeaderProps> = ({
               </button>
 
               <button
+                onClick={() => setActiveTab('capacity')}
+                className={`flex items-center gap-2 px-3 py-2 text-xs sm:text-sm font-medium rounded-lg transition whitespace-nowrap ${getTabClassName('capacity')}`}
+              >
+                <Gauge className="w-4 h-4 text-cyan-600 dark:text-cyan-400" />
+                Capacity &amp; Pools
+              </button>
+
+              <button
                 onClick={() => setActiveTab('operations')}
                 className={`flex items-center gap-2 px-3 py-2 text-xs sm:text-sm font-medium rounded-lg transition whitespace-nowrap ${getTabClassName('operations')}`}
               >
@@ -558,6 +568,14 @@ export const Header: React.FC<HeaderProps> = ({
               >
                 <Network className="w-4 h-4" />
                 NOC Overview
+              </button>
+
+              <button
+                onClick={() => setActiveTab('capacity')}
+                className={`flex items-center gap-2 px-3 py-2 text-xs sm:text-sm font-medium rounded-lg transition whitespace-nowrap ${getTabClassName('capacity', 'indigo')}`}
+              >
+                <Gauge className="w-4 h-4" />
+                Capacity &amp; Pools
               </button>
 
               <button

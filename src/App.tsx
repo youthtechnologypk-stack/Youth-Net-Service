@@ -6,7 +6,8 @@ import { ISPProvider, useISP } from './context/ISPContext';
 import { PermissionProvider } from './context/PermissionContext';
 import { Sidebar } from './components/Sidebar';
 import { Header, ActiveTab } from './components/Header';
-import { NocOverview } from './components/NocOverview';
+import { NocCommandCenter } from './components/NocCommandCenter';
+import { CapacityPlannerView } from './components/CapacityPlannerView';
 import { MikrotikStudio } from './components/MikrotikStudio';
 import { VsolOltStudio } from './components/VsolOltStudio';
 import { BillingStudio } from './components/BillingStudio';
@@ -323,13 +324,16 @@ function ISPAppContent() {
               <>
                 {/* 1. Admin NOC Command Center */}
                 {activeTab === 'noc' && (
-                  <NocOverview
+                  <NocCommandCenter
                     onNavigateTab={(tab) => setActiveTab(tab)}
                     onOpenOutageModal={() => setIsOutageOpen(true)}
                     onOpenTicketModal={() => setIsTicketOpen(true)}
                     onOpenAddRouterModal={() => setIsAddRouterOpen(true)}
                   />
                 )}
+
+                {/* 1b. Bandwidth Pool, 1:6 Contention & Upstream Capacity Planner */}
+                {activeTab === 'capacity' && <CapacityPlannerView />}
 
                 {/* 2. Operations & Dispatch (Customized for Manager / Admin) */}
                 {activeTab === 'operations' && (

@@ -49,6 +49,7 @@ export function getTabFromPath(path: string): string | null {
   if (clean === 'agent/portal' || clean === 'agent') return 'agent_portal';
   if (clean === 'client/portal' || clean === 'client') return 'client_portal';
   if (clean === 'admin/noc' || clean === 'admin' || clean === 'dashboard/admin' || clean === 'noc' || clean === '') return 'noc';
+  if (clean === 'capacity' || clean === 'capacity-pools' || clean === 'admin/capacity') return 'capacity';
   if (clean === 'manager/dashboard' || clean === 'manager' || clean === 'dashboard/operations' || clean === 'operations') return 'operations';
   if (clean === 'billing') return 'billing';
   if (clean === 'complaints') return 'complaints';
@@ -97,6 +98,7 @@ export function isRouteAllowedForRole(role: SystemRole, routeOrTab: string): boo
     // Strictly Hidden: hardware credentials/passwords, router deletion, system settings, global currency configs
     const managerAllowed = [
       'noc',
+      'capacity',
       'operations',
       'dashboard/operations',
       'complaints',
