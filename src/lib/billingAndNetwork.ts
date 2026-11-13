@@ -273,11 +273,14 @@ export async function restoreSubscriberOnInvoicePaid(
     const restoredProfile =
       (userRecord?.package_speed || '').trim().replace(/\s+/g, '') || '20Mbps';
 
-    // 2. Mark account_status = 'ACTIVE' in portal_users
+    // 2. Mark account_status = 'ACTIVE' and extend 31-day expiry_date in portal_users
     if (userRecord) {
       await supabase
         .from('portal_users')
-        .update({ account_status: 'ACTIVE' })
+        .update({
+          account_status: 'ACTIVE',
+          expiry_date: add31DaysDateString(new Date()),
+        })
         .eq('id', userRecord.id);
     }
 

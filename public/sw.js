@@ -1,15 +1,16 @@
-// Youth Net NOC Service Worker
-const CACHE_NAME = 'youthnet-noc-v1';
+// Youth Net NOC Service Worker (Offline App Shell + Background Sync Relay)
+const CACHE_NAME = 'youthnet-noc-v3';
 const PRECACHE_ASSETS = [
   '/',
   '/index.html',
   '/manifest.json',
-  '/icon-192x192.png',
-  '/icon-512x512.png',
+  '/icon-192.png',
+  '/icon-512.png',
+  '/apple-touch-icon.png',
   '/favicon.ico',
 ];
 
-// Install Event - Precache critical assets
+// Install Event - Precache critical shell assets
 self.addEventListener('install', (event) => {
   event.waitUntil(
     caches
@@ -19,7 +20,7 @@ self.addEventListener('install', (event) => {
   );
 });
 
-// Activate Event - Clean up stale caches & claim clients
+// Activate Event - Clean up stale caches & claim clients immediately
 self.addEventListener('activate', (event) => {
   event.waitUntil(
     caches
@@ -38,27 +39,35 @@ self.addEventListener('activate', (event) => {
   );
 });
 
-// Fetch Event - Network-first with cache fallback for offline resilience
+// Fetch Event - Network-first with cache fallback for same-origin app shell & static assets;
+// strictly bypass cross-origin links (e.g. wa.me), dynamic API, and Supabase calls.
 self.addEventListener('fetch', (event) => {
-  // Only handle GET requests
   if (event.request.method !== 'GET') {
     return;
   }
 
-  // Bypass chrome extensions or non-http requests
   if (!event.request.url.startsWith('http')) {
     return;
   }
 
-  // API calls: Network only or network with silent fallback
-  if (event.request.url.includes('/api/')) {
+  const url = new URL(event.request.url);
+
+  // Allow external links (https://wa.me/..., etc.) to resolve directly via OS / Android TWA Intents
+  if (url.origin !== self.location.origin) {
+    return;
+  }
+
+  // Never intercept or cache live API routes
+  if (
+    url.pathname.startsWith('/api/') ||
+    url.pathname.startsWith('/.netlify/')
+  ) {
     return;
   }
 
   event.respondWith(
     fetch(event.request)
       .then((response) => {
-        // Cache valid responses for static assets
         if (response && response.status === 200 && response.type === 'basic') {
           const responseToCache = response.clone();
           caches.open(CACHE_NAME).then((cache) => {
@@ -68,15 +77,14 @@ self.addEventListener('fetch', (event) => {
         return response;
       })
       .catch(async () => {
-        // Fallback to cache when offline
         const cachedResponse = await caches.match(event.request);
         if (cachedResponse) {
           return cachedResponse;
         }
 
-        // For navigation requests, fallback to root /
         if (event.request.mode === 'navigate') {
-          return caches.match('/');
+          const shell = await caches.match('/');
+          if (shell) return shell;
         }
 
         return new Response('Network offline', {
@@ -86,4 +94,17 @@ self.addEventListener('fetch', (event) => {
         });
       })
   );
+});
+
+// Background Sync Event - Notify open app clients to flush offline outbox automatically
+self.addEventListener('sync', (event) => {
+  if (event.tag === 'youthnet-outbox-sync') {
+    event.waitUntil(
+      self.clients.matchAll({ includeUncontrolled: true, type: 'window' }).then((clients) => {
+        clients.forEach((client) => {
+          client.postMessage({ type: 'AUTO_SYNC_OUTBOX' });
+        });
+      })
+    );
+  }
 });

@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useCallback, useMemo } from 'react';
+import React, { useState, useEffect, useCallback, useMemo, useRef } from 'react';
 import {
   X,
   Landmark,
@@ -14,7 +14,6 @@ import {
   AlertCircle,
   MessageSquare,
   Globe,
-  Power,
 } from 'lucide-react';
 import {
   PaymentAccountType,
@@ -26,7 +25,6 @@ import {
   DEFAULT_SUPPORT_WHATSAPP,
   PAYMENT_ACCOUNT_TYPES,
   buildPreExpiryReminderMessage,
-  fetchPaymentAccounts,
   fetchWhatsappBillingConfig,
   saveWhatsappBillingConfig,
 } from '../lib/whatsappBilling';
@@ -34,6 +32,8 @@ import {
 export interface WhatsAppBillingCenterProps {
   isOpen: boolean;
   onClose: () => void;
+  initialAccounts?: SupabasePaymentAccount[];
+  initialConfig?: SupabaseWhatsappBillingConfig;
   onAccountsOrConfigChanged?: (
     accounts: SupabasePaymentAccount[],
     config: SupabaseWhatsappBillingConfig
@@ -56,21 +56,42 @@ const createEmptyAccountForm = (): AccountFormState => ({
   is_active: true,
 });
 
+const getTypeBadgeStyle = (typeUpper: string): string => {
+  switch (typeUpper) {
+    case 'JAZZCASH':
+      return 'bg-rose-950/90 text-rose-300 border-rose-700/70';
+    case 'EASYPAISA':
+      return 'bg-emerald-950/90 text-emerald-300 border-emerald-700/70';
+    case 'RAST':
+      return 'bg-purple-950/90 text-purple-300 border-purple-700/70';
+    case 'BANK':
+    default:
+      return 'bg-cyan-950/90 text-cyan-300 border-cyan-700/70';
+  }
+};
+
 export const WhatsAppBillingCenter: React.FC<WhatsAppBillingCenterProps> = ({
   isOpen,
   onClose,
+  initialAccounts,
+  initialConfig,
   onAccountsOrConfigChanged,
 }) => {
-  const [accounts, setAccounts] = useState<SupabasePaymentAccount[]>([]);
-  const [config, setConfig] = useState<SupabaseWhatsappBillingConfig>({
-    support_whatsapp: DEFAULT_SUPPORT_WHATSAPP,
-    cloud_api_enabled: false,
-    webhook_url: '',
-    phone_number_id: '',
-    auto_remind_days_before: 3,
-  });
+  const [accounts, setAccounts] = useState<SupabasePaymentAccount[]>(
+    () => initialAccounts || []
+  );
+  const [config, setConfig] = useState<SupabaseWhatsappBillingConfig>(
+    () =>
+      initialConfig || {
+        support_whatsapp: DEFAULT_SUPPORT_WHATSAPP,
+        cloud_api_enabled: false,
+        webhook_url: '',
+        phone_number_id: '',
+        auto_remind_days_before: 3,
+      }
+  );
 
-  const [isLoading, setIsLoading] = useState<boolean>(true);
+  const [isLoadingAccounts, setIsLoadingAccounts] = useState<boolean>(false);
   const [isSavingConfig, setIsSavingConfig] = useState<boolean>(false);
   const [isSavingAccount, setIsSavingAccount] = useState<boolean>(false);
   const [togglingId, setTogglingId] = useState<string | null>(null);
@@ -84,16 +105,34 @@ export const WhatsAppBillingCenter: React.FC<WhatsAppBillingCenterProps> = ({
   );
 
   // Delete confirmation state
-  const [accountToDelete, setAccountToDelete] = useState<SupabasePaymentAccount | null>(
-    null
-  );
+  const [confirmDeleteId, setConfirmDeleteId] = useState<string | null>(null);
   const [isDeleting, setIsDeleting] = useState<boolean>(false);
 
-  // Feedback state
+  // Feedback banner state
   const [banner, setBanner] = useState<{
     type: 'success' | 'error';
     text: string;
   } | null>(null);
+
+  // Refs to avoid unstable parent callback props re-triggering useEffect infinitely
+  const onAccountsChangedRef = useRef(onAccountsOrConfigChanged);
+  onAccountsChangedRef.current = onAccountsOrConfigChanged;
+  const configRef = useRef(config);
+  configRef.current = config;
+  const formSectionRef = useRef<HTMLFormElement | null>(null);
+
+  // Sync initial props when drawer opens
+  useEffect(() => {
+    if (isOpen && initialAccounts && initialAccounts.length > 0) {
+      setAccounts((prev) => (prev.length === 0 ? initialAccounts : prev));
+    }
+  }, [isOpen, initialAccounts]);
+
+  useEffect(() => {
+    if (isOpen && initialConfig) {
+      setConfig(initialConfig);
+    }
+  }, [isOpen, initialConfig]);
 
   const showBanner = (type: 'success' | 'error', text: string) => {
     setBanner({ type, text });
@@ -101,30 +140,40 @@ export const WhatsAppBillingCenter: React.FC<WhatsAppBillingCenterProps> = ({
 
   useEffect(() => {
     if (!banner) return;
-    const t = setTimeout(() => setBanner(null), 4000);
+    const t = setTimeout(() => setBanner(null), 4500);
     return () => clearTimeout(t);
   }, [banner]);
 
-  const loadData = useCallback(async () => {
-    setIsLoading(true);
+  const fetchPaymentAccountsList = useCallback(async () => {
+    setIsLoadingAccounts(true);
     try {
-      const [loadedAccounts, loadedConfig] = await Promise.all([
-        fetchPaymentAccounts(),
+      const [{ data, error }, loadedConfig] = await Promise.all([
+        supabase
+          .from('payment_accounts')
+          .select('*')
+          .order('created_at', { ascending: true }),
         fetchWhatsappBillingConfig(),
       ]);
+
+      if (error) {
+        throw new Error(error.message);
+      }
+
+      const loadedAccounts = (data as SupabasePaymentAccount[]) || [];
       setAccounts(loadedAccounts);
       setConfig(loadedConfig);
-      onAccountsOrConfigChanged?.(loadedAccounts, loadedConfig);
+      onAccountsChangedRef.current?.(loadedAccounts, loadedConfig);
     } catch (err: any) {
+      console.error('[WhatsAppBillingCenter] fetchPaymentAccountsList error:', err);
       showBanner('error', err?.message || 'Failed to load payment accounts.');
     } finally {
-      setIsLoading(false);
+      setIsLoadingAccounts(false);
     }
-  }, [onAccountsOrConfigChanged]);
+  }, []);
 
   useEffect(() => {
     if (!isOpen) return;
-    loadData();
+    void fetchPaymentAccountsList();
 
     const channel = supabase
       .channel('public:whatsapp_billing_center_accounts')
@@ -132,15 +181,15 @@ export const WhatsAppBillingCenter: React.FC<WhatsAppBillingCenterProps> = ({
         'postgres_changes',
         { event: '*', schema: 'public', table: 'payment_accounts' },
         () => {
-          loadData();
+          void fetchPaymentAccountsList();
         }
       )
       .subscribe();
 
     return () => {
-      supabase.removeChannel(channel);
+      void supabase.removeChannel(channel);
     };
-  }, [isOpen, loadData]);
+  }, [isOpen, fetchPaymentAccountsList]);
 
   const activeAccounts = useMemo(
     () => accounts.filter((a) => a.is_active !== false),
@@ -175,7 +224,7 @@ export const WhatsAppBillingCenter: React.FC<WhatsAppBillingCenterProps> = ({
     try {
       const result = await saveWhatsappBillingConfig(config);
       setConfig(result.config);
-      onAccountsOrConfigChanged?.(accounts, result.config);
+      onAccountsChangedRef.current?.(accounts, result.config);
       showBanner(
         'success',
         `Saved NOC Support WhatsApp (${result.config.support_whatsapp}). All reminder & receipt templates updated.`
@@ -189,12 +238,17 @@ export const WhatsAppBillingCenter: React.FC<WhatsAppBillingCenterProps> = ({
 
   const handleOpenAddForm = () => {
     setEditingAccount(null);
+    setConfirmDeleteId(null);
     setFormState(createEmptyAccountForm());
     setIsFormOpen(true);
+    setTimeout(() => {
+      formSectionRef.current?.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
+    }, 40);
   };
 
   const handleOpenEditForm = (acc: SupabasePaymentAccount) => {
     setEditingAccount(acc);
+    setConfirmDeleteId(null);
     setFormState({
       account_type: (acc.account_type as PaymentAccountType) || 'BANK',
       provider_name: acc.provider_name || '',
@@ -203,6 +257,9 @@ export const WhatsAppBillingCenter: React.FC<WhatsAppBillingCenterProps> = ({
       is_active: acc.is_active !== false,
     });
     setIsFormOpen(true);
+    setTimeout(() => {
+      formSectionRef.current?.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
+    }, 40);
   };
 
   const handleSaveAccount = async (e: React.FormEvent) => {
@@ -220,7 +277,7 @@ export const WhatsAppBillingCenter: React.FC<WhatsAppBillingCenterProps> = ({
     try {
       const nowIso = new Date().toISOString();
       if (editingAccount?.id) {
-        const { error } = await supabase
+        const { data: updatedRow, error } = await supabase
           .from('payment_accounts')
           .update({
             account_type: formState.account_type,
@@ -230,33 +287,54 @@ export const WhatsAppBillingCenter: React.FC<WhatsAppBillingCenterProps> = ({
             is_active: formState.is_active,
             updated_at: nowIso,
           })
-          .eq('id', editingAccount.id);
+          .eq('id', editingAccount.id)
+          .select()
+          .maybeSingle();
 
         if (error) throw error;
+
+        if (updatedRow) {
+          const nextList = accounts.map((a) =>
+            a.id === editingAccount.id ? (updatedRow as SupabasePaymentAccount) : a
+          );
+          setAccounts(nextList);
+          onAccountsChangedRef.current?.(nextList, configRef.current);
+        }
         showBanner('success', `Updated payment account "${provider}" (${title}).`);
       } else {
-        const { error } = await supabase.from('payment_accounts').insert([
-          {
-            account_type: formState.account_type,
-            provider_name: provider,
-            account_title: title,
-            account_number_or_iban: numberOrIban,
-            is_active: formState.is_active,
-            updated_at: nowIso,
-          },
-        ]);
+        const { data: insertedRow, error } = await supabase
+          .from('payment_accounts')
+          .insert([
+            {
+              account_type: formState.account_type,
+              provider_name: provider,
+              account_title: title,
+              account_number_or_iban: numberOrIban,
+              is_active: formState.is_active,
+              updated_at: nowIso,
+            },
+          ])
+          .select()
+          .maybeSingle();
 
         if (error) throw error;
+
+        if (insertedRow) {
+          const nextList = [...accounts, insertedRow as SupabasePaymentAccount];
+          setAccounts(nextList);
+          onAccountsChangedRef.current?.(nextList, configRef.current);
+        }
         showBanner('success', `Added new payment account "${provider}" (${title}).`);
       }
 
       setIsFormOpen(false);
       setEditingAccount(null);
-      await loadData();
+      await fetchPaymentAccountsList();
     } catch (err: any) {
       showBanner('error', err?.message || 'Failed to save payment account.');
     } finally {
       setIsSavingAccount(false);
+      setIsLoadingAccounts(false);
     }
   };
 
@@ -278,7 +356,7 @@ export const WhatsAppBillingCenter: React.FC<WhatsAppBillingCenterProps> = ({
         a.id === acc.id ? { ...a, is_active: nextActive } : a
       );
       setAccounts(updatedList);
-      onAccountsOrConfigChanged?.(updatedList, config);
+      onAccountsChangedRef.current?.(updatedList, configRef.current);
       showBanner(
         'success',
         `${acc.provider_name} marked ${nextActive ? 'Active (shown in WhatsApp reminders)' : 'Inactive (hidden from reminders)'}.`
@@ -290,21 +368,26 @@ export const WhatsAppBillingCenter: React.FC<WhatsAppBillingCenterProps> = ({
     }
   };
 
-  const handleConfirmDeleteAccount = async () => {
-    if (!accountToDelete) return;
+  const handleDeleteAccount = async (account: SupabasePaymentAccount) => {
     setIsDeleting(true);
     try {
       const { error } = await supabase
         .from('payment_accounts')
         .delete()
-        .eq('id', accountToDelete.id);
+        .eq('id', account.id);
 
       if (error) throw error;
 
-      const deletedName = accountToDelete.provider_name;
-      setAccountToDelete(null);
-      showBanner('success', `Deleted payment account "${deletedName}".`);
-      await loadData();
+      const remaining = accounts.filter((a) => a.id !== account.id);
+      setAccounts(remaining);
+      setConfirmDeleteId(null);
+      if (editingAccount?.id === account.id) {
+        setIsFormOpen(false);
+        setEditingAccount(null);
+      }
+      onAccountsChangedRef.current?.(remaining, configRef.current);
+      showBanner('success', `Deleted payment account "${account.provider_name}".`);
+      await fetchPaymentAccountsList();
     } catch (err: any) {
       showBanner('error', err?.message || 'Failed to delete payment account.');
     } finally {
@@ -524,12 +607,12 @@ export const WhatsAppBillingCenter: React.FC<WhatsAppBillingCenterProps> = ({
               <div className="flex items-center gap-2 shrink-0">
                 <button
                   type="button"
-                  onClick={loadData}
-                  disabled={isLoading}
+                  onClick={() => void fetchPaymentAccountsList()}
+                  disabled={isLoadingAccounts}
                   className="p-2 rounded-lg bg-slate-800 hover:bg-slate-700 text-slate-300 border border-slate-700 cursor-pointer"
                   title="Refresh accounts from Supabase"
                 >
-                  <RefreshCw className={`w-3.5 h-3.5 ${isLoading ? 'animate-spin' : ''}`} />
+                  <RefreshCw className={`w-3.5 h-3.5 ${isLoadingAccounts ? 'animate-spin text-cyan-400' : ''}`} />
                 </button>
                 <button
                   type="button"
@@ -537,7 +620,7 @@ export const WhatsAppBillingCenter: React.FC<WhatsAppBillingCenterProps> = ({
                   className="px-3.5 py-2 rounded-lg bg-cyan-600 hover:bg-cyan-500 text-slate-950 font-bold text-xs flex items-center gap-1.5 transition cursor-pointer whitespace-nowrap shrink-0"
                 >
                   <Plus className="w-3.5 h-3.5 stroke-[3]" />
-                  <span>+ Add New Account</span>
+                  <span>Add New Account</span>
                 </button>
               </div>
             </div>
@@ -545,8 +628,9 @@ export const WhatsAppBillingCenter: React.FC<WhatsAppBillingCenterProps> = ({
             {/* Add / Edit Account Form */}
             {isFormOpen && (
               <form
+                ref={formSectionRef}
                 onSubmit={handleSaveAccount}
-                className="bg-slate-950 border border-cyan-800/60 rounded-xl p-4 space-y-3.5 text-xs"
+                className="bg-slate-950 border border-cyan-700/70 rounded-xl p-4 space-y-3.5 text-xs shadow-lg"
               >
                 <div className="flex items-center justify-between border-b border-slate-800 pb-2">
                   <span className="font-bold text-cyan-300">
@@ -690,10 +774,11 @@ export const WhatsAppBillingCenter: React.FC<WhatsAppBillingCenterProps> = ({
               </form>
             )}
 
-            {/* Accounts List */}
-            {isLoading ? (
-              <div className="py-10 text-center text-xs font-mono text-slate-500">
-                Loading payment_accounts from Supabase...
+            {/* Accounts List — NEVER hide existing accounts behind loading state */}
+            {isLoadingAccounts && accounts.length === 0 ? (
+              <div className="py-10 text-center text-xs font-mono text-slate-400 flex items-center justify-center gap-2">
+                <RefreshCw className="w-4 h-4 animate-spin text-cyan-400" />
+                <span>Loading payment_accounts from Supabase...</span>
               </div>
             ) : accounts.length === 0 ? (
               <div className="py-10 text-center bg-slate-950 border border-slate-800 rounded-xl space-y-2 p-6">
@@ -709,129 +794,147 @@ export const WhatsAppBillingCenter: React.FC<WhatsAppBillingCenterProps> = ({
                 {accounts.map((acc) => {
                   const isActive = acc.is_active !== false;
                   const typeUpper = (acc.account_type || 'BANK').toUpperCase();
+                  const isConfirmingDelete = confirmDeleteId === acc.id;
+
                   return (
                     <div
                       key={acc.id}
-                      className={`p-3.5 rounded-xl border transition flex flex-col sm:flex-row sm:items-center justify-between gap-3 ${
+                      className={`p-3.5 rounded-xl border transition space-y-2.5 ${
                         isActive
                           ? 'bg-slate-950 border-slate-800'
-                          : 'bg-slate-950/50 border-slate-800/60 opacity-70'
+                          : 'bg-slate-950/60 border-slate-800/60 opacity-75'
                       }`}
                     >
-                      <div className="space-y-1 min-w-0">
-                        <div className="flex flex-wrap items-center gap-2 text-xs">
-                          <span className="font-mono font-bold text-[11px] text-cyan-400">
-                            [{typeUpper}]
-                          </span>
-                          <span className="font-bold text-white text-sm">
-                            {acc.provider_name}
-                          </span>
-                          <span className="text-slate-500">&middot;</span>
-                          <span className="text-slate-300">
-                            Title: <strong className="text-white">{acc.account_title}</strong>
-                          </span>
+                      <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3">
+                        <div className="space-y-1.5 min-w-0">
+                          <div className="flex flex-wrap items-center gap-2 text-xs">
+                            <span
+                              className={`px-2 py-0.5 rounded border font-mono font-bold text-[10px] tracking-wide ${getTypeBadgeStyle(
+                                typeUpper
+                              )}`}
+                            >
+                              {typeUpper}
+                            </span>
+                            <span className="font-bold text-white text-sm">
+                              {acc.provider_name}
+                            </span>
+                            <span className="text-slate-500">&middot;</span>
+                            <span className="text-slate-300">
+                              Title: <strong className="text-white">{acc.account_title}</strong>
+                            </span>
+                          </div>
+
+                          <div className="flex items-center gap-2">
+                            <span className="font-mono text-xs text-emerald-300 select-all break-all">
+                              {acc.account_number_or_iban}
+                            </span>
+                            <button
+                              type="button"
+                              onClick={() => handleCopyAccountNumber(acc)}
+                              className="px-2 py-0.5 rounded bg-slate-800 hover:bg-slate-700 text-slate-300 text-[11px] font-mono flex items-center gap-1 cursor-pointer shrink-0"
+                              title="Copy Account Number / IBAN"
+                            >
+                              {copiedId === acc.id ? (
+                                <>
+                                  <Check className="w-3 h-3 text-emerald-400" />
+                                  <span className="text-emerald-400">Copied</span>
+                                </>
+                              ) : (
+                                <>
+                                  <Copy className="w-3 h-3" />
+                                  <span>Copy</span>
+                                </>
+                              )}
+                            </button>
+                          </div>
                         </div>
 
-                        <div className="flex items-center gap-2">
-                          <span className="font-mono text-xs text-emerald-300 select-all break-all">
-                            {acc.account_number_or_iban}
-                          </span>
+                        <div className="flex items-center gap-2 shrink-0">
+                          {/* Active / Inactive Switch */}
                           <button
                             type="button"
-                            onClick={() => handleCopyAccountNumber(acc)}
-                            className="px-2 py-0.5 rounded bg-slate-800 hover:bg-slate-700 text-slate-300 text-[11px] font-mono flex items-center gap-1 cursor-pointer shrink-0"
-                            title="Copy Account Number / IBAN"
+                            role="switch"
+                            aria-checked={isActive}
+                            onClick={() => handleToggleAccountActive(acc)}
+                            disabled={togglingId === acc.id}
+                            className={`px-2.5 py-1.5 rounded-lg text-[11px] font-semibold border flex items-center gap-2 transition cursor-pointer whitespace-nowrap ${
+                              isActive
+                                ? 'bg-emerald-950/60 text-emerald-300 border-emerald-700/60 hover:bg-emerald-900/60'
+                                : 'bg-slate-900 text-slate-400 border-slate-700 hover:text-white'
+                            }`}
+                            title={
+                              isActive
+                                ? 'Active — click to disable in WhatsApp reminders'
+                                : 'Inactive — click to enable in WhatsApp reminders'
+                            }
                           >
-                            {copiedId === acc.id ? (
-                              <>
-                                <Check className="w-3 h-3 text-emerald-400" />
-                                <span className="text-emerald-400">Copied</span>
-                              </>
-                            ) : (
-                              <>
-                                <Copy className="w-3 h-3" />
-                                <span>Copy</span>
-                              </>
-                            )}
+                            <span
+                              className={`relative inline-flex h-4 w-7 items-center rounded-full transition-colors ${
+                                isActive ? 'bg-emerald-500' : 'bg-slate-700'
+                              }`}
+                            >
+                              <span
+                                className={`inline-block h-3 w-3 transform rounded-full bg-white transition-transform ${
+                                  isActive ? 'translate-x-3.5' : 'translate-x-0.5'
+                                }`}
+                              />
+                            </span>
+                            <span>{isActive ? 'Active' : 'Inactive'}</span>
+                          </button>
+
+                          <button
+                            type="button"
+                            onClick={() => handleOpenEditForm(acc)}
+                            className="px-2.5 py-1.5 rounded-lg bg-slate-800 hover:bg-slate-700 text-cyan-300 border border-slate-700 text-xs font-semibold flex items-center gap-1 transition cursor-pointer whitespace-nowrap"
+                            title="Edit Account"
+                          >
+                            <Edit2 className="w-3.5 h-3.5" />
+                            <span>Edit</span>
+                          </button>
+
+                          <button
+                            type="button"
+                            onClick={() =>
+                              setConfirmDeleteId((prev) => (prev === acc.id ? null : acc.id))
+                            }
+                            className="px-2.5 py-1.5 rounded-lg bg-rose-950/60 hover:bg-rose-900/80 text-rose-300 border border-rose-800/70 text-xs font-semibold flex items-center gap-1 transition cursor-pointer whitespace-nowrap"
+                            title="Delete Account"
+                          >
+                            <Trash2 className="w-3.5 h-3.5" />
+                            <span>Delete</span>
                           </button>
                         </div>
                       </div>
 
-                      <div className="flex items-center gap-2 shrink-0">
-                        <button
-                          type="button"
-                          onClick={() => handleToggleAccountActive(acc)}
-                          disabled={togglingId === acc.id}
-                          className={`px-2.5 py-1.5 rounded-lg text-[11px] font-semibold border flex items-center gap-1.5 transition cursor-pointer whitespace-nowrap ${
-                            isActive
-                              ? 'bg-emerald-950/60 text-emerald-300 border-emerald-700/60 hover:bg-emerald-900/60'
-                              : 'bg-slate-900 text-slate-400 border-slate-700 hover:text-white'
-                          }`}
-                          title={
-                            isActive
-                              ? 'Active — click to disable in reminders'
-                              : 'Inactive — click to enable in reminders'
-                          }
-                        >
-                          <Power className="w-3 h-3" />
-                          <span>{isActive ? 'Active' : 'Inactive'}</span>
-                        </button>
-
-                        <button
-                          type="button"
-                          onClick={() => handleOpenEditForm(acc)}
-                          className="px-2.5 py-1.5 rounded-lg bg-slate-800 hover:bg-slate-700 text-cyan-300 border border-slate-700 text-xs font-semibold flex items-center gap-1 transition cursor-pointer whitespace-nowrap"
-                          title="Edit Account"
-                        >
-                          <Edit2 className="w-3.5 h-3.5" />
-                          <span>Edit</span>
-                        </button>
-
-                        <button
-                          type="button"
-                          onClick={() => setAccountToDelete(acc)}
-                          className="px-2.5 py-1.5 rounded-lg bg-rose-950/60 hover:bg-rose-900/80 text-rose-300 border border-rose-800/70 text-xs font-semibold flex items-center gap-1 transition cursor-pointer whitespace-nowrap"
-                          title="Delete Account"
-                        >
-                          <Trash2 className="w-3.5 h-3.5" />
-                          <span>Delete</span>
-                        </button>
-                      </div>
+                      {/* Inline per-card Delete Confirmation (immediately visible on click) */}
+                      {isConfirmingDelete && (
+                        <div className="pt-2.5 border-t border-rose-900/60 flex flex-wrap items-center justify-between gap-2 text-xs">
+                          <span className="text-rose-200 font-medium">
+                            Delete &ldquo;{acc.provider_name}&rdquo; ({acc.account_number_or_iban}) permanently?
+                          </span>
+                          <div className="flex items-center gap-2 shrink-0">
+                            <button
+                              type="button"
+                              onClick={() => setConfirmDeleteId(null)}
+                              disabled={isDeleting}
+                              className="px-2.5 py-1 rounded-md bg-slate-800 hover:bg-slate-700 text-slate-200 font-semibold cursor-pointer"
+                            >
+                              Cancel
+                            </button>
+                            <button
+                              type="button"
+                              onClick={() => handleDeleteAccount(acc)}
+                              disabled={isDeleting}
+                              className="px-3 py-1 rounded-md bg-rose-600 hover:bg-rose-500 disabled:opacity-50 text-white font-bold cursor-pointer"
+                            >
+                              {isDeleting ? 'Deleting...' : 'Confirm Delete'}
+                            </button>
+                          </div>
+                        </div>
+                      )}
                     </div>
                   );
                 })}
-              </div>
-            )}
-
-            {/* Inline Delete Confirmation Box */}
-            {accountToDelete && (
-              <div className="p-4 rounded-xl bg-rose-950/40 border border-rose-700/70 flex flex-col sm:flex-row sm:items-center justify-between gap-3 text-xs">
-                <div>
-                  <div className="font-bold text-rose-200">
-                    Delete &ldquo;{accountToDelete.provider_name}&rdquo; ({accountToDelete.account_number_or_iban})?
-                  </div>
-                  <p className="text-rose-300/80 mt-0.5">
-                    This permanently removes the account from Supabase `payment_accounts` and future WhatsApp templates.
-                  </p>
-                </div>
-                <div className="flex items-center gap-2 shrink-0">
-                  <button
-                    type="button"
-                    onClick={() => setAccountToDelete(null)}
-                    disabled={isDeleting}
-                    className="px-3 py-1.5 rounded-lg bg-slate-800 hover:bg-slate-700 text-slate-200 font-semibold cursor-pointer"
-                  >
-                    Cancel
-                  </button>
-                  <button
-                    type="button"
-                    onClick={handleConfirmDeleteAccount}
-                    disabled={isDeleting}
-                    className="px-3.5 py-1.5 rounded-lg bg-rose-600 hover:bg-rose-500 disabled:opacity-50 text-white font-bold cursor-pointer"
-                  >
-                    {isDeleting ? 'Deleting...' : 'Confirm Delete'}
-                  </button>
-                </div>
               </div>
             )}
           </div>

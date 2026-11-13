@@ -16,6 +16,7 @@ import {
 import { UserAccount, SystemRole, CredentialShareDetails } from '../types/auth';
 import { useISP } from '../context/ISPContext';
 import { generateRandomPassword, buildWhatsAppShareText } from '../services/authUtils';
+import { openWhatsAppLink } from '../lib/whatsappBilling';
 
 interface UserCredentialModalProps {
   isOpen: boolean;
@@ -100,9 +101,7 @@ export const UserCredentialModal: React.FC<UserCredentialModalProps> = ({
   };
 
   const handleWhatsAppSend = () => {
-    const cleanPhone = currentPhone.replace(/[^\d+]/g, '');
-    const url = `https://wa.me/${cleanPhone.replace('+', '')}?text=${encodeURIComponent(shareText)}`;
-    window.open(url, '_blank');
+    openWhatsAppLink(currentPhone, shareText);
   };
 
   const handleSubmit = (e: React.FormEvent) => {

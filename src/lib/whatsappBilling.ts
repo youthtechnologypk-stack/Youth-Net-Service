@@ -157,16 +157,21 @@ export async function saveWhatsappBillingConfig(
 }
 
 export async function fetchPaymentAccounts(): Promise<SupabasePaymentAccount[]> {
-  const { data, error } = await supabase
-    .from('payment_accounts')
-    .select('*')
-    .order('created_at', { ascending: true });
+  try {
+    const { data, error } = await supabase
+      .from('payment_accounts')
+      .select('*')
+      .order('created_at', { ascending: true });
 
-  if (error) {
-    console.warn('fetchPaymentAccounts error:', error.message);
+    if (error) {
+      console.warn('fetchPaymentAccounts error:', error.message);
+      return [];
+    }
+    return (data as SupabasePaymentAccount[]) || [];
+  } catch (err) {
+    console.error('fetchPaymentAccounts failed:', err);
     return [];
   }
-  return (data as SupabasePaymentAccount[]) || [];
 }
 
 /**
@@ -182,24 +187,49 @@ export function formatWhatsAppPhone(phone?: string | null): string {
   return digits;
 }
 
+/**
+ * Formats phone strings cleanly for tel:<number> URIs in Android Dialer / TWA wrappers
+ */
+export function formatTelPhone(phone?: string | null): string {
+  const raw = (phone || '').trim();
+  if (!raw) return '';
+  const hasPlus = raw.startsWith('+');
+  const digits = raw.replace(/[^\d]/g, '');
+  if (!digits) return '';
+  return hasPlus ? `+${digits}` : digits;
+}
+
 export function buildWhatsAppUrl(phone: string | null | undefined, messageText: string): string {
   const cleanPhone = formatWhatsAppPhone(phone);
   const encoded = encodeURIComponent(messageText);
+  if (!messageText) {
+    return cleanPhone ? `https://wa.me/${cleanPhone}` : 'https://wa.me/';
+  }
   return cleanPhone
     ? `https://wa.me/${cleanPhone}?text=${encoded}`
     : `https://wa.me/?text=${encoded}`;
 }
 
-export function openWhatsAppLink(phone: string | null | undefined, messageText: string): void {
-  if (typeof document === 'undefined') return;
-  const url = buildWhatsAppUrl(phone, messageText);
+/**
+ * Opens https://wa.me/... via a real external anchor click (target="_blank", rel="noopener noreferrer")
+ * so Android TWA / Chrome Custom Tabs / APK wrappers trigger the OS App Link / Intent directly
+ * into the native WhatsApp app instead of trapping a popup or getting blocked by window.open.
+ */
+export function openExternalWhatsAppUrl(url: string): void {
+  if (typeof document === 'undefined' || !url) return;
   const link = document.createElement('a');
   link.href = url;
   link.target = '_blank';
-  link.rel = 'noopener noreferrer';
+  link.rel = 'noopener noreferrer external';
+  link.style.display = 'none';
   document.body.appendChild(link);
   link.click();
   document.body.removeChild(link);
+}
+
+export function openWhatsAppLink(phone: string | null | undefined, messageText: string): void {
+  const url = buildWhatsAppUrl(phone, messageText);
+  openExternalWhatsAppUrl(url);
 }
 
 /**

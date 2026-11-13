@@ -28,6 +28,7 @@ import { OnuDevice, VsolOlt, OpticalSignalQuality } from '../types/olt';
 import { getSignalColorClass } from '../services/oltUtils';
 import { AddEditOltModal } from './AddEditOltModal';
 import { OltFleetManagerModal } from './OltFleetManagerModal';
+import { openWhatsAppLink } from '../lib/whatsappBilling';
 
 export const VsolOltStudio: React.FC = () => {
   const {
@@ -125,9 +126,7 @@ export const VsolOltStudio: React.FC = () => {
 
     logWhatsAppNotice(onu.customerPhone, onu.customerName, text, 'onu_optical_signal_report');
 
-    const cleanPhone = onu.customerPhone.replace(/[^\d+]/g, '').replace('+', '');
-    const url = `https://wa.me/${cleanPhone}?text=${encodeURIComponent(text)}`;
-    window.open(url, '_blank');
+    openWhatsAppLink(onu.customerPhone, text);
 
     setNotificationMsg({
       type: 'success',

@@ -1509,6 +1509,8 @@ export const BillingView: React.FC<BillingViewProps> = ({
       <WhatsAppBillingCenter
         isOpen={isPaymentAccountsOpen}
         onClose={() => setIsPaymentAccountsOpen(false)}
+        initialAccounts={paymentAccounts}
+        initialConfig={whatsappConfig}
         onAccountsOrConfigChanged={(updatedAccounts, updatedConfig) => {
           setPaymentAccounts(updatedAccounts);
           setWhatsappConfig(updatedConfig);

@@ -79,7 +79,7 @@ import {
 import { storageService } from '../services/storageService';
 import { saveUnifiedPortalUser, USERS_STORAGE_KEY } from '../lib/userRepository';
 import { supabase } from '../services/supabaseClient';
-import { sessionSyncEngine } from '../services/sessionSyncEngine';
+import { sessionSyncEngine, parseRouterOsUptimeSeconds } from '../services/sessionSyncEngine';
 
 interface BandwidthDataPoint {
   time: string;
@@ -1182,15 +1182,22 @@ export const ISPProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
 
         setActiveSessions(telemetryResult.activeSessions);
         setRouterInterfaces(telemetryResult.interfaces);
-        if (telemetryResult.interfaces && telemetryResult.interfaces.length > 0) {
+        const hasFreshInterfaces = Boolean(
+          telemetryResult.interfaces && telemetryResult.interfaces.length > 0
+        );
+        if (hasFreshInterfaces) {
           lastInterfaceSyncTimeRef.current = Date.now();
         }
         if (telemetryResult.sessionsPolledOk !== false) {
           void sessionSyncEngine.syncCycle(
             telemetryResult.activeSessions,
-            telemetryResult.interfaces && telemetryResult.interfaces.length > 0
-              ? telemetryResult.interfaces
-              : routerInterfacesRef.current
+            hasFreshInterfaces ? telemetryResult.interfaces : routerInterfacesRef.current,
+            {
+              routerId: targetRouter.id,
+              sessionsPolledOk: telemetryResult.sessionsPolledOk,
+              interfacesFresh: hasFreshInterfaces,
+              interfacesPolledAtMs: lastInterfaceSyncTimeRef.current || undefined,
+            }
           );
         }
 
@@ -1296,18 +1303,21 @@ export const ISPProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
   // Rolling Historical Session Logging & Total Consumption Tracking
   // -------------------------------------------------------------------------
   const updateRollingSessionHistory = (currentSessions: ActiveSession[]) => {
-    const nowIso = new Date().toISOString();
+    const nowMs = Date.now();
+    const nowIso = new Date(nowMs).toISOString();
     setSessionHistory((prevHistory) => {
       const updated = [...prevHistory];
       const currentUnames = new Set(
         currentSessions.map((s) => (s.username || '').toLowerCase()).filter(Boolean)
       );
 
-      // 1. Update or append ongoing active sessions
+      // 1. Update ongoing session in-place or close+open ONLY on genuine reconnect
       currentSessions.forEach((s) => {
         const uname = (s.username || '').toLowerCase();
         if (!uname) return;
 
+        const realSessId = String((s as any)['.id'] || '').trim();
+        const uptimeSec = parseRouterOsUptimeSeconds(s.uptime);
         const dlMb = s.bytesInMb || 0;
         const ulMb = s.bytesOutMb || 0;
         const existingIdx = updated.findIndex(
@@ -1315,22 +1325,62 @@ export const ISPProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
         );
 
         if (existingIdx >= 0) {
-          updated[existingIdx] = {
-            ...updated[existingIdx],
-            duration: s.uptime || updated[existingIdx].duration,
-            totalDownloadMB: Math.max(updated[existingIdx].totalDownloadMB, dlMb),
-            totalUploadMB: Math.max(updated[existingIdx].totalUploadMB, ulMb),
-            assignedIp: s.address || updated[existingIdx].assignedIp,
-            callerId: s.callerId || updated[existingIdx].callerId,
-            lastUpdated: nowIso,
-          };
+          const prevEntry = updated[existingIdx];
+          const prevUptimeSec =
+            prevEntry.uptimeSeconds ?? parseRouterOsUptimeSeconds(prevEntry.duration);
+          const sessionIdChanged = Boolean(
+            realSessId && prevEntry.sessionId && realSessId !== prevEntry.sessionId
+          );
+          const uptimeDropped = Boolean(
+            prevUptimeSec > 30 && uptimeSec < prevUptimeSec - 30
+          );
+
+          if (!sessionIdChanged && !uptimeDropped) {
+            // Same continuous session -> update in place
+            updated[existingIdx] = {
+              ...prevEntry,
+              sessionId: realSessId || prevEntry.sessionId,
+              duration: s.uptime || prevEntry.duration,
+              uptimeSeconds: Math.max(prevUptimeSec, uptimeSec),
+              totalDownloadMB: Math.max(prevEntry.totalDownloadMB, dlMb),
+              totalUploadMB: Math.max(prevEntry.totalUploadMB, ulMb),
+              assignedIp: s.address || prevEntry.assignedIp,
+              callerId: s.callerId || prevEntry.callerId,
+              lastUpdated: nowIso,
+            };
+          } else {
+            // Genuine reconnect -> close prior session & open fresh row without carry-over
+            updated[existingIdx] = {
+              ...prevEntry,
+              disconnectTime: nowIso,
+              terminationReason: 'Session Reconnected',
+              lastUpdated: nowIso,
+            };
+            updated.unshift({
+              id: `sess-${nowMs}-${Math.random().toString(36).slice(2, 6)}`,
+              sessionId: realSessId || undefined,
+              username: s.username,
+              connectTime: new Date(nowMs - uptimeSec * 1000).toISOString(),
+              disconnectTime: null,
+              duration: s.uptime || '0s',
+              uptimeSeconds: uptimeSec,
+              totalDownloadMB: dlMb,
+              totalUploadMB: ulMb,
+              assignedIp: s.address,
+              callerId: s.callerId,
+              routerId: selectedRouterId,
+              lastUpdated: nowIso,
+            });
+          }
         } else {
           updated.unshift({
-            id: `sess-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`,
+            id: `sess-${nowMs}-${Math.random().toString(36).slice(2, 6)}`,
+            sessionId: realSessId || undefined,
             username: s.username,
-            connectTime: nowIso,
+            connectTime: new Date(nowMs - uptimeSec * 1000).toISOString(),
             disconnectTime: null,
             duration: s.uptime || '0s',
+            uptimeSeconds: uptimeSec,
             totalDownloadMB: dlMb,
             totalUploadMB: ulMb,
             assignedIp: s.address,
@@ -1390,12 +1440,6 @@ export const ISPProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
       }
     }
 
-    // Realistic baseline fallback for newly provisioned subscribers
-    if (totalDownloadMB === 0 && totalUploadMB === 0) {
-      totalDownloadMB = 14250.6; // ~14.25 GB
-      totalUploadMB = 3840.4; // ~3.84 GB
-    }
-
     const totalCombinedMB = Math.round((totalDownloadMB + totalUploadMB) * 10) / 10;
     const totalCombinedGB = Number((totalCombinedMB / 1024).toFixed(2));
 
@@ -1406,8 +1450,8 @@ export const ISPProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
       totalCombinedGB,
       totalMB: totalCombinedMB,
       totalGB: totalCombinedGB,
-      sessionCount: Math.max(1, userHistory.length),
-      sessionsCount: Math.max(1, userHistory.length),
+      sessionCount: userHistory.length + (activeSess && !userHistory.some((h) => !h.disconnectTime) ? 1 : 0),
+      sessionsCount: userHistory.length + (activeSess && !userHistory.some((h) => !h.disconnectTime) ? 1 : 0),
       lastActiveSession: activeSess || (userHistory.length > 0 ? userHistory[0] : null),
       history: userHistory,
     };
@@ -1504,6 +1548,9 @@ export const ISPProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
           setActiveSessions([...result.activeSessions]);
           updateRollingSessionHistory(result.activeSessions);
 
+          const polledFreshInterfaces = Boolean(
+            shouldPollInterfaces && result.interfaces && result.interfaces.length > 0
+          );
           const effectiveInterfaces =
             result.interfaces && result.interfaces.length > 0
               ? result.interfaces
@@ -1517,7 +1564,12 @@ export const ISPProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
           }
 
           if (result.sessionsPolledOk !== false) {
-            void sessionSyncEngine.syncCycle(result.activeSessions, effectiveInterfaces);
+            void sessionSyncEngine.syncCycle(result.activeSessions, effectiveInterfaces, {
+              routerId: selectedRouterId,
+              sessionsPolledOk: result.sessionsPolledOk,
+              interfacesFresh: polledFreshInterfaces,
+              interfacesPolledAtMs: lastInterfaceSyncTimeRef.current || undefined,
+            });
           }
 
           if (result.traffic && isViewingTrafficWidget) {
@@ -1534,7 +1586,12 @@ export const ISPProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
             setIsSslOrCorsBlocked(false);
             setActiveSessions([...result.activeSessions]);
             if (result.sessionsPolledOk !== false) {
-              void sessionSyncEngine.syncCycle(result.activeSessions, routerInterfacesRef.current);
+              void sessionSyncEngine.syncCycle(result.activeSessions, routerInterfacesRef.current, {
+                routerId: selectedRouterId,
+                sessionsPolledOk: result.sessionsPolledOk,
+                interfacesFresh: false,
+                interfacesPolledAtMs: lastInterfaceSyncTimeRef.current || undefined,
+              });
             }
           } else {
             const errorMsg =

@@ -43,6 +43,7 @@ import {
 } from '../lib/billingAndNetwork';
 import { AreaNodeSelector } from './AreaNodeSelector';
 import { AreaNodeManagerModal } from './AreaNodeManagerModal';
+import { formatTelPhone } from '../lib/whatsappBilling';
 import { sessionSyncEngine } from '../services/sessionSyncEngine';
 import { DateFilterToolbar } from './DateFilterToolbar';
 import {
@@ -1151,7 +1152,7 @@ export const ManagerOperationsDashboard: React.FC<ManagerOperationsDashboardProp
                           <div className="text-[10px] text-slate-400 font-mono flex items-center gap-2">
                             <span>@{ticket.subscriber_username}</span>
                             {phone && (
-                              <a href={`tel:${phone}`} className="text-cyan-400 hover:underline flex items-center gap-0.5">
+                              <a href={`tel:${formatTelPhone(phone)}`} className="text-cyan-400 hover:underline flex items-center gap-0.5">
                                 <Phone className="w-2.5 h-2.5" />
                                 {phone}
                               </a>
@@ -1286,7 +1287,7 @@ export const ManagerOperationsDashboard: React.FC<ManagerOperationsDashboardProp
                         <td className="py-2 px-3 font-sans">
                           <div className="font-bold text-white">{sub.full_name}</div>
                           {sub.phone && (
-                            <a href={`tel:${sub.phone}`} className="text-[10px] text-cyan-400 hover:underline font-mono">
+                            <a href={`tel:${formatTelPhone(sub.phone)}`} className="text-[10px] text-cyan-400 hover:underline font-mono">
                               {sub.phone}
                             </a>
                           )}

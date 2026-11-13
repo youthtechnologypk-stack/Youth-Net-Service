@@ -646,7 +646,7 @@ export const MikrotikStudio: React.FC<MikrotikStudioProps> = ({
                 <span>Automated PPPoE Session Audit Log (`subscriber_session_logs`)</span>
               </h3>
               <p className="text-xs text-slate-400 mt-0.5">
-                Live Supabase persistence of connects, 60s telemetry updates, reconnects, drops, and manual NOC kicks.
+                Live Supabase persistence per PPPoE session — connects, in-place telemetry updates, disconnects, and manual NOC kicks.
               </p>
             </div>
             <div className="flex items-center flex-wrap gap-2">
@@ -738,10 +738,10 @@ export const MikrotikStudio: React.FC<MikrotikStudioProps> = ({
                           </div>
                           <div className="text-[10px] text-slate-500">
                             {log.disconnected_at
-                              ? `Ended: ${new Date(log.disconnected_at).toLocaleString()}`
+                              ? `Closed: ${new Date(log.disconnected_at).toLocaleString()}`
                               : derivedStatus === 'ACTIVE'
-                              ? 'Live Telemetry (60s sync)'
-                              : `Recorded: ${log.recorded_at ? new Date(log.recorded_at).toLocaleString() : '—'}`}
+                              ? 'Live session'
+                              : `Closed: ${log.recorded_at ? new Date(log.recorded_at).toLocaleString() : '—'}`}
                           </div>
                         </td>
                         <td className="py-3 px-4 font-mono text-[11px] whitespace-nowrap">

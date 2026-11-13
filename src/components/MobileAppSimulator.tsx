@@ -32,6 +32,7 @@ import { HandoverCashModal } from './HandoverCashModal';
 import { OfflineActivityDashboard } from './OfflineActivityDashboard';
 import { offlineQueueManager } from '../services/offlineQueueManager';
 import { getSignalColorClass } from '../services/oltUtils';
+import { formatTelPhone } from '../lib/whatsappBilling';
 
 interface MobileAppSimulatorProps {
   onOpenReceiptModal: (invoice: Invoice) => void;
@@ -445,7 +446,7 @@ export const MobileAppSimulator: React.FC<MobileAppSimulatorProps> = ({
                             <span>Collect Cash & Restore</span>
                           </button>
                           <a
-                            href={`tel:${cust.phone}`}
+                            href={`tel:${formatTelPhone(cust.phone)}`}
                             className="p-1.5 bg-slate-800 hover:bg-slate-700 text-slate-300 rounded-lg text-xs"
                             title="Call customer"
                           >

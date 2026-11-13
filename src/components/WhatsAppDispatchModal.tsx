@@ -17,6 +17,7 @@ import {
   buildStandardWhatsAppCredentialText,
   getPortalUrlForRole,
 } from '../services/authUtils';
+import { buildWhatsAppUrl, openExternalWhatsAppUrl } from '../lib/whatsappBilling';
 
 interface WhatsAppDispatchModalProps {
   isOpen: boolean;
@@ -48,8 +49,7 @@ export const WhatsAppDispatchModal: React.FC<WhatsAppDispatchModalProps> = ({
       portalUrl
     );
 
-  const cleanPhone = (user.phone || '').replace(/[^\d+]/g, '').replace('+', '');
-  const whatsAppUrl = `https://wa.me/${cleanPhone}?text=${encodeURIComponent(messageText)}`;
+  const whatsAppUrl = buildWhatsAppUrl(user.phone, messageText);
 
   const handleCopy = () => {
     navigator.clipboard.writeText(messageText);
@@ -58,7 +58,7 @@ export const WhatsAppDispatchModal: React.FC<WhatsAppDispatchModalProps> = ({
   };
 
   const handleOpenWhatsApp = () => {
-    window.open(whatsAppUrl, '_blank', 'noopener,noreferrer');
+    openExternalWhatsAppUrl(whatsAppUrl);
   };
 
   return (

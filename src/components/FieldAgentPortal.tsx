@@ -48,7 +48,13 @@ import {
   fetchWhatsappBillingConfig,
   getDefaultWhatsappConfig,
   openWhatsAppLink,
+  formatTelPhone,
 } from '../lib/whatsappBilling';
+import {
+  offlineSyncManager,
+  isLikelyNetworkError,
+  isOfflineCapableRole,
+} from '../services/OfflineSyncManager';
 
 interface FieldAgentPortalProps {
   currentUser: UserAccount;
@@ -95,6 +101,10 @@ export const FieldAgentPortal: React.FC<FieldAgentPortalProps> = ({
     nextExpiryDate: string;
   } | null>(null);
   const [isLoadingData, setIsLoadingData] = useState<boolean>(true);
+  const [isOnline, setIsOnline] = useState<boolean>(() =>
+    typeof navigator !== 'undefined' ? navigator.onLine : true
+  );
+  const resolvedAgentIdRef = React.useRef<string>(currentUser.id);
 
   // Modal State for Cash Collection
   const [isCollectModalOpen, setIsCollectModalOpen] = useState<boolean>(false);
@@ -102,16 +112,46 @@ export const FieldAgentPortal: React.FC<FieldAgentPortalProps> = ({
   const [collectionAmountInput, setCollectionAmountInput] = useState<number | string>('');
   const [isSubmittingCollection, setIsSubmittingCollection] = useState<boolean>(false);
 
-  // Fetch this specific agent's live data from Supabase
+  const showNoticeToast = (msg: string, durationMs = 6000) => {
+    setCollectionSuccessToast(msg);
+    setTimeout(() => {
+      setCollectionSuccessToast((prev) => (prev === msg ? null : prev));
+    }, durationMs);
+  };
+
+  const applyCachedOfflineSnapshot = (agentIdToLoad: string) => {
+    const cached = offlineSyncManager.getCachedAgentSnapshot(agentIdToLoad, currentUser.role);
+    if (!cached) return false;
+    setAssignedTickets(cached.tickets);
+    setAssignedInvoices(cached.invoices);
+    setSubscriberDirectory(cached.subscribers);
+    setAgentCash(cached.wallet.cashInHand);
+    setAgentBaseSalary(cached.wallet.baseSalary);
+    setAgentAdvanceBalance(cached.wallet.advanceBalance);
+    setAgentCashTransactions(cached.wallet.cashTransactions);
+    return true;
+  };
+
+  // Fetch this specific agent's live data from Supabase (with automatic offline cache fallback)
   const fetchAgentData = async () => {
     setIsLoadingData(true);
     try {
+      const effectiveId = resolvedAgentIdRef.current || currentUser.id;
+      if (typeof navigator !== 'undefined' && navigator.onLine === false) {
+        applyCachedOfflineSnapshot(effectiveId);
+        return;
+      }
+
       // 1. Fetch agent's latest cash_in_hand, advance_balance, base_salary from portal_users
-      let { data: userRow } = await supabase
+      let { data: userRow, error: userErr } = await supabase
         .from('portal_users')
         .select('id, cash_in_hand, advance_balance, base_salary, area, full_name')
         .eq('id', currentUser.id)
         .maybeSingle();
+
+      if (userErr && isLikelyNetworkError(userErr)) {
+        throw userErr;
+      }
 
       if (!userRow && currentUser.username) {
         const res = await supabase
@@ -123,60 +163,48 @@ export const FieldAgentPortal: React.FC<FieldAgentPortalProps> = ({
       }
 
       const resolvedAgentId = userRow?.id || currentUser.id;
+      resolvedAgentIdRef.current = resolvedAgentId;
 
-      if (userRow) {
-        if (userRow.cash_in_hand !== undefined && userRow.cash_in_hand !== null) {
-          setAgentCash(Number(userRow.cash_in_hand) || 0);
-        }
-        if (userRow.advance_balance !== undefined && userRow.advance_balance !== null) {
-          setAgentAdvanceBalance(Number(userRow.advance_balance) || 0);
-        }
-        if (userRow.base_salary !== undefined && userRow.base_salary !== null) {
-          setAgentBaseSalary(Number(userRow.base_salary) || 0);
-        }
-      }
+      const nextBaseSalary =
+        userRow?.base_salary !== undefined && userRow?.base_salary !== null
+          ? Number(userRow.base_salary) || 0
+          : agentBaseSalary;
+      const nextAdvanceBal =
+        userRow?.advance_balance !== undefined && userRow?.advance_balance !== null
+          ? Number(userRow.advance_balance) || 0
+          : agentAdvanceBalance;
+      const serverCash =
+        userRow?.cash_in_hand !== undefined && userRow?.cash_in_hand !== null
+          ? Number(userRow.cash_in_hand) || 0
+          : agentCash;
 
-      // 1b. Fetch cash ledger transactions for this agent
-      const { data: cashTxns } = await supabase
-        .from('agent_cash_transactions')
-        .select('*')
-        .eq('agent_id', resolvedAgentId)
-        .order('created_at', { ascending: false });
+      setAgentBaseSalary(nextBaseSalary);
+      setAgentAdvanceBalance(nextAdvanceBal);
 
-      if (cashTxns) {
-        setAgentCashTransactions(cashTxns as SupabaseAgentCashTransaction[]);
-      }
-
-      // 2. Fetch tickets strictly assigned to this agent (by UUID and Name)
-      const { data: tktData } = await supabase
-        .from('tickets')
-        .select('*')
-        .or(`assigned_agent_id.eq.${resolvedAgentId},assigned_agent_name.ilike.%${currentUser.fullName}%`)
-        .order('created_at', { ascending: false });
-
-      if (tktData) {
-        const seenTicketIds = new Set<string>();
-        const uniqueTickets = (tktData as SupabaseTicket[]).filter((t) => {
-          if (!t?.id || seenTicketIds.has(t.id)) return false;
-          seenTicketIds.add(t.id);
-          return true;
-        });
-        setAssignedTickets(uniqueTickets);
-      }
-
-      // 3. Fetch recovery invoices strictly assigned to this agent (by UUID and Name)
-      const { data: agentInvoices } = await supabase
-        .from('invoices')
-        .select('*')
-        .or(`assigned_agent_id.eq.${resolvedAgentId},assigned_agent_name.ilike.%${currentUser.fullName}%`)
-        .order('created_at', { ascending: false });
-
-      if (agentInvoices) {
-        setAssignedInvoices(agentInvoices as SupabaseInvoice[]);
-      }
-
-      // 4. Fetch subscriber phone numbers and addresses from portal_users for Click-to-Call & WhatsApp
-      const [{ data: clientRows }, loadedAccounts, loadedWaConfig] = await Promise.all([
+      // 1b. Fetch cash ledger transactions, assigned tickets, recovery invoices & subscriber directory
+      const [
+        { data: cashTxns },
+        { data: tktData, error: tktErr },
+        { data: agentInvoices, error: invErr },
+        { data: clientRows },
+        loadedAccounts,
+        loadedWaConfig,
+      ] = await Promise.all([
+        supabase
+          .from('agent_cash_transactions')
+          .select('*')
+          .eq('agent_id', resolvedAgentId)
+          .order('created_at', { ascending: false }),
+        supabase
+          .from('tickets')
+          .select('*')
+          .or(`assigned_agent_id.eq.${resolvedAgentId},assigned_agent_name.ilike.%${currentUser.fullName}%`)
+          .order('created_at', { ascending: false }),
+        supabase
+          .from('invoices')
+          .select('*')
+          .or(`assigned_agent_id.eq.${resolvedAgentId},assigned_agent_name.ilike.%${currentUser.fullName}%`)
+          .order('created_at', { ascending: false }),
         supabase
           .from('portal_users')
           .select('username, full_name, phone, address, area, package_speed')
@@ -185,12 +213,34 @@ export const FieldAgentPortal: React.FC<FieldAgentPortalProps> = ({
         fetchWhatsappBillingConfig(),
       ]);
 
+      if ((tktErr && isLikelyNetworkError(tktErr)) || (invErr && isLikelyNetworkError(invErr))) {
+        throw tktErr || invErr;
+      }
+
+      const nextCashTxns = (cashTxns as SupabaseAgentCashTransaction[]) || agentCashTransactions;
+      if (cashTxns) {
+        setAgentCashTransactions(nextCashTxns);
+      }
+
+      let uniqueTickets: SupabaseTicket[] = assignedTickets;
+      if (tktData) {
+        const seenTicketIds = new Set<string>();
+        uniqueTickets = (tktData as SupabaseTicket[]).filter((t) => {
+          if (!t?.id || seenTicketIds.has(t.id)) return false;
+          seenTicketIds.add(t.id);
+          return true;
+        });
+      }
+
+      const rawInvoices = (agentInvoices as SupabaseInvoice[]) || assignedInvoices;
+
+      let lookup: Record<string, { phone?: string; address?: string; full_name?: string; area?: string; package_speed?: string }> = subscriberDirectory;
       if (clientRows && Array.isArray(clientRows)) {
-        const lookup: Record<string, { phone?: string; address?: string; full_name?: string; area?: string; package_speed?: string }> = {};
+        const freshLookup: typeof lookup = {};
         clientRows.forEach((c: any) => {
           const uname = (c.username || '').trim().toLowerCase();
           if (uname) {
-            lookup[uname] = {
+            freshLookup[uname] = {
               phone: c.phone || '',
               address: c.address || '',
               full_name: c.full_name || '',
@@ -199,25 +249,103 @@ export const FieldAgentPortal: React.FC<FieldAgentPortalProps> = ({
             };
           }
         });
-        setSubscriberDirectory(lookup);
+        lookup = freshLookup;
+        setSubscriberDirectory(freshLookup);
       }
+
+      // Role-guarded automatic offline snapshot caching
+      if (isOfflineCapableRole(currentUser.role)) {
+        offlineSyncManager.cacheAgentSnapshot(resolvedAgentId, currentUser.role, {
+          subscribers: lookup,
+          invoices: rawInvoices,
+          tickets: uniqueTickets,
+          wallet: {
+            cashInHand: serverCash,
+            baseSalary: nextBaseSalary,
+            advanceBalance: nextAdvanceBal,
+            cashTransactions: nextCashTxns,
+          },
+        });
+      }
+
+      // Overlay any queued offline actions until auto-sync clears them
+      const overlaid = offlineSyncManager.applyOutboxOverlay(
+        resolvedAgentId,
+        currentUser.role,
+        {
+          invoices: rawInvoices,
+          tickets: uniqueTickets,
+          cashInHand: serverCash,
+        }
+      );
+
+      setAssignedTickets(overlaid.tickets);
+      setAssignedInvoices(overlaid.invoices);
+      setAgentCash(overlaid.cashInHand);
       setPaymentAccounts(loadedAccounts);
       setWhatsappConfig(loadedWaConfig);
     } catch (err) {
       console.warn('FieldAgentPortal fetch error:', err);
+      const effectiveId = resolvedAgentIdRef.current || currentUser.id;
+      applyCachedOfflineSnapshot(effectiveId);
     } finally {
       setIsLoadingData(false);
     }
   };
 
-  useEffect(() => {
-    fetchAgentData();
+  // Automatic Background Sync runner on mount, reconnect, and visibility return
+  const runAutoSync = async () => {
+    if (!isOfflineCapableRole(currentUser.role)) return;
+    if (typeof navigator !== 'undefined' && navigator.onLine === false) return;
 
+    const effectiveId = resolvedAgentIdRef.current || currentUser.id;
+    const res = await offlineSyncManager.autoSyncOutbox(effectiveId, currentUser.role);
+    if (res.syncedCount > 0) {
+      await fetchAgentData();
+      showNoticeToast('✅ 4G/Wi-Fi connected — Offline records synced!', 6000);
+    }
+  };
+
+  useEffect(() => {
+    const initialize = async () => {
+      await fetchAgentData();
+      if (typeof navigator === 'undefined' || navigator.onLine) {
+        await runAutoSync();
+      }
+    };
+    void initialize();
+
+    const handleOnline = () => {
+      setIsOnline(true);
+      void runAutoSync();
+    };
+    const handleOffline = () => {
+      setIsOnline(false);
+    };
+    const handleVisibilityChange = () => {
+      const onlineNow = typeof navigator === 'undefined' ? true : navigator.onLine;
+      setIsOnline(onlineNow);
+      if (document.visibilityState === 'visible' && onlineNow) {
+        void runAutoSync();
+      }
+    };
+    const handleSwMessage = (event: MessageEvent) => {
+      if (event.data?.type === 'AUTO_SYNC_OUTBOX' && navigator.onLine) {
+        void runAutoSync();
+      }
+    };
     const handleWaConfigUpdated = (e: Event) => {
       const detail = (e as CustomEvent)?.detail;
       if (detail) setWhatsappConfig(detail);
     };
+
+    window.addEventListener('online', handleOnline);
+    window.addEventListener('offline', handleOffline);
+    document.addEventListener('visibilitychange', handleVisibilityChange);
     window.addEventListener(WHATSAPP_CONFIG_UPDATED_EVENT, handleWaConfigUpdated);
+    if (typeof navigator !== 'undefined' && 'serviceWorker' in navigator) {
+      navigator.serviceWorker.addEventListener('message', handleSwMessage);
+    }
 
     // Realtime subscriptions for agent portal
     const channel = supabase
@@ -233,20 +361,20 @@ export const FieldAgentPortal: React.FC<FieldAgentPortalProps> = ({
               prev.some((t) => t.id === newTicket.id) ? prev : [newTicket, ...prev]
             );
           } else {
-            fetchAgentData();
+            void fetchAgentData();
           }
         } else {
-          fetchAgentData();
+          void fetchAgentData();
         }
       })
       .on('postgres_changes', { event: '*', schema: 'public', table: 'invoices' }, () => {
-        fetchAgentData();
+        void fetchAgentData();
       })
       .on('postgres_changes', { event: '*', schema: 'public', table: 'payment_accounts' }, () => {
         fetchPaymentAccounts().then(setPaymentAccounts).catch(() => {});
       })
       .on('postgres_changes', { event: '*', schema: 'public', table: 'agent_cash_transactions' }, () => {
-        fetchAgentData();
+        void fetchAgentData();
       })
       .on('postgres_changes', { event: '*', schema: 'public', table: 'portal_users' }, (payload) => {
         if (payload.new && (payload.new as any).id === currentUser.id) {
@@ -262,114 +390,76 @@ export const FieldAgentPortal: React.FC<FieldAgentPortalProps> = ({
       .subscribe();
 
     return () => {
+      window.removeEventListener('online', handleOnline);
+      window.removeEventListener('offline', handleOffline);
+      document.removeEventListener('visibilitychange', handleVisibilityChange);
       window.removeEventListener(WHATSAPP_CONFIG_UPDATED_EVENT, handleWaConfigUpdated);
-      supabase.removeChannel(channel);
+      if (typeof navigator !== 'undefined' && 'serviceWorker' in navigator) {
+        navigator.serviceWorker.removeEventListener('message', handleSwMessage);
+      }
+      void supabase.removeChannel(channel);
     };
   }, [currentUser.id]);
 
   // Open modal for recording payment
   const handleOpenCollectionModal = (inv: SupabaseInvoice) => {
-    setSelectedInvForCollection(inv);
     const alreadyPaid = Number(inv.paid_amount) || 0;
     const remainingDue = Math.max(0, (Number(inv.amount) || 0) - alreadyPaid);
-    if (remainingDue <= 0) {
-      alert('This invoice has already been settled and marked PAID.');
+    if (remainingDue <= 0 || (inv.status || '').toUpperCase() === 'PAID') {
+      showNoticeToast('This invoice has already been settled and marked PAID.', 4000);
       return;
     }
+    setSelectedInvForCollection(inv);
     setCollectionAmountInput(remainingDue);
     setIsCollectModalOpen(true);
   };
 
-  // Handle direct cash collection with partial payment support & payment_transactions record
+  // Handle direct cash collection with transparent offline saving fallback
   const handleConfirmCollection = async () => {
     if (!selectedInvForCollection) return;
     const enteredVal = Number(collectionAmountInput);
     if (isNaN(enteredVal) || enteredVal <= 0) {
-      alert('Please enter a valid payment amount greater than 0.');
+      showNoticeToast('Please enter a valid payment amount greater than 0.', 4000);
       return;
     }
 
     setIsSubmittingCollection(true);
-    try {
-      const inv = selectedInvForCollection;
-      const totalAmount = Number(inv.amount || 0);
-      const previousPaid = Number(inv.paid_amount || 0);
-      const collectedNow = Number(enteredVal || 0);
-      const newPaidTotal = previousPaid + collectedNow;
-      const remaining = totalAmount - newPaidTotal;
+    const inv = selectedInvForCollection;
+    const totalAmount = Number(inv.amount || 0);
+    const previousPaid = Number(inv.paid_amount || 0);
+    const collectedNow = Number(enteredVal || 0);
+    const newPaidTotal = previousPaid + collectedNow;
+    const remaining = totalAmount - newPaidTotal;
+    const newStatus: 'PAID' | 'PARTIAL' = remaining <= 0 ? 'PAID' : 'PARTIAL';
+    const finalPaidAmount = remaining <= 0 ? totalAmount : newPaidTotal;
+    const nowIso = new Date().toISOString();
+    const nextExpiryDate =
+      newStatus === 'PAID' ? add31DaysDateString(new Date()) : inv.due_date || add31DaysDateString(new Date());
+    const effectiveAgentId = resolvedAgentIdRef.current || currentUser.id;
 
-      // Strictly evaluate PAID vs PARTIAL
-      const newStatus = remaining <= 0 ? 'PAID' : 'PARTIAL';
-      const finalPaidAmount = remaining <= 0 ? totalAmount : newPaidTotal;
-      const nowIso = new Date().toISOString();
-
-      // 1. Update invoice in Supabase: status, paid_amount, paid_at, and 31-day renewal on PAID
-      const invoiceUpdateData: Partial<SupabaseInvoice> = {
-        status: newStatus,
-        paid_amount: finalPaidAmount,
-        paid_at: newStatus === 'PAID' ? nowIso : (inv.paid_at || null),
-        cycle_day: 31,
-      };
-      if (newStatus === 'PAID') {
-        invoiceUpdateData.due_date = add31DaysDateString(new Date());
-      }
-
-      const { error: invErr } = await supabase
-        .from('invoices')
-        .update(invoiceUpdateData)
-        .eq('id', inv.id);
-
-      if (invErr) throw new Error(invErr.message);
-
-      if (newStatus === 'PAID') {
-        await restoreSubscriberOnInvoicePaid(inv.subscriber_username);
-      }
-
-      // 2. Increment agent's cash_in_hand in portal_users by ONLY enteredVal
-      const { data: agentRecord } = await supabase
-        .from('portal_users')
-        .select('cash_in_hand')
-        .eq('id', currentUser.id)
-        .maybeSingle();
-
-      const currentCash = Number(agentRecord?.cash_in_hand ?? agentCash) || 0;
-      const newCash = currentCash + enteredVal;
-
-      await supabase
-        .from('portal_users')
-        .update({ cash_in_hand: newCash })
-        .eq('id', currentUser.id);
-
-      setAgentCash(newCash);
-
-      // 3. Record in payment_transactions table
-      const { error: txError } = await supabase
-        .from('payment_transactions')
-        .insert([{
-          invoice_id: inv.id,
-          subscriber_username: inv.subscriber_username,
-          collected_by_id: currentUser.id,
-          collected_by_name: currentUser.fullName,
-          amount_paid: enteredVal,
-          payment_method: 'Cash Handover',
-          created_at: nowIso,
-        }]);
-
-      if (txError) {
-        console.warn('payment_transactions insert error:', txError.message);
-      }
-
-      // Context sync fallback
-      try {
-        await collectAgentCashPayment(inv.id, currentUser.id, enteredVal);
-      } catch {}
-
+    const applyOptimisticAndReceipt = (offlineSaved: boolean) => {
       const subKey = (inv.subscriber_username || '').trim().toLowerCase();
       const subInfo = subscriberDirectory[subKey];
       const subPhone =
         subInfo?.phone ||
         customers.find((c) => c.pppoeUsername?.toLowerCase() === subKey)?.phone ||
         '';
+
+      // Immediately update local UI state to prevent double collection
+      setAssignedInvoices((prev) =>
+        prev.map((row) =>
+          row.id === inv.id
+            ? {
+                ...row,
+                paid_amount: finalPaidAmount,
+                status: newStatus,
+                paid_at: newStatus === 'PAID' ? nowIso : row.paid_at || null,
+                due_date: newStatus === 'PAID' ? nextExpiryDate : row.due_date,
+              }
+            : row
+        )
+      );
+      setAgentCash((prev) => Number(prev || 0) + enteredVal);
 
       setLastCollectedReceipt({
         phone: subPhone,
@@ -379,37 +469,184 @@ export const FieldAgentPortal: React.FC<FieldAgentPortalProps> = ({
         amountPaid: enteredVal,
         totalAmount,
         remainingBalance: Math.max(0, totalAmount - finalPaidAmount),
-        nextExpiryDate: invoiceUpdateData.due_date || inv.due_date || add31DaysDateString(new Date()),
+        nextExpiryDate,
       });
 
-      setCollectionSuccessToast(
-        `Collected ${formatCurrency(enteredVal)} from @${inv.subscriber_username}! Status: ${newStatus}. Credited to Wallet.`
-      );
-      setTimeout(() => setCollectionSuccessToast(null), 10000);
       setIsCollectModalOpen(false);
       setSelectedInvForCollection(null);
+
+      if (offlineSaved) {
+        showNoticeToast('Saved locally — will auto-sync when 4G/Wi-Fi returns', 6000);
+      } else {
+        showNoticeToast(
+          `Collected ${formatCurrency(enteredVal)} from @${inv.subscriber_username}! Status: ${newStatus}. Credited to Wallet.`,
+          8000
+        );
+      }
+    };
+
+    try {
+      const isOfflineNow = typeof navigator !== 'undefined' && navigator.onLine === false;
+      if (isOfflineNow && isOfflineCapableRole(currentUser.role)) {
+        offlineSyncManager.enqueueOfflinePayment(effectiveAgentId, currentUser.role, {
+          invoiceId: inv.id,
+          invoiceNo: inv.invoice_no,
+          subscriberUsername: inv.subscriber_username,
+          amountPaid: collectedNow,
+          totalAmount,
+          previousPaid,
+          agentId: effectiveAgentId,
+          agentName: currentUser.fullName,
+          collectedAtIso: nowIso,
+          paymentMethod: 'Cash Handover',
+        });
+        applyOptimisticAndReceipt(true);
+        return;
+      }
+
+      // 1. Update invoice in Supabase: status, paid_amount, paid_at, and 31-day renewal on PAID
+      const invoiceUpdateData: Partial<SupabaseInvoice> = {
+        status: newStatus,
+        paid_amount: finalPaidAmount,
+        paid_at: newStatus === 'PAID' ? nowIso : (inv.paid_at || null),
+        cycle_day: 31,
+      };
+      if (newStatus === 'PAID') {
+        invoiceUpdateData.due_date = nextExpiryDate;
+      }
+
+      const { error: invErr } = await supabase
+        .from('invoices')
+        .update(invoiceUpdateData)
+        .eq('id', inv.id);
+
+      if (invErr) throw invErr;
+
+      if (newStatus === 'PAID') {
+        await restoreSubscriberOnInvoicePaid(inv.subscriber_username);
+      }
+
+      // 2. Increment agent's cash_in_hand in portal_users by ONLY enteredVal
+      const { data: agentRecord } = await supabase
+        .from('portal_users')
+        .select('cash_in_hand')
+        .eq('id', effectiveAgentId)
+        .maybeSingle();
+
+      const currentCash = Number(agentRecord?.cash_in_hand ?? agentCash) || 0;
+      const newCash = currentCash + enteredVal;
+
+      await supabase
+        .from('portal_users')
+        .update({ cash_in_hand: newCash })
+        .eq('id', effectiveAgentId);
+
+      // 3. Record in payment_transactions table (matching actual PostgreSQL columns)
+      const { error: txError } = await supabase
+        .from('payment_transactions')
+        .insert([{
+          invoice_id: inv.id,
+          subscriber_username: inv.subscriber_username,
+          collected_by_id: effectiveAgentId,
+          collected_by_name: currentUser.fullName,
+          amount_paid: enteredVal,
+          payment_mode: 'Cash Handover',
+          payment_date: nowIso,
+          notes: `Field collection for Invoice #${inv.invoice_no}`,
+        }]);
+
+      if (txError) {
+        console.warn('payment_transactions insert error:', txError.message);
+      }
+
+      try {
+        await collectAgentCashPayment(inv.id, effectiveAgentId, enteredVal);
+      } catch {}
+
+      applyOptimisticAndReceipt(false);
       await fetchAgentData();
     } catch (err: any) {
-      alert(`Collection error: ${err.message || 'Failed'}`);
+      if (isLikelyNetworkError(err) && isOfflineCapableRole(currentUser.role)) {
+        try {
+          offlineSyncManager.enqueueOfflinePayment(effectiveAgentId, currentUser.role, {
+            invoiceId: inv.id,
+            invoiceNo: inv.invoice_no,
+            subscriberUsername: inv.subscriber_username,
+            amountPaid: collectedNow,
+            totalAmount,
+            previousPaid,
+            agentId: effectiveAgentId,
+            agentName: currentUser.fullName,
+            collectedAtIso: nowIso,
+            paymentMethod: 'Cash Handover',
+          });
+          applyOptimisticAndReceipt(true);
+          return;
+        } catch (queueErr: any) {
+          showNoticeToast(queueErr?.message || 'Already saved locally.', 5000);
+          setIsCollectModalOpen(false);
+          setSelectedInvForCollection(null);
+          return;
+        }
+      }
+      showNoticeToast(`Collection error: ${err?.message || 'Failed'}`, 5000);
     } finally {
       setIsSubmittingCollection(false);
     }
   };
 
-  // Handle marking ticket fixed
+  // Handle marking ticket fixed with transparent offline saving fallback
   const handleMarkTicketFixed = async (ticketId: string) => {
+    const ticketObj = assignedTickets.find((t) => t.id === ticketId);
+    const effectiveAgentId = resolvedAgentIdRef.current || currentUser.id;
+    const nowIso = new Date().toISOString();
+
+    const saveTicketOffline = () => {
+      offlineSyncManager.enqueueOfflineTicketResolution(effectiveAgentId, currentUser.role, {
+        ticketId,
+        ticketNo: ticketObj?.ticket_no || ticketId,
+        subscriberUsername: ticketObj?.subscriber_username || '',
+        agentId: effectiveAgentId,
+        agentName: currentUser.fullName,
+        resolvedAtIso: nowIso,
+        resolutionNotes: 'Resolved in field by technician',
+      });
+      setAssignedTickets((prev) =>
+        prev.map((t) => (t.id === ticketId ? { ...t, status: 'RESOLVED' } : t))
+      );
+      resolveTicket(ticketId, 'Resolved in field by technician');
+      showNoticeToast('Saved locally — will auto-sync when 4G/Wi-Fi returns', 6000);
+    };
+
     try {
-      await supabase
+      if (
+        typeof navigator !== 'undefined' &&
+        navigator.onLine === false &&
+        isOfflineCapableRole(currentUser.role)
+      ) {
+        saveTicketOffline();
+        return;
+      }
+
+      const { error } = await supabase
         .from('tickets')
         .update({ status: 'RESOLVED' })
         .eq('id', ticketId);
 
+      if (error) throw error;
+
+      setAssignedTickets((prev) =>
+        prev.map((t) => (t.id === ticketId ? { ...t, status: 'RESOLVED' } : t))
+      );
       resolveTicket(ticketId, 'Resolved in field by technician');
-      setCollectionSuccessToast('Complaint marked RESOLVED successfully!');
-      setTimeout(() => setCollectionSuccessToast(null), 4000);
+      showNoticeToast('Complaint marked RESOLVED successfully!', 4000);
       await fetchAgentData();
     } catch (err: any) {
-      alert(`Failed to resolve ticket: ${err.message}`);
+      if (isLikelyNetworkError(err) && isOfflineCapableRole(currentUser.role)) {
+        saveTicketOffline();
+        return;
+      }
+      showNoticeToast(`Failed to resolve ticket: ${err?.message || 'Unknown error'}`, 5000);
     }
   };
 
@@ -489,8 +726,19 @@ export const FieldAgentPortal: React.FC<FieldAgentPortalProps> = ({
               🛵
             </div>
             <div>
-              <div className="flex items-center gap-2">
+              <div className="flex items-center gap-2 flex-wrap">
                 <h2 className="text-sm font-bold text-white">{currentUser.fullName}</h2>
+                {isOfflineCapableRole(currentUser.role) && (
+                  <span
+                    className={`px-2 py-0.5 rounded-full text-[10px] font-mono font-semibold border whitespace-nowrap ${
+                      isOnline
+                        ? 'bg-emerald-950/70 text-emerald-300 border-emerald-700/60'
+                        : 'bg-amber-950/80 text-amber-300 border-amber-700/70'
+                    }`}
+                  >
+                    {isOnline ? '🟢 Online' : '🟠 Offline (Auto-Sync Ready)'}
+                  </span>
+                )}
               </div>
               <span className="text-[11px] text-emerald-400 font-mono flex items-center gap-1">
                 <MapPin className="w-3 h-3" /> {currentUser.area || 'Assigned Zone'}
@@ -655,7 +903,7 @@ export const FieldAgentPortal: React.FC<FieldAgentPortalProps> = ({
                     </span>
                     {subPhone ? (
                       <a
-                        href={`tel:${subPhone}`}
+                        href={`tel:${formatTelPhone(subPhone)}`}
                         className="px-2.5 py-1 rounded-lg bg-cyan-600 hover:bg-cyan-500 text-slate-950 font-bold font-mono text-[10px] flex items-center gap-1 shadow transition"
                       >
                         <Phone className="w-3 h-3" />
@@ -769,7 +1017,7 @@ export const FieldAgentPortal: React.FC<FieldAgentPortalProps> = ({
                 <div className="flex items-center justify-between gap-2 pt-2 border-t border-slate-800 flex-wrap">
                   {subPhone ? (
                     <a
-                      href={`tel:${subPhone}`}
+                      href={`tel:${formatTelPhone(subPhone)}`}
                       className="px-3 py-1.5 rounded-lg bg-cyan-600 hover:bg-cyan-500 text-slate-950 font-bold font-mono text-[11px] flex items-center gap-1.5 shadow transition"
                     >
                       <Phone className="w-3.5 h-3.5" />
@@ -1093,7 +1341,7 @@ export const FieldAgentPortal: React.FC<FieldAgentPortalProps> = ({
                       <div className="pt-1 flex flex-wrap gap-2">
                         {subPhone && (
                           <a
-                            href={`tel:${subPhone}`}
+                            href={`tel:${formatTelPhone(subPhone)}`}
                             className="flex-1 min-w-[120px] py-1.5 px-2.5 rounded-lg bg-cyan-950 hover:bg-cyan-900 border border-cyan-800 text-cyan-300 font-bold text-xs transition flex items-center justify-center gap-1.5"
                           >
                             <span>&#128222; Call ({subPhone})</span>

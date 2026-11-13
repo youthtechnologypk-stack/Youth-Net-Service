@@ -4,6 +4,7 @@ import { supabase, SupabaseSubscriberSessionLog } from './supabaseClient';
 export interface TrackedSessionSnapshot {
   username: string;
   sessionId: string;
+  hasRealId: boolean;
   ipAddress: string;
   macAddress: string;
   uptime: string;
@@ -11,7 +12,17 @@ export interface TrackedSessionSnapshot {
   bytesIn: number;
   bytesOut: number;
   connectedAtIso: string;
+  connectedAtMs: number;
+  startMinute: number;
   lastSeenMs: number;
+}
+
+export interface SyncCycleOptions {
+  routerId?: string;
+  sessionsPolledOk?: boolean;
+  interfacesFresh?: boolean;
+  interfacesPolledAtMs?: number;
+  nowMs?: number;
 }
 
 /**
@@ -105,9 +116,57 @@ export function resolveSessionInterfaceBytes(
 }
 
 /**
+ * Computes deterministic identity for a MikroTik PPPoE session.
+ * Uses MikroTik's real `.id` when present, otherwise falls back to
+ * `callerId + roundedStartMinute`.
+ */
+function resolveSessionIdentity(
+  sess: ActiveSession,
+  uptimeSeconds: number,
+  nowMs: number
+): {
+  sessionId: string;
+  hasRealId: boolean;
+  macNormalized: string;
+  connectedAtMs: number;
+  connectedAtIso: string;
+  startMinute: number;
+} {
+  const hasDotIdProp = Object.prototype.hasOwnProperty.call(sess, '.id');
+  const rawId = hasDotIdProp
+    ? String((sess as any)['.id'] || '').trim()
+    : String((sess as any)['.id'] || sess.id || '').trim();
+
+  const connectedAtMs = nowMs - uptimeSeconds * 1000;
+  const connectedAtIso = new Date(connectedAtMs).toISOString();
+  const startMinute = Math.round(connectedAtMs / 60_000);
+  const macNormalized = (sess.callerId || 'NO-MAC').trim().toUpperCase();
+
+  if (rawId) {
+    return {
+      sessionId: rawId,
+      hasRealId: true,
+      macNormalized,
+      connectedAtMs,
+      connectedAtIso,
+      startMinute,
+    };
+  }
+
+  return {
+    sessionId: `${macNormalized}|${startMinute}`,
+    hasRealId: false,
+    macNormalized,
+    connectedAtMs,
+    connectedAtIso,
+    startMinute,
+  };
+}
+
+/**
  * Live Session Diff & Supabase Persistence Engine
- * Tracks active PPPoE sessions in memory and persists Connects, 60s Telemetry
- * Checkpoints, Reconnects, Disconnects, and Manual Kicks into `subscriber_session_logs`.
+ * Strictly tracks each PPPoE session independently without duplicate splits
+ * or cumulative byte carry-over across sessions.
  */
 class SessionSyncEngine {
   private prevActiveSessions = new Map<string, TrackedSessionSnapshot>();
@@ -117,7 +176,20 @@ class SessionSyncEngine {
   private hydrated = false;
   private hydrationPromise: Promise<void> | null = null;
   private syncInFlight = false;
-  private readonly TELEMETRY_INTERVAL_MS = 60_000;
+  private activeRouterId: string | null = null;
+  private readonly TELEMETRY_INTERVAL_MS = 30_000;
+
+  /**
+   * Reset in-memory session cache (useful on router switch or test runs).
+   */
+  public resetInMemoryState(): void {
+    this.prevActiveSessions.clear();
+    this.activeLogIds.clear();
+    this.lastPersistedAt.clear();
+    this.kickedRecently.clear();
+    this.hydrated = false;
+    this.hydrationPromise = null;
+  }
 
   private async ensureHydrated(): Promise<void> {
     if (this.hydrated) return;
@@ -151,21 +223,32 @@ class SessionSyncEngine {
           }
 
           this.activeLogIds.set(key, row.id);
-          const recordedMs = row.recorded_at ? new Date(row.recorded_at).getTime() : 0;
+          const recordedMs = row.recorded_at ? new Date(row.recorded_at).getTime() : Date.now();
+          const connectedAtIso = row.connected_at || row.recorded_at || nowIso;
+          const connectedAtMs = new Date(connectedAtIso).getTime() || Date.now();
+          const uptimeSeconds = Number(
+            row.uptime_seconds ?? parseRouterOsUptimeSeconds(row.uptime_duration)
+          );
+          const rawSessionId = String(row.session_id || '').trim();
+          const hasRealId = Boolean(rawSessionId && !rawSessionId.includes('|'));
+
           if (recordedMs > 0) {
             this.lastPersistedAt.set(key, recordedMs);
           }
 
           this.prevActiveSessions.set(key, {
             username: uname,
-            sessionId: row.session_id || '',
+            sessionId: rawSessionId,
+            hasRealId,
             ipAddress: row.ip_address || '',
-            macAddress: row.mac_address || '',
+            macAddress: (row.mac_address || '').trim().toUpperCase(),
             uptime: row.uptime_duration || '0s',
-            uptimeSeconds: Number(row.uptime_seconds ?? parseRouterOsUptimeSeconds(row.uptime_duration)),
+            uptimeSeconds,
             bytesIn: Number(row.bytes_in || 0),
             bytesOut: Number(row.bytes_out || 0),
-            connectedAtIso: row.connected_at || row.recorded_at || nowIso,
+            connectedAtIso,
+            connectedAtMs,
+            startMinute: Math.round(connectedAtMs / 60_000),
             lastSeenMs: recordedMs || Date.now(),
           });
         }
@@ -175,7 +258,7 @@ class SessionSyncEngine {
             .from('subscriber_session_logs')
             .update({
               session_status: 'DISCONNECTED',
-              disconnect_reason: 'Closed stale duplicate session record',
+              disconnect_reason: 'Closed stale duplicate active record',
               disconnected_at: nowIso,
               recorded_at: nowIso,
             })
@@ -197,15 +280,28 @@ class SessionSyncEngine {
    */
   public async syncCycle(
     activeSessions: ActiveSession[],
-    interfaces: RouterInterface[] = []
+    interfaces: RouterInterface[] = [],
+    options?: SyncCycleOptions
   ): Promise<void> {
+    if (options?.sessionsPolledOk === false) {
+      return;
+    }
+
     if (this.syncInFlight) return;
     this.syncInFlight = true;
 
     try {
+      if (options?.routerId && this.activeRouterId && this.activeRouterId !== options.routerId) {
+        // Router switched: clear local memory and re-hydrate cleanly without marking previous router's users offline
+        this.resetInMemoryState();
+      }
+      if (options?.routerId) {
+        this.activeRouterId = options.routerId;
+      }
+
       await this.ensureHydrated();
 
-      const nowMs = Date.now();
+      const nowMs = options?.nowMs ?? Date.now();
       const nowIso = new Date(nowMs).toISOString();
       const currentKeys = new Set<string>();
 
@@ -216,94 +312,221 @@ class SessionSyncEngine {
         }
       }
 
+      // Deduplicate activeSessions by lowercase username (keep the newest / highest-uptime or last entry)
+      const dedupedSessions = new Map<string, ActiveSession>();
       for (const sess of activeSessions) {
-        const uname = (sess.username || '').trim();
-        const key = uname.toLowerCase();
+        const key = (sess.username || '').trim().toLowerCase();
         if (!key) continue;
+        dedupedSessions.set(key, sess);
+      }
 
+      for (const [key, sess] of dedupedSessions.entries()) {
+        const uname = (sess.username || '').trim();
         currentKeys.add(key);
 
-        const sessionId = String((sess as any)['.id'] || sess.id || '').trim();
         const uptimeStr = sess.uptime || '0s';
         const uptimeSeconds = parseRouterOsUptimeSeconds(uptimeStr);
-        const { bytesIn, bytesOut } = resolveSessionInterfaceBytes(sess, interfaces);
+        const identity = resolveSessionIdentity(sess, uptimeSeconds, nowMs);
         const ipAddress = sess.address || 'Dynamic IP';
         const macAddress = sess.callerId || '';
 
-        const prev = this.prevActiveSessions.get(key);
-        const existingLogId = this.activeLogIds.get(key);
+        let prev = this.prevActiveSessions.get(key);
+        let existingLogId = this.activeLogIds.get(key);
 
-        // If user was kicked within the last 2s and router briefly still returned the stale session, ignore re-insert
+        // If memory doesn't have an active row yet for this username, verify against Supabase first
+        // so page reloads or concurrent tabs NEVER insert a duplicate row for an ongoing session.
+        if (!prev || !existingLogId) {
+          const { data: dbActiveRows } = await supabase
+            .from('subscriber_session_logs')
+            .select('*')
+            .ilike('subscriber_username', uname)
+            .eq('session_status', 'ACTIVE')
+            .order('recorded_at', { ascending: false })
+            .limit(5);
+
+          if (Array.isArray(dbActiveRows) && dbActiveRows.length > 0) {
+            const primary = dbActiveRows[0] as SupabaseSubscriberSessionLog;
+            const dbConnectedMs = new Date(
+              primary.connected_at || primary.recorded_at || nowIso
+            ).getTime();
+            const dbUptimeSec = Number(
+              primary.uptime_seconds ?? parseRouterOsUptimeSeconds(primary.uptime_duration)
+            );
+            const dbSessionId = String(primary.session_id || '').trim();
+            const dbHasRealId = Boolean(dbSessionId && !dbSessionId.includes('|'));
+            const dbMac = (primary.mac_address || '').trim().toUpperCase();
+
+            const bothHaveRealIds = dbHasRealId && identity.hasRealId;
+            const matchesOngoing = bothHaveRealIds
+              ? dbSessionId === identity.sessionId && uptimeSeconds >= dbUptimeSec - 15
+              : uptimeSeconds >= dbUptimeSec - 15 &&
+                (!dbMac || !identity.macNormalized || dbMac === identity.macNormalized) &&
+                Math.abs(dbConnectedMs - identity.connectedAtMs) <= 120_000;
+
+            if (matchesOngoing && primary.id) {
+              existingLogId = primary.id;
+              this.activeLogIds.set(key, primary.id);
+              prev = {
+                username: primary.subscriber_username || uname,
+                sessionId: identity.hasRealId ? identity.sessionId : dbSessionId || identity.sessionId,
+                hasRealId: identity.hasRealId || dbHasRealId,
+                ipAddress: primary.ip_address || ipAddress,
+                macAddress: dbMac || identity.macNormalized,
+                uptime: primary.uptime_duration || uptimeStr,
+                uptimeSeconds: dbUptimeSec,
+                bytesIn: Number(primary.bytes_in || 0),
+                bytesOut: Number(primary.bytes_out || 0),
+                connectedAtIso: primary.connected_at || primary.recorded_at || identity.connectedAtIso,
+                connectedAtMs: dbConnectedMs,
+                startMinute: Math.round(dbConnectedMs / 60_000),
+                lastSeenMs: primary.recorded_at ? new Date(primary.recorded_at).getTime() : nowMs,
+              };
+              this.prevActiveSessions.set(key, prev);
+
+              // Close any older extra duplicate ACTIVE rows for this user
+              const extras = dbActiveRows.slice(1).map((r: any) => r.id).filter(Boolean);
+              if (extras.length > 0) {
+                await supabase
+                  .from('subscriber_session_logs')
+                  .update({
+                    session_status: 'DISCONNECTED',
+                    disconnect_reason: 'Closed duplicate active row',
+                    disconnected_at: nowIso,
+                    recorded_at: nowIso,
+                  })
+                  .in('id', extras);
+              }
+            } else {
+              // Stale ACTIVE rows from an earlier disconnected session: close them cleanly before Rule C inserts new session
+              const staleIds = dbActiveRows.map((r: any) => r.id).filter(Boolean);
+              if (staleIds.length > 0) {
+                await supabase
+                  .from('subscriber_session_logs')
+                  .update({
+                    session_status: 'DISCONNECTED',
+                    disconnect_reason: 'Session Reconnected (New PPPoE Session Started)',
+                    disconnected_at: nowIso,
+                    recorded_at: nowIso,
+                  })
+                  .in('id', staleIds);
+              }
+              this.prevActiveSessions.delete(key);
+              this.activeLogIds.delete(key);
+              this.lastPersistedAt.delete(key);
+              prev = undefined;
+              existingLogId = undefined;
+            }
+          }
+        }
+
+        // Suppress stale router echo for 4s immediately after a manual NOC kick
         const recentKickTs = this.kickedRecently.get(key);
-        if (recentKickTs && nowMs - recentKickTs < 4000 && prev?.sessionId === sessionId) {
+        if (recentKickTs && nowMs - recentKickTs < 4000 && prev?.sessionId === identity.sessionId) {
           continue;
         }
 
-        const sessionIdChanged = Boolean(
-          prev && sessionId && prev.sessionId && sessionId !== prev.sessionId
-        );
+        // Strict Continuity vs Reconnect Detection (Rule A vs Rule B/C)
+        let sessionIdChanged = false;
+        if (prev) {
+          if (prev.hasRealId && identity.hasRealId) {
+            sessionIdChanged = identity.sessionId !== prev.sessionId;
+          } else if (!prev.hasRealId && !identity.hasRealId) {
+            const macChanged = Boolean(
+              prev.macAddress &&
+                identity.macNormalized &&
+                prev.macAddress !== 'NO-MAC' &&
+                identity.macNormalized !== 'NO-MAC' &&
+                prev.macAddress !== identity.macNormalized
+            );
+            const startShiftedSignificantly =
+              Math.abs(identity.startMinute - prev.startMinute) > 2;
+            sessionIdChanged = macChanged || startShiftedSignificantly;
+          }
+        }
+
         const uptimeDropped = Boolean(
-          prev && prev.uptimeSeconds > 15 && uptimeSeconds + 10 < prev.uptimeSeconds
+          prev && prev.uptimeSeconds > 30 && uptimeSeconds < prev.uptimeSeconds - 30
         );
 
         const isReconnect = Boolean(prev && (sessionIdChanged || uptimeDropped));
-        const isNewSession = !prev && !existingLogId;
+        const isBrandNewSession = !prev || isReconnect;
 
-        if (isReconnect) {
-          // Finalize prior ACTIVE row as RECONNECTED before opening the new session row
-          const finalUptime = prev?.uptime || uptimeStr;
-          const finalUptimeSec = prev?.uptimeSeconds ?? uptimeSeconds;
-          const finalBytesIn = prev?.bytesIn ?? 0;
-          const finalBytesOut = prev?.bytesOut ?? 0;
+        // Guard against stale <pppoe-user> interface byte carry-over:
+        // Only trust cached `interfaces` when they were polled AFTER this session connected
+        // (or when caller did not provide interfacesPolledAtMs and interfacesFresh !== false).
+        const sessionConnectedAtMs = isBrandNewSession
+          ? identity.connectedAtMs
+          : prev!.connectedAtMs;
+
+        const interfacesAreSafeForSession = (() => {
+          if (options?.interfacesFresh === false && isBrandNewSession) {
+            return false;
+          }
+          if (options?.interfacesPolledAtMs !== undefined) {
+            return options.interfacesPolledAtMs >= sessionConnectedAtMs - 2000;
+          }
+          return options?.interfacesFresh !== false;
+        })();
+
+        const resolvedBytes = interfacesAreSafeForSession
+          ? resolveSessionInterfaceBytes(sess, interfaces)
+          : {
+              bytesIn: Math.max(0, Number(sess.rawBytesIn || 0)),
+              bytesOut: Math.max(0, Number(sess.rawBytesOut || 0)),
+            };
+
+        if (isReconnect && prev) {
+          // Rule B: True reconnect detected -> Close prior ACTIVE session cleanly as DISCONNECTED
+          // with its frozen final uptime and final bytes (no carry-over into new session).
+          const disconnectUpdate = {
+            uptime_duration: prev.uptime || 'Ended',
+            uptime_seconds: prev.uptimeSeconds,
+            bytes_in: prev.bytesIn,
+            bytes_out: prev.bytesOut,
+            session_status: 'DISCONNECTED' as const,
+            disconnect_reason: 'Session Reconnected (New PPPoE Session Started)',
+            disconnected_at: nowIso,
+            recorded_at: nowIso,
+          };
 
           if (existingLogId) {
             await supabase
               .from('subscriber_session_logs')
-              .update({
-                uptime_duration: finalUptime,
-                uptime_seconds: finalUptimeSec,
-                bytes_in: finalBytesIn,
-                bytes_out: finalBytesOut,
-                session_status: 'RECONNECTED',
-                disconnect_reason: 'Session Dropped & Reconnected',
-                disconnected_at: nowIso,
-                recorded_at: nowIso,
-              })
+              .update(disconnectUpdate)
               .eq('id', existingLogId);
           } else {
             await supabase
               .from('subscriber_session_logs')
-              .update({
-                session_status: 'RECONNECTED',
-                disconnect_reason: 'Session Dropped & Reconnected',
-                disconnected_at: nowIso,
-                recorded_at: nowIso,
-              })
-              .eq('subscriber_username', prev?.username || uname)
+              .update(disconnectUpdate)
+              .ilike('subscriber_username', prev.username || uname)
               .eq('session_status', 'ACTIVE');
           }
 
           this.activeLogIds.delete(key);
           this.lastPersistedAt.delete(key);
+          existingLogId = undefined;
         }
 
-        if (isNewSession || isReconnect) {
-          const connectedAtIso = new Date(nowMs - uptimeSeconds * 1000).toISOString();
+        if (isBrandNewSession) {
+          // Rule C: Insert ONE fresh ACTIVE row for the new session with zero carry-over from older rows
+          const freshBytesIn = resolvedBytes.bytesIn;
+          const freshBytesOut = resolvedBytes.bytesOut;
+
           const { data: inserted, error: insertErr } = await supabase
             .from('subscriber_session_logs')
             .insert([
               {
                 subscriber_username: uname,
-                session_id: sessionId || null,
+                session_id: identity.sessionId,
                 ip_address: ipAddress,
                 mac_address: macAddress || null,
                 uptime_duration: uptimeStr,
                 uptime_seconds: uptimeSeconds,
-                bytes_in: bytesIn,
-                bytes_out: bytesOut,
+                bytes_in: freshBytesIn,
+                bytes_out: freshBytesOut,
                 session_status: 'ACTIVE',
                 disconnect_reason: 'PPPoE Session Connected',
-                connected_at: connectedAtIso,
+                connected_at: identity.connectedAtIso,
                 disconnected_at: null,
                 recorded_at: nowIso,
               },
@@ -317,60 +540,77 @@ class SessionSyncEngine {
           this.lastPersistedAt.set(key, nowMs);
           this.prevActiveSessions.set(key, {
             username: uname,
-            sessionId,
+            sessionId: identity.sessionId,
+            hasRealId: identity.hasRealId,
             ipAddress,
-            macAddress,
+            macAddress: identity.macNormalized,
             uptime: uptimeStr,
             uptimeSeconds,
-            bytesIn,
-            bytesOut,
-            connectedAtIso,
+            bytesIn: freshBytesIn,
+            bytesOut: freshBytesOut,
+            connectedAtIso: identity.connectedAtIso,
+            connectedAtMs: identity.connectedAtMs,
+            startMinute: identity.startMinute,
             lastSeenMs: nowMs,
           });
           this.kickedRecently.delete(key);
-        } else {
-          // Ongoing active session: preserve monotonic byte maxima & update DB every 60s
-          const mergedBytesIn = Math.max(prev?.bytesIn || 0, bytesIn);
-          const mergedBytesOut = Math.max(prev?.bytesOut || 0, bytesOut);
-          const connectedAtIso =
-            prev?.connectedAtIso || new Date(nowMs - uptimeSeconds * 1000).toISOString();
+        } else if (prev) {
+          // Rule A: Same ongoing continuous session -> NEVER insert a new row, ONLY update the existing ACTIVE row.
+          const effectiveSessionId = identity.hasRealId ? identity.sessionId : prev.sessionId;
+          const effectiveHasRealId = identity.hasRealId || prev.hasRealId;
+          const mergedBytesIn = Math.max(prev.bytesIn, resolvedBytes.bytesIn);
+          const mergedBytesOut = Math.max(prev.bytesOut, resolvedBytes.bytesOut);
+          const effectiveUptimeSeconds =
+            uptimeSeconds >= prev.uptimeSeconds - 15
+              ? Math.max(uptimeSeconds, prev.uptimeSeconds)
+              : uptimeSeconds;
+          const effectiveUptimeStr =
+            uptimeSeconds >= prev.uptimeSeconds - 15 && uptimeSeconds < prev.uptimeSeconds
+              ? prev.uptime
+              : uptimeStr;
 
           this.prevActiveSessions.set(key, {
             username: uname,
-            sessionId: sessionId || prev?.sessionId || '',
-            ipAddress: ipAddress || prev?.ipAddress || 'Dynamic IP',
-            macAddress: macAddress || prev?.macAddress || '',
-            uptime: uptimeStr,
-            uptimeSeconds,
+            sessionId: effectiveSessionId,
+            hasRealId: effectiveHasRealId,
+            ipAddress: ipAddress || prev.ipAddress || 'Dynamic IP',
+            macAddress: identity.macNormalized || prev.macAddress,
+            uptime: effectiveUptimeStr,
+            uptimeSeconds: effectiveUptimeSeconds,
             bytesIn: mergedBytesIn,
             bytesOut: mergedBytesOut,
-            connectedAtIso,
+            connectedAtIso: prev.connectedAtIso,
+            connectedAtMs: prev.connectedAtMs,
+            startMinute: prev.startMinute,
             lastSeenMs: nowMs,
           });
 
           const lastWrite = this.lastPersistedAt.get(key) || 0;
-          if (nowMs - lastWrite >= this.TELEMETRY_INTERVAL_MS) {
-            if (existingLogId) {
-              await supabase
-                .from('subscriber_session_logs')
-                .update({
-                  session_id: sessionId || prev?.sessionId || null,
-                  ip_address: ipAddress || prev?.ipAddress || 'Dynamic IP',
-                  mac_address: macAddress || prev?.macAddress || null,
-                  uptime_duration: uptimeStr,
-                  uptime_seconds: uptimeSeconds,
-                  bytes_in: mergedBytesIn,
-                  bytes_out: mergedBytesOut,
-                  recorded_at: nowIso,
-                })
-                .eq('id', existingLogId);
-            }
+          const shouldWriteTelemetry =
+            nowMs - lastWrite >= this.TELEMETRY_INTERVAL_MS ||
+            (!prev.hasRealId && identity.hasRealId);
+
+          if (shouldWriteTelemetry && existingLogId) {
+            await supabase
+              .from('subscriber_session_logs')
+              .update({
+                session_id: effectiveSessionId || null,
+                ip_address: ipAddress || prev.ipAddress || 'Dynamic IP',
+                mac_address: macAddress || null,
+                uptime_duration: effectiveUptimeStr,
+                uptime_seconds: effectiveUptimeSeconds,
+                bytes_in: mergedBytesIn,
+                bytes_out: mergedBytesOut,
+                recorded_at: nowIso,
+              })
+              .eq('id', existingLogId);
+
             this.lastPersistedAt.set(key, nowMs);
           }
         }
       }
 
-      // Disconnected / Went Offline sweep
+      // Rule B: Complete disappearance from /api/mikrotik/ppp/active -> Mark ACTIVE row as DISCONNECTED
       for (const [key, prev] of Array.from(this.prevActiveSessions.entries())) {
         if (currentKeys.has(key)) continue;
 
@@ -389,7 +629,7 @@ class SessionSyncEngine {
           uptime_seconds: prev.uptimeSeconds,
           bytes_in: prev.bytesIn,
           bytes_out: prev.bytesOut,
-          session_status: 'DISCONNECTED',
+          session_status: 'DISCONNECTED' as const,
           disconnect_reason: 'Client Disconnected / Link Down',
           disconnected_at: nowIso,
           recorded_at: nowIso,
@@ -404,7 +644,7 @@ class SessionSyncEngine {
           await supabase
             .from('subscriber_session_logs')
             .update(updatePayload)
-            .eq('subscriber_username', prev.username)
+            .ilike('subscriber_username', prev.username)
             .eq('session_status', 'ACTIVE');
         }
 
@@ -492,7 +732,7 @@ class SessionSyncEngine {
         const { data: openRows } = await supabase
           .from('subscriber_session_logs')
           .select('id')
-          .eq('subscriber_username', prev?.username || cleanUsername)
+          .ilike('subscriber_username', prev?.username || cleanUsername)
           .eq('session_status', 'ACTIVE')
           .limit(5);
 

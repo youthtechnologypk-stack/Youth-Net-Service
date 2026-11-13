@@ -40,6 +40,7 @@ import { apiClient } from '../services/apiClient';
 import { storageService } from '../services/storageService';
 import { supabase, SupabaseSubscriberSessionLog } from '../services/supabaseClient';
 import { sessionSyncEngine, formatBytesTransfer } from '../services/sessionSyncEngine';
+import { openWhatsAppLink } from '../lib/whatsappBilling';
 
 export interface SubscriberProfileDrawerProps {
   isOpen: boolean;
@@ -409,10 +410,37 @@ export const SubscriberProfileDrawer: React.FC<SubscriberProfileDrawerProps> = (
     return server360Data?.complaints || [];
   }, [customer, complaints, server360Data, username]);
 
-  // Historical data usage metrics
+  // Historical data usage metrics (Prefer distinct Supabase session logs; never fabricate carry-over)
   const historicalUsage = useMemo(() => {
+    if (supabaseSessionLogs.length > 0) {
+      let totalBytesIn = 0;
+      let totalBytesOut = 0;
+      const seenIds = new Set<string>();
+      for (const s of supabaseSessionLogs) {
+        const rowId = s.id || `${s.connected_at}-${s.session_id || ''}`;
+        if (seenIds.has(rowId)) continue;
+        seenIds.add(rowId);
+        totalBytesIn += Math.max(0, Number(s.bytes_in || 0));
+        totalBytesOut += Math.max(0, Number(s.bytes_out || 0));
+      }
+      const totalDownloadMB = Math.round((totalBytesIn / (1024 * 1024)) * 10) / 10;
+      const totalUploadMB = Math.round((totalBytesOut / (1024 * 1024)) * 10) / 10;
+      const totalCombinedMB = Math.round((totalDownloadMB + totalUploadMB) * 10) / 10;
+      return {
+        totalDownloadMB,
+        totalUploadMB,
+        totalCombinedMB,
+        totalCombinedGB: Number((totalCombinedMB / 1024).toFixed(2)),
+        totalMB: totalCombinedMB,
+        totalGB: Number((totalCombinedMB / 1024).toFixed(2)),
+        sessionCount: seenIds.size,
+        sessionsCount: seenIds.size,
+        lastActiveSession: liveSession || null,
+        history: [],
+      };
+    }
     return getSubscriberHistoricalUsage(username || '');
-  }, [getSubscriberHistoricalUsage, username]);
+  }, [supabaseSessionLogs, getSubscriberHistoricalUsage, username, liveSession]);
 
   // Session history logs (Prefer persisted Supabase subscriber_session_logs, fallback to local/server history)
   const sessionLogs: SessionLog[] = useMemo(() => {
@@ -1330,10 +1358,10 @@ export const SubscriberProfileDrawer: React.FC<SubscriberProfileDrawerProps> = (
               <div className="flex items-center justify-between">
                 <h3 className="text-sm font-bold text-white flex items-center gap-2">
                   <Clock className="w-4 h-4 text-cyan-400" />
-                  Last 5 Connection / Disconnection Records
+                  PPPoE Connection &amp; Disconnection History ({sessionLogs.length})
                 </h3>
                 <span className="text-xs text-slate-400 font-mono">
-                  Recorded from RouterOS Event Stream
+                  Per-Session Telemetry (No Carry-Over)
                 </span>
               </div>
 
@@ -1474,9 +1502,8 @@ export const SubscriberProfileDrawer: React.FC<SubscriberProfileDrawerProps> = (
                             <button
                               type="button"
                               onClick={() => {
-                                const cleanPhone = (customer?.phone || '').replace(/[^0-9]/g, '');
                                 const text = `*YOUTH NET ISP - BILLING STATEMENT*\n\nDear *${customer?.name || username}*,\nInvoice: *${inv?.invoiceNumber || (inv as any)?.invoice_no || 'N/A'}*\nMonth: ${inv?.billingMonth || 'Current'}\nAmount: *Rs. ${Number(inv?.totalAmount || (inv as any)?.amount || 0).toLocaleString()}*\nDue Date: ${inv?.dueDate || 'N/A'}\nStatus: *${(inv?.status || '').toUpperCase()}*\n\nPlease settle your bill before due date to prevent automated RouterOS service suspension.\nThank you!`;
-                                window.open(`https://wa.me/${cleanPhone || '923001234567'}?text=${encodeURIComponent(text)}`, '_blank');
+                                openWhatsAppLink(customer?.phone || '923001234567', text);
                               }}
                               title="Send WhatsApp Invoice Notice"
                               className="p-1 rounded bg-slate-800 hover:bg-emerald-950 text-slate-300 hover:text-emerald-400 border border-slate-700 transition cursor-pointer"

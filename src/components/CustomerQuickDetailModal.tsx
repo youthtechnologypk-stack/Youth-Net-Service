@@ -21,6 +21,7 @@ import { Customer, Invoice } from '../types/isp';
 import { useISP } from '../context/ISPContext';
 import { useCurrency } from '../context/CurrencyContext';
 import { ActiveTab } from './Header';
+import { openWhatsAppLink } from '../lib/whatsappBilling';
 
 interface CustomerQuickDetailModalProps {
   customer: Customer | null;
@@ -62,9 +63,7 @@ export const CustomerQuickDetailModal: React.FC<CustomerQuickDetailModalProps> =
       `_Youth Net Fiber NOC Team_`;
 
     logWhatsAppNotice(customer.phone, customer.name, text, 'account_inquiry');
-    const cleanPhone = customer.phone.replace(/[^\d+]/g, '').replace('+', '');
-    const url = `https://wa.me/${cleanPhone}?text=${encodeURIComponent(text)}`;
-    window.open(url, '_blank');
+    openWhatsAppLink(customer.phone, text);
   };
 
   return (

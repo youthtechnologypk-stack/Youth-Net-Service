@@ -1,21 +1,23 @@
 {
-  "name": "Youth Net NOC",
-  "short_name": "YouthNet",
-  "description": "Carrier-Grade ISP Operations & MikroTik Automation Portal",
+  "id": "/",
+  "name": "Youth Net Service NOC & Field Portal",
+  "short_name": "Youth Net",
+  "description": "Carrier-Grade ISP Operations, Billing Recovery & MikroTik Automation Portal",
   "start_url": "/",
+  "scope": "/",
   "display": "standalone",
-  "background_color": "#0a0f1d",
-  "theme_color": "#0284c7",
-  "orientation": "portrait-primary",
+  "orientation": "portrait",
+  "background_color": "#090d16",
+  "theme_color": "#0ea5e9",
   "icons": [
     {
-      "src": "/icon-192x192.png",
+      "src": "/icon-192.png",
       "sizes": "192x192",
       "type": "image/png",
       "purpose": "any maskable"
     },
     {
-      "src": "/icon-512x512.png",
+      "src": "/icon-512.png",
       "sizes": "512x512",
       "type": "image/png",
       "purpose": "any maskable"

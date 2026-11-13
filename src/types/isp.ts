@@ -387,10 +387,12 @@ export interface MikrotikPppSecret {
 
 export interface HistoricalSessionRecord {
   id: string;
+  sessionId?: string;
   username: string;
   connectTime: string;
   disconnectTime: string | null;
   duration: string;
+  uptimeSeconds?: number;
   totalDownloadMB: number;
   totalUploadMB: number;
   assignedIp?: string;

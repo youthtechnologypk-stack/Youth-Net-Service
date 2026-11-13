@@ -33,6 +33,7 @@ import {
 } from '../services/mikrotikSubscriberSync';
 import { supabase } from '../services/supabaseClient';
 import { AreaNodeSelector } from './AreaNodeSelector';
+import { buildWhatsAppUrl } from '../lib/whatsappBilling';
 import {
   fetchNetworkAreas,
   resolveAreaFromUsername,
@@ -315,8 +316,7 @@ export const CreateAccountModal: React.FC<CreateAccountModalProps> = ({
       plainPass,
       getPortalUrlForRole(role)
     );
-    const cleanWaPhone = cleanPhone.replace(/[^0-9]/g, '');
-    const waUrl = `https://wa.me/${cleanWaPhone}?text=${encodeURIComponent(waText)}`;
+    const waUrl = buildWhatsAppUrl(cleanPhone, waText);
 
     // Log to system WhatsApp notification history
     logWhatsAppNotice(
@@ -428,7 +428,7 @@ export const CreateAccountModal: React.FC<CreateAccountModalProps> = ({
                 <a
                   href={createdSuccessToast.waUrl}
                   target="_blank"
-                  rel="noopener noreferrer"
+                  rel="noopener noreferrer external"
                   className="w-full sm:flex-1 py-2.5 px-3 rounded-xl bg-emerald-600 hover:bg-emerald-500 text-slate-950 font-bold text-xs flex items-center justify-center gap-2 shadow-lg shadow-emerald-950/40 transition"
                 >
                   <Send className="w-4 h-4" />

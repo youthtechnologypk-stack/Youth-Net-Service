@@ -489,11 +489,12 @@ export async function getActiveSessions(
     const gbOut = (Number(rawBytesOut) / (1024 * 1024 * 1024)).toFixed(2);
     const bytesIn = Math.round(rawBytesIn / 1_000_000);
     const bytesOut = Math.round(rawBytesOut / 1_000_000);
-    const internalId = s['.id'] || s.id || `*${idx + 1}`;
+    const realRouterOsId = String(s['.id'] || s.id || '').trim();
+    const internalId = realRouterOsId || `*${idx + 1}`;
 
     return {
       id: internalId,
-      '.id': s['.id'] || internalId,
+      '.id': realRouterOsId,
       username: s.name || s.user || `user-${idx}`,
       callerId: s['caller-id'] || s.callerId || '00:00:00:00:00:00',
       address: s.address || '0.0.0.0',

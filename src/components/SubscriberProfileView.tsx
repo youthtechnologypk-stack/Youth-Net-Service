@@ -63,6 +63,7 @@ import {
   NetworkAreaNode,
   PARENT_FLEET_ROUTER,
 } from '../lib/billingAndNetwork';
+import { buildWhatsAppUrl } from '../lib/whatsappBilling';
 
 export interface SubscriberProfileViewProps {
   username: string;
@@ -530,7 +531,11 @@ export const SubscriberProfileView: React.FC<SubscriberProfileViewProps> = ({
           )
         : new Date(now.getFullYear(), now.getMonth(), 1).getTime();
 
+    const seenIds = new Set<string>();
     const cycleLogs = (sessionLogs || []).filter((s) => {
+      const rowKey = s.id || `${s.connected_at}-${s.session_id || ''}`;
+      if (seenIds.has(rowKey)) return false;
+      seenIds.add(rowKey);
       const ts = new Date(s.connected_at || s.recorded_at || 0).getTime();
       return !Number.isNaN(ts) && ts >= cycleStartMs;
     });
@@ -1076,9 +1081,9 @@ export const SubscriberProfileView: React.FC<SubscriberProfileViewProps> = ({
                 <span className="text-white font-bold">{user?.phone || 'N/A'}</span>
                 {user?.phone && (
                   <a
-                    href={`https://wa.me/${user.phone.replace(/[^0-9]/g, '')}`}
+                    href={buildWhatsAppUrl(user.phone, '')}
                     target="_blank"
-                    rel="noreferrer"
+                    rel="noopener noreferrer external"
                     className="p-1 rounded bg-emerald-950 text-emerald-400 hover:text-white transition"
                     title="Open WhatsApp"
                   >
@@ -1864,10 +1869,10 @@ export const SubscriberProfileView: React.FC<SubscriberProfileViewProps> = ({
                               </div>
                               <div className="text-[10px] text-slate-500 mt-0.5">
                                 {sess.disconnected_at
-                                  ? `Ended: ${new Date(sess.disconnected_at).toLocaleString()}`
+                                  ? `Closed: ${new Date(sess.disconnected_at).toLocaleString()}`
                                   : derivedStatus === 'ACTIVE'
-                                  ? 'Active Telemetry (60s sync)'
-                                  : `Updated: ${sess.recorded_at ? new Date(sess.recorded_at).toLocaleString() : '—'}`}
+                                  ? 'Live session'
+                                  : `Closed: ${sess.recorded_at ? new Date(sess.recorded_at).toLocaleString() : '—'}`}
                               </div>
                             </td>
                             <td className="py-3 px-4 font-mono text-cyan-400 whitespace-nowrap">
