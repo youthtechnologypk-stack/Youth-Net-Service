@@ -291,7 +291,8 @@ export interface SupabaseWhatsappReminderLog {
   created_at?: string;
 }
 
-export type GisNodeType = 'OLT' | 'FOSC_JOINT' | 'FDB_FAT';
+export type GisNodeType = 'OLT' | 'DIST_NODE' | 'FOSC_JOINT' | 'FDB_FAT';
+export type GisSplitterCategory = 'NONE' | 'PLC_EQUAL' | 'FBT_RATIO';
 export type GisSplitterType =
   | 'none'
   | '1:2'
@@ -300,15 +301,29 @@ export type GisSplitterType =
   | '1:16'
   | '1:32'
   | '90:10'
+  | '85:15'
   | '80:20'
-  | '70:30';
+  | '70:30'
+  | '60:40'
+  | '50:50';
 export type GisCoreStatus =
   | 'Feed / Splitter'
   | 'Through / Pass'
   | 'Free / Dark'
   | 'Dead / High Loss';
+export type GisCoreUsageType =
+  | 'SPLITTER_FEED'
+  | 'PASS_THROUGH_AREA'
+  | 'FREE_SPARE'
+  | 'DEAD_FAULT';
 export type GisSpliceStatus = 'Straight Splice' | 'Cross Splice' | 'Cut / Dead';
 export type GisPortStatus = 'ACTIVE' | 'FREE' | 'FAULTY';
+export type SplitterUtilizationType =
+  | 'CLIENT_ONT'
+  | 'DOWNSTREAM_AREA_FEED'
+  | 'CASCADED_SPLITTER'
+  | 'FREE_PORT'
+  | 'FAULTY';
 
 export interface GisLatLng {
   lat: number;
@@ -330,23 +345,68 @@ export interface GisCoreEntry {
   coreColorName: string;
   coreColorHex: string;
   status: GisCoreStatus;
+  usage_type?: GisCoreUsageType;
+  origin_olt_id?: string | null;
+  origin_pon_port_id?: string | null;
+  origin_olt_label?: string;
+  assigned_splitter_node_id?: string | null;
+  forwarded_to_area?: string;
+  remarks?: string;
   destinationNote?: string;
   assignedNodeId?: string | null;
+}
+
+export type OltPonMode = 'GPON' | 'EPON';
+export type OltSfpClass = 'B+' | 'C+' | 'C++' | 'C+++' | 'CUSTOM';
+export type OltPonPortStatus = 'ACTIVE' | 'SPARE' | 'FAULT';
+
+export interface SupabaseGisOlt {
+  id: string;
+  name: string;
+  vendor_model?: string | null;
+  pon_mode: OltPonMode;
+  total_pon_ports: 2 | 4 | 8 | 16;
+  mgmt_ip?: string | null;
+  area_name?: string | null;
+  lat?: number | null;
+  lng?: number | null;
+  status: 'ONLINE' | 'OFFLINE';
+  notes?: string | null;
+  created_at?: string;
+  updated_at?: string;
+}
+
+export interface SupabaseGisOltPonPort {
+  id: string;
+  olt_id: string;
+  port_number: number;
+  port_label?: string | null;
+  sfp_class: OltSfpClass;
+  tx_power_dbm: number;
+  max_onu_limit: number;
+  active_onus: number;
+  status: OltPonPortStatus;
+  updated_at?: string;
 }
 
 export interface SupabaseGisNode {
   id: string;
   node_type: GisNodeType;
+  olt_id?: string | null;
+  pon_port_id?: string | null;
   name: string;
   area_name?: string | null;
   lat: number;
   lng: number;
   tx_power_dbm: number;
+  splitter_category?: GisSplitterCategory;
   splitter_type: GisSplitterType;
   total_ports: number;
   feed_cable_id?: string | null;
   feed_core_number?: number | null;
+  feed_core_pair?: string | null;
   calculated_input_dbm?: number | null;
+  calculated_output_dbm?: number | null;
   calculated_ont_rx_dbm?: number | null;
   tray_capacity: number;
   loss_per_splice: number;
@@ -362,10 +422,13 @@ export interface SupabaseGisCable {
   name?: string | null;
   source_node_id: string;
   target_node_id: string;
+  source_olt_id?: string | null;
+  source_pon_port_id?: string | null;
   cable_cores: 2 | 4 | 6 | 8 | 12 | 24 | 48;
   distance_meters: number;
   route_coordinates_json: GisLatLng[];
   cores_tia598_json: GisCoreEntry[];
+  cores_allocation_json?: GisCoreEntry[];
   notes?: string | null;
   updated_by?: string | null;
   created_at?: string;
@@ -383,5 +446,22 @@ export interface SupabaseGisFdbPort {
   status: GisPortStatus;
   updated_at?: string;
 }
+
+export interface SupabaseGisSplitterOutput {
+  id: string;
+  node_id: string;
+  port_number: number;
+  leg_label?: string | null;
+  utilization_type: SplitterUtilizationType;
+  subscriber_id?: string | null;
+  subscriber_username?: string | null;
+  client_name_manual?: string | null;
+  target_area_or_node?: string | null;
+  drop_distance_m: number;
+  estimated_rx_dbm?: number | null;
+  updated_at?: string;
+}
+
+
 
 

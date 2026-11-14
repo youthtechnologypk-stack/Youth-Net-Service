@@ -5,6 +5,7 @@ import {
   Copy,
   Crosshair,
   Database,
+  Layers,
   MapPin,
   MousePointer,
   Plus,
@@ -24,32 +25,48 @@ import type {
   GisNodeType,
   GisPortStatus,
   GisSplitterType,
+  OltPonMode,
+  SplitterUtilizationType,
   SupabaseGisCable,
   SupabaseGisFdbPort,
   SupabaseGisNode,
+  SupabaseGisOlt,
+  SupabaseGisOltPonPort,
+  SupabaseGisSplitterOutput,
 } from '../services/supabaseClient';
 import {
   GisRealtimeConnectionStatus,
   GisSubscriberSummary,
   applyRealtimeCableDelta,
   applyRealtimeNodeDelta,
+  applyRealtimeOltDelta,
+  applyRealtimePonPortDelta,
   applyRealtimePortDelta,
+  applyRealtimeSplitterOutputDelta,
   createGisCable,
   createGisNode,
   deleteGisCable,
   deleteGisNode,
+  initializeSplitterOutputsForNode,
   loadGisTopology,
+  placeOrMoveOltOnMap,
   splitCableWithFoscJoint,
   subscribeToGisRealtime,
   syncOpticalBudgetsToDb,
   updateGisCable,
   updateGisNode,
+  updateOltPonPort,
   upsertFdbPortAssignment,
+  upsertSplitterOutput,
 } from '../services/fiberGisService';
 import {
+  SFP_TX_PRESETS,
   SPLITTER_SPECS,
   calculateTopologyOpticalBudgets,
   computePolylineDistanceMeters,
+  inferSfpClassFromDbm,
+  inferSplitterCategory,
+  traceOpticalPathToNode,
 } from '../lib/fiberOpticEngine';
 import { FIBER_GIS_MIGRATION_SQL } from '../lib/gisMigrationSql';
 import { DEFAULT_NETWORK_AREAS } from '../lib/billingAndNetwork';
@@ -59,6 +76,8 @@ import {
   MapLayerType,
 } from './gis/FiberGisLeafletCanvas';
 import { FiberGisInspectorPanel } from './gis/FiberGisInspectorPanel';
+import { FiberTraceabilityDrawer } from './gis/FiberTraceabilityDrawer';
+import { OltFormDraft, OltManagerModal } from './OltManagerModal';
 
 interface FiberGisMapViewProps {
   currentUser?: UserAccount | null;
@@ -74,9 +93,12 @@ export const FiberGisMapView: React.FC<FiberGisMapViewProps> = ({
 }) => {
   const { activeSessions } = useISP();
 
+  const [olts, setOlts] = useState<SupabaseGisOlt[]>([]);
+  const [ponPorts, setPonPorts] = useState<SupabaseGisOltPonPort[]>([]);
   const [nodes, setNodes] = useState<SupabaseGisNode[]>([]);
   const [cables, setCables] = useState<SupabaseGisCable[]>([]);
   const [ports, setPorts] = useState<SupabaseGisFdbPort[]>([]);
+  const [splitterOutputs, setSplitterOutputs] = useState<SupabaseGisSplitterOutput[]>([]);
   const [subscribers, setSubscribers] = useState<GisSubscriberSummary[]>([]);
   const [schemaMissing, setSchemaMissing] = useState(false);
   const [isLoading, setIsLoading] = useState(true);
@@ -103,11 +125,31 @@ export const FiberGisMapView: React.FC<FiberGisMapViewProps> = ({
   const [selectedNodeId, setSelectedNodeId] = useState<string | null>(null);
   const [selectedCableId, setSelectedCableId] = useState<string | null>(null);
   const [cableClickPoint, setCableClickPoint] = useState<GisLatLng | null>(null);
+  const [traceRequest, setTraceRequest] = useState<{
+    nodeId: string;
+    output?: SupabaseGisSplitterOutput | null;
+  } | null>(null);
 
-  // Multi-waypoint cable drawing state
+  // Multi-OLT Manager & Pick/Place on Map state
+  const [isOltManagerOpen, setIsOltManagerOpen] = useState(false);
+  const [editingOltId, setEditingOltId] = useState<string | null>(null);
+  const [oltDraftForPick, setOltDraftForPick] = useState<OltFormDraft | null>(null);
+  const [pickedCoordsForModal, setPickedCoordsForModal] = useState<GisLatLng | null>(null);
+  const [pendingPlaceOltFromRegistry, setPendingPlaceOltFromRegistry] =
+    useState<SupabaseGisOlt | null>(null);
+
+  // Multi-waypoint cable drawing state + OLT PON Port feeder selection modal
   const [connectSourceNodeId, setConnectSourceNodeId] = useState<string | null>(null);
   const [draftWaypoints, setDraftWaypoints] = useState<GisLatLng[]>([]);
   const [draftCableCores, setDraftCableCores] = useState<2 | 4 | 6 | 8 | 12 | 24 | 48>(12);
+  const [pendingCablePonSelect, setPendingCablePonSelect] = useState<{
+    sourceNode: SupabaseGisNode;
+    targetNode: SupabaseGisNode;
+    routeCoordinates: GisLatLng[];
+    olt: SupabaseGisOlt;
+    oltPorts: SupabaseGisOltPonPort[];
+    selectedPonPortId: string;
+  } | null>(null);
 
   // Live GPS Tracking
   const [userLocation, setUserLocation] = useState<GisLatLng | null>(null);
@@ -122,6 +164,10 @@ export const FiberGisMapView: React.FC<FiberGisMapViewProps> = ({
   const [newNodeName, setNewNodeName] = useState('');
   const [newNodeArea, setNewNodeArea] = useState('');
   const [newNodeTxPower, setNewNodeTxPower] = useState<number>(5.0);
+  const [newOltPonMode, setNewOltPonMode] = useState<OltPonMode>('GPON');
+  const [newOltTotalPorts, setNewOltTotalPorts] = useState<2 | 4 | 8 | 16>(8);
+  const [newOltVendorModel, setNewOltVendorModel] = useState<string>('VSOL V1600G1');
+  const [newOltMgmtIp, setNewOltMgmtIp] = useState<string>('');
   const [newNodeSplitter, setNewNodeSplitter] = useState<GisSplitterType>('1:8');
   const [newNodeTrayCap, setNewNodeTrayCap] = useState<number>(12);
 
@@ -153,19 +199,59 @@ export const FiberGisMapView: React.FC<FiberGisMapViewProps> = ({
       try {
         const data = await loadGisTopology(activeSessionNames);
         setSchemaMissing(data.schemaMissing);
+        setOlts(data.olts);
+        setPonPorts(data.ponPorts);
         setNodes(data.nodes);
         setCables(data.cables);
         setPorts(data.ports);
+        setSplitterOutputs(data.splitterOutputs);
         setSubscribers(data.subscribers);
 
-        if (centerOnFirstNode && data.nodes.length > 0) {
+        // Check if NOC requested placing or viewing an OLT pin
+        let handledNocJump = false;
+        try {
+          const jumpOltId = sessionStorage.getItem('youthnet_gis_place_olt_id');
+          if (jumpOltId) {
+            sessionStorage.removeItem('youthnet_gis_place_olt_id');
+            const targetOlt = data.olts.find((o) => o.id === jumpOltId);
+            if (targetOlt) {
+              handledNocJump = true;
+              const existingPin = data.nodes.find((n) => n.olt_id === targetOlt.id);
+              if (
+                existingPin &&
+                targetOlt.lat !== null &&
+                targetOlt.lat !== undefined &&
+                targetOlt.lng !== null &&
+                targetOlt.lng !== undefined
+              ) {
+                setSelectedNodeId(existingPin.id);
+                setFlyToTarget({
+                  lat: targetOlt.lat,
+                  lng: targetOlt.lng,
+                  zoom: 17,
+                  ts: Date.now(),
+                });
+              } else {
+                setPendingPlaceOltFromRegistry(targetOlt);
+                setToolMode('pick_olt_coords');
+                showToast(`Tap anywhere on the map to place OLT "${targetOlt.name}".`);
+              }
+            }
+          }
+        } catch {
+          // ignore storage access issues
+        }
+
+        if (!handledNocJump && centerOnFirstNode && data.nodes.length > 0) {
           const anchor =
             data.nodes.find((n) => n.node_type === 'OLT') || data.nodes[0];
           setFlyToTarget({ lat: anchor.lat, lng: anchor.lng, zoom: 16, ts: Date.now() });
         }
 
         if (data.nodes.length > 0 && !data.schemaMissing) {
-          syncOpticalBudgetsToDb(data.nodes, data.cables).catch(() => {});
+          const portMap: Record<string, SupabaseGisOltPonPort> = {};
+          for (const pp of data.ponPorts) portMap[pp.id] = pp;
+          syncOpticalBudgetsToDb(data.nodes, data.cables, portMap).catch(() => {});
         }
         setLastSyncedAt(new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' }));
       } catch (err: any) {
@@ -181,11 +267,23 @@ export const FiberGisMapView: React.FC<FiberGisMapViewProps> = ({
     refreshTopology(true);
   }, []);
 
-  // Real-time Supabase WebSocket syncing across gis_nodes, gis_cables, and gis_fdb_ports
+  // Real-time Supabase WebSocket syncing across gis_olts, gis_olt_pon_ports, gis_nodes, gis_cables, and gis_fdb_ports
   useEffect(() => {
     if (schemaMissing) return;
 
     const unsubscribe = subscribeToGisRealtime({
+      onOltDelta: (eventType, newRow, oldRow) => {
+        setOlts((prev) => applyRealtimeOltDelta(prev, eventType, newRow, oldRow));
+        setLastSyncedAt(
+          new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' })
+        );
+      },
+      onPonPortDelta: (eventType, newRow, oldRow) => {
+        setPonPorts((prev) => applyRealtimePonPortDelta(prev, eventType, newRow, oldRow));
+        setLastSyncedAt(
+          new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' })
+        );
+      },
       onNodeDelta: (eventType, newRow, oldRow) => {
         setNodes((prev) => applyRealtimeNodeDelta(prev, eventType, newRow, oldRow));
         if (eventType === 'DELETE' && oldRow?.id) {
@@ -206,6 +304,14 @@ export const FiberGisMapView: React.FC<FiberGisMapViewProps> = ({
       },
       onPortDelta: (eventType, newRow, oldRow) => {
         setPorts((prev) => applyRealtimePortDelta(prev, eventType, newRow, oldRow));
+        setLastSyncedAt(
+          new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' })
+        );
+      },
+      onSplitterOutputDelta: (eventType, newRow, oldRow) => {
+        setSplitterOutputs((prev) =>
+          applyRealtimeSplitterOutputDelta(prev, eventType, newRow, oldRow)
+        );
         setLastSyncedAt(
           new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' })
         );
@@ -241,6 +347,27 @@ export const FiberGisMapView: React.FC<FiberGisMapViewProps> = ({
     };
   }, []);
 
+  const oltsById = useMemo(() => {
+    const map: Record<string, SupabaseGisOlt> = {};
+    for (const o of olts) map[o.id] = o;
+    return map;
+  }, [olts]);
+
+  const ponPortsById = useMemo(() => {
+    const map: Record<string, SupabaseGisOltPonPort> = {};
+    for (const p of ponPorts) map[p.id] = p;
+    return map;
+  }, [ponPorts]);
+
+  const ponPortsByOltId = useMemo(() => {
+    const map: Record<string, SupabaseGisOltPonPort[]> = {};
+    for (const p of ponPorts) {
+      if (!map[p.olt_id]) map[p.olt_id] = [];
+      map[p.olt_id].push(p);
+    }
+    return map;
+  }, [ponPorts]);
+
   const portsByNodeId = useMemo(() => {
     const map: Record<string, SupabaseGisFdbPort[]> = {};
     for (const p of ports) {
@@ -250,10 +377,43 @@ export const FiberGisMapView: React.FC<FiberGisMapViewProps> = ({
     return map;
   }, [ports]);
 
+  const splitterOutputsByNodeId = useMemo(() => {
+    const map: Record<string, SupabaseGisSplitterOutput[]> = {};
+    for (const o of splitterOutputs) {
+      if (!map[o.node_id]) map[o.node_id] = [];
+      map[o.node_id].push(o);
+    }
+    return map;
+  }, [splitterOutputs]);
+
   const budgetsByNodeId = useMemo(
-    () => calculateTopologyOpticalBudgets(nodes, cables),
-    [nodes, cables]
+    () => calculateTopologyOpticalBudgets(nodes, cables, ponPortsById),
+    [nodes, cables, ponPortsById]
   );
+
+  const traceResult = useMemo(() => {
+    if (!traceRequest) return null;
+    const out = traceRequest.output;
+    const subMatch = out
+      ? subscribers.find(
+          (s) =>
+            (out.subscriber_id && s.id === out.subscriber_id) ||
+            (out.subscriber_username &&
+              s.username.toLowerCase() === out.subscriber_username.toLowerCase())
+        )
+      : undefined;
+    return traceOpticalPathToNode({
+      targetNodeId: traceRequest.nodeId,
+      nodes,
+      cables,
+      budgetsByNodeId,
+      oltsById,
+      ponPortsById,
+      selectedOutput: out || null,
+      subscriberLabel: subMatch ? `${subMatch.fullName} (@${subMatch.username})` : undefined,
+      subscriberOnline: subMatch ? subMatch.isOnline : undefined,
+    });
+  }, [traceRequest, nodes, cables, budgetsByNodeId, oltsById, ponPortsById, subscribers]);
 
   const selectedNode = useMemo(
     () => nodes.find((n) => n.id === selectedNodeId) || null,
@@ -348,22 +508,75 @@ export const FiberGisMapView: React.FC<FiberGisMapViewProps> = ({
   };
 
   const handleMapClick = useCallback(
-    (coords: GisLatLng) => {
+    async (coords: GisLatLng) => {
       setIsSearchOpen(false);
-      if (toolMode === 'place_olt' || toolMode === 'place_fdb' || toolMode === 'place_fosc') {
+
+      if (toolMode === 'pick_olt_coords') {
+        if (pendingPlaceOltFromRegistry) {
+          setIsSaving(true);
+          try {
+            const oltPorts = ponPortsByOltId[pendingPlaceOltFromRegistry.id] || [];
+            const defaultTx = oltPorts[0]?.tx_power_dbm ?? 5.0;
+            const res = await placeOrMoveOltOnMap({
+              olt: pendingPlaceOltFromRegistry,
+              lat: coords.lat,
+              lng: coords.lng,
+              defaultTxPowerDbm: defaultTx,
+              updatedBy: actorUsername,
+            });
+            setOlts((prev) => applyRealtimeOltDelta(prev, 'UPDATE', res.olt));
+            setNodes((prev) => applyRealtimeNodeDelta(prev, 'INSERT', res.mapNode));
+            setPendingPlaceOltFromRegistry(null);
+            setToolMode('pan');
+            setSelectedNodeId(res.mapNode.id);
+            showToast(`Placed "${res.olt.name}" on map at ${coords.lat.toFixed(5)}, ${coords.lng.toFixed(5)}.`);
+          } catch (err: any) {
+            showToast(err?.message || 'Failed to place OLT marker on map', 'err');
+          } finally {
+            setIsSaving(false);
+          }
+          return;
+        }
+
+        if (oltDraftForPick) {
+          setPickedCoordsForModal(coords);
+          setToolMode('pan');
+          setIsOltManagerOpen(true);
+          return;
+        }
+      }
+
+      if (
+        toolMode === 'place_olt' ||
+        toolMode === 'place_dist' ||
+        toolMode === 'place_fdb' ||
+        toolMode === 'place_fosc'
+      ) {
         const nodeType: GisNodeType =
           toolMode === 'place_olt'
             ? 'OLT'
+            : toolMode === 'place_dist'
+            ? 'DIST_NODE'
             : toolMode === 'place_fosc'
             ? 'FOSC_JOINT'
             : 'FDB_FAT';
         const prefix =
-          nodeType === 'OLT' ? 'OLT-POP' : nodeType === 'FOSC_JOINT' ? 'FOSC' : 'FDB';
+          nodeType === 'OLT'
+            ? 'OLT-POP'
+            : nodeType === 'DIST_NODE'
+            ? 'DIST'
+            : nodeType === 'FOSC_JOINT'
+            ? 'FOSC'
+            : 'FDB';
         const existingCount = nodes.filter((n) => n.node_type === nodeType).length + 1;
         setNewNodeName(`${prefix}-${existingCount}`);
         setNewNodeArea('');
         setNewNodeTxPower(5.0);
-        setNewNodeSplitter('1:8');
+        setNewOltPonMode('GPON');
+        setNewOltTotalPorts(8);
+        setNewOltVendorModel('VSOL V1600G1');
+        setNewOltMgmtIp('');
+        setNewNodeSplitter(nodeType === 'FDB_FAT' ? '1:8' : nodeType === 'DIST_NODE' ? '90:10' : 'none');
         setNewNodeTrayCap(12);
         setPendingPlaceCoords({ coords, nodeType });
         return;
@@ -373,7 +586,58 @@ export const FiberGisMapView: React.FC<FiberGisMapViewProps> = ({
         setDraftWaypoints((prev) => [...prev, coords]);
       }
     },
-    [toolMode, nodes, connectSourceNodeId]
+    [
+      toolMode,
+      pendingPlaceOltFromRegistry,
+      oltDraftForPick,
+      ponPortsByOltId,
+      actorUsername,
+      nodes,
+      connectSourceNodeId,
+      showToast,
+    ]
+  );
+
+  const finalizeCreateCable = useCallback(
+    async (params: {
+      sourceNode: SupabaseGisNode;
+      targetNode: SupabaseGisNode;
+      routeCoordinates: GisLatLng[];
+      sourceOltId?: string | null;
+      sourcePonPortId?: string | null;
+    }) => {
+      setIsSaving(true);
+      try {
+        const ponLabel =
+          params.sourcePonPortId && ponPortsById[params.sourcePonPortId]
+            ? ` [PON-${ponPortsById[params.sourcePonPortId].port_number}]`
+            : '';
+        const created = await createGisCable({
+          name: `${params.sourceNode.name}${ponLabel} → ${params.targetNode.name}`,
+          sourceNodeId: params.sourceNode.id,
+          targetNodeId: params.targetNode.id,
+          sourceOltId: params.sourceOltId || null,
+          sourcePonPortId: params.sourcePonPortId || null,
+          cableCores: draftCableCores,
+          routeCoordinates: params.routeCoordinates,
+          updatedBy: actorUsername,
+        });
+        setCables((prev) => applyRealtimeCableDelta(prev, 'INSERT', created));
+        setConnectSourceNodeId(null);
+        setDraftWaypoints([]);
+        setToolMode('pan');
+        setSelectedCableId(created.id);
+        setSelectedNodeId(null);
+        showToast(
+          `Saved ${created.cable_cores}-core span${ponLabel} (${created.distance_meters}m) to Supabase.`
+        );
+      } catch (err: any) {
+        showToast(err?.message || 'Failed to save fiber cable route', 'err');
+      } finally {
+        setIsSaving(false);
+      }
+    },
+    [ponPortsById, draftCableCores, actorUsername, showToast]
   );
 
   const handleNodeClick = useCallback(
@@ -394,30 +658,35 @@ export const FiberGisMapView: React.FC<FiberGisMapViewProps> = ({
 
         const routeCoordinates = [...draftWaypoints, { lat: node.lat, lng: node.lng }];
         const sourceNode = nodes.find((n) => n.id === connectSourceNodeId);
-        setIsSaving(true);
-        try {
-          const created = await createGisCable({
-            name: `${sourceNode?.name || 'Node'} → ${node.name}`,
-            sourceNodeId: connectSourceNodeId,
-            targetNodeId: node.id,
-            cableCores: draftCableCores,
-            routeCoordinates,
-            updatedBy: actorUsername,
-          });
-          setCables((prev) => applyRealtimeCableDelta(prev, 'INSERT', created));
-          setConnectSourceNodeId(null);
-          setDraftWaypoints([]);
-          setToolMode('pan');
-          setSelectedCableId(created.id);
-          setSelectedNodeId(null);
-          showToast(
-            `Saved ${created.cable_cores}-core span (${created.distance_meters}m) to Supabase.`
-          );
-        } catch (err: any) {
-          showToast(err?.message || 'Failed to save fiber cable route', 'err');
-        } finally {
-          setIsSaving(false);
+        if (!sourceNode) return;
+
+        // If starting from a Multi-OLT hub that has PON ports, prompt user which PON Port feeds this fiber
+        if (sourceNode.node_type === 'OLT' && sourceNode.olt_id && oltsById[sourceNode.olt_id]) {
+          const olt = oltsById[sourceNode.olt_id];
+          const oltPorts = (ponPortsByOltId[olt.id] || [])
+            .slice()
+            .sort((a, b) => a.port_number - b.port_number);
+          if (oltPorts.length > 0) {
+            setPendingCablePonSelect({
+              sourceNode,
+              targetNode: node,
+              routeCoordinates,
+              olt,
+              oltPorts,
+              selectedPonPortId: oltPorts[0].id,
+            });
+            return;
+          }
         }
+
+        const upstreamBudget = budgetsByNodeId[sourceNode.id];
+        await finalizeCreateCable({
+          sourceNode,
+          targetNode: node,
+          routeCoordinates,
+          sourceOltId: sourceNode.olt_id || upstreamBudget?.oltId || null,
+          sourcePonPortId: sourceNode.pon_port_id || upstreamBudget?.sourcePonPortId || null,
+        });
         return;
       }
 
@@ -429,11 +698,46 @@ export const FiberGisMapView: React.FC<FiberGisMapViewProps> = ({
       toolMode,
       connectSourceNodeId,
       draftWaypoints,
-      draftCableCores,
       nodes,
-      actorUsername,
+      oltsById,
+      ponPortsByOltId,
+      budgetsByNodeId,
+      finalizeCreateCable,
       showToast,
     ]
+  );
+
+  const handleNodeDragEnd = useCallback(
+    async (node: SupabaseGisNode, coords: GisLatLng) => {
+      setIsSaving(true);
+      try {
+        if (node.node_type === 'OLT' && node.olt_id && oltsById[node.olt_id]) {
+          const res = await placeOrMoveOltOnMap({
+            olt: oltsById[node.olt_id],
+            lat: coords.lat,
+            lng: coords.lng,
+            updatedBy: actorUsername,
+          });
+          setOlts((prev) => applyRealtimeOltDelta(prev, 'UPDATE', res.olt));
+          setNodes((prev) => applyRealtimeNodeDelta(prev, 'UPDATE', res.mapNode));
+        } else {
+          const updated = await updateGisNode(node.id, {
+            lat: coords.lat,
+            lng: coords.lng,
+            updated_by: actorUsername,
+          });
+          setNodes((prev) => applyRealtimeNodeDelta(prev, 'UPDATE', updated));
+        }
+        showToast(
+          `Moved "${node.name}" to ${coords.lat.toFixed(5)}, ${coords.lng.toFixed(5)} in Supabase.`
+        );
+      } catch (err: any) {
+        showToast(err?.message || 'Failed to update node coordinates', 'err');
+      } finally {
+        setIsSaving(false);
+      }
+    },
+    [oltsById, actorUsername, showToast]
   );
 
   const handleCableClick = useCallback(
@@ -451,29 +755,89 @@ export const FiberGisMapView: React.FC<FiberGisMapViewProps> = ({
     if (!pendingPlaceCoords) return;
     setIsSaving(true);
     try {
-      const created = await createGisNode({
+      const chosenSplitter =
+        pendingPlaceCoords.nodeType === 'FDB_FAT' || pendingPlaceCoords.nodeType === 'DIST_NODE'
+          ? newNodeSplitter
+          : 'none';
+      const { node: createdNode, olt: createdOlt, ponPorts: createdPonPorts } = await createGisNode({
         nodeType: pendingPlaceCoords.nodeType,
         name: newNodeName || 'GIS-Node',
         areaName: newNodeArea,
         lat: pendingPlaceCoords.coords.lat,
         lng: pendingPlaceCoords.coords.lng,
         txPowerDbm: newNodeTxPower,
-        splitterType: newNodeSplitter,
+        sfpClass: inferSfpClassFromDbm(newNodeTxPower),
+        ponMode: newOltPonMode,
+        totalPonPorts: newOltTotalPorts,
+        vendorModel: newOltVendorModel,
+        mgmtIp: newOltMgmtIp,
+        splitterCategory: inferSplitterCategory(chosenSplitter),
+        splitterType: chosenSplitter,
         trayCapacity: newNodeTrayCap,
         updatedBy: actorUsername,
       });
-      setNodes((prev) => applyRealtimeNodeDelta(prev, 'INSERT', created));
+      setNodes((prev) => applyRealtimeNodeDelta(prev, 'INSERT', createdNode));
+      if (chosenSplitter !== 'none') {
+        try {
+          const createdOutputs = await initializeSplitterOutputsForNode({
+            node: createdNode,
+            splitterType: chosenSplitter,
+            totalPorts: createdNode.total_ports,
+            inputDbm: null,
+            existingOutputs: [],
+          });
+          setSplitterOutputs((prev) => {
+            let next = prev;
+            for (const o of createdOutputs) {
+              next = applyRealtimeSplitterOutputDelta(next, 'INSERT', o);
+            }
+            return next;
+          });
+        } catch {
+          // ignore if gis_splitter_outputs migration hasn't been applied yet
+        }
+      }
+      if (createdOlt) {
+        setOlts((prev) => applyRealtimeOltDelta(prev, 'INSERT', createdOlt));
+      }
+      if (Array.isArray(createdPonPorts)) {
+        setPonPorts((prev) => {
+          let next = prev;
+          for (const pp of createdPonPorts) {
+            next = applyRealtimePonPortDelta(next, 'INSERT', pp);
+          }
+          return next;
+        });
+      }
       setPendingPlaceCoords(null);
       setToolMode('pan');
-      setSelectedNodeId(created.id);
+      setSelectedNodeId(createdNode.id);
       setSelectedCableId(null);
-      showToast(`Created ${created.name} and saved to PostgreSQL.`);
+      showToast(`Created ${createdNode.name} and saved to PostgreSQL.`);
     } catch (err: any) {
       showToast(err?.message || 'Failed to save GIS node', 'err');
     } finally {
       setIsSaving(false);
     }
   };
+
+  const handleUpdatePonPort = useCallback(
+    async (portId: string, patch: Partial<SupabaseGisOltPonPort>) => {
+      setIsSaving(true);
+      try {
+        const updatedPort = await updateOltPonPort(portId, patch);
+        setPonPorts((prev) => applyRealtimePonPortDelta(prev, 'UPDATE', updatedPort));
+        showToast(
+          `Updated PON-${updatedPort.port_number} TX to +${Number(updatedPort.tx_power_dbm).toFixed(1)} dBm (${updatedPort.sfp_class}).`
+        );
+      } catch (err: any) {
+        showToast(err?.message || 'Failed to update PON port TX power', 'err');
+      } finally {
+        setIsSaving(false);
+      }
+    },
+    [showToast]
+  );
 
   const handleSaveNode = async (nodeId: string, patch: Partial<SupabaseGisNode>) => {
     setIsSaving(true);
@@ -586,15 +950,82 @@ export const FiberGisMapView: React.FC<FiberGisMapViewProps> = ({
     }
   };
 
+  const handleUpsertSplitterOutput = async (params: {
+    nodeId: string;
+    nodeType: GisNodeType;
+    portNumber: number;
+    legLabel?: string | null;
+    utilizationType: SplitterUtilizationType;
+    subscriberId?: string | null;
+    subscriberUsername?: string | null;
+    clientNameManual?: string | null;
+    targetAreaOrNode?: string | null;
+    dropDistanceMeters?: number;
+    estimatedRxDbm?: number | null;
+  }) => {
+    setIsSaving(true);
+    try {
+      const res = await upsertSplitterOutput(params);
+      setSplitterOutputs((prev) =>
+        applyRealtimeSplitterOutputDelta(prev, 'INSERT', res.output)
+      );
+      if (res.fdbPort) {
+        setPorts((prev) => applyRealtimePortDelta(prev, 'INSERT', res.fdbPort));
+      }
+      showToast(`${res.output.leg_label || `Port ${params.portNumber}`} saved to Supabase.`);
+    } catch (err: any) {
+      showToast(err?.message || 'Failed to save splitter output assignment', 'err');
+    } finally {
+      setIsSaving(false);
+    }
+  };
+
+  const handleInitializeSplitterOutputs = async (params: {
+    node: SupabaseGisNode;
+    splitterType: GisSplitterType;
+    totalPorts: number;
+    inputDbm?: number | null;
+  }) => {
+    setIsSaving(true);
+    try {
+      const updatedNode = await updateGisNode(params.node.id, {
+        splitter_category: inferSplitterCategory(params.splitterType),
+        splitter_type: params.splitterType,
+        total_ports: params.totalPorts,
+        updated_by: actorUsername,
+      });
+      setNodes((prev) => applyRealtimeNodeDelta(prev, 'UPDATE', updatedNode));
+
+      const synced = await initializeSplitterOutputsForNode({
+        node: updatedNode,
+        splitterType: params.splitterType,
+        totalPorts: params.totalPorts,
+        inputDbm: params.inputDbm ?? null,
+        existingOutputs: splitterOutputsByNodeId[params.node.id] || [],
+      });
+      setSplitterOutputs((prev) => {
+        const filtered = prev.filter((o) => o.node_id !== params.node.id);
+        return [...filtered, ...synced];
+      });
+      showToast(`Synchronized ${synced.length} splitter output legs for ${updatedNode.name}.`);
+    } catch (err: any) {
+      showToast(err?.message || 'Failed to initialize splitter outputs', 'err');
+    } finally {
+      setIsSaving(false);
+    }
+  };
+
   // Summary Stats (zero-pill clean metrics)
   const summaryStats = useMemo(() => {
     let oltCount = 0;
+    let distCount = 0;
     let fdbCount = 0;
     let foscCount = 0;
     let totalPorts = 0;
     let usedPorts = 0;
     for (const n of nodes) {
       if (n.node_type === 'OLT') oltCount++;
+      else if (n.node_type === 'DIST_NODE') distCount++;
       else if (n.node_type === 'FOSC_JOINT') foscCount++;
       else {
         fdbCount++;
@@ -606,6 +1037,7 @@ export const FiberGisMapView: React.FC<FiberGisMapViewProps> = ({
     const totalFiberMeters = cables.reduce((acc, c) => acc + Number(c.distance_meters || 0), 0);
     return {
       oltCount,
+      distCount,
       fdbCount,
       foscCount,
       freePorts: Math.max(0, totalPorts - usedPorts),
@@ -630,10 +1062,12 @@ export const FiberGisMapView: React.FC<FiberGisMapViewProps> = ({
               <span>Supabase FTTH Fiber GIS Tables Not Initialized Yet</span>
             </div>
             <p className="text-[11px] text-amber-200/90">
-              Run the SQL migration in your Supabase SQL Editor to create{' '}
+              Run the SQL migration in your Supabase SQL Editor to update{' '}
+              <code className="font-mono text-white">gis_olts</code>,{' '}
               <code className="font-mono text-white">gis_nodes</code>,{' '}
-              <code className="font-mono text-white">gis_cables</code>, and{' '}
-              <code className="font-mono text-white">gis_fdb_ports</code>.
+              <code className="font-mono text-white">gis_cables</code>,{' '}
+              <code className="font-mono text-white">gis_fdb_ports</code>, and{' '}
+              <code className="font-mono text-white">gis_splitter_outputs</code>.
             </p>
           </div>
           <div className="flex items-center gap-2 shrink-0">
@@ -699,7 +1133,7 @@ export const FiberGisMapView: React.FC<FiberGisMapViewProps> = ({
                 </span>
               </div>
               <p className="text-[10px] font-mono text-slate-400 tabular-nums whitespace-nowrap">
-                {summaryStats.oltCount} OLT · {summaryStats.fdbCount} FDB ({summaryStats.freePorts}/
+                {summaryStats.oltCount} OLT · {summaryStats.distCount} Dist · {summaryStats.fdbCount} FDB ({summaryStats.freePorts}/
                 {summaryStats.totalPorts} Free) · {summaryStats.foscCount} FOSC ·{' '}
                 {summaryStats.totalFiberKm} km
               </p>
@@ -771,6 +1205,21 @@ export const FiberGisMapView: React.FC<FiberGisMapViewProps> = ({
           <button
             type="button"
             onClick={() => {
+              setEditingOltId(null);
+              setOltDraftForPick(null);
+              setPickedCoordsForModal(null);
+              setIsOltManagerOpen(true);
+            }}
+            className="min-h-[40px] px-2.5 py-1.5 rounded-lg border text-xs font-mono font-semibold flex items-center gap-1.5 whitespace-nowrap cursor-pointer transition bg-sky-950/80 text-sky-300 border-sky-700/80 hover:border-sky-500"
+            title="Add, Edit & Delete EPON/GPON OLTs and PON Ports"
+          >
+            <Server className="w-3.5 h-3.5" />
+            <span>Manage OLTs</span>
+          </button>
+
+          <button
+            type="button"
+            onClick={() => {
               setToolMode('place_olt');
               setConnectSourceNodeId(null);
               setDraftWaypoints([]);
@@ -783,6 +1232,23 @@ export const FiberGisMapView: React.FC<FiberGisMapViewProps> = ({
           >
             <Plus className="w-3.5 h-3.5" />
             <span>OLT</span>
+          </button>
+
+          <button
+            type="button"
+            onClick={() => {
+              setToolMode('place_dist');
+              setConnectSourceNodeId(null);
+              setDraftWaypoints([]);
+            }}
+            className={`min-h-[40px] px-2.5 py-1.5 rounded-lg border text-xs font-mono font-semibold flex items-center gap-1 whitespace-nowrap cursor-pointer transition ${
+              toolMode === 'place_dist'
+                ? 'bg-indigo-600 text-white border-indigo-300'
+                : 'bg-slate-950 text-indigo-300 border-slate-700 hover:border-indigo-500'
+            }`}
+          >
+            <Plus className="w-3.5 h-3.5" />
+            <span>Dist Node</span>
           </button>
 
           <button
@@ -879,10 +1345,34 @@ export const FiberGisMapView: React.FC<FiberGisMapViewProps> = ({
         </div>
       </div>
 
-      {/* Mode Instruction Strip (Placement / Connect Cable Route) */}
+      {/* Mode Instruction Strip (Placement / Pick OLT Coords / Connect Cable Route) */}
       {toolMode !== 'pan' && (
         <div className="px-4 py-2 bg-cyan-950/90 border-b border-cyan-700/70 text-cyan-100 text-xs font-mono flex flex-wrap items-center justify-between gap-2">
-          {toolMode === 'connect_cable' ? (
+          {toolMode === 'pick_olt_coords' ? (
+            <>
+              <div className="flex items-center gap-2">
+                <MapPin className="w-4 h-4 text-sky-400 shrink-0" />
+                <span>
+                  {pendingPlaceOltFromRegistry
+                    ? `Tap the exact building/POP on the map to place OLT "${pendingPlaceOltFromRegistry.name}".`
+                    : 'Tap anywhere on the map to capture GPS coordinates for your OLT.'}
+                </span>
+              </div>
+              <button
+                type="button"
+                onClick={() => {
+                  setToolMode('pan');
+                  setPendingPlaceOltFromRegistry(null);
+                  if (oltDraftForPick) {
+                    setIsOltManagerOpen(true);
+                  }
+                }}
+                className="px-2.5 py-1 rounded bg-slate-900 border border-slate-700 text-slate-200 cursor-pointer"
+              >
+                Cancel
+              </button>
+            </>
+          ) : toolMode === 'connect_cable' ? (
             <>
               <div className="flex items-center gap-2">
                 <Cable className="w-4 h-4 text-cyan-400 shrink-0" />
@@ -941,6 +1431,8 @@ export const FiberGisMapView: React.FC<FiberGisMapViewProps> = ({
                   <strong>
                     {toolMode === 'place_olt'
                       ? 'OLT Hub'
+                      : toolMode === 'place_dist'
+                      ? 'Distribution Node'
                       : toolMode === 'place_fosc'
                       ? 'FOSC Joint Closure'
                       : 'FDB / FAT Splitter Box'}
@@ -1000,7 +1492,11 @@ export const FiberGisMapView: React.FC<FiberGisMapViewProps> = ({
             nodes={nodes}
             cables={cables}
             portsByNodeId={portsByNodeId}
+            splitterOutputsByNodeId={splitterOutputsByNodeId}
             budgetsByNodeId={budgetsByNodeId}
+            oltsById={oltsById}
+            ponPortsByOltId={ponPortsByOltId}
+            ponPortsById={ponPortsById}
             selectedNodeId={selectedNodeId}
             selectedCableId={selectedCableId}
             connectSourceNodeId={connectSourceNodeId}
@@ -1009,6 +1505,7 @@ export const FiberGisMapView: React.FC<FiberGisMapViewProps> = ({
             flyToTarget={flyToTarget}
             onMapClick={handleMapClick}
             onNodeClick={handleNodeClick}
+            onNodeDragEnd={handleNodeDragEnd}
             onCableClick={handleCableClick}
             onCameraChange={(c, z) => {
               setMapCenter(c);
@@ -1020,6 +1517,9 @@ export const FiberGisMapView: React.FC<FiberGisMapViewProps> = ({
           <div className="absolute bottom-3 left-3 z-10 pointer-events-none hidden sm:flex items-center gap-3 px-3 py-1.5 rounded-xl bg-slate-950/90 border border-slate-800 backdrop-blur-md text-[10px] font-mono text-slate-300 shadow-xl">
             <span className="flex items-center gap-1.5">
               <span className="w-2.5 h-2.5 rounded-sm bg-sky-500" /> OLT
+            </span>
+            <span className="flex items-center gap-1.5">
+              <span className="w-2.5 h-2.5 rounded-sm bg-indigo-500" /> Dist Node
             </span>
             <span className="flex items-center gap-1.5">
               <span className="w-2.5 h-2.5 rounded-sm bg-emerald-500" /> FDB &gt;2 Free
@@ -1044,7 +1544,12 @@ export const FiberGisMapView: React.FC<FiberGisMapViewProps> = ({
           nodes={nodes}
           cables={cables}
           portsByNodeId={portsByNodeId}
+          splitterOutputsByNodeId={splitterOutputsByNodeId}
           budgetsByNodeId={budgetsByNodeId}
+          olts={olts}
+          oltsById={oltsById}
+          ponPortsByOltId={ponPortsByOltId}
+          ponPortsById={ponPortsById}
           subscribers={subscribers}
           isSaving={isSaving}
           onClose={() => {
@@ -1058,6 +1563,16 @@ export const FiberGisMapView: React.FC<FiberGisMapViewProps> = ({
           onDeleteCable={handleDeleteCable}
           onSplitCable={handleSplitCable}
           onAssignPort={handleAssignPort}
+          onUpsertSplitterOutput={handleUpsertSplitterOutput}
+          onInitializeSplitterOutputs={handleInitializeSplitterOutputs}
+          onOpenTrace={(nodeId, output) => setTraceRequest({ nodeId, output })}
+          onOpenEditOlt={(oltId) => {
+            setEditingOltId(oltId);
+            setOltDraftForPick(null);
+            setPickedCoordsForModal(null);
+            setIsOltManagerOpen(true);
+          }}
+          onUpdatePonPort={handleUpdatePonPort}
         />
       </div>
 
@@ -1072,6 +1587,8 @@ export const FiberGisMapView: React.FC<FiberGisMapViewProps> = ({
               <h3 className="text-sm font-bold text-white flex items-center gap-2">
                 {pendingPlaceCoords.nodeType === 'OLT' ? (
                   <Server className="w-4 h-4 text-sky-400" />
+                ) : pendingPlaceCoords.nodeType === 'DIST_NODE' ? (
+                  <Layers className="w-4 h-4 text-indigo-400" />
                 ) : pendingPlaceCoords.nodeType === 'FOSC_JOINT' ? (
                   <Wrench className="w-4 h-4 text-purple-400" />
                 ) : (
@@ -1081,6 +1598,8 @@ export const FiberGisMapView: React.FC<FiberGisMapViewProps> = ({
                   Place{' '}
                   {pendingPlaceCoords.nodeType === 'OLT'
                     ? 'OLT Hub'
+                    : pendingPlaceCoords.nodeType === 'DIST_NODE'
+                    ? 'Distribution Node'
                     : pendingPlaceCoords.nodeType === 'FOSC_JOINT'
                     ? 'FOSC Joint Closure'
                     : 'FDB / FAT Splitter Box'}
@@ -1133,26 +1652,106 @@ export const FiberGisMapView: React.FC<FiberGisMapViewProps> = ({
             </div>
 
             {pendingPlaceCoords.nodeType === 'OLT' && (
-              <div>
-                <label className="block text-[10px] font-mono text-slate-400 mb-1">
-                  PON SFP TX Power (dBm)
-                </label>
-                <select
-                  value={newNodeTxPower}
-                  onChange={(e) => setNewNodeTxPower(Number(e.target.value))}
-                  className="w-full bg-slate-950 border border-slate-700 rounded-lg px-3 py-2 text-xs text-white"
-                >
-                  <option value={3.5}>+3.5 dBm (Class B+)</option>
-                  <option value={5.0}>+5.0 dBm (Class C+)</option>
-                  <option value={7.5}>+7.5 dBm (Class C++/C+++)</option>
-                </select>
+              <div className="space-y-3">
+                <div className="grid grid-cols-2 gap-2">
+                  <div>
+                    <label className="block text-[10px] font-mono text-slate-400 mb-1">
+                      PON Mode
+                    </label>
+                    <select
+                      value={newOltPonMode}
+                      onChange={(e) => setNewOltPonMode(e.target.value as OltPonMode)}
+                      className="w-full bg-slate-950 border border-slate-700 rounded-lg px-2.5 py-2 text-xs text-white font-mono"
+                    >
+                      <option value="GPON">GPON (128/PON)</option>
+                      <option value="EPON">EPON (64/PON)</option>
+                    </select>
+                  </div>
+                  <div>
+                    <label className="block text-[10px] font-mono text-slate-400 mb-1">
+                      PON Ports
+                    </label>
+                    <select
+                      value={newOltTotalPorts}
+                      onChange={(e) =>
+                        setNewOltTotalPorts(Number(e.target.value) as 2 | 4 | 8 | 16)
+                      }
+                      className="w-full bg-slate-950 border border-slate-700 rounded-lg px-2.5 py-2 text-xs text-white font-mono"
+                    >
+                      {[2, 4, 8, 16].map((cnt) => (
+                        <option key={cnt} value={cnt}>
+                          {cnt} PON Ports
+                        </option>
+                      ))}
+                    </select>
+                  </div>
+                </div>
+
+                <div className="grid grid-cols-2 gap-2">
+                  <div>
+                    <label className="block text-[10px] font-mono text-slate-400 mb-1">
+                      Model
+                    </label>
+                    <input
+                      type="text"
+                      value={newOltVendorModel}
+                      onChange={(e) => setNewOltVendorModel(e.target.value)}
+                      placeholder="VSOL V1600G1"
+                      className="w-full bg-slate-950 border border-slate-700 rounded-lg px-2.5 py-2 text-xs text-white"
+                    />
+                  </div>
+                  <div>
+                    <label className="block text-[10px] font-mono text-slate-400 mb-1">
+                      Mgmt IP
+                    </label>
+                    <input
+                      type="text"
+                      value={newOltMgmtIp}
+                      onChange={(e) => setNewOltMgmtIp(e.target.value)}
+                      placeholder="192.168.100.10"
+                      className="w-full bg-slate-950 border border-slate-700 rounded-lg px-2.5 py-2 text-xs text-white font-mono"
+                    />
+                  </div>
+                </div>
+
+                <div>
+                  <label className="block text-[10px] font-mono text-slate-400 mb-1">
+                    Default PON SFP TX Power (dBm)
+                  </label>
+                  <div className="grid grid-cols-4 gap-1 mb-1.5">
+                    {SFP_TX_PRESETS.map((preset) => (
+                      <button
+                        key={preset.sfpClass}
+                        type="button"
+                        onClick={() => setNewNodeTxPower(preset.txPowerDbm)}
+                        className={`py-1.5 rounded border text-[10px] font-mono font-bold cursor-pointer ${
+                          Math.abs(Number(newNodeTxPower) - preset.txPowerDbm) < 0.05
+                            ? 'bg-sky-600 text-slate-950 border-sky-300'
+                            : 'bg-slate-950 text-slate-300 border-slate-700'
+                        }`}
+                      >
+                        {preset.sfpClass} +{preset.txPowerDbm.toFixed(1)}
+                      </button>
+                    ))}
+                  </div>
+                  <input
+                    type="number"
+                    step="0.1"
+                    min="-5"
+                    max="12"
+                    value={newNodeTxPower}
+                    onChange={(e) => setNewNodeTxPower(Number(e.target.value))}
+                    className="w-full bg-slate-950 border border-slate-700 rounded-lg px-3 py-2 text-xs text-white font-mono tabular-nums"
+                  />
+                </div>
               </div>
             )}
 
-            {pendingPlaceCoords.nodeType === 'FDB_FAT' && (
+            {(pendingPlaceCoords.nodeType === 'FDB_FAT' ||
+              pendingPlaceCoords.nodeType === 'DIST_NODE') && (
               <div>
                 <label className="block text-[10px] font-mono text-slate-400 mb-1">
-                  Splitter Configuration
+                  Splitter / Ratio Configuration
                 </label>
                 <select
                   value={newNodeSplitter}
@@ -1160,10 +1759,13 @@ export const FiberGisMapView: React.FC<FiberGisMapViewProps> = ({
                   className="w-full bg-slate-950 border border-slate-700 rounded-lg px-3 py-2 text-xs text-white"
                 >
                   {(Object.keys(SPLITTER_SPECS) as GisSplitterType[])
-                    .filter((k) => k !== 'none')
+                    .filter((k) => pendingPlaceCoords.nodeType === 'DIST_NODE' || k !== 'none')
                     .map((k) => (
                       <option key={k} value={k}>
-                        {SPLITTER_SPECS[k].label} ({SPLITTER_SPECS[k].defaultPorts} ports)
+                        {SPLITTER_SPECS[k].label}
+                        {SPLITTER_SPECS[k].defaultPorts > 0
+                          ? ` (${SPLITTER_SPECS[k].defaultPorts} outputs)`
+                          : ''}
                       </option>
                     ))}
                 </select>
@@ -1208,6 +1810,162 @@ export const FiberGisMapView: React.FC<FiberGisMapViewProps> = ({
           </form>
         </div>
       )}
+
+      {/* PON Port Feeder Selector Modal when connecting fiber starting from an OLT */}
+      {pendingCablePonSelect && (
+        <div className="fixed inset-0 z-50 bg-black/75 backdrop-blur-sm flex items-center justify-center p-4">
+          <div className="w-full max-w-md bg-slate-900 border border-slate-700 rounded-2xl p-5 shadow-2xl space-y-4">
+            <div className="flex items-start justify-between gap-2 pb-2 border-b border-slate-800">
+              <div>
+                <h3 className="text-sm font-bold text-white flex items-center gap-2">
+                  <Server className="w-4 h-4 text-sky-400" />
+                  <span>Select OLT Source PON Port</span>
+                </h3>
+                <p className="text-[11px] font-mono text-slate-400 mt-0.5">
+                  {pendingCablePonSelect.olt.name} ({pendingCablePonSelect.olt.pon_mode}) →{' '}
+                  {pendingCablePonSelect.targetNode.name}
+                </p>
+              </div>
+              <button
+                type="button"
+                onClick={() => setPendingCablePonSelect(null)}
+                className="text-slate-400 hover:text-white cursor-pointer"
+              >
+                <X className="w-4 h-4" />
+              </button>
+            </div>
+
+            <div className="max-h-72 overflow-y-auto space-y-2 pr-1">
+              {pendingCablePonSelect.oltPorts.map((pp) => {
+                const picked = pendingCablePonSelect.selectedPonPortId === pp.id;
+                const existingFeeder = cables.find((c) => c.source_pon_port_id === pp.id);
+                return (
+                  <button
+                    key={pp.id}
+                    type="button"
+                    onClick={() =>
+                      setPendingCablePonSelect((prev) =>
+                        prev ? { ...prev, selectedPonPortId: pp.id } : null
+                      )
+                    }
+                    className={`w-full text-left p-3 rounded-xl border font-mono transition cursor-pointer ${
+                      picked
+                        ? 'bg-sky-950/90 border-sky-400 text-white'
+                        : 'bg-slate-950 border-slate-800 text-slate-300 hover:border-slate-600'
+                    }`}
+                  >
+                    <div className="flex items-center justify-between gap-2 text-xs">
+                      <span className="font-bold">
+                        PON {pp.port_number} · {pp.port_label || `PON-${pp.port_number}`}
+                      </span>
+                      <span className="text-sky-300 font-bold tabular-nums">
+                        +{Number(pp.tx_power_dbm).toFixed(1)} dBm ({pp.sfp_class})
+                      </span>
+                    </div>
+                    {existingFeeder && (
+                      <div className="text-[10px] text-amber-300 mt-1">
+                        Already feeding: {existingFeeder.name || `${existingFeeder.cable_cores}C span`}
+                      </div>
+                    )}
+                  </button>
+                );
+              })}
+            </div>
+
+            <div className="flex items-center gap-2 pt-1">
+              <button
+                type="button"
+                onClick={() => setPendingCablePonSelect(null)}
+                className="flex-1 min-h-[42px] rounded-xl bg-slate-800 hover:bg-slate-700 text-slate-200 font-mono text-xs cursor-pointer"
+              >
+                Cancel
+              </button>
+              <button
+                type="button"
+                disabled={isSaving}
+                onClick={async () => {
+                  const job = pendingCablePonSelect;
+                  setPendingCablePonSelect(null);
+                  await finalizeCreateCable({
+                    sourceNode: job.sourceNode,
+                    targetNode: job.targetNode,
+                    routeCoordinates: job.routeCoordinates,
+                    sourceOltId: job.olt.id,
+                    sourcePonPortId: job.selectedPonPortId,
+                  });
+                }}
+                className="flex-1 min-h-[42px] rounded-xl bg-cyan-600 hover:bg-cyan-500 text-slate-950 font-mono font-bold text-xs cursor-pointer"
+              >
+                Bind PON Port &amp; Save Cable
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Full Multi-OLT Manager Modal */}
+      <OltManagerModal
+        isOpen={isOltManagerOpen}
+        initialOltId={editingOltId}
+        preservedDraft={oltDraftForPick}
+        pickedCoords={pickedCoordsForModal}
+        updatedBy={actorUsername}
+        onClose={() => {
+          setIsOltManagerOpen(false);
+          setEditingOltId(null);
+          setOltDraftForPick(null);
+          setPickedCoordsForModal(null);
+        }}
+        onRequestPickOnMap={(draft) => {
+          setOltDraftForPick(draft);
+          setPendingPlaceOltFromRegistry(null);
+          setIsOltManagerOpen(false);
+          setToolMode('pick_olt_coords');
+          showToast('Tap anywhere on the map to pick GPS coordinates for this OLT.');
+        }}
+        onPlaceExistingOltOnMap={(olt) => {
+          setIsOltManagerOpen(false);
+          const existingPin = nodes.find((n) => n.olt_id === olt.id);
+          if (
+            existingPin &&
+            olt.lat !== null &&
+            olt.lat !== undefined &&
+            olt.lng !== null &&
+            olt.lng !== undefined
+          ) {
+            setSelectedNodeId(existingPin.id);
+            setFlyToTarget({ lat: olt.lat, lng: olt.lng, zoom: 17, ts: Date.now() });
+            showToast(`Centered map on "${olt.name}". Drag marker anytime to adjust location.`);
+          } else {
+            setPendingPlaceOltFromRegistry(olt);
+            setToolMode('pick_olt_coords');
+            showToast(`Tap anywhere on the map to place "${olt.name}".`);
+          }
+        }}
+        onOltsChanged={() => {
+          refreshTopology(false);
+        }}
+      />
+
+      {/* End-to-End Optical Traceability Path Drawer */}
+      <FiberTraceabilityDrawer
+        isOpen={Boolean(traceRequest && traceResult)}
+        traceResult={traceResult}
+        selectedOutput={traceRequest?.output || null}
+        onClose={() => setTraceRequest(null)}
+        onFocusNode={(nodeId) => {
+          const match = nodes.find((n) => n.id === nodeId);
+          setSelectedNodeId(nodeId);
+          setSelectedCableId(null);
+          if (match) {
+            setFlyToTarget({ lat: match.lat, lng: match.lng, zoom: 18, ts: Date.now() });
+          }
+        }}
+        onFocusCable={(cableId) => {
+          setSelectedCableId(cableId);
+          setSelectedNodeId(null);
+        }}
+      />
     </div>
   );
 };
