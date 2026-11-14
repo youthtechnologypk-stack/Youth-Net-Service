@@ -5,13 +5,11 @@ import {
   Copy,
   Crosshair,
   Database,
-  Key,
   MapPin,
   MousePointer,
   Plus,
   Radio,
   RefreshCw,
-  Satellite,
   Search,
   Server,
   Undo2,
@@ -41,7 +39,6 @@ import {
   deleteGisCable,
   deleteGisNode,
   loadGisTopology,
-  saveGoogleMapsApiKey,
   splitCableWithFoscJoint,
   subscribeToGisRealtime,
   syncOpticalBudgetsToDb,
@@ -57,11 +54,10 @@ import {
 import { FIBER_GIS_MIGRATION_SQL } from '../lib/gisMigrationSql';
 import { DEFAULT_NETWORK_AREAS } from '../lib/billingAndNetwork';
 import {
-  FiberGisGoogleCanvas,
+  FiberGisLeafletCanvas,
   GisToolMode,
   MapLayerType,
-} from './gis/FiberGisGoogleCanvas';
-import { FiberGisLeafletCanvas } from './gis/FiberGisLeafletCanvas';
+} from './gis/FiberGisLeafletCanvas';
 import { FiberGisInspectorPanel } from './gis/FiberGisInspectorPanel';
 
 interface FiberGisMapViewProps {
@@ -82,9 +78,6 @@ export const FiberGisMapView: React.FC<FiberGisMapViewProps> = ({
   const [cables, setCables] = useState<SupabaseGisCable[]>([]);
   const [ports, setPorts] = useState<SupabaseGisFdbPort[]>([]);
   const [subscribers, setSubscribers] = useState<GisSubscriberSummary[]>([]);
-  const [googleMapsApiKey, setGoogleMapsApiKey] = useState<string>(
-    () => (import.meta.env.VITE_GOOGLE_MAPS_API_KEY || '').trim()
-  );
   const [schemaMissing, setSchemaMissing] = useState(false);
   const [isLoading, setIsLoading] = useState(true);
   const [isSaving, setIsSaving] = useState(false);
@@ -94,10 +87,7 @@ export const FiberGisMapView: React.FC<FiberGisMapViewProps> = ({
   const wasDisconnectedRef = useRef(false);
   const [toastMsg, setToastMsg] = useState<{ text: string; tone: 'ok' | 'err' } | null>(null);
 
-  // Map Engine & Layer State
-  const [mapEngine, setMapEngine] = useState<'google' | 'leaflet'>(() =>
-    (import.meta.env.VITE_GOOGLE_MAPS_API_KEY || '').trim() ? 'google' : 'leaflet'
-  );
+  // Free OpenStreetMap + Esri World Imagery Layer State
   const [layerType, setLayerType] = useState<MapLayerType>('hybrid');
   const [mapCenter, setMapCenter] = useState<GisLatLng>(DEFAULT_MAP_CENTER);
   const [mapZoom, setMapZoom] = useState<number>(DEFAULT_MAP_ZOOM);
@@ -135,16 +125,12 @@ export const FiberGisMapView: React.FC<FiberGisMapViewProps> = ({
   const [newNodeSplitter, setNewNodeSplitter] = useState<GisSplitterType>('1:8');
   const [newNodeTrayCap, setNewNodeTrayCap] = useState<number>(12);
 
-  // Search & Settings Modal State
+  // Search State
   const [searchQuery, setSearchQuery] = useState('');
   const [isSearchOpen, setIsSearchOpen] = useState(false);
-  const [isKeyModalOpen, setIsKeyModalOpen] = useState(false);
-  const [apiKeyInput, setApiKeyInput] = useState('');
   const [copiedSql, setCopiedSql] = useState(false);
 
   const actorUsername = currentUser?.username || 'admin';
-  const canEditKey =
-    currentUser?.role === 'ADMIN' || currentUser?.role === 'MANAGER' || !currentUser;
 
   const showToast = useCallback((text: string, tone: 'ok' | 'err' = 'ok') => {
     setToastMsg({ text, tone });
@@ -171,16 +157,6 @@ export const FiberGisMapView: React.FC<FiberGisMapViewProps> = ({
         setCables(data.cables);
         setPorts(data.ports);
         setSubscribers(data.subscribers);
-
-        const resolvedKey =
-          data.googleMapsApiKey || (import.meta.env.VITE_GOOGLE_MAPS_API_KEY || '').trim();
-        setGoogleMapsApiKey(resolvedKey);
-        setApiKeyInput(resolvedKey);
-        if (resolvedKey) {
-          setMapEngine((prev) => (prev === 'leaflet' ? 'google' : prev));
-        } else {
-          setMapEngine('leaflet');
-        }
 
         if (centerOnFirstNode && data.nodes.length > 0) {
           const anchor =
@@ -610,27 +586,6 @@ export const FiberGisMapView: React.FC<FiberGisMapViewProps> = ({
     }
   };
 
-  const handleSaveApiKey = async (e: React.FormEvent) => {
-    e.preventDefault();
-    setIsSaving(true);
-    try {
-      const saved = await saveGoogleMapsApiKey(apiKeyInput);
-      setGoogleMapsApiKey(saved);
-      if (saved) {
-        setMapEngine('google');
-        showToast('Google Maps API key persisted in Supabase settings.');
-      } else {
-        setMapEngine('leaflet');
-        showToast('Cleared Google Maps key — using OpenStreetMap/Esri Satellite fallback.');
-      }
-      setIsKeyModalOpen(false);
-    } catch (err: any) {
-      showToast(err?.message || 'Failed to save Google Maps API key to Supabase', 'err');
-    } finally {
-      setIsSaving(false);
-    }
-  };
-
   // Summary Stats (zero-pill clean metrics)
   const summaryStats = useMemo(() => {
     let oltCount = 0;
@@ -895,7 +850,7 @@ export const FiberGisMapView: React.FC<FiberGisMapViewProps> = ({
             <span className="hidden sm:inline">{isTrackingGps ? 'GPS Live' : 'My GPS'}</span>
           </button>
 
-          {/* Layer Selector */}
+          {/* Layer Selector (Esri Satellite / Hybrid Labels / OpenStreetMap Street) */}
           <div className="flex items-center bg-slate-950 border border-slate-700 rounded-lg overflow-hidden min-h-[40px]">
             {(['satellite', 'hybrid', 'roadmap'] as MapLayerType[]).map((lt) => (
               <button
@@ -912,34 +867,6 @@ export const FiberGisMapView: React.FC<FiberGisMapViewProps> = ({
               </button>
             ))}
           </div>
-
-          {/* Engine Switcher (Google Maps / OSM Fallback) */}
-          <button
-            type="button"
-            onClick={() => {
-              if (mapEngine === 'leaflet' && !googleMapsApiKey) {
-                setIsKeyModalOpen(true);
-                return;
-              }
-              setMapEngine((prev) => (prev === 'google' ? 'leaflet' : 'google'));
-            }}
-            className="min-h-[40px] px-2.5 py-1.5 rounded-lg bg-slate-950 border border-slate-700 hover:border-slate-500 text-[11px] font-mono text-slate-200 flex items-center gap-1.5 whitespace-nowrap cursor-pointer"
-            title="Switch Map Provider (Google Maps / OpenStreetMap Fallback)"
-          >
-            <Satellite className="w-3.5 h-3.5 text-cyan-400" />
-            <span>{mapEngine === 'google' ? 'Google' : 'OSM/Esri'}</span>
-          </button>
-
-          {canEditKey && (
-            <button
-              type="button"
-              onClick={() => setIsKeyModalOpen(true)}
-              className="min-h-[40px] min-w-[40px] px-2.5 py-1.5 rounded-lg bg-slate-950 border border-slate-700 hover:border-cyan-500 text-slate-300 hover:text-white flex items-center justify-center cursor-pointer"
-              title="Configure Google Maps API Key"
-            >
-              <Key className="w-3.5 h-3.5 text-amber-400" />
-            </button>
-          )}
 
           <button
             type="button"
@@ -1065,63 +992,29 @@ export const FiberGisMapView: React.FC<FiberGisMapViewProps> = ({
         }`}
       >
         <div className="flex-1 h-full relative min-w-0">
-          {mapEngine === 'google' && googleMapsApiKey ? (
-            <FiberGisGoogleCanvas
-              apiKey={googleMapsApiKey}
-              center={mapCenter}
-              zoom={mapZoom}
-              layerType={layerType}
-              toolMode={toolMode}
-              nodes={nodes}
-              cables={cables}
-              portsByNodeId={portsByNodeId}
-              budgetsByNodeId={budgetsByNodeId}
-              selectedNodeId={selectedNodeId}
-              selectedCableId={selectedCableId}
-              connectSourceNodeId={connectSourceNodeId}
-              draftWaypoints={draftWaypoints}
-              userLocation={userLocation}
-              flyToTarget={flyToTarget}
-              onMapClick={handleMapClick}
-              onNodeClick={handleNodeClick}
-              onCableClick={handleCableClick}
-              onCameraChange={(c, z) => {
-                setMapCenter(c);
-                setMapZoom(z);
-              }}
-              onMapsAuthOrLoadError={() => {
-                setMapEngine('leaflet');
-                showToast(
-                  'Switched to OpenStreetMap/Esri Satellite fallback (Google Maps unavailable or key restricted).',
-                  'err'
-                );
-              }}
-            />
-          ) : (
-            <FiberGisLeafletCanvas
-              center={mapCenter}
-              zoom={mapZoom}
-              layerType={layerType}
-              toolMode={toolMode}
-              nodes={nodes}
-              cables={cables}
-              portsByNodeId={portsByNodeId}
-              budgetsByNodeId={budgetsByNodeId}
-              selectedNodeId={selectedNodeId}
-              selectedCableId={selectedCableId}
-              connectSourceNodeId={connectSourceNodeId}
-              draftWaypoints={draftWaypoints}
-              userLocation={userLocation}
-              flyToTarget={flyToTarget}
-              onMapClick={handleMapClick}
-              onNodeClick={handleNodeClick}
-              onCableClick={handleCableClick}
-              onCameraChange={(c, z) => {
-                setMapCenter(c);
-                setMapZoom(z);
-              }}
-            />
-          )}
+          <FiberGisLeafletCanvas
+            center={mapCenter}
+            zoom={mapZoom}
+            layerType={layerType}
+            toolMode={toolMode}
+            nodes={nodes}
+            cables={cables}
+            portsByNodeId={portsByNodeId}
+            budgetsByNodeId={budgetsByNodeId}
+            selectedNodeId={selectedNodeId}
+            selectedCableId={selectedCableId}
+            connectSourceNodeId={connectSourceNodeId}
+            draftWaypoints={draftWaypoints}
+            userLocation={userLocation}
+            flyToTarget={flyToTarget}
+            onMapClick={handleMapClick}
+            onNodeClick={handleNodeClick}
+            onCableClick={handleCableClick}
+            onCameraChange={(c, z) => {
+              setMapCenter(c);
+              setMapZoom(z);
+            }}
+          />
 
           {/* Compact Bottom-Left Legend Overlay */}
           <div className="absolute bottom-3 left-3 z-10 pointer-events-none hidden sm:flex items-center gap-3 px-3 py-1.5 rounded-xl bg-slate-950/90 border border-slate-800 backdrop-blur-md text-[10px] font-mono text-slate-300 shadow-xl">
@@ -1310,66 +1203,6 @@ export const FiberGisMapView: React.FC<FiberGisMapViewProps> = ({
                 className="flex-1 min-h-[42px] rounded-xl bg-cyan-600 hover:bg-cyan-500 text-slate-950 font-mono font-bold text-xs cursor-pointer"
               >
                 {isSaving ? 'Saving...' : 'Save Pin'}
-              </button>
-            </div>
-          </form>
-        </div>
-      )}
-
-      {/* Google Maps API Key Configuration Modal (Saved in Supabase isp_billing_settings) */}
-      {isKeyModalOpen && (
-        <div className="fixed inset-0 z-50 bg-black/75 backdrop-blur-sm flex items-center justify-center p-4">
-          <form
-            onSubmit={handleSaveApiKey}
-            className="w-full max-w-md bg-slate-900 border border-slate-700 rounded-2xl p-5 shadow-2xl space-y-4"
-          >
-            <div className="flex items-center justify-between pb-2 border-b border-slate-800">
-              <h3 className="text-sm font-bold text-white flex items-center gap-2">
-                <Key className="w-4 h-4 text-amber-400" />
-                <span>Google Maps Satellite API Key</span>
-              </h3>
-              <button
-                type="button"
-                onClick={() => setIsKeyModalOpen(false)}
-                className="text-slate-400 hover:text-white cursor-pointer"
-              >
-                <X className="w-4 h-4" />
-              </button>
-            </div>
-
-            <p className="text-xs text-slate-300 leading-relaxed">
-              Enter your Google Maps JavaScript API key to enable high-resolution Satellite &amp;
-              Hybrid imagery. Leave blank to use the free OpenStreetMap &amp; Esri Satellite
-              fallback. Saved securely in Supabase <code className="text-cyan-400">isp_billing_settings</code>.
-            </p>
-
-            <div>
-              <label className="block text-[10px] font-mono uppercase text-slate-400 mb-1">
-                Google Maps API Key
-              </label>
-              <input
-                type="password"
-                value={apiKeyInput}
-                onChange={(e) => setApiKeyInput(e.target.value)}
-                placeholder="AIzaSy... (or leave empty for OSM/Esri fallback)"
-                className="w-full bg-slate-950 border border-slate-700 rounded-lg px-3 py-2 text-xs text-white font-mono focus:outline-none focus:border-cyan-500"
-              />
-            </div>
-
-            <div className="flex items-center justify-end gap-2 pt-2 border-t border-slate-800">
-              <button
-                type="button"
-                onClick={() => setIsKeyModalOpen(false)}
-                className="min-h-[40px] px-4 rounded-xl bg-slate-800 hover:bg-slate-700 text-slate-200 text-xs font-mono cursor-pointer"
-              >
-                Cancel
-              </button>
-              <button
-                type="submit"
-                disabled={isSaving}
-                className="min-h-[40px] px-4 rounded-xl bg-cyan-600 hover:bg-cyan-500 text-slate-950 font-mono font-bold text-xs cursor-pointer"
-              >
-                {isSaving ? 'Saving...' : 'Save to Supabase'}
               </button>
             </div>
           </form>

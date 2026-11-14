@@ -11,7 +11,15 @@ import {
   NodeOpticalBudgetResult,
   getHealthBadgeColors,
 } from '../../lib/fiberOpticEngine';
-import type { GisToolMode, MapLayerType } from './FiberGisGoogleCanvas';
+
+export type GisToolMode =
+  | 'pan'
+  | 'place_olt'
+  | 'place_fdb'
+  | 'place_fosc'
+  | 'connect_cable';
+
+export type MapLayerType = 'satellite' | 'hybrid' | 'roadmap';
 
 interface FiberGisLeafletCanvasProps {
   center: GisLatLng;
@@ -108,7 +116,7 @@ export const FiberGisLeafletCanvas: React.FC<FiberGisLeafletCanvasProps> = ({
     containerRef.current.style.cursor = toolMode === 'pan' ? 'grab' : 'crosshair';
   }, [toolMode]);
 
-  // Switch tile layer cleanly
+  // Switch tile layer cleanly (100% Free OpenStreetMap + Esri World Imagery)
   useEffect(() => {
     const map = mapRef.current;
     if (!map) return;
@@ -133,7 +141,7 @@ export const FiberGisLeafletCanvas: React.FC<FiberGisLeafletCanvasProps> = ({
 
       if (layerType === 'hybrid') {
         labelsLayerRef.current = L.tileLayer(
-          'https://{s}.basemaps.cartocdn.com/light_only_labels/{z}/{x}/{y}{r}.png',
+          'https://{s}.basemaps.cartocdn.com/dark_only_labels/{z}/{x}/{y}{r}.png',
           {
             attribution: '&copy; OpenStreetMap &copy; CARTO',
             maxZoom: 19,

@@ -41,43 +41,7 @@ export interface LoadedGisTopology {
   cables: SupabaseGisCable[];
   ports: SupabaseGisFdbPort[];
   subscribers: GisSubscriberSummary[];
-  googleMapsApiKey: string;
   schemaMissing: boolean;
-}
-
-export async function fetchGoogleMapsApiKey(): Promise<string> {
-  const envKey = (import.meta.env.VITE_GOOGLE_MAPS_API_KEY || '').trim();
-  try {
-    const { data, error } = await supabase
-      .from('isp_billing_settings')
-      .select('google_maps_api_key')
-      .eq('id', 1)
-      .maybeSingle();
-    if (!error && data && (data as any).google_maps_api_key) {
-      return String((data as any).google_maps_api_key).trim();
-    }
-  } catch {
-    // Fallback to envKey
-  }
-  return envKey;
-}
-
-export async function saveGoogleMapsApiKey(apiKey: string): Promise<string> {
-  const cleanKey = (apiKey || '').trim();
-  const { data, error } = await supabase
-    .from('isp_billing_settings')
-    .upsert(
-      {
-        id: 1,
-        google_maps_api_key: cleanKey,
-        updated_at: new Date().toISOString(),
-      },
-      { onConflict: 'id' }
-    )
-    .select('google_maps_api_key')
-    .single();
-  if (error) throw error;
-  return String((data as any)?.google_maps_api_key || cleanKey).trim();
 }
 
 /**
@@ -328,7 +292,7 @@ export function subscribeToGisRealtime(handlers: {
 export async function loadGisTopology(
   fallbackActiveUsernames: string[] = []
 ): Promise<LoadedGisTopology> {
-  const [nodesRes, cablesRes, portsRes, subsRes, onlineMap, dbKey] = await Promise.all([
+  const [nodesRes, cablesRes, portsRes, subsRes, onlineMap] = await Promise.all([
     supabase.from('gis_nodes').select('*').order('created_at', { ascending: true }),
     supabase.from('gis_cables').select('*').order('created_at', { ascending: true }),
     supabase.from('gis_fdb_ports').select('*').order('port_number', { ascending: true }),
@@ -338,7 +302,6 @@ export async function loadGisTopology(
       .eq('role', 'CLIENT')
       .order('full_name', { ascending: true }),
     fetchOnlineSubscribersMap(fallbackActiveUsernames),
-    fetchGoogleMapsApiKey(),
   ]);
 
   const missing =
@@ -352,7 +315,6 @@ export async function loadGisTopology(
       cables: [],
       ports: [],
       subscribers: [],
-      googleMapsApiKey: dbKey,
       schemaMissing: true,
     };
   }
@@ -385,7 +347,6 @@ export async function loadGisTopology(
     cables: rawCables,
     ports: rawPorts,
     subscribers,
-    googleMapsApiKey: dbKey,
     schemaMissing: false,
   };
 }
