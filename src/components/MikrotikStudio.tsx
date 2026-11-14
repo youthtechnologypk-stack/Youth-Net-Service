@@ -48,7 +48,13 @@ import {
   calculateExpirationMetrics,
 } from '../services/mikrotikSubscriberSync';
 import { supabase, SupabaseSubscriberSessionLog } from '../services/supabaseClient';
-import { formatBytesTransfer } from '../services/sessionSyncEngine';
+import {
+  formatBytesTransfer,
+  formatDurationHms,
+  formatRadiusDateTime,
+  formatDisconnectReasonBadge,
+  computeExactSessionUptimeSeconds,
+} from '../services/sessionSyncEngine';
 
 interface MikrotikStudioProps {
   onOpenProvisionModal: () => void;
@@ -70,10 +76,6 @@ export const MikrotikStudio: React.FC<MikrotikStudioProps> = ({
     provisionedSecrets,
     bandwidthProfiles,
     routerError,
-    isSslOrCorsBlocked,
-    directCertUrl,
-    routerProxyMode,
-    setRouterProxyMode,
     isSyncingRouter,
     syncSelectedRouterNow,
     kickSession,
@@ -427,46 +429,26 @@ export const MikrotikStudio: React.FC<MikrotikStudioProps> = ({
             </div>
           </div>
 
-          {/* Live Sync Failure / SSL Certificate / Proxy Error Banner */}
-          {routerError && (
+          {/* Live Proxy Connection Error Banner (hidden whenever router is online) */}
+          {routerError && currentRouter?.status !== 'online' && (
             <div className="mt-4 p-4 bg-rose-950/40 border border-rose-700/80 rounded-xl flex flex-col sm:flex-row items-start sm:items-center justify-between gap-3 text-xs text-rose-200 animate-fade-in shadow-lg">
               <div className="flex items-start gap-3">
                 <AlertTriangle className="w-5 h-5 text-rose-400 shrink-0 mt-0.5" />
                 <div>
                   <div className="flex items-center gap-2">
-                    <h4 className="font-bold text-rose-300 text-sm">RouterOS REST API Connection Error</h4>
+                    <h4 className="font-bold text-rose-300 text-sm">RouterOS Proxy Connection Notice</h4>
                     <span className="text-[10px] px-2 py-0.5 rounded bg-rose-900/60 text-rose-200 font-mono font-bold uppercase border border-rose-700/60">
-                      Disconnected
+                      Router Offline
                     </span>
                   </div>
                   <p className="mt-1 font-mono text-rose-200 leading-relaxed font-semibold">
                     {routerError}
                   </p>
-                  <p className="mt-1.5 text-rose-300 text-xs flex flex-wrap items-center gap-1.5">
-                    <span>Browser blocked self-signed SSL.</span>
-                    <a
-                      href={directCertUrl || `https://${currentRouter.ip || currentRouter.ipAddress || '202.142.186.150'}:${currentRouter.port || 443}/rest/system/resource`}
-                      target="_blank"
-                      rel="noopener noreferrer"
-                      className="text-cyan-300 underline font-bold hover:text-cyan-200 inline-flex items-center gap-1 bg-cyan-950/60 px-2 py-0.5 rounded border border-cyan-800"
-                    >
-                      [Click here to authorize certificate in new tab]
-                      <ExternalLink className="w-3 h-3" />
-                    </a>
-                    <span>, then click Retry Sync.</span>
-                  </p>
                   <div className="mt-2 flex items-center gap-2 text-[11px] text-slate-300">
-                    <span className="text-slate-400">Current Gateway Mode:</span>
+                    <span className="text-slate-400">Gateway Mode:</span>
                     <span className="font-mono font-bold text-cyan-300">
-                      {routerProxyMode === 'proxy' ? 'Netlify Managed Proxy Mode (/api/mikrotik)' : 'Direct IP Mode'}
+                      Netlify Managed Proxy (/api/mikrotik)
                     </span>
-                    <button
-                      type="button"
-                      onClick={() => setRouterProxyMode(routerProxyMode === 'proxy' ? 'direct' : 'proxy')}
-                      className="text-[10px] text-cyan-400 underline hover:text-cyan-300 ml-1 cursor-pointer font-semibold"
-                    >
-                      Switch to {routerProxyMode === 'proxy' ? 'Direct IP Mode' : 'Netlify Managed Proxy Mode'}
-                    </button>
                   </div>
                 </div>
               </div>
@@ -680,12 +662,12 @@ export const MikrotikStudio: React.FC<MikrotikStudioProps> = ({
               <thead className="bg-slate-950 text-slate-400 uppercase tracking-wider text-[11px] font-mono border-b border-slate-800">
                 <tr>
                   <th className="py-3 px-4">Subscriber</th>
-                  <th className="py-3 px-4">Status</th>
-                  <th className="py-3 px-4">Connected / Disconnected</th>
-                  <th className="py-3 px-4">Assigned IP &amp; MAC</th>
+                  <th className="py-3 px-4">DC Reason / Status</th>
+                  <th className="py-3 px-4">Login</th>
+                  <th className="py-3 px-4">Logoff</th>
                   <th className="py-3 px-4">Uptime</th>
-                  <th className="py-3 px-4 text-right">Data Consumed (DL / UL)</th>
-                  <th className="py-3 px-4">Event / Reason</th>
+                  <th className="py-3 px-4 text-right">Data Used</th>
+                  <th className="py-3 px-4">MAC &amp; IP Address</th>
                 </tr>
               </thead>
               <tbody className="divide-y divide-slate-800 text-slate-300">
@@ -697,18 +679,35 @@ export const MikrotikStudio: React.FC<MikrotikStudioProps> = ({
                   </tr>
                 ) : (
                   filteredPersistedSessionLogs.map((log) => {
-                    const derivedStatus = (
+                    const rawStatus = (
                       log.session_status ||
                       (log.disconnected_at ? 'DISCONNECTED' : 'ACTIVE')
                     ).toUpperCase();
-                    const badgeStyle =
-                      derivedStatus === 'ACTIVE'
-                        ? 'bg-emerald-950/90 text-emerald-300 border-emerald-700/80'
-                        : derivedStatus === 'RECONNECTED'
-                        ? 'bg-amber-950/90 text-amber-300 border-amber-700/80'
-                        : derivedStatus === 'KICKED'
-                        ? 'bg-rose-950/90 text-rose-300 border-rose-700/80'
-                        : 'bg-slate-800 text-slate-300 border-slate-700';
+                    const isLiveUser = activeSessions.some(
+                      (s) => (s.username || '').toLowerCase() === (log.subscriber_username || '').toLowerCase()
+                    );
+                    const isRowActive = rawStatus === 'ACTIVE' && !log.disconnected_at && isLiveUser;
+                    const loginIso = log.connected_at || log.recorded_at || null;
+                    const logoffIso = isRowActive ? null : (log.disconnected_at || log.recorded_at || null);
+                    const uptimeSec = computeExactSessionUptimeSeconds(
+                      loginIso,
+                      isRowActive ? new Date().toISOString() : logoffIso,
+                      log.uptime_seconds,
+                      log.uptime_duration
+                    );
+                    const reasonLabel = isRowActive
+                      ? 'ONLINE (Active)'
+                      : formatDisconnectReasonBadge(log.disconnect_reason, rawStatus);
+
+                    const badgeStyle = isRowActive
+                      ? 'bg-emerald-950/90 text-emerald-300 border-emerald-700/80'
+                      : reasonLabel === 'Admin-Reset'
+                      ? 'bg-rose-950/90 text-rose-300 border-rose-700/80'
+                      : reasonLabel === 'Peer-Not-Responding' || reasonLabel === 'Lost-Carrier'
+                      ? 'bg-amber-950/90 text-amber-300 border-amber-700/80'
+                      : reasonLabel === 'User-Request'
+                      ? 'bg-cyan-950/90 text-cyan-300 border-cyan-700/80'
+                      : 'bg-slate-800 text-slate-300 border-slate-700';
 
                     return (
                       <tr
@@ -722,34 +721,24 @@ export const MikrotikStudio: React.FC<MikrotikStudioProps> = ({
                         </td>
                         <td className="py-3 px-4 whitespace-nowrap">
                           <span className={`px-2 py-0.5 rounded text-[10px] font-mono font-bold inline-flex items-center gap-1.5 border ${badgeStyle}`}>
-                            {derivedStatus === 'ACTIVE' && (
+                            {isRowActive && (
                               <span className="w-1.5 h-1.5 rounded-full bg-emerald-400 animate-pulse" />
                             )}
-                            {derivedStatus === 'ACTIVE' ? 'ACTIVE (ONLINE)' : derivedStatus}
+                            {reasonLabel}
                           </span>
                         </td>
-                        <td className="py-3 px-4 font-mono text-[11px] whitespace-nowrap">
-                          <div className="text-slate-200">
-                            {log.connected_at
-                              ? new Date(log.connected_at).toLocaleString()
-                              : log.recorded_at
-                              ? new Date(log.recorded_at).toLocaleString()
-                              : 'Live'}
-                          </div>
-                          <div className="text-[10px] text-slate-500">
-                            {log.disconnected_at
-                              ? `Closed: ${new Date(log.disconnected_at).toLocaleString()}`
-                              : derivedStatus === 'ACTIVE'
-                              ? 'Live session'
-                              : `Closed: ${log.recorded_at ? new Date(log.recorded_at).toLocaleString() : '—'}`}
-                          </div>
+                        <td className="py-3 px-4 font-mono text-[11px] text-slate-200 whitespace-nowrap">
+                          {formatRadiusDateTime(loginIso)}
                         </td>
                         <td className="py-3 px-4 font-mono text-[11px] whitespace-nowrap">
-                          <div className="text-cyan-400">{log.ip_address || 'Dynamic IP'}</div>
-                          <div className="text-slate-400 text-[10px]">{log.mac_address || 'N/A'}</div>
+                          {isRowActive ? (
+                            <span className="text-emerald-400 font-bold">Active Now</span>
+                          ) : (
+                            <span className="text-slate-300">{formatRadiusDateTime(logoffIso)}</span>
+                          )}
                         </td>
-                        <td className="py-3 px-4 font-mono text-white font-semibold whitespace-nowrap">
-                          {log.uptime_duration || '0s'}
+                        <td className="py-3 px-4 font-mono text-white font-semibold tabular-nums whitespace-nowrap">
+                          {formatDurationHms(uptimeSec)}
                         </td>
                         <td className="py-3 px-4 text-right font-mono tabular-nums whitespace-nowrap">
                           <div className="font-bold text-cyan-400">
@@ -759,10 +748,9 @@ export const MikrotikStudio: React.FC<MikrotikStudioProps> = ({
                             ↑ {formatBytesTransfer(log.bytes_out)}
                           </div>
                         </td>
-                        <td className="py-3 px-4">
-                          <span className="px-2 py-0.5 rounded text-[10px] font-mono bg-slate-800/90 text-slate-300 border border-slate-700">
-                            {log.disconnect_reason || 'PPPoE Session Recorded'}
-                          </span>
+                        <td className="py-3 px-4 font-mono text-[11px] whitespace-nowrap">
+                          <div className="text-slate-300">{log.mac_address || 'N/A'}</div>
+                          <div className="text-cyan-400 text-[10px]">{log.ip_address || 'Dynamic IP'}</div>
                         </td>
                       </tr>
                     );

@@ -16,7 +16,6 @@ import {
   FileText,
   DollarSign,
   Layers,
-  ExternalLink,
   RefreshCw,
   Wallet,
   TrendingUp,
@@ -72,10 +71,6 @@ export const NocOverview: React.FC<NocOverviewProps> = ({
     whatsAppLogs,
     olts,
     onus,
-    routerProxyMode,
-    setRouterProxyMode,
-    isSslOrCorsBlocked,
-    directCertUrl,
     syncSelectedRouterNow,
     isSyncingRouter,
   } = useISP();
@@ -151,7 +146,7 @@ export const NocOverview: React.FC<NocOverviewProps> = ({
 
   useEffect(() => {
     let isMounted = true;
-    if (currentRouter && currentRouter.status === 'online') {
+    if (currentRouter?.id && currentRouter.status === 'online' && (!provisionedSecrets || provisionedSecrets.length === 0)) {
       fetchMikrotikPppSecrets(currentRouter)
         .then((res) => {
           if (isMounted && res.success && Array.isArray(res.secrets)) {
@@ -163,7 +158,7 @@ export const NocOverview: React.FC<NocOverviewProps> = ({
     return () => {
       isMounted = false;
     };
-  }, [currentRouter]);
+  }, [currentRouter?.id, currentRouter?.status, provisionedSecrets?.length]);
 
   const safeInvoices = Array.isArray(invoices) ? invoices : [];
   const safeComplaints = Array.isArray(complaints) ? complaints : [];
@@ -209,33 +204,23 @@ export const NocOverview: React.FC<NocOverviewProps> = ({
 
   return (
     <div className="space-y-6">
-      {/* Real Router Connection Error Banner if router unreachable / CORS / SSL */}
+      {/* Real Router Proxy Connection Notice ONLY when /api/mikrotik reports offline */}
       {routerError && currentRouter?.status !== 'online' && (
         <div className="bg-rose-950/90 border border-rose-500/60 text-rose-200 px-4 py-3.5 rounded-xl flex flex-col md:flex-row md:items-center justify-between gap-3 text-xs sm:text-sm font-mono shadow-lg shadow-rose-950/50">
           <div className="flex items-start gap-3">
             <AlertTriangle className="w-5 h-5 text-rose-400 shrink-0 mt-0.5" />
             <div>
               <div className="flex items-center gap-2">
-                <span className="text-rose-100 font-bold">RouterOS REST API Connection Notice</span>
+                <span className="text-rose-100 font-bold">RouterOS Proxy Connection Notice</span>
                 <span className="text-[11px] px-2 py-0.5 bg-rose-900/60 border border-rose-700/60 rounded font-semibold text-rose-300">
-                  Disconnected
+                  Router Offline
                 </span>
               </div>
               <p className="mt-1 font-mono text-rose-200 leading-relaxed text-xs">
                 {routerError}
               </p>
-              <p className="mt-1.5 text-rose-300 text-xs flex flex-wrap items-center gap-1.5 font-sans">
-                <span>Browser blocked self-signed SSL.</span>
-                <a
-                  href={directCertUrl || `https://${currentRouter?.ip || currentRouter?.ipAddress || '202.142.186.150'}:${currentRouter?.port || 443}/rest/system/resource`}
-                  target="_blank"
-                  rel="noopener noreferrer"
-                  className="text-cyan-300 underline font-bold hover:text-cyan-200 inline-flex items-center gap-1 bg-cyan-950/60 px-2 py-0.5 rounded border border-cyan-800"
-                >
-                  [Click here to authorize certificate in new tab]
-                  <ExternalLink className="w-3 h-3" />
-                </a>
-                <span>, then click Retry Sync.</span>
+              <p className="mt-1 text-rose-300/90 text-[11px] font-sans">
+                All telemetry routes through backend proxy <code className="bg-rose-900/50 px-1 rounded">/api/mikrotik</code>. Verify upstream router reachability or credentials, then click Retry Sync.
               </p>
             </div>
           </div>
@@ -260,7 +245,7 @@ export const NocOverview: React.FC<NocOverviewProps> = ({
                 : 'bg-rose-950/90 text-rose-300 border-rose-500/30 shadow-rose-950/40'
             }`}>
               <span className={`w-2 h-2 rounded-full ${currentRouter.status === 'online' ? 'bg-emerald-400 animate-pulse' : 'bg-rose-400'}`} />
-              {currentRouter.status === 'online' ? 'RouterOS v7 REST Live' : 'Router Unreachable'}
+              {currentRouter.status === 'online' ? 'Router Online' : 'Router Offline'}
             </span>
             <span className="text-xs text-slate-400 font-mono hidden sm:inline">
               Active BNG: <span className="text-slate-200 font-bold">{currentRouter.name}</span> ({currentRouter.ip || currentRouter.ipAddress}:{currentRouter.port || (currentRouter.useSsl ? 443 : 80)})

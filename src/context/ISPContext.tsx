@@ -1006,21 +1006,21 @@ export const ISPProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
 
   const [routerError, setRouterError] = useState<string | null>(null);
   const [isSslOrCorsBlocked, setIsSslOrCorsBlocked] = useState<boolean>(false);
-  const [directCertUrl, setDirectCertUrl] = useState<string>('https://202.142.186.150:443/rest/system/resource');
+  const [directCertUrl] = useState<string>('');
   const [routerProxyMode, setRouterProxyModeState] = useState<RouterProxyMode>(() => {
     if (typeof window !== 'undefined') {
-      const saved = localStorage.getItem('netpulse_router_proxy_mode');
-      if (saved === 'direct' || saved === 'proxy') return saved;
+      try {
+        localStorage.setItem('netpulse_router_proxy_mode', 'proxy');
+      } catch {}
     }
-    return 'proxy'; // Default to "Netlify Managed Proxy Mode"
+    return 'proxy'; // Strictly enforce Netlify/Backend Managed Proxy Mode (/api/mikrotik/*)
   });
 
-  const setRouterProxyMode = (mode: RouterProxyMode) => {
-    setRouterProxyModeState(mode);
+  const setRouterProxyMode = (_mode: RouterProxyMode) => {
+    setRouterProxyModeState('proxy');
     try {
-      localStorage.setItem('netpulse_router_proxy_mode', mode);
+      localStorage.setItem('netpulse_router_proxy_mode', 'proxy');
     } catch {}
-    // Trigger immediate re-sync with new mode
     syncSelectedRouterNow().catch(() => {});
   };
 
@@ -1041,6 +1041,7 @@ export const ISPProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
 
   const lastSessionsPollTimeRef = useRef(0);
   const lastInterfaceSyncTimeRef = useRef(0);
+  const telemetryInFlightPromiseRef = useRef<Promise<any> | null>(null);
 
   // RouterOS PPPoE Total Provisioned Secrets loaded from /rest/ppp/secret
   const [provisionedSecrets, setProvisionedSecrets] = useState<MikrotikPppSecret[]>([]);
@@ -1111,33 +1112,42 @@ export const ISPProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
     if (!targetRouter) {
       return { success: false, activeCount: 0, secretsCount: 0, error: 'No router selected' };
     }
-    const targetPort = targetRouter.port || targetRouter.apiPort || (targetRouter.useSsl ? 443 : 80);
-    const targetIp = targetRouter.ip || targetRouter.ipAddress || '127.0.0.1';
-    setIsSyncingRouter(true);
-    setRouterError(null);
+    if (telemetryInFlightPromiseRef.current) {
+      return telemetryInFlightPromiseRef.current;
+    }
 
-    try {
-      // 1. Parallel Fetching: Concurrent retrieval of /system/resource, /ppp/active, /interface, /ppp/secret, /ppp/profile
-      const [telemetryResult, secretsResult, profilesResult] = await Promise.all([
-        fetchMikrotikLiveTelemetry(targetRouter).catch(
-          (err): FetchRouterLiveResult => ({
+    const runSync = async (): Promise<{
+      success: boolean;
+      activeCount: number;
+      secretsCount: number;
+      message?: string;
+      error?: string;
+    }> => {
+      setIsSyncingRouter(true);
+      setRouterError(null);
+
+      try {
+        // 1. Parallel Fetching exclusively through /api/mikrotik proxy
+        const [telemetryResult, secretsResult, profilesResult] = await Promise.all([
+          fetchMikrotikLiveTelemetry(targetRouter).catch(
+            (err): FetchRouterLiveResult => ({
+              success: false,
+              activeSessions: activeSessionsRef.current,
+              interfaces: routerInterfacesRef.current,
+              error: err.message,
+            })
+          ),
+          fetchMikrotikPppSecrets(targetRouter).catch((err) => ({
             success: false,
-            activeSessions: activeSessionsRef.current,
-            interfaces: routerInterfacesRef.current,
+            secrets: provisionedSecrets,
             error: err.message,
-          })
-        ),
-        fetchMikrotikPppSecrets(targetRouter).catch((err) => ({
-          success: false,
-          secrets: provisionedSecrets,
-          error: err.message,
-        })),
-        fetchMikrotikPppProfiles(targetRouter).catch((err) => ({
-          success: false,
-          profiles: bandwidthProfiles,
-          error: err.message,
-        })),
-      ]);
+          })),
+          fetchMikrotikPppProfiles(targetRouter).catch((err) => ({
+            success: false,
+            profiles: bandwidthProfiles,
+            error: err.message,
+          })),
+        ]);
 
       if (secretsResult.success && Array.isArray(secretsResult.secrets) && secretsResult.secrets.length > 0) {
         setProvisionedSecrets(secretsResult.secrets);
@@ -1154,87 +1164,108 @@ export const ISPProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
         );
       }
 
-      // HEALTH CHECK UPDATE:
-      // A router must NOT be marked "UNREACHABLE" if /ppp/active or /interface or /system/resource returned valid records.
-      // If /ppp/active succeeds, set status = 'online' and remove the red SSL banner automatically.
-      const isOnline = Boolean(
-        (telemetryResult.success && telemetryResult.router?.status === 'online') ||
-        (telemetryResult.activeSessions && telemetryResult.activeSessions.length > 0) ||
-        (telemetryResult.interfaces && telemetryResult.interfaces.length > 0) ||
-        (secretsResult.success && secretsResult.secrets && secretsResult.secrets.length > 0)
-      );
-
-      if (isOnline) {
-        setRouterError(null);
-        setIsSslOrCorsBlocked(false);
-        setRouters((prev) =>
-          prev.map((r) =>
-            r.id === targetRouter.id
-              ? {
-                  ...r,
-                  ...(telemetryResult.router || {}),
-                  status: 'online',
-                  activePppoeCount: telemetryResult.activeSessions.length,
-                }
-              : r
-          )
+        // HEALTH CHECK UPDATE:
+        // Derive online status directly from /api/mikrotik proxy response.
+        const isOnline = Boolean(
+          (telemetryResult.success && telemetryResult.router?.status === 'online') ||
+          telemetryResult.sessionsPolledOk ||
+          (telemetryResult.activeSessions && telemetryResult.activeSessions.length > 0) ||
+          (telemetryResult.interfaces && telemetryResult.interfaces.length > 0) ||
+          (secretsResult.success && Array.isArray(secretsResult.secrets))
         );
 
-        setActiveSessions(telemetryResult.activeSessions);
-        setRouterInterfaces(telemetryResult.interfaces);
-        const hasFreshInterfaces = Boolean(
-          telemetryResult.interfaces && telemetryResult.interfaces.length > 0
-        );
-        if (hasFreshInterfaces) {
-          lastInterfaceSyncTimeRef.current = Date.now();
-        }
-        if (telemetryResult.sessionsPolledOk !== false) {
-          void sessionSyncEngine.syncCycle(
-            telemetryResult.activeSessions,
-            hasFreshInterfaces ? telemetryResult.interfaces : routerInterfacesRef.current,
-            {
-              routerId: targetRouter.id,
-              sessionsPolledOk: telemetryResult.sessionsPolledOk,
-              interfacesFresh: hasFreshInterfaces,
-              interfacesPolledAtMs: lastInterfaceSyncTimeRef.current || undefined,
-            }
+        if (isOnline) {
+          setRouterError(null);
+          setIsSslOrCorsBlocked(false);
+          setRouters((prev) =>
+            prev.map((r) =>
+              r.id === targetRouter.id
+                ? {
+                    ...r,
+                    ...(telemetryResult.router || {}),
+                    status: 'online',
+                    activePppoeCount: telemetryResult.activeSessions.length,
+                  }
+                : r
+            )
           );
-        }
 
-        if (telemetryResult.traffic) {
-          const nowStr = new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' });
-          setBandwidthHistory((prev) => [
-            ...prev.slice(1),
-            { time: nowStr, rxMbps: telemetryResult.traffic!.rxMbps, txMbps: telemetryResult.traffic!.txMbps },
-          ]);
-        }
+          setActiveSessions(telemetryResult.activeSessions);
+          setRouterInterfaces(telemetryResult.interfaces);
+          const hasFreshInterfaces = Boolean(
+            telemetryResult.interfaces && telemetryResult.interfaces.length > 0
+          );
+          if (hasFreshInterfaces) {
+            lastInterfaceSyncTimeRef.current = Date.now();
+          }
+          if (telemetryResult.sessionsPolledOk !== false) {
+            void sessionSyncEngine.syncCycle(
+              telemetryResult.activeSessions,
+              hasFreshInterfaces ? telemetryResult.interfaces : routerInterfacesRef.current,
+              {
+                routerId: targetRouter.id,
+                sessionsPolledOk: telemetryResult.sessionsPolledOk,
+                interfacesFresh: hasFreshInterfaces,
+                interfacesPolledAtMs: lastInterfaceSyncTimeRef.current || undefined,
+              }
+            );
+          }
 
-        const secCount = secretsResult.success && Array.isArray(secretsResult.secrets)
-          ? secretsResult.secrets.length
-          : provisionedSecrets.length;
+          if (telemetryResult.traffic) {
+            const nowStr = new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' });
+            setBandwidthHistory((prev) => [
+              ...prev.slice(1),
+              { time: nowStr, rxMbps: telemetryResult.traffic!.rxMbps, txMbps: telemetryResult.traffic!.txMbps },
+            ]);
+          }
 
-        return {
-          success: true,
-          activeCount: telemetryResult.activeSessions.length,
-          secretsCount: secCount,
-          message: `Live data synchronized from RouterOS v7 REST API (${telemetryResult.activeSessions.length} active sessions, ${secCount} secrets, ${profilesResult.profiles?.length || 0} profiles)`,
-        };
-      } else {
-        // Only mark UNREACHABLE if ALL endpoints failed
-        const isSslBlocked = Boolean(telemetryResult.isSslOrCorsBlocked);
-        setIsSslOrCorsBlocked(isSslBlocked);
-        const cleanIp = (targetIp || '202.142.186.150').replace(/:\d+$/, '');
-        if (telemetryResult.directCertUrl) {
-          setDirectCertUrl(telemetryResult.directCertUrl);
+          const secCount = secretsResult.success && Array.isArray(secretsResult.secrets)
+            ? secretsResult.secrets.length
+            : provisionedSecrets.length;
+
+          return {
+            success: true,
+            activeCount: telemetryResult.activeSessions.length,
+            secretsCount: secCount,
+            message: `Live data synchronized via /api/mikrotik proxy (${telemetryResult.activeSessions.length} active sessions, ${secCount} secrets, ${profilesResult.profiles?.length || 0} profiles)`,
+          };
         } else {
-          setDirectCertUrl(`https://${cleanIp}:${targetPort}/rest/system/resource`);
-        }
+          // Only mark UNREACHABLE if ALL /api/mikrotik proxy endpoints failed
+          setIsSslOrCorsBlocked(false);
+          const errorMsg =
+            telemetryResult.error ||
+            'RouterOS proxy (/api/mikrotik) could not reach the router. Verify IP, credentials, and RouterOS REST service.';
 
+          setRouterError(errorMsg);
+          setRouters((prev) =>
+            prev.map((r) =>
+              r.id === targetRouter.id
+                ? { ...r, status: 'unreachable', cpuLoad: 0, uptime: '0s' }
+                : r
+            )
+          );
+
+          if (typeof window !== 'undefined') {
+            window.dispatchEvent(
+              new CustomEvent('mikrotik_sync_error', {
+                detail: { message: errorMsg },
+              })
+            );
+          }
+
+          return {
+            success: false,
+            activeCount: activeSessionsRef.current.length,
+            secretsCount: provisionedSecrets.length,
+            error: 'ROUTER_UNREACHABLE',
+            message: errorMsg,
+          };
+        }
+      } catch (err: any) {
+        setIsSslOrCorsBlocked(false);
         const errorMsg =
-          telemetryResult.error ||
-          (isSslBlocked
-            ? 'Browser blocked self-signed SSL. [Click here to authorize certificate in new tab], then click Retry Sync.'
-            : 'Cannot reach RouterOS REST API. Verify IP, credentials, and ensure www/www-ssl service is enabled in IP > Services.');
+          err?.message ||
+          'RouterOS proxy (/api/mikrotik) could not reach the router. Verify IP, credentials, and RouterOS REST service.';
 
         setRouterError(errorMsg);
         setRouters((prev) =>
@@ -1260,43 +1291,15 @@ export const ISPProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
           error: 'ROUTER_UNREACHABLE',
           message: errorMsg,
         };
+      } finally {
+        setIsSyncingRouter(false);
+        telemetryInFlightPromiseRef.current = null;
       }
-    } catch (err: any) {
-      const isTypeError = err instanceof TypeError || (err?.message || '').toLowerCase().includes('failed to fetch');
-      setIsSslOrCorsBlocked(isTypeError);
-      setDirectCertUrl(`https://${targetIp}:${targetPort}/rest/system/resource`);
+    };
 
-      const errorMsg = isTypeError
-        ? 'Browser blocked self-signed SSL. [Click here to authorize certificate in new tab], then click Retry Sync.'
-        : 'Cannot reach RouterOS REST API. Verify IP, credentials, and ensure www/www-ssl service is enabled in IP > Services.';
-
-      setRouterError(errorMsg);
-      setRouters((prev) =>
-        prev.map((r) =>
-          r.id === targetRouter.id
-            ? { ...r, status: 'unreachable', cpuLoad: 0, uptime: '0s' }
-            : r
-        )
-      );
-
-      if (typeof window !== 'undefined') {
-        window.dispatchEvent(
-          new CustomEvent('mikrotik_sync_error', {
-            detail: { message: errorMsg },
-          })
-        );
-      }
-
-      return {
-        success: false,
-        activeCount: activeSessionsRef.current.length,
-        secretsCount: provisionedSecrets.length,
-        error: 'ROUTER_UNREACHABLE',
-        message: errorMsg,
-      };
-    } finally {
-      setIsSyncingRouter(false);
-    }
+    const promise = runSync();
+    telemetryInFlightPromiseRef.current = promise;
+    return promise;
   };
 
   // -------------------------------------------------------------------------
@@ -1473,10 +1476,9 @@ export const ISPProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
         return;
       }
 
-      if (inFlight) return;
+      if (inFlight || telemetryInFlightPromiseRef.current) return;
       inFlight = true;
 
-      // Abort previous in-flight request if any before dispatching a new one
       if (abortController) {
         abortController.abort();
       }
@@ -1499,14 +1501,16 @@ export const ISPProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
         const shouldPollInterfaces =
           isViewingTrafficWidget || nowCheck - lastInterfaceSyncTimeRef.current >= 55000;
 
-        // 1. Background Telemetry Poll: fetch /ppp/active every cycle and /interface at least every 60s for byte counters
-        const result = await fetchMikrotikLiveTelemetry(targetRouter, {
+        // 1. Background Telemetry Poll via /api/mikrotik proxy under single-flight lock
+        const fetchPromise = fetchMikrotikLiveTelemetry(targetRouter, {
           signal: abortController.signal,
           pollTraffic: shouldPollInterfaces,
           pollSessions: true,
           cachedSessions: [],
           cachedInterfaces: routerInterfacesRef.current,
         });
+        telemetryInFlightPromiseRef.current = fetchPromise;
+        const result = await fetchPromise;
 
         if (isCancelled || abortController.signal.aborted) return;
 
@@ -1580,10 +1584,26 @@ export const ISPProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
             ]);
           }
         } else if (result.error !== 'Aborted') {
-          // If active sessions or interfaces succeeded, don't mark unreachable
-          if (result.activeSessions && result.activeSessions.length > 0) {
+          // If active sessions, interfaces, or sessionsPolledOk succeeded via /api/mikrotik, mark router ONLINE immediately
+          const hasValidProxyData = Boolean(
+            result.sessionsPolledOk ||
+            (result.activeSessions && result.activeSessions.length > 0) ||
+            (result.interfaces && result.interfaces.length > 0)
+          );
+          if (hasValidProxyData) {
             setRouterError(null);
             setIsSslOrCorsBlocked(false);
+            setRouters((prev) =>
+              prev.map((r) =>
+                r.id === selectedRouterId
+                  ? {
+                      ...r,
+                      status: 'online',
+                      activePppoeCount: result.activeSessions.length,
+                    }
+                  : r
+              )
+            );
             setActiveSessions([...result.activeSessions]);
             if (result.sessionsPolledOk !== false) {
               void sessionSyncEngine.syncCycle(result.activeSessions, routerInterfacesRef.current, {
@@ -1596,7 +1616,7 @@ export const ISPProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
           } else {
             const errorMsg =
               result.error ||
-              'Cannot reach RouterOS REST API. Verify IP, credentials, and ensure www/www-ssl service is enabled in IP > Services.';
+              'RouterOS proxy (/api/mikrotik) could not reach the router. Verify IP, credentials, and RouterOS REST service.';
             setRouterError(errorMsg);
             setRouters((prev) =>
               prev.map((r) =>
@@ -1610,7 +1630,8 @@ export const ISPProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
       } catch (err: any) {
         if (!isCancelled && !abortController?.signal.aborted) {
           const errorMsg =
-            'Cannot reach RouterOS REST API. Verify IP, credentials, and ensure www/www-ssl service is enabled in IP > Services.';
+            err?.message ||
+            'RouterOS proxy (/api/mikrotik) could not reach the router. Verify IP, credentials, and RouterOS REST service.';
           setRouterError(errorMsg);
           setRouters((prev) =>
             prev.map((r) =>
@@ -1622,6 +1643,7 @@ export const ISPProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
         }
       } finally {
         inFlight = false;
+        telemetryInFlightPromiseRef.current = null;
       }
     };
 

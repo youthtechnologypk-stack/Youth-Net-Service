@@ -337,7 +337,7 @@ export const Header: React.FC<HeaderProps> = ({
                   : 'bg-rose-50 dark:bg-rose-950/90 text-rose-700 dark:text-rose-300 border border-rose-200 dark:border-rose-500/30'
               }`}>
                 <span className={`w-1.5 h-1.5 rounded-full ${currentRouter.status === 'online' ? 'bg-emerald-500 animate-pulse' : 'bg-rose-500'}`} />
-                {currentRouter.status === 'online' ? 'RouterOS v7 REST Live' : 'Router Offline'}
+                {currentRouter.status === 'online' ? 'Router Online' : 'Router Offline'}
               </span>
 
               <div className="hidden lg:flex items-center gap-3 bg-slate-100 dark:bg-slate-900/80 border border-slate-200 dark:border-slate-800 px-3 py-1.5 rounded-md text-slate-700 dark:text-slate-300">

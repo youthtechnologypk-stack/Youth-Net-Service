@@ -49,7 +49,15 @@ import {
   SupabaseSubscriberSessionLog,
 } from '../services/supabaseClient';
 import { safeMikrotikFetch } from '../services/mikrotikRestClient';
-import { sessionSyncEngine, formatBytesTransfer } from '../services/sessionSyncEngine';
+import {
+  sessionSyncEngine,
+  formatBytesTransfer,
+  formatDurationHms,
+  formatRadiusDateTime,
+  formatDisconnectReasonBadge,
+  computeExactSessionUptimeSeconds,
+  parseRouterOsUptimeSeconds,
+} from '../services/sessionSyncEngine';
 import { useCurrency } from '../context/CurrencyContext';
 import { useISP } from '../context/ISPContext';
 import { CreateInvoiceModal, resolvePackageRate } from './CreateInvoiceModal';
@@ -400,6 +408,13 @@ export const SubscriberProfileView: React.FC<SubscriberProfileViewProps> = ({
               });
             } else {
               setActiveSession(null);
+              const healedLogs = await sessionSyncEngine.reconcileOfflineSubscriberActiveRows(
+                username,
+                false
+              );
+              if (healedLogs) {
+                setSessionLogs(healedLogs);
+              }
             }
           }
         }
@@ -455,9 +470,10 @@ export const SubscriberProfileView: React.FC<SubscriberProfileViewProps> = ({
     };
   }, [username]);
 
-  // 2. Real-time Live Speed Gauge Poller + Continuous Session Watcher (Runs every 3s, read-only ?once)
+  // 2. Real-time Live Speed Gauge Poller (Runs every 15s with single in-flight lock, read-only ?once)
   useEffect(() => {
     let isMounted = true;
+    let inFlight = false;
 
     const pollSpeed = async () => {
       if (!activeSession) {
@@ -471,6 +487,8 @@ export const SubscriberProfileView: React.FC<SubscriberProfileViewProps> = ({
         }
         return;
       }
+      if (inFlight || (typeof document !== 'undefined' && document.hidden)) return;
+      inFlight = true;
 
       try {
         setLiveSpeed((prev) => ({ ...prev, isPolling: true }));
@@ -491,11 +509,13 @@ export const SubscriberProfileView: React.FC<SubscriberProfileViewProps> = ({
         if (isMounted) {
           setLiveSpeed((prev) => ({ ...prev, rxMbps: 0, txMbps: 0, isPolling: false }));
         }
+      } finally {
+        inFlight = false;
       }
     };
 
     pollSpeed();
-    speedPollingTimerRef.current = setInterval(pollSpeed, 3000);
+    speedPollingTimerRef.current = setInterval(pollSpeed, 15000);
 
     return () => {
       isMounted = false;
@@ -503,7 +523,7 @@ export const SubscriberProfileView: React.FC<SubscriberProfileViewProps> = ({
         clearInterval(speedPollingTimerRef.current);
       }
     };
-  }, [username, activeSession]);
+  }, [username, Boolean(activeSession)]);
 
   // Financial Balances Calculation
   const totalInvoiced = useMemo(() => {
@@ -1744,7 +1764,9 @@ export const SubscriberProfileView: React.FC<SubscriberProfileViewProps> = ({
                     </div>
                     <div className="p-2.5 bg-slate-950 rounded-lg border border-slate-800">
                       <span className="text-[10px] text-slate-400 block">SESSION UPTIME</span>
-                      <span className="text-emerald-400 font-bold mt-0.5 block">{activeSession.uptime}</span>
+                      <span className="text-emerald-400 font-bold mt-0.5 block">
+                        {formatDurationHms(parseRouterOsUptimeSeconds(activeSession.uptime))}
+                      </span>
                     </div>
                     <div className="p-2.5 bg-slate-950 rounded-lg border border-slate-800">
                       <span className="text-[10px] text-slate-400 block">PROTOCOL / SERVICE</span>
@@ -1815,13 +1837,13 @@ export const SubscriberProfileView: React.FC<SubscriberProfileViewProps> = ({
                 <table className="w-full text-left text-xs text-slate-300">
                   <thead className="bg-slate-900 text-slate-400 border-b border-slate-800 uppercase font-mono text-[11px]">
                     <tr>
-                      <th className="py-3 px-4">Status</th>
-                      <th className="py-3 px-4">Connected / Disconnected Time</th>
-                      <th className="py-3 px-4">Assigned IP</th>
-                      <th className="py-3 px-4">ONT / Router MAC</th>
-                      <th className="py-3 px-4">Session Uptime</th>
-                      <th className="py-3 px-4 text-right">Data Consumed (DL / UL)</th>
-                      <th className="py-3 px-4">Event / Reason</th>
+                      <th className="py-3 px-4">DC Reason / Status</th>
+                      <th className="py-3 px-4">Login</th>
+                      <th className="py-3 px-4">Logoff</th>
+                      <th className="py-3 px-4">Uptime</th>
+                      <th className="py-3 px-4 text-right">Data Used</th>
+                      <th className="py-3 px-4">MAC Address</th>
+                      <th className="py-3 px-4">IP Address</th>
                     </tr>
                   </thead>
                   <tbody className="divide-y divide-slate-800/60 font-sans">
@@ -1833,56 +1855,85 @@ export const SubscriberProfileView: React.FC<SubscriberProfileViewProps> = ({
                       </tr>
                     ) : (
                       sessionLogs.map((sess) => {
-                        const rawBytesIn = Number(sess.bytes_in || 0);
-                        const rawBytesOut = Number(sess.bytes_out || 0);
-                        const derivedStatus = (
+                        const rawStatus = (
                           sess.session_status ||
                           (sess.disconnected_at ? 'DISCONNECTED' : 'ACTIVE')
                         ).toUpperCase();
+                        const isRowActive =
+                          rawStatus === 'ACTIVE' && !sess.disconnected_at && isOnline;
 
-                        const badgeStyle =
-                          derivedStatus === 'ACTIVE'
-                            ? 'bg-emerald-950/90 text-emerald-300 border-emerald-700/80'
-                            : derivedStatus === 'RECONNECTED'
-                            ? 'bg-amber-950/90 text-amber-300 border-amber-700/80'
-                            : derivedStatus === 'KICKED'
-                            ? 'bg-rose-950/90 text-rose-300 border-rose-700/80'
-                            : 'bg-slate-800 text-slate-300 border-slate-700';
+                        const loginIso = sess.connected_at || sess.recorded_at || null;
+                        const logoffIso = isRowActive
+                          ? null
+                          : sess.disconnected_at || sess.recorded_at || null;
+
+                        const uptimeSec =
+                          isRowActive && activeSession
+                            ? parseRouterOsUptimeSeconds(activeSession.uptime) ||
+                              computeExactSessionUptimeSeconds(
+                                loginIso,
+                                new Date().toISOString(),
+                                sess.uptime_seconds,
+                                sess.uptime_duration
+                              )
+                            : computeExactSessionUptimeSeconds(
+                                loginIso,
+                                logoffIso,
+                                sess.uptime_seconds,
+                                sess.uptime_duration
+                              );
+                        const uptimeHms = formatDurationHms(uptimeSec);
+
+                        const reasonLabel = isRowActive
+                          ? 'ONLINE (Active)'
+                          : formatDisconnectReasonBadge(sess.disconnect_reason, rawStatus);
+
+                        const rawBytesIn =
+                          isRowActive && activeSession
+                            ? Math.max(Number(sess.bytes_in || 0), Number(activeSession.rawBytesIn || 0))
+                            : Number(sess.bytes_in || 0);
+                        const rawBytesOut =
+                          isRowActive && activeSession
+                            ? Math.max(Number(sess.bytes_out || 0), Number(activeSession.rawBytesOut || 0))
+                            : Number(sess.bytes_out || 0);
+
+                        const badgeStyle = isRowActive
+                          ? 'bg-emerald-950/90 text-emerald-300 border-emerald-700/80'
+                          : reasonLabel === 'Admin-Reset'
+                          ? 'bg-rose-950/90 text-rose-300 border-rose-700/80'
+                          : reasonLabel === 'Peer-Not-Responding' || reasonLabel === 'Lost-Carrier'
+                          ? 'bg-amber-950/90 text-amber-300 border-amber-700/80'
+                          : reasonLabel === 'User-Request'
+                          ? 'bg-cyan-950/90 text-cyan-300 border-cyan-700/80'
+                          : 'bg-slate-800 text-slate-300 border-slate-700';
 
                         return (
-                          <tr key={sess.id || `${sess.recorded_at}-${sess.session_id}`} className="hover:bg-slate-800/40 transition">
+                          <tr
+                            key={sess.id || `${sess.recorded_at}-${sess.session_id}`}
+                            className="hover:bg-slate-800/40 transition"
+                          >
                             <td className="py-3 px-4 whitespace-nowrap">
-                              <span className={`px-2 py-0.5 rounded text-[10px] font-mono font-bold inline-flex items-center gap-1.5 border ${badgeStyle}`}>
-                                {derivedStatus === 'ACTIVE' && (
+                              <span
+                                className={`px-2 py-0.5 rounded text-[10px] font-mono font-bold inline-flex items-center gap-1.5 border ${badgeStyle}`}
+                              >
+                                {isRowActive && (
                                   <span className="w-1.5 h-1.5 rounded-full bg-emerald-400 animate-pulse" />
                                 )}
-                                {derivedStatus === 'ACTIVE' ? 'ACTIVE (ONLINE)' : derivedStatus}
+                                {reasonLabel}
                               </span>
                             </td>
+                            <td className="py-3 px-4 font-mono text-[11px] text-slate-200 whitespace-nowrap">
+                              {formatRadiusDateTime(loginIso)}
+                            </td>
                             <td className="py-3 px-4 font-mono text-[11px] whitespace-nowrap">
-                              <div className="text-slate-200">
-                                {sess.connected_at
-                                  ? new Date(sess.connected_at).toLocaleString()
-                                  : sess.recorded_at
-                                  ? new Date(sess.recorded_at).toLocaleString()
-                                  : 'Live'}
-                              </div>
-                              <div className="text-[10px] text-slate-500 mt-0.5">
-                                {sess.disconnected_at
-                                  ? `Closed: ${new Date(sess.disconnected_at).toLocaleString()}`
-                                  : derivedStatus === 'ACTIVE'
-                                  ? 'Live session'
-                                  : `Closed: ${sess.recorded_at ? new Date(sess.recorded_at).toLocaleString() : '—'}`}
-                              </div>
+                              {isRowActive ? (
+                                <span className="text-emerald-400 font-bold">Active Now</span>
+                              ) : (
+                                <span className="text-slate-300">{formatRadiusDateTime(logoffIso)}</span>
+                              )}
                             </td>
-                            <td className="py-3 px-4 font-mono text-cyan-400 whitespace-nowrap">
-                              {sess.ip_address || 'Dynamic IP'}
-                            </td>
-                            <td className="py-3 px-4 font-mono text-slate-300 whitespace-nowrap">
-                              {sess.mac_address || user?.onu_mac || 'N/A'}
-                            </td>
-                            <td className="py-3 px-4 font-mono text-white font-semibold whitespace-nowrap">
-                              {sess.uptime_duration || '0s'}
+                            <td className="py-3 px-4 font-mono text-white font-semibold tabular-nums whitespace-nowrap">
+                              {uptimeHms}
                             </td>
                             <td className="py-3 px-4 text-right font-mono tabular-nums whitespace-nowrap">
                               <div className="font-bold text-cyan-400">
@@ -1892,10 +1943,11 @@ export const SubscriberProfileView: React.FC<SubscriberProfileViewProps> = ({
                                 ↑ {formatBytesTransfer(rawBytesOut)}
                               </div>
                             </td>
-                            <td className="py-3 px-4">
-                              <span className="px-2 py-0.5 rounded text-[10px] font-mono bg-slate-800/90 text-slate-300 border border-slate-700">
-                                {sess.disconnect_reason || 'PPPoE Session Recorded'}
-                              </span>
+                            <td className="py-3 px-4 font-mono text-slate-300 whitespace-nowrap">
+                              {sess.mac_address || user?.onu_mac || 'N/A'}
+                            </td>
+                            <td className="py-3 px-4 font-mono text-cyan-400 whitespace-nowrap">
+                              {sess.ip_address || 'Dynamic IP'}
                             </td>
                           </tr>
                         );

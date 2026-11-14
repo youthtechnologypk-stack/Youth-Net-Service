@@ -83,12 +83,18 @@ export async function safeMikrotikFetch(
   const auth = getActiveRouterAuth(activeRouter);
   const resolved = resolveRestHostAndPort(activeRouter);
 
-  // If a raw direct router URL was passed (e.g. https://202.142.186.150:443/rest/...),
-  // rewrite it to the reverse proxy (/api/mikrotik/...) to avoid direct browser fetch CORS failures!
+  // Strictly normalize any router URL to the backend proxy (/api/mikrotik/...)
+  // so no direct browser-to-IP HTTPS fetches ever execute.
   let targetUrl = url;
   if (targetUrl.includes('/rest/')) {
     const subpath = targetUrl.slice(targetUrl.indexOf('/rest/') + 6);
     targetUrl = `/api/mikrotik/${subpath}`;
+  } else if (/^https?:\/\//i.test(targetUrl) && !targetUrl.startsWith(typeof window !== 'undefined' ? window.location.origin : '')) {
+    try {
+      const parsed = new URL(targetUrl);
+      const cleanPath = parsed.pathname.replace(/^\/+/, '');
+      targetUrl = `/api/mikrotik/${cleanPath}${parsed.search}`;
+    } catch {}
   }
 
   const incomingHeaders = (init.headers as Record<string, string>) || {};
@@ -151,9 +157,6 @@ export async function fetchMikrotikLiveTelemetry(
   options?: FetchTelemetryOptions
 ): Promise<FetchRouterLiveResult> {
   const router = activeRouter;
-  const resolved = resolveRestHostAndPort(activeRouter);
-  const targetPort = resolved.port;
-  const ip = resolved.host;
 
   try {
     const sessionsPromise: Promise<{ success: boolean; activeSessions: ActiveSession[]; error?: string }> =
@@ -163,7 +166,7 @@ export async function fetchMikrotikLiveTelemetry(
 
     const ifacesPromise = options?.pollTraffic !== false
       ? apiClient.get<any[]>('/interface', { router: activeRouter, signal: options?.signal, timeoutMs: 5000 })
-      : Promise.resolve({ success: true, data: options?.cachedInterfaces || [] });
+      : Promise.resolve({ success: true, data: options?.cachedInterfaces || [], error: undefined as string | undefined });
 
     const resourcePromise = apiClient.get<any>('/system/resource', { router: activeRouter, signal: options?.signal, timeoutMs: 5000 });
 
@@ -192,31 +195,31 @@ export async function fetchMikrotikLiveTelemetry(
     const hasValidResource = Boolean(
       resRes.success &&
       rData &&
-      (rData['cpu-load'] !== undefined || rData.uptime !== undefined)
+      (rData['cpu-load'] !== undefined || rData.uptime !== undefined || rData['board-name'] !== undefined)
     );
 
-    const hasActiveSessions = Boolean(
-      sessionsRes.success && Array.isArray(sessionsRes.activeSessions) && sessionsRes.activeSessions.length > 0
+    const hasValidSessions = Boolean(
+      sessionsRes.success && Array.isArray(sessionsRes.activeSessions)
     );
 
-    const hasInterfaces = Boolean(
-      ifacesRes.success && Array.isArray(ifacesRes.data) && ifacesRes.data.length > 0
+    const hasValidInterfaces = Boolean(
+      ifacesRes.success && Array.isArray(ifacesRes.data)
     );
 
-    const isOnline = hasValidResource || hasActiveSessions || hasInterfaces;
+    // Derive router online state directly from valid /api/mikrotik proxy responses
+    const isOnline = hasValidResource || hasValidSessions || hasValidInterfaces;
 
     if (!isOnline) {
-      const isSslBlocked = resRes.isSslOrCorsBlocked || sessionsRes.error?.includes('self-signed') || resRes.error?.includes('self-signed');
-      const directUrl = resRes.directCertUrl || `https://${ip}:${targetPort}/rest/system/resource`;
-      const errorMsg = isSslBlocked
-        ? 'Browser blocked self-signed SSL. [Click here to authorize certificate in new tab], then click Retry Sync.'
-        : (resRes.error || sessionsRes.error || 'Cannot reach RouterOS REST API. Verify IP, credentials, and ensure www/www-ssl service is enabled in IP > Services.');
+      const errorMsg =
+        resRes.error ||
+        sessionsRes.error ||
+        ifacesRes.error ||
+        'RouterOS proxy (/api/mikrotik) could not reach the router. Check router status or credentials and retry.';
 
       return {
         success: false,
         error: errorMsg,
-        isSslOrCorsBlocked: isSslBlocked,
-        directCertUrl: directUrl,
+        isSslOrCorsBlocked: false,
         activeSessions: [],
         interfaces: [],
         router: {
@@ -328,19 +331,15 @@ export async function fetchMikrotikLiveTelemetry(
         error: 'Aborted',
       };
     }
-    const isTypeError =
-      err instanceof TypeError ||
-      (err?.message || '').toLowerCase().includes('failed to fetch');
-    const directUrl = `https://${ip}:${targetPort}/rest/system/resource`;
-    const errorMsg = isTypeError
-      ? 'Browser blocked self-signed SSL. [Click here to authorize certificate in new tab], then click Retry Sync.'
-      : (err?.message || 'Cannot reach RouterOS REST API. Verify IP, credentials, and ensure www/www-ssl service is enabled in IP > Services.');
+    const errorMsg =
+      err?.message && !String(err.message).toLowerCase().includes('failed to fetch')
+        ? String(err.message)
+        : 'RouterOS proxy (/api/mikrotik) could not reach the router. Check router status or credentials and retry.';
 
     return {
       success: false,
       error: errorMsg,
-      isSslOrCorsBlocked: isTypeError,
-      directCertUrl: directUrl,
+      isSslOrCorsBlocked: false,
       activeSessions: options?.cachedSessions || [],
       interfaces: options?.cachedInterfaces || [],
       router: {

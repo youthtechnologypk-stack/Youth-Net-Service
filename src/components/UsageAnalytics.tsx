@@ -156,60 +156,67 @@ export const UsageAnalytics: React.FC = () => {
     }
   }, [availableInterfaces, selectedInterface]);
 
-  // 2. Poll /api/mikrotik/interface/monitor-traffic via authenticated safeMikrotikFetch every 3 seconds
+  // 2. Poll /api/mikrotik/interface/monitor-traffic via authenticated safeMikrotikFetch every 15 seconds (single in-flight lock)
   useEffect(() => {
     if (!selectedInterface || !isTrafficStreaming) return;
     let isMounted = true;
+    let inFlight = false;
 
     // Reset series when switching port so graph clearly reflects new interface
     setLiveInterfaceHistory([]);
 
     const pollInterfaceTraffic = async () => {
-      const sample = await fetchMikrotikInterfaceTrafficOnce(selectedInterface, currentRouter);
-      if (!isMounted) return;
+      if (inFlight || (typeof document !== 'undefined' && document.hidden)) return;
+      inFlight = true;
+      try {
+        const sample = await fetchMikrotikInterfaceTrafficOnce(selectedInterface, currentRouter);
+        if (!isMounted) return;
 
-      const nowStr = new Date().toLocaleTimeString([], {
-        hour: '2-digit',
-        minute: '2-digit',
-        second: '2-digit',
-      });
+        const nowStr = new Date().toLocaleTimeString([], {
+          hour: '2-digit',
+          minute: '2-digit',
+          second: '2-digit',
+        });
 
-      if (sample.ok) {
-        setLiveInterfaceHistory((prev) => {
-          const next = [
-            ...prev,
-            {
-              time: nowStr,
-              rxMbps: sample.rxMbps,
-              txMbps: sample.txMbps,
-            },
-          ];
-          return next.slice(-30);
-        });
-      } else if (bandwidthHistory && bandwidthHistory.length > 0) {
-        const last = bandwidthHistory[bandwidthHistory.length - 1];
-        setLiveInterfaceHistory((prev) => {
-          const next = [
-            ...prev,
-            {
-              time: nowStr,
-              rxMbps: Number(last?.rxMbps || 0),
-              txMbps: Number(last?.txMbps || 0),
-            },
-          ];
-          return next.slice(-30);
-        });
+        if (sample.ok) {
+          setLiveInterfaceHistory((prev) => {
+            const next = [
+              ...prev,
+              {
+                time: nowStr,
+                rxMbps: sample.rxMbps,
+                txMbps: sample.txMbps,
+              },
+            ];
+            return next.slice(-30);
+          });
+        } else if (bandwidthHistory && bandwidthHistory.length > 0) {
+          const last = bandwidthHistory[bandwidthHistory.length - 1];
+          setLiveInterfaceHistory((prev) => {
+            const next = [
+              ...prev,
+              {
+                time: nowStr,
+                rxMbps: Number(last?.rxMbps || 0),
+                txMbps: Number(last?.txMbps || 0),
+              },
+            ];
+            return next.slice(-30);
+          });
+        }
+      } finally {
+        inFlight = false;
       }
     };
 
     pollInterfaceTraffic();
-    const timer = setInterval(pollInterfaceTraffic, 3000);
+    const timer = setInterval(pollInterfaceTraffic, 15000);
 
     return () => {
       isMounted = false;
       clearInterval(timer);
     };
-  }, [selectedInterface, isTrafficStreaming, currentRouter]);
+  }, [selectedInterface, isTrafficStreaming, currentRouter?.id]);
 
   const effectiveHistory = useMemo(() => {
     if (liveInterfaceHistory.length > 0) return liveInterfaceHistory;

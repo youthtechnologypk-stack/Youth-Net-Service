@@ -25,13 +25,10 @@ export type RouterProxyMode = 'proxy' | 'direct';
  * 'proxy' = Netlify Managed Proxy Mode (/api/mikrotik rewrite) - DEFAULT
  * 'direct' = Direct IP Mode (raw IP/port)
  */
-export function getRouterProxyMode(router?: RouterAuthInfo): RouterProxyMode {
-  if (router?.proxyMode) return router.proxyMode;
-  if (typeof window !== 'undefined') {
-    const saved = localStorage.getItem('netpulse_router_proxy_mode');
-    if (saved === 'direct' || saved === 'proxy') return saved;
-  }
-  return 'proxy'; // Default to "Netlify Managed Proxy Mode"
+export function getRouterProxyMode(_router?: RouterAuthInfo): RouterProxyMode {
+  // Always route browser requests through the backend Netlify / Express proxy (/api/mikrotik/*)
+  // to avoid direct browser-to-IP self-signed SSL & CORS blocks.
+  return 'proxy';
 }
 
 export interface ApiResponse<T = any> {
@@ -261,15 +258,12 @@ class ApiClient {
       cleanEndpoint = `/${cleanEndpoint}`;
     }
 
-    // 1. ROUTE ALL ROUTEROS REST CALLS THROUGH REVERSE PROXY:
-    // Default to 'Netlify Managed Proxy Mode' (/api/mikrotik/*)
-    // Only use direct IP if user explicitly switched to 'direct'
-    let fullUrl: string;
-    if (proxyMode === 'direct') {
-      fullUrl = `${resolved.protocol}://${resolved.host}:${resolved.port}/rest${cleanEndpoint}`;
-    } else {
-      fullUrl = `/api/mikrotik${cleanEndpoint}`;
-    }
+    // 1. ROUTE ALL ROUTEROS REST CALLS EXCLUSIVELY THROUGH BACKEND PROXY (/api/mikrotik/*):
+    // Direct browser-to-IP HTTPS fetches are strictly disabled to prevent self-signed SSL errors.
+    let fullUrl =
+      typeof window !== 'undefined'
+        ? `/api/mikrotik${cleanEndpoint}`
+        : `${resolved.protocol}://${resolved.host}:${resolved.port}/rest${cleanEndpoint}`;
 
     // Append query params if provided
     if (options.params) {
@@ -318,7 +312,7 @@ class ApiClient {
       signal: controller.signal,
       // CRITICAL: 'omit' prevents modern browsers from triggering the native HTTP Basic Auth modal on 401
       credentials: 'omit',
-      mode: proxyMode === 'direct' ? 'cors' : 'same-origin',
+      mode: typeof window !== 'undefined' ? 'same-origin' : 'cors',
     };
 
     if (bodyData !== undefined && method !== 'GET') {
@@ -339,25 +333,17 @@ class ApiClient {
         };
       }
 
-      const isTypeError =
-        networkErr instanceof TypeError ||
-        (networkErr?.message || '').toLowerCase().includes('failed to fetch') ||
-        (networkErr?.message || '').toLowerCase().includes('networkerror');
-
-      const directCertUrl = `https://${resolved.host}:${resolved.port}/rest/system/resource`;
-      let errMsg = networkErr.message || 'Network connection failure';
-      if (isTypeError) {
-        errMsg =
-          'Browser blocked self-signed SSL. [Click here to authorize certificate in new tab], then click Retry Sync.';
-      }
+      const errMsg =
+        networkErr?.message && !String(networkErr.message).toLowerCase().includes('failed to fetch')
+          ? String(networkErr.message)
+          : 'Unable to reach /api/mikrotik backend proxy. Verify network connectivity and retry.';
 
       return {
         success: false,
         status: 0,
         error: errMsg,
         message: errMsg,
-        isSslOrCorsBlocked: isTypeError,
-        directCertUrl,
+        isSslOrCorsBlocked: false,
       };
     }
 

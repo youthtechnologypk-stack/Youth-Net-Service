@@ -146,57 +146,31 @@ export const RouterFleet: React.FC<RouterFleetProps> = ({ onOpenAddDeviceModal }
         </button>
       </div>
 
-      {/* Target Router Gateway Mode: Direct IP vs Netlify Managed Proxy Mode */}
+      {/* Target Router Gateway Mode: Exclusively Netlify Managed Proxy Mode (/api/mikrotik) */}
       <div className="bg-slate-900 border border-slate-800 p-4 rounded-xl flex flex-col md:flex-row items-start md:items-center justify-between gap-3 text-xs shadow-lg">
         <div className="space-y-1">
           <div className="flex items-center gap-2">
             <Network className="w-4 h-4 text-cyan-400 shrink-0" />
             <span className="font-bold text-white text-sm">RouterOS REST Gateway Architecture</span>
-            <span className={`text-[10px] px-2 py-0.5 rounded font-mono font-bold uppercase border ${
-              routerProxyMode === 'proxy'
-                ? 'bg-emerald-950 text-emerald-300 border-emerald-700/60'
-                : 'bg-amber-950 text-amber-300 border-amber-700/60'
-            }`}>
-              {routerProxyMode === 'proxy' ? 'Netlify Managed Proxy Mode (Recommended)' : 'Direct IP Mode'}
+            <span className="text-[10px] px-2 py-0.5 rounded font-mono font-bold uppercase border bg-emerald-950 text-emerald-300 border-emerald-700/60">
+              Netlify Managed Proxy Mode (Active)
             </span>
           </div>
           <p className="text-slate-400 text-xs">
-            {routerProxyMode === 'proxy'
-              ? 'All REST calls route through /api/mikrotik proxy rewrite to bypass browser CORS restrictions and untrusted SSL blocks.'
-              : 'Direct browser fetch to raw router public IP (requires allowing self-signed certificates and browser CORS permissions).'}
+            All RouterOS health checks, CPU/WAN telemetry, and PPPoE sync calls route exclusively through the backend proxy (<code className="text-cyan-300">/api/mikrotik/*</code>) to eliminate browser SSL/CORS errors.
           </p>
         </div>
 
-        <div className="flex items-center gap-1.5 bg-slate-950 p-1 rounded-lg border border-slate-800 shrink-0">
-          <button
-            type="button"
-            onClick={() => {
-              setRouterProxyMode('proxy');
-              showToast('Switched to Netlify Managed Proxy Mode (/api/mikrotik rewrite)');
-            }}
-            className={`px-3 py-1.5 rounded-md font-medium text-xs transition cursor-pointer ${
-              routerProxyMode === 'proxy'
-                ? 'bg-cyan-600 text-slate-950 font-bold shadow'
-                : 'text-slate-400 hover:text-white'
-            }`}
-          >
-            Netlify Managed Proxy Mode
-          </button>
-          <button
-            type="button"
-            onClick={() => {
-              setRouterProxyMode('direct');
-              showToast('Switched to Direct IP Mode (raw IP/port fetch)');
-            }}
-            className={`px-3 py-1.5 rounded-md font-medium text-xs transition cursor-pointer ${
-              routerProxyMode === 'direct'
-                ? 'bg-amber-600 text-slate-950 font-bold shadow'
-                : 'text-slate-400 hover:text-white'
-            }`}
-          >
-            Direct IP Mode
-          </button>
-        </div>
+        <button
+          type="button"
+          onClick={() => {
+            setRouterProxyMode('proxy');
+            showToast('Verified Netlify Managed Proxy Mode (/api/mikrotik)');
+          }}
+          className="px-3.5 py-1.5 rounded-lg font-medium text-xs bg-cyan-600 hover:bg-cyan-500 text-slate-950 font-bold shadow cursor-pointer shrink-0"
+        >
+          Proxy Verified (/api/mikrotik)
+        </button>
       </div>
 
       {/* Empty State when no routers registered */}

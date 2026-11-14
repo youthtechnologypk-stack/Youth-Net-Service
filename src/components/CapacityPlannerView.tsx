@@ -273,12 +273,15 @@ export const CapacityPlannerView: React.FC = () => {
     return preferred?.name || 'ether1-WAN';
   }, [config.wan_interface_name, physicalInterfaces]);
 
-  // Poll live WAN traffic every 3 seconds + compute per-PPPoE session rates via interface byte counters
+  // Poll live WAN traffic every 15 seconds with single in-flight locking to prevent MikroTik rest-api session pile-up
   useEffect(() => {
     let isMounted = true;
+    let inFlight = false;
     setTrafficSeries([]);
 
     const pollLiveTraffic = async () => {
+      if (inFlight || (typeof document !== 'undefined' && document.hidden)) return;
+      inFlight = true;
       try {
         const [wanSample, ifaceList, activeList] = await Promise.all([
           fetchMikrotikInterfaceTrafficOnce(effectiveWanInterface, activeRouter),
@@ -356,11 +359,13 @@ export const CapacityPlannerView: React.FC = () => {
         }
       } catch {
         // Keep last valid state on transient error
+      } finally {
+        inFlight = false;
       }
     };
 
     pollLiveTraffic();
-    const timer = setInterval(pollLiveTraffic, 3000);
+    const timer = setInterval(pollLiveTraffic, 15000);
     return () => {
       isMounted = false;
       clearInterval(timer);

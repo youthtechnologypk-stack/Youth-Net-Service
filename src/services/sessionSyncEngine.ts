@@ -1,4 +1,5 @@
 import { ActiveSession, RouterInterface } from '../types/isp';
+import { safeMikrotikFetch } from './mikrotikRestClient';
 import { supabase, SupabaseSubscriberSessionLog } from './supabaseClient';
 
 export interface TrackedSessionSnapshot {
@@ -17,12 +18,20 @@ export interface TrackedSessionSnapshot {
   lastSeenMs: number;
 }
 
+export interface MikrotikLogEntry {
+  '.id'?: string;
+  time?: string;
+  topics?: string;
+  message?: string;
+}
+
 export interface SyncCycleOptions {
   routerId?: string;
   sessionsPolledOk?: boolean;
   interfacesFresh?: boolean;
   interfacesPolledAtMs?: number;
   nowMs?: number;
+  mikrotikLogs?: MikrotikLogEntry[];
 }
 
 /**
@@ -57,6 +66,213 @@ export function parseRouterOsUptimeSeconds(uptimeStr?: string | null): number {
   }
 
   return Math.max(0, total);
+}
+
+/**
+ * Formats total seconds strictly as HH:MM:SS (e.g., "02:15:37", "25:42:40", "00:03:04").
+ */
+export function formatDurationHms(totalSeconds?: number | null): string {
+  const safe = Math.max(0, Math.floor(Number(totalSeconds || 0)));
+  const hours = Math.floor(safe / 3600);
+  const minutes = Math.floor((safe % 3600) / 60);
+  const seconds = safe % 60;
+  return `${String(hours).padStart(2, '0')}:${String(minutes).padStart(2, '0')}:${String(seconds).padStart(2, '0')}`;
+}
+
+/**
+ * Formats an ISO string, timestamp, or Date strictly as DD/MM/YYYY HH:mm:ss.
+ */
+export function formatRadiusDateTime(input?: string | number | Date | null): string {
+  if (input === null || input === undefined || input === '') return '—';
+  const d = input instanceof Date ? input : new Date(input);
+  if (Number.isNaN(d.getTime())) return '—';
+  const dd = String(d.getDate()).padStart(2, '0');
+  const mm = String(d.getMonth() + 1).padStart(2, '0');
+  const yyyy = d.getFullYear();
+  const hh = String(d.getHours()).padStart(2, '0');
+  const min = String(d.getMinutes()).padStart(2, '0');
+  const ss = String(d.getSeconds()).padStart(2, '0');
+  return `${dd}/${mm}/${yyyy} ${hh}:${min}:${ss}`;
+}
+
+/**
+ * Normalizes RADIUS/RouterOS disconnect reason labels cleanly for display.
+ */
+export function formatDisconnectReasonBadge(
+  reason?: string | null,
+  status?: string | null
+): string {
+  const upperStatus = (status || '').toUpperCase();
+  if (upperStatus === 'ACTIVE') return 'ONLINE (Active)';
+
+  const raw = (reason || '').trim();
+  const lower = raw.toLowerCase();
+
+  if (upperStatus === 'KICKED' || /admin|noc|kicked/.test(lower)) {
+    return 'Admin-Reset';
+  }
+  if (/user[\s_-]*request/.test(lower)) {
+    return 'User-Request';
+  }
+  if (/peer[\s_-]*not[\s_-]*responding|lcp.*timeout|echo/.test(lower)) {
+    return 'Peer-Not-Responding';
+  }
+  if (/lost[\s_-]*carrier|hungup/.test(lower)) {
+    return 'Lost-Carrier';
+  }
+  if (/reconnect/.test(lower)) {
+    return 'Session-Reconnect';
+  }
+  if (!raw || /link[\s_-]*down|client disconnected|closed stale|duplicate|disconnected|ended|pppoe session/.test(lower)) {
+    return 'Link-Down';
+  }
+  return raw;
+}
+
+/**
+ * Computes exact elapsed seconds from (Logoff - Login) when closed, or fallback live uptime.
+ */
+export function computeExactSessionUptimeSeconds(
+  connectedAt?: string | null,
+  disconnectedAt?: string | null,
+  fallbackSeconds?: number | null,
+  fallbackDurationStr?: string | null
+): number {
+  if (connectedAt && disconnectedAt) {
+    const startMs = new Date(connectedAt).getTime();
+    const endMs = new Date(disconnectedAt).getTime();
+    if (!Number.isNaN(startMs) && !Number.isNaN(endMs) && endMs >= startMs) {
+      return Math.max(0, Math.floor((endMs - startMs) / 1000));
+    }
+  }
+  if (typeof fallbackSeconds === 'number' && !Number.isNaN(fallbackSeconds) && fallbackSeconds >= 0) {
+    return Math.floor(fallbackSeconds);
+  }
+  return parseRouterOsUptimeSeconds(fallbackDurationStr);
+}
+
+function escapeRegExp(value: string): string {
+  return value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+}
+
+/**
+ * Extracts the latest RouterOS PPPoE disconnect reason for a given subscriber
+ * from `/api/mikrotik/log` entries.
+ */
+export function parseMikrotikDisconnectReason(
+  username: string,
+  logs: MikrotikLogEntry[] = []
+): string {
+  const uname = (username || '').trim().toLowerCase();
+  if (!uname || !Array.isArray(logs) || logs.length === 0) {
+    return 'Link-Down';
+  }
+
+  const userBoundaryRegex = new RegExp(`(^|[^a-z0-9_.-])${escapeRegExp(uname)}([^a-z0-9_.-]|$)`, 'i');
+
+  for (let i = logs.length - 1; i >= 0; i -= 1) {
+    const entry = logs[i];
+    const topics = String(entry?.topics || '').toLowerCase();
+    const message = String(entry?.message || '').toLowerCase();
+    if (!message) continue;
+
+    const mentionsUser =
+      message.includes(`<pppoe-${uname}>`) ||
+      message.includes(`${uname}:`) ||
+      userBoundaryRegex.test(message);
+    if (!mentionsUser) continue;
+
+    const relevantTopic = !topics || topics.includes('ppp') || topics.includes('account') || topics.includes('info');
+    if (!relevantTopic) continue;
+
+    const isDisconnectEvent =
+      message.includes('terminating') ||
+      message.includes('logged out') ||
+      message.includes('disconnected') ||
+      message.includes('user request') ||
+      message.includes('user-request') ||
+      message.includes('lost carrier') ||
+      message.includes('lost-carrier') ||
+      message.includes('hungup') ||
+      message.includes('peer is not responding') ||
+      message.includes('peer-not-responding') ||
+      message.includes('link down') ||
+      message.includes('link-down') ||
+      message.includes('admin');
+
+    if (!isDisconnectEvent) continue;
+
+    if (message.includes('user request') || message.includes('user-request')) {
+      return 'User-Request';
+    }
+    if (
+      message.includes('peer is not responding') ||
+      message.includes('peer-not-responding') ||
+      message.includes('echo') ||
+      message.includes('timeout')
+    ) {
+      return 'Peer-Not-Responding';
+    }
+    if (
+      message.includes('lost carrier') ||
+      message.includes('lost-carrier') ||
+      message.includes('hungup')
+    ) {
+      return 'Lost-Carrier';
+    }
+    if (message.includes('admin') || message.includes('kicked') || message.includes('reset')) {
+      return 'Admin-Reset';
+    }
+    if (message.includes('terminat')) {
+      return 'Lost-Carrier';
+    }
+    return 'Link-Down';
+  }
+
+  return 'Link-Down';
+}
+
+/**
+ * Queries RouterOS `/api/mikrotik/log` once and resolves disconnect reasons for usernames.
+ * Safely falls back to 'Link-Down' if unreachable or running headless.
+ */
+export async function fetchMikrotikDisconnectReasons(
+  usernames: string[],
+  providedLogs?: MikrotikLogEntry[]
+): Promise<Record<string, string>> {
+  const result: Record<string, string> = {};
+  const cleanNames = Array.from(
+    new Set(usernames.map((u) => (u || '').trim()).filter(Boolean))
+  );
+  if (cleanNames.length === 0) return result;
+
+  let logs: MikrotikLogEntry[] = Array.isArray(providedLogs) ? providedLogs : [];
+
+  if (!Array.isArray(providedLogs) && typeof window !== 'undefined') {
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), 4000);
+    try {
+      const res = await safeMikrotikFetch('/api/mikrotik/log', {
+        method: 'GET',
+        signal: controller.signal,
+      });
+      if (res.ok) {
+        const parsed = await res.json();
+        if (Array.isArray(parsed)) {
+          logs = parsed as MikrotikLogEntry[];
+        }
+      }
+    } catch {
+      // Fallback to Link-Down cleanly when log fetch fails or times out
+    } finally {
+      clearTimeout(timer);
+    }
+  }
+
+  for (const uname of cleanNames) {
+    result[uname.toLowerCase()] = parseMikrotikDisconnectReason(uname, logs);
+  }
+  return result;
 }
 
 /**
@@ -165,8 +381,8 @@ function resolveSessionIdentity(
 
 /**
  * Live Session Diff & Supabase Persistence Engine
- * Strictly tracks each PPPoE session independently without duplicate splits
- * or cumulative byte carry-over across sessions.
+ * Strictly tracks each PPPoE session independently with exact RADIUS-style
+ * (Logoff - Login) HH:MM:SS uptime accounting and RouterOS disconnect reasons.
  */
 class SessionSyncEngine {
   private prevActiveSessions = new Map<string, TrackedSessionSnapshot>();
@@ -177,7 +393,9 @@ class SessionSyncEngine {
   private hydrationPromise: Promise<void> | null = null;
   private syncInFlight = false;
   private activeRouterId: string | null = null;
+  private lastOrphanSweepMs = 0;
   private readonly TELEMETRY_INTERVAL_MS = 30_000;
+  private readonly ORPHAN_SWEEP_INTERVAL_MS = 60_000;
 
   /**
    * Reset in-memory session cache (useful on router switch or test runs).
@@ -189,6 +407,7 @@ class SessionSyncEngine {
     this.kickedRecently.clear();
     this.hydrated = false;
     this.hydrationPromise = null;
+    this.lastOrphanSweepMs = 0;
   }
 
   private async ensureHydrated(): Promise<void> {
@@ -209,8 +428,8 @@ class SessionSyncEngine {
           return;
         }
 
-        const nowIso = new Date().toISOString();
-        const duplicateIdsToClose: string[] = [];
+        const nowMs = Date.now();
+        const nowIso = new Date(nowMs).toISOString();
 
         for (const row of data as SupabaseSubscriberSessionLog[]) {
           const uname = (row.subscriber_username || '').trim();
@@ -218,14 +437,27 @@ class SessionSyncEngine {
           if (!key || !row.id) continue;
 
           if (this.activeLogIds.has(key)) {
-            duplicateIdsToClose.push(row.id);
+            const rowConnectedMs =
+              new Date(row.connected_at || row.recorded_at || nowIso).getTime() || nowMs;
+            const exactSeconds = Math.max(1, Math.floor((nowMs - rowConnectedMs) / 1000));
+            await supabase
+              .from('subscriber_session_logs')
+              .update({
+                session_status: 'DISCONNECTED',
+                disconnect_reason: 'Link-Down',
+                disconnected_at: nowIso,
+                recorded_at: nowIso,
+                uptime_seconds: exactSeconds,
+                uptime_duration: formatDurationHms(exactSeconds),
+              })
+              .eq('id', row.id);
             continue;
           }
 
           this.activeLogIds.set(key, row.id);
-          const recordedMs = row.recorded_at ? new Date(row.recorded_at).getTime() : Date.now();
+          const recordedMs = row.recorded_at ? new Date(row.recorded_at).getTime() : nowMs;
           const connectedAtIso = row.connected_at || row.recorded_at || nowIso;
-          const connectedAtMs = new Date(connectedAtIso).getTime() || Date.now();
+          const connectedAtMs = new Date(connectedAtIso).getTime() || nowMs;
           const uptimeSeconds = Number(
             row.uptime_seconds ?? parseRouterOsUptimeSeconds(row.uptime_duration)
           );
@@ -242,27 +474,15 @@ class SessionSyncEngine {
             hasRealId,
             ipAddress: row.ip_address || '',
             macAddress: (row.mac_address || '').trim().toUpperCase(),
-            uptime: row.uptime_duration || '0s',
+            uptime: formatDurationHms(uptimeSeconds),
             uptimeSeconds,
             bytesIn: Number(row.bytes_in || 0),
             bytesOut: Number(row.bytes_out || 0),
             connectedAtIso,
             connectedAtMs,
             startMinute: Math.round(connectedAtMs / 60_000),
-            lastSeenMs: recordedMs || Date.now(),
+            lastSeenMs: recordedMs || nowMs,
           });
-        }
-
-        if (duplicateIdsToClose.length > 0) {
-          await supabase
-            .from('subscriber_session_logs')
-            .update({
-              session_status: 'DISCONNECTED',
-              disconnect_reason: 'Closed stale duplicate active record',
-              disconnected_at: nowIso,
-              recorded_at: nowIso,
-            })
-            .in('id', duplicateIdsToClose);
         }
       } catch (err) {
         console.warn('[SessionSyncEngine] Hydration error:', err);
@@ -273,6 +493,130 @@ class SessionSyncEngine {
     })();
 
     return this.hydrationPromise;
+  }
+
+  /**
+   * Closes orphaned 'ACTIVE' DB rows whose subscriber is absent from live /ppp/active.
+   */
+  private async closeOrphanedActiveRows(
+    currentKeys: Set<string>,
+    nowMs: number,
+    getDisconnectReason: (uname: string) => Promise<string>
+  ): Promise<void> {
+    const nowIso = new Date(nowMs).toISOString();
+    const { data: openRows } = await supabase
+      .from('subscriber_session_logs')
+      .select('*')
+      .eq('session_status', 'ACTIVE')
+      .limit(500);
+
+    if (!Array.isArray(openRows) || openRows.length === 0) return;
+
+    for (const row of openRows as SupabaseSubscriberSessionLog[]) {
+      if (!row.id) continue;
+      const uname = (row.subscriber_username || '').trim();
+      const key = uname.toLowerCase();
+      if (!key) continue;
+
+      const kickTs = this.kickedRecently.get(key);
+      if (kickTs && nowMs - kickTs < 25_000) continue;
+
+      // Keep only the single tracked active row for currently online users
+      if (currentKeys.has(key) && this.activeLogIds.get(key) === row.id) {
+        continue;
+      }
+
+      const connectedMs =
+        new Date(row.connected_at || row.recorded_at || nowIso).getTime() || nowMs;
+      const finalSeconds = Math.max(1, Math.floor((nowMs - connectedMs) / 1000));
+      const finalDuration = formatDurationHms(finalSeconds);
+      const reason = await getDisconnectReason(uname);
+
+      await supabase
+        .from('subscriber_session_logs')
+        .update({
+          session_status: 'DISCONNECTED',
+          disconnect_reason: reason,
+          disconnected_at: nowIso,
+          recorded_at: nowIso,
+          uptime_seconds: finalSeconds,
+          uptime_duration: finalDuration,
+        })
+        .eq('id', row.id);
+
+      if (!currentKeys.has(key)) {
+        this.prevActiveSessions.delete(key);
+        this.activeLogIds.delete(key);
+        this.lastPersistedAt.delete(key);
+      }
+    }
+  }
+
+  /**
+   * Reconciles a specific subscriber's stale ACTIVE rows when MikroTik /ppp/active
+   * confirms they are currently Offline.
+   */
+  public async reconcileOfflineSubscriberActiveRows(
+    username: string,
+    isLiveOnline: boolean,
+    providedLogs?: MikrotikLogEntry[]
+  ): Promise<SupabaseSubscriberSessionLog[] | null> {
+    const uname = (username || '').trim();
+    const key = uname.toLowerCase();
+    if (!key) return null;
+
+    if (!isLiveOnline) {
+      const nowMs = Date.now();
+      const nowIso = new Date(nowMs).toISOString();
+      const kickTs = this.kickedRecently.get(key);
+
+      if (!kickTs || nowMs - kickTs >= 25_000) {
+        const { data: openRows } = await supabase
+          .from('subscriber_session_logs')
+          .select('*')
+          .ilike('subscriber_username', uname)
+          .eq('session_status', 'ACTIVE')
+          .limit(20);
+
+        if (Array.isArray(openRows) && openRows.length > 0) {
+          const reasonMap = await fetchMikrotikDisconnectReasons([uname], providedLogs);
+          const reason = reasonMap[key] || 'Link-Down';
+
+          for (const row of openRows as SupabaseSubscriberSessionLog[]) {
+            if (!row.id) continue;
+            const connectedMs =
+              new Date(row.connected_at || row.recorded_at || nowIso).getTime() || nowMs;
+            const finalSeconds = Math.max(1, Math.floor((nowMs - connectedMs) / 1000));
+            const finalDuration = formatDurationHms(finalSeconds);
+
+            await supabase
+              .from('subscriber_session_logs')
+              .update({
+                session_status: 'DISCONNECTED',
+                disconnect_reason: reason,
+                disconnected_at: nowIso,
+                recorded_at: nowIso,
+                uptime_seconds: finalSeconds,
+                uptime_duration: finalDuration,
+              })
+              .eq('id', row.id);
+          }
+        }
+      }
+
+      this.prevActiveSessions.delete(key);
+      this.activeLogIds.delete(key);
+      this.lastPersistedAt.delete(key);
+    }
+
+    const { data: refreshed } = await supabase
+      .from('subscriber_session_logs')
+      .select('*')
+      .in('subscriber_username', [uname, uname.toLowerCase()])
+      .order('recorded_at', { ascending: false })
+      .limit(50);
+
+    return Array.isArray(refreshed) ? (refreshed as SupabaseSubscriberSessionLog[]) : null;
   }
 
   /**
@@ -312,7 +656,29 @@ class SessionSyncEngine {
         }
       }
 
-      // Deduplicate activeSessions by lowercase username (keep the newest / highest-uptime or last entry)
+      // Lazy single-fetch MikroTik log helper (runs only if a disconnect/reconnect actually occurs)
+      let reasonCachePromise: Promise<Record<string, string>> | null = null;
+      const getDisconnectReason = async (uname: string): Promise<string> => {
+        if (!reasonCachePromise) {
+          const allTargets = Array.from(
+            new Set([
+              uname,
+              ...Array.from(this.prevActiveSessions.values()).map((p) => p.username),
+            ])
+          );
+          reasonCachePromise = fetchMikrotikDisconnectReasons(allTargets, options?.mikrotikLogs);
+        }
+        const map = await reasonCachePromise;
+        const cleanKey = (uname || '').trim().toLowerCase();
+        if (map[cleanKey]) return map[cleanKey];
+        // Handle newly encountered username if providedLogs exist
+        if (options?.mikrotikLogs) {
+          return parseMikrotikDisconnectReason(uname, options.mikrotikLogs);
+        }
+        return 'Link-Down';
+      };
+
+      // Deduplicate activeSessions by lowercase username
       const dedupedSessions = new Map<string, ActiveSession>();
       for (const sess of activeSessions) {
         const key = (sess.username || '').trim().toLowerCase();
@@ -326,6 +692,7 @@ class SessionSyncEngine {
 
         const uptimeStr = sess.uptime || '0s';
         const uptimeSeconds = parseRouterOsUptimeSeconds(uptimeStr);
+        const formattedUptime = formatDurationHms(uptimeSeconds);
         const identity = resolveSessionIdentity(sess, uptimeSeconds, nowMs);
         const ipAddress = sess.address || 'Dynamic IP';
         const macAddress = sess.callerId || '';
@@ -346,9 +713,8 @@ class SessionSyncEngine {
 
           if (Array.isArray(dbActiveRows) && dbActiveRows.length > 0) {
             const primary = dbActiveRows[0] as SupabaseSubscriberSessionLog;
-            const dbConnectedMs = new Date(
-              primary.connected_at || primary.recorded_at || nowIso
-            ).getTime();
+            const dbConnectedMs =
+              new Date(primary.connected_at || primary.recorded_at || nowIso).getTime() || nowMs;
             const dbUptimeSec = Number(
               primary.uptime_seconds ?? parseRouterOsUptimeSeconds(primary.uptime_duration)
             );
@@ -366,49 +732,66 @@ class SessionSyncEngine {
             if (matchesOngoing && primary.id) {
               existingLogId = primary.id;
               this.activeLogIds.set(key, primary.id);
+              const normalizedConnectedMs =
+                uptimeSeconds > 0 && Math.abs(dbConnectedMs - identity.connectedAtMs) > 120_000
+                  ? identity.connectedAtMs
+                  : dbConnectedMs;
+              const normalizedConnectedIso = new Date(normalizedConnectedMs).toISOString();
+
               prev = {
                 username: primary.subscriber_username || uname,
                 sessionId: identity.hasRealId ? identity.sessionId : dbSessionId || identity.sessionId,
                 hasRealId: identity.hasRealId || dbHasRealId,
                 ipAddress: primary.ip_address || ipAddress,
                 macAddress: dbMac || identity.macNormalized,
-                uptime: primary.uptime_duration || uptimeStr,
+                uptime: formatDurationHms(dbUptimeSec),
                 uptimeSeconds: dbUptimeSec,
                 bytesIn: Number(primary.bytes_in || 0),
                 bytesOut: Number(primary.bytes_out || 0),
-                connectedAtIso: primary.connected_at || primary.recorded_at || identity.connectedAtIso,
-                connectedAtMs: dbConnectedMs,
-                startMinute: Math.round(dbConnectedMs / 60_000),
+                connectedAtIso: normalizedConnectedIso,
+                connectedAtMs: normalizedConnectedMs,
+                startMinute: Math.round(normalizedConnectedMs / 60_000),
                 lastSeenMs: primary.recorded_at ? new Date(primary.recorded_at).getTime() : nowMs,
               };
               this.prevActiveSessions.set(key, prev);
 
-              // Close any older extra duplicate ACTIVE rows for this user
-              const extras = dbActiveRows.slice(1).map((r: any) => r.id).filter(Boolean);
-              if (extras.length > 0) {
+              // Close any older extra duplicate ACTIVE rows for this user with exact (Logoff - Login)
+              for (const extra of dbActiveRows.slice(1) as SupabaseSubscriberSessionLog[]) {
+                if (!extra?.id) continue;
+                const extraConnectedMs =
+                  new Date(extra.connected_at || extra.recorded_at || nowIso).getTime() || nowMs;
+                const exactSec = Math.max(1, Math.floor((nowMs - extraConnectedMs) / 1000));
                 await supabase
                   .from('subscriber_session_logs')
                   .update({
                     session_status: 'DISCONNECTED',
-                    disconnect_reason: 'Closed duplicate active row',
+                    disconnect_reason: 'Link-Down',
                     disconnected_at: nowIso,
                     recorded_at: nowIso,
+                    uptime_seconds: exactSec,
+                    uptime_duration: formatDurationHms(exactSec),
                   })
-                  .in('id', extras);
+                  .eq('id', extra.id);
               }
             } else {
-              // Stale ACTIVE rows from an earlier disconnected session: close them cleanly before Rule C inserts new session
-              const staleIds = dbActiveRows.map((r: any) => r.id).filter(Boolean);
-              if (staleIds.length > 0) {
+              // Stale ACTIVE rows from an earlier disconnected session: close them cleanly with (Logoff - Login)
+              const reason = await getDisconnectReason(uname);
+              for (const stale of dbActiveRows as SupabaseSubscriberSessionLog[]) {
+                if (!stale?.id) continue;
+                const staleConnectedMs =
+                  new Date(stale.connected_at || stale.recorded_at || nowIso).getTime() || nowMs;
+                const exactSec = Math.max(1, Math.floor((nowMs - staleConnectedMs) / 1000));
                 await supabase
                   .from('subscriber_session_logs')
                   .update({
                     session_status: 'DISCONNECTED',
-                    disconnect_reason: 'Session Reconnected (New PPPoE Session Started)',
+                    disconnect_reason: reason,
                     disconnected_at: nowIso,
                     recorded_at: nowIso,
+                    uptime_seconds: exactSec,
+                    uptime_duration: formatDurationHms(exactSec),
                   })
-                  .in('id', staleIds);
+                  .eq('id', stale.id);
               }
               this.prevActiveSessions.delete(key);
               this.activeLogIds.delete(key);
@@ -451,9 +834,6 @@ class SessionSyncEngine {
         const isReconnect = Boolean(prev && (sessionIdChanged || uptimeDropped));
         const isBrandNewSession = !prev || isReconnect;
 
-        // Guard against stale <pppoe-user> interface byte carry-over:
-        // Only trust cached `interfaces` when they were polled AFTER this session connected
-        // (or when caller did not provide interfacesPolledAtMs and interfacesFresh !== false).
         const sessionConnectedAtMs = isBrandNewSession
           ? identity.connectedAtMs
           : prev!.connectedAtMs;
@@ -477,14 +857,19 @@ class SessionSyncEngine {
 
         if (isReconnect && prev) {
           // Rule B: True reconnect detected -> Close prior ACTIVE session cleanly as DISCONNECTED
-          // with its frozen final uptime and final bytes (no carry-over into new session).
+          // Recalculating Uptime strictly as (Logoff - Login) in HH:MM:SS.
+          const prevConnectedMs = prev.connectedAtMs || nowMs - (prev.uptimeSeconds || 0) * 1000;
+          const exactSeconds = Math.max(1, Math.floor((nowMs - prevConnectedMs) / 1000));
+          const exactDuration = formatDurationHms(exactSeconds);
+          const reason = await getDisconnectReason(prev.username || uname);
+
           const disconnectUpdate = {
-            uptime_duration: prev.uptime || 'Ended',
-            uptime_seconds: prev.uptimeSeconds,
+            uptime_duration: exactDuration,
+            uptime_seconds: exactSeconds,
             bytes_in: prev.bytesIn,
             bytes_out: prev.bytesOut,
             session_status: 'DISCONNECTED' as const,
-            disconnect_reason: 'Session Reconnected (New PPPoE Session Started)',
+            disconnect_reason: reason,
             disconnected_at: nowIso,
             recorded_at: nowIso,
           };
@@ -520,12 +905,12 @@ class SessionSyncEngine {
                 session_id: identity.sessionId,
                 ip_address: ipAddress,
                 mac_address: macAddress || null,
-                uptime_duration: uptimeStr,
+                uptime_duration: formattedUptime,
                 uptime_seconds: uptimeSeconds,
                 bytes_in: freshBytesIn,
                 bytes_out: freshBytesOut,
                 session_status: 'ACTIVE',
-                disconnect_reason: 'PPPoE Session Connected',
+                disconnect_reason: 'ONLINE (Active)',
                 connected_at: identity.connectedAtIso,
                 disconnected_at: null,
                 recorded_at: nowIso,
@@ -544,7 +929,7 @@ class SessionSyncEngine {
             hasRealId: identity.hasRealId,
             ipAddress,
             macAddress: identity.macNormalized,
-            uptime: uptimeStr,
+            uptime: formattedUptime,
             uptimeSeconds,
             bytesIn: freshBytesIn,
             bytesOut: freshBytesOut,
@@ -564,10 +949,20 @@ class SessionSyncEngine {
             uptimeSeconds >= prev.uptimeSeconds - 15
               ? Math.max(uptimeSeconds, prev.uptimeSeconds)
               : uptimeSeconds;
-          const effectiveUptimeStr =
-            uptimeSeconds >= prev.uptimeSeconds - 15 && uptimeSeconds < prev.uptimeSeconds
-              ? prev.uptime
-              : uptimeStr;
+          const effectiveUptimeStr = formatDurationHms(effectiveUptimeSeconds);
+
+          // Self-heal drifted connected_at if corrupted by a historical mismatch (> 120s off from now - uptime)
+          const hasDriftedLogin =
+            uptimeSeconds > 0 && Math.abs(prev.connectedAtMs - identity.connectedAtMs) > 120_000;
+          const effectiveConnectedAtMs = hasDriftedLogin
+            ? identity.connectedAtMs
+            : prev.connectedAtMs;
+          const effectiveConnectedAtIso = hasDriftedLogin
+            ? identity.connectedAtIso
+            : prev.connectedAtIso;
+
+          const legacyFormatNeedsUpgrade =
+            !/^\d{2,}:\d{2}:\d{2}$/.test(prev.uptime || '');
 
           this.prevActiveSessions.set(key, {
             username: uname,
@@ -579,16 +974,18 @@ class SessionSyncEngine {
             uptimeSeconds: effectiveUptimeSeconds,
             bytesIn: mergedBytesIn,
             bytesOut: mergedBytesOut,
-            connectedAtIso: prev.connectedAtIso,
-            connectedAtMs: prev.connectedAtMs,
-            startMinute: prev.startMinute,
+            connectedAtIso: effectiveConnectedAtIso,
+            connectedAtMs: effectiveConnectedAtMs,
+            startMinute: Math.round(effectiveConnectedAtMs / 60_000),
             lastSeenMs: nowMs,
           });
 
           const lastWrite = this.lastPersistedAt.get(key) || 0;
           const shouldWriteTelemetry =
             nowMs - lastWrite >= this.TELEMETRY_INTERVAL_MS ||
-            (!prev.hasRealId && identity.hasRealId);
+            (!prev.hasRealId && identity.hasRealId) ||
+            hasDriftedLogin ||
+            legacyFormatNeedsUpgrade;
 
           if (shouldWriteTelemetry && existingLogId) {
             await supabase
@@ -601,6 +998,7 @@ class SessionSyncEngine {
                 uptime_seconds: effectiveUptimeSeconds,
                 bytes_in: mergedBytesIn,
                 bytes_out: mergedBytesOut,
+                connected_at: effectiveConnectedAtIso,
                 recorded_at: nowIso,
               })
               .eq('id', existingLogId);
@@ -611,26 +1009,31 @@ class SessionSyncEngine {
       }
 
       // Rule B: Complete disappearance from /api/mikrotik/ppp/active -> Mark ACTIVE row as DISCONNECTED
+      // Recalculating Uptime strictly as (Logoff - Login) in HH:MM:SS + fetching MikroTik /log reason.
       for (const [key, prev] of Array.from(this.prevActiveSessions.entries())) {
         if (currentKeys.has(key)) continue;
 
         const kickTs = this.kickedRecently.get(key);
         if (kickTs && nowMs - kickTs < 25_000) {
-          // Already finalized as KICKED by finalizeSessionKick
           this.prevActiveSessions.delete(key);
           this.activeLogIds.delete(key);
           this.lastPersistedAt.delete(key);
           continue;
         }
 
+        const prevConnectedMs = prev.connectedAtMs || nowMs - (prev.uptimeSeconds || 0) * 1000;
+        const exactSeconds = Math.max(1, Math.floor((nowMs - prevConnectedMs) / 1000));
+        const exactDuration = formatDurationHms(exactSeconds);
+        const reason = await getDisconnectReason(prev.username || key);
+
         const logId = this.activeLogIds.get(key);
         const updatePayload = {
-          uptime_duration: prev.uptime || 'Ended',
-          uptime_seconds: prev.uptimeSeconds,
+          uptime_duration: exactDuration,
+          uptime_seconds: exactSeconds,
           bytes_in: prev.bytesIn,
           bytes_out: prev.bytesOut,
           session_status: 'DISCONNECTED' as const,
-          disconnect_reason: 'Client Disconnected / Link Down',
+          disconnect_reason: reason,
           disconnected_at: nowIso,
           recorded_at: nowIso,
         };
@@ -651,6 +1054,12 @@ class SessionSyncEngine {
         this.prevActiveSessions.delete(key);
         this.activeLogIds.delete(key);
         this.lastPersistedAt.delete(key);
+      }
+
+      // Sweep orphaned DB ACTIVE rows once after hydration and periodically every 60s
+      if (this.lastOrphanSweepMs === 0 || nowMs - this.lastOrphanSweepMs >= this.ORPHAN_SWEEP_INTERVAL_MS) {
+        this.lastOrphanSweepMs = nowMs;
+        await this.closeOrphanedActiveRows(currentKeys, nowMs, getDisconnectReason);
       }
     } catch (err) {
       console.warn('[SessionSyncEngine] syncCycle error:', err);
@@ -700,8 +1109,14 @@ class SessionSyncEngine {
 
       const finalBytesIn = Math.max(prev?.bytesIn || 0, ifaceBytes.bytesIn);
       const finalBytesOut = Math.max(prev?.bytesOut || 0, ifaceBytes.bytesOut);
-      const finalUptime = sessionSnapshot?.uptime || prev?.uptime || 'Active Session';
-      const finalUptimeSec = parseRouterOsUptimeSeconds(finalUptime) || prev?.uptimeSeconds || 0;
+      const snapshotUptimeSec = parseRouterOsUptimeSeconds(sessionSnapshot?.uptime);
+      const connectedAtMs =
+        prev?.connectedAtMs ||
+        nowMs - (snapshotUptimeSec || prev?.uptimeSeconds || 1) * 1000;
+      const connectedAtIso = prev?.connectedAtIso || new Date(connectedAtMs).toISOString();
+      const finalUptimeSec = Math.max(1, Math.floor((nowMs - connectedAtMs) / 1000));
+      const finalUptime = formatDurationHms(finalUptimeSec);
+
       const finalIp = sessionSnapshot?.address || prev?.ipAddress || 'Dynamic IP';
       const finalMac = sessionSnapshot?.callerId || prev?.macAddress || null;
       const finalSessionId = sessionSnapshot?.id || prev?.sessionId || null;
@@ -714,7 +1129,7 @@ class SessionSyncEngine {
         bytes_in: finalBytesIn,
         bytes_out: finalBytesOut,
         session_status: 'KICKED',
-        disconnect_reason: 'Disconnected by Admin / NOC',
+        disconnect_reason: 'Admin-Reset',
         disconnected_at: nowIso,
         recorded_at: nowIso,
       };
@@ -731,26 +1146,31 @@ class SessionSyncEngine {
       if (!updated) {
         const { data: openRows } = await supabase
           .from('subscriber_session_logs')
-          .select('id')
+          .select('id, connected_at, recorded_at')
           .ilike('subscriber_username', prev?.username || cleanUsername)
           .eq('session_status', 'ACTIVE')
           .limit(5);
 
         if (openRows && openRows.length > 0) {
-          await supabase
-            .from('subscriber_session_logs')
-            .update(updateFields)
-            .in(
-              'id',
-              openRows.map((r: any) => r.id)
-            );
+          for (const row of openRows as Array<{ id: string; connected_at?: string; recorded_at?: string }>) {
+            const rowConnectedMs =
+              new Date(row.connected_at || row.recorded_at || connectedAtIso).getTime() ||
+              connectedAtMs;
+            const rowUptimeSec = Math.max(1, Math.floor((nowMs - rowConnectedMs) / 1000));
+            await supabase
+              .from('subscriber_session_logs')
+              .update({
+                ...updateFields,
+                uptime_seconds: rowUptimeSec,
+                uptime_duration: formatDurationHms(rowUptimeSec),
+              })
+              .eq('id', row.id);
+          }
           updated = true;
         }
       }
 
       if (!updated) {
-        const connectedAtIso =
-          prev?.connectedAtIso || new Date(nowMs - finalUptimeSec * 1000).toISOString();
         await supabase.from('subscriber_session_logs').insert([
           {
             subscriber_username: prev?.username || cleanUsername,
@@ -762,7 +1182,7 @@ class SessionSyncEngine {
             bytes_in: finalBytesIn,
             bytes_out: finalBytesOut,
             session_status: 'KICKED',
-            disconnect_reason: 'Disconnected by Admin / NOC',
+            disconnect_reason: 'Admin-Reset',
             connected_at: connectedAtIso,
             disconnected_at: nowIso,
             recorded_at: nowIso,
