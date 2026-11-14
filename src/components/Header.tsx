@@ -24,6 +24,7 @@ import {
   User,
   Gauge,
   Wallet,
+  MapPin,
 } from 'lucide-react';
 import { useISP } from '../context/ISPContext';
 import { SystemRole, UserAccount } from '../types/auth';
@@ -39,6 +40,7 @@ export type ActiveTab =
   | 'operations'
   | 'mikrotik'
   | 'olt'
+  | 'fiber_gis'
   | 'billing'
   | 'profit_expenses'
   | 'complaints'
@@ -483,6 +485,14 @@ export const Header: React.FC<HeaderProps> = ({
               </button>
 
               <button
+                onClick={() => setActiveTab('fiber_gis')}
+                className={`flex items-center gap-2 px-3 py-2 text-xs sm:text-sm font-medium rounded-lg transition whitespace-nowrap ${getTabClassName('fiber_gis')}`}
+              >
+                <MapPin className="w-4 h-4 text-sky-500 dark:text-sky-400" />
+                Fiber GIS &amp; Map
+              </button>
+
+              <button
                 onClick={() => setActiveTab('billing')}
                 className={`flex items-center gap-2 px-3 py-2 text-xs sm:text-sm font-medium rounded-lg transition whitespace-nowrap ${getTabClassName('billing')}`}
               >
@@ -607,6 +617,14 @@ export const Header: React.FC<HeaderProps> = ({
               >
                 <Layers className="w-4 h-4 text-cyan-600 dark:text-cyan-400" />
                 VSOL OLT
+              </button>
+
+              <button
+                onClick={() => setActiveTab('fiber_gis')}
+                className={`flex items-center gap-2 px-3 py-2 text-xs sm:text-sm font-medium rounded-lg transition whitespace-nowrap ${getTabClassName('fiber_gis', 'indigo')}`}
+              >
+                <MapPin className="w-4 h-4 text-sky-500 dark:text-sky-400" />
+                Fiber GIS &amp; Map
               </button>
 
               <button

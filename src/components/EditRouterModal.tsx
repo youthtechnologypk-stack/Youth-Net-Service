@@ -357,39 +357,18 @@ export const EditRouterModal: React.FC<EditRouterModalProps> = ({
 
           {/* REST Gateway Architecture */}
           <div className="p-3 bg-slate-950/70 border border-slate-800 rounded-xl space-y-2">
-            <div>
-              <span className="text-xs font-bold text-slate-200 block">
-                RouterOS REST Gateway Architecture
+            <div className="flex items-center justify-between gap-2">
+              <div>
+                <span className="text-xs font-bold text-slate-200 block">
+                  RouterOS REST Gateway Architecture
+                </span>
+                <span className="text-[11px] text-slate-400">
+                  All router telemetry &amp; PPPoE API calls route exclusively through the backend proxy (<code className="text-cyan-300">/api/mikrotik/*</code>) to eliminate browser SSL &amp; CORS errors.
+                </span>
+              </div>
+              <span className="px-2.5 py-1 rounded-md text-[10px] font-mono font-bold bg-emerald-950 text-emerald-300 border border-emerald-700/60 shrink-0">
+                Proxy Active
               </span>
-              <span className="text-[11px] text-slate-400">
-                Route via reverse proxy (avoids CORS & untrusted SSL) or direct browser fetch.
-              </span>
-            </div>
-            <div className="grid grid-cols-2 gap-2 mt-2">
-              <button
-                type="button"
-                onClick={() => setProxyMode('proxy')}
-                className={`px-3 py-2 rounded-lg text-xs font-semibold border text-left transition cursor-pointer ${
-                  proxyMode === 'proxy'
-                    ? 'bg-cyan-950/80 border-cyan-500 text-cyan-200'
-                    : 'bg-slate-900 border-slate-800 text-slate-400 hover:text-slate-300'
-                }`}
-              >
-                <div className="font-bold">Netlify Managed Proxy</div>
-                <div className="text-[10px] text-slate-400">/api/mikrotik (Recommended)</div>
-              </button>
-              <button
-                type="button"
-                onClick={() => setProxyMode('direct')}
-                className={`px-3 py-2 rounded-lg text-xs font-semibold border text-left transition cursor-pointer ${
-                  proxyMode === 'direct'
-                    ? 'bg-amber-950/80 border-amber-500 text-amber-200'
-                    : 'bg-slate-900 border-slate-800 text-slate-400 hover:text-slate-300'
-                }`}
-              >
-                <div className="font-bold">Direct IP Mode</div>
-                <div className="text-[10px] text-slate-400">Direct browser fetch with CORS</div>
-              </button>
             </div>
           </div>
 

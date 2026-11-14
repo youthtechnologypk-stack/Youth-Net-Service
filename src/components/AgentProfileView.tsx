@@ -22,7 +22,10 @@ import {
 } from 'lucide-react';
 import { supabase, SupabasePortalUser, SupabasePaymentTransaction, SupabaseAgentCashTransaction } from '../services/supabaseClient';
 import { useCurrency } from '../context/CurrencyContext';
+import { useAuth } from '../context/AuthContext';
 import { EditStaffModal } from './EditStaffModal';
+import { EditLedgerEntryModal } from './EditLedgerEntryModal';
+import { FieldAuditLedgerRow } from '../lib/ledgerAuditPersistence';
 import { DateFilterToolbar } from './DateFilterToolbar';
 import {
   DateFilterState,
@@ -43,9 +46,11 @@ export const AgentProfileView: React.FC<AgentProfileViewProps> = ({
   onBack,
 }) => {
   const { formatCurrency } = useCurrency();
+  const { currentUser } = useAuth();
 
   // Agent profile state
   const [agent, setAgent] = useState<SupabasePortalUser | null>(null);
+  const [allAgents, setAllAgents] = useState<SupabasePortalUser[]>([]);
   const [collections, setCollections] = useState<SupabasePaymentTransaction[]>([]);
   const [cashTransactions, setCashTransactions] = useState<SupabaseAgentCashTransaction[]>([]);
   const [isLoading, setIsLoading] = useState<boolean>(true);
@@ -54,6 +59,7 @@ export const AgentProfileView: React.FC<AgentProfileViewProps> = ({
   const [toastMessage, setToastMessage] = useState<{ text: string; type: 'success' | 'error' } | null>(null);
 
   // Modals
+  const [editingLedgerEntry, setEditingLedgerEntry] = useState<FieldAuditLedgerRow | null>(null);
   const [isEditStaffModalOpen, setIsEditStaffModalOpen] = useState(false);
   const [isHandoverModalOpen, setIsHandoverModalOpen] = useState(false);
   const [isAdvanceModalOpen, setIsAdvanceModalOpen] = useState(false);
@@ -104,6 +110,15 @@ export const AgentProfileView: React.FC<AgentProfileViewProps> = ({
       setAgent(userData as SupabasePortalUser);
       setHandoverAmount(String(userData.cash_in_hand || 0));
       setSalaryPayoutAmount(String(userData.base_salary ?? 0));
+
+      const { data: agentsList } = await supabase
+        .from('portal_users')
+        .select('*')
+        .eq('role', 'AGENT')
+        .order('full_name', { ascending: true });
+      if (Array.isArray(agentsList)) {
+        setAllAgents(agentsList as SupabasePortalUser[]);
+      }
 
       // 1.2 Fetch client collections from payment_transactions matching both ID and full name
       let txns: SupabasePaymentTransaction[] = [];
@@ -718,40 +733,80 @@ export const AgentProfileView: React.FC<AgentProfileViewProps> = ({
                   <th className="py-3.5 px-4">Amount Collected</th>
                   <th className="py-3.5 px-4">Payment Mode</th>
                   <th className="py-3.5 px-4">Notes</th>
+                  <th className="py-3.5 px-4 text-right">Edit</th>
                 </tr>
               </thead>
               <tbody className="divide-y divide-slate-800/80 font-mono">
                 {filteredCollections.length === 0 ? (
                   <tr>
-                    <td colSpan={6} className="py-12 text-center text-slate-500 font-mono">
+                    <td colSpan={7} className="py-12 text-center text-slate-500 font-mono">
                       No customer collections recorded in {describeDateFilter(dateFilter)} for this field agent.
                     </td>
                   </tr>
                 ) : (
-                  filteredCollections.map((tx) => (
-                    <tr key={tx.id || Math.random()} className="hover:bg-slate-950/50 transition">
-                      <td className="py-3.5 px-4 text-slate-400">
-                        {tx.created_at ? new Date(tx.created_at).toLocaleString() : 'Recent'}
-                      </td>
-                      <td className="py-3.5 px-4 font-bold text-cyan-400">
-                        @{tx.subscriber_username}
-                      </td>
-                      <td className="py-3.5 px-4 text-slate-300">
-                        {tx.invoice_id || 'Direct'}
-                      </td>
-                      <td className="py-3.5 px-4 font-bold text-emerald-400 tabular-nums">
-                        {formatCurrency(Number(tx.amount_paid) || 0)}
-                      </td>
-                      <td className="py-3.5 px-4">
-                        <span className="px-2 py-0.5 rounded text-[10px] font-bold uppercase bg-slate-950 text-slate-300 border border-slate-800">
-                          {tx.payment_mode || tx.payment_method || 'CASH'}
-                        </span>
-                      </td>
-                      <td className="py-3.5 px-4 text-slate-400 truncate max-w-xs">
-                        {tx.notes || 'Verified field collection'}
-                      </td>
-                    </tr>
-                  ))
+                  filteredCollections.map((tx) => {
+                    const isSyntheticInvRow = String(tx.id || '').startsWith('inv-tx-');
+                    const actualRecordId = isSyntheticInvRow
+                      ? String(tx.id || '').replace(/^inv-tx-/, '')
+                      : String(tx.id || '');
+                    return (
+                      <tr key={tx.id || Math.random()} className="hover:bg-slate-950/50 transition">
+                        <td className="py-3.5 px-4 text-slate-400">
+                          {tx.payment_date || tx.created_at
+                            ? new Date(tx.payment_date || tx.created_at || '').toLocaleString()
+                            : 'Recent'}
+                        </td>
+                        <td className="py-3.5 px-4 font-bold text-cyan-400">
+                          @{tx.subscriber_username}
+                        </td>
+                        <td className="py-3.5 px-4 text-slate-300">
+                          {tx.invoice_id || 'Direct'}
+                        </td>
+                        <td className="py-3.5 px-4 font-bold text-emerald-400 tabular-nums">
+                          {formatCurrency(Number(tx.amount_paid) || 0)}
+                        </td>
+                        <td className="py-3.5 px-4">
+                          <span className="px-2 py-0.5 rounded text-[10px] font-bold uppercase bg-slate-950 text-slate-300 border border-slate-800">
+                            {tx.payment_mode || tx.payment_method || 'CASH'}
+                          </span>
+                        </td>
+                        <td className="py-3.5 px-4 text-slate-400 truncate max-w-xs">
+                          {tx.notes || 'Verified field collection'}
+                        </td>
+                        <td className="py-3.5 px-4 text-right">
+                          {actualRecordId && (
+                            <button
+                              type="button"
+                              onClick={() =>
+                                setEditingLedgerEntry({
+                                  uid: String(tx.id || actualRecordId),
+                                  recordId: actualRecordId,
+                                  sourceTable: isSyntheticInvRow ? 'invoices' : 'payment_transactions',
+                                  invoiceId: tx.invoice_id || null,
+                                  subscriberUsername: tx.subscriber_username,
+                                  agentId: tx.collected_by_id || agent.id,
+                                  agentName: tx.collected_by_name || agent.full_name,
+                                  entryType: 'COLLECTION',
+                                  amount: Number(tx.amount_paid) || 0,
+                                  previousAmount: tx.previous_amount ?? null,
+                                  paymentMethod: tx.payment_mode || tx.payment_method || 'Cash Handover',
+                                  collectedAt: tx.payment_date || tx.created_at || new Date().toISOString(),
+                                  remarks: tx.notes || '',
+                                  editedBy: tx.edited_by || null,
+                                  editedAt: tx.edited_at || null,
+                                  editReason: tx.edit_reason || null,
+                                })
+                              }
+                              className="px-2.5 py-1 rounded-lg bg-slate-800 hover:bg-slate-700 text-cyan-300 border border-slate-700 font-semibold text-xs inline-flex items-center gap-1 transition cursor-pointer"
+                            >
+                              <Edit className="w-3 h-3" />
+                              <span>Edit</span>
+                            </button>
+                          )}
+                        </td>
+                      </tr>
+                    );
+                  })
                 )}
               </tbody>
             </table>
@@ -771,12 +826,13 @@ export const AgentProfileView: React.FC<AgentProfileViewProps> = ({
                   <th className="py-3.5 px-4">Amount</th>
                   <th className="py-3.5 px-4">Handed Over To / Received By</th>
                   <th className="py-3.5 px-4">Audit Notes</th>
+                  <th className="py-3.5 px-4 text-right">Edit</th>
                 </tr>
               </thead>
               <tbody className="divide-y divide-slate-800/80 font-mono">
                 {filteredCashTransactions.length === 0 ? (
                   <tr>
-                    <td colSpan={5} className="py-12 text-center text-slate-500 font-mono">
+                    <td colSpan={6} className="py-12 text-center text-slate-500 font-mono">
                       No cash handovers or advance transactions recorded in {describeDateFilter(dateFilter)}.
                     </td>
                   </tr>
@@ -785,7 +841,6 @@ export const AgentProfileView: React.FC<AgentProfileViewProps> = ({
                     const isHandover = tx.transaction_type === 'CASH_HANDOVER';
                     const isAdvanceTaken = tx.transaction_type === 'ADVANCE_TAKEN';
                     const isAdvanceReturn = tx.transaction_type === 'ADVANCE_RETURN';
-                    const isSalary = tx.transaction_type === 'SALARY_PAYOUT';
 
                     return (
                       <tr key={tx.id || Math.random()} className="hover:bg-slate-950/50 transition">
@@ -815,6 +870,35 @@ export const AgentProfileView: React.FC<AgentProfileViewProps> = ({
                         </td>
                         <td className="py-3.5 px-4 text-slate-400 truncate max-w-sm">
                           {tx.notes || '—'}
+                        </td>
+                        <td className="py-3.5 px-4 text-right">
+                          {tx.id && (
+                            <button
+                              type="button"
+                              onClick={() =>
+                                setEditingLedgerEntry({
+                                  uid: `act-${tx.id}`,
+                                  recordId: String(tx.id),
+                                  sourceTable: 'agent_cash_transactions',
+                                  agentId: tx.agent_id || agent.id,
+                                  agentName: tx.agent_name || agent.full_name,
+                                  entryType: tx.transaction_type || 'CASH_HANDOVER',
+                                  amount: Number(tx.amount) || 0,
+                                  previousAmount: tx.previous_amount ?? null,
+                                  paymentMethod: tx.received_by || 'Admin',
+                                  collectedAt: tx.created_at || new Date().toISOString(),
+                                  remarks: tx.notes || '',
+                                  editedBy: tx.edited_by || null,
+                                  editedAt: tx.edited_at || null,
+                                  editReason: tx.edit_reason || null,
+                                })
+                              }
+                              className="px-2.5 py-1 rounded-lg bg-slate-800 hover:bg-slate-700 text-cyan-300 border border-slate-700 font-semibold text-xs inline-flex items-center gap-1 transition cursor-pointer"
+                            >
+                              <Edit className="w-3 h-3" />
+                              <span>Edit</span>
+                            </button>
+                          )}
                         </td>
                       </tr>
                     );
@@ -1116,6 +1200,18 @@ export const AgentProfileView: React.FC<AgentProfileViewProps> = ({
           </div>
         </div>
       )}
+
+      <EditLedgerEntryModal
+        entry={editingLedgerEntry}
+        agents={allAgents.length > 0 ? allAgents : [agent]}
+        editedBy={currentUser?.fullName ? `${currentUser.fullName} (@${currentUser.username})` : 'NOC Admin'}
+        onClose={() => setEditingLedgerEntry(null)}
+        onErrorToast={(errMsg) => showToast(`❌ ${errMsg}`, 'error')}
+        onVerifiedSuccess={async () => {
+          await fetchAgentProfile();
+          showToast('✅ Ledger updated in Supabase database', 'success');
+        }}
+      />
 
       {/* Edit Staff Profile Modal */}
       <EditStaffModal

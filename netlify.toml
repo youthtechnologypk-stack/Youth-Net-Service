@@ -5,9 +5,27 @@
 [functions]
   directory = "netlify/functions"
 
+[functions."sync-sessions"]
+  schedule = "*/2 * * * *"
+
+[functions."billing-expiry-check"]
+  schedule = "0 9 * * *"
+
 [[redirects]]
   from = "/api/whatsapp/webhook"
   to = "/.netlify/functions/whatsapp-webhook"
+  status = 200
+  force = true
+
+[[redirects]]
+  from = "/api/sync-sessions"
+  to = "/.netlify/functions/sync-sessions"
+  status = 200
+  force = true
+
+[[redirects]]
+  from = "/api/billing/run-expiry-check"
+  to = "/.netlify/functions/billing-expiry-check"
   status = 200
   force = true
 

@@ -43,6 +43,7 @@ import {
 } from 'recharts';
 import { EditUpstreamLinkModal } from './EditUpstreamLinkModal';
 import { AreaNodeManagerModal } from './AreaNodeManagerModal';
+import { PcqSubnetPoolManager } from './PcqSubnetPoolManager';
 import { safeMikrotikFetch } from '../services/mikrotikRestClient';
 import { useISP } from '../context/ISPContext';
 import { useAuth } from '../context/AuthContext';
@@ -154,10 +155,10 @@ export const CapacityPlannerView: React.FC = () => {
   const [areaSearch, setAreaSearch] = useState<string>('');
   const [showAllAreas, setShowAllAreas] = useState<boolean>(true);
 
-  const showToast = (text: string, type: 'success' | 'error' = 'success') => {
+  const showToast = useCallback((text: string, type: 'success' | 'error' = 'success') => {
     setSaveNotice({ text, type });
-    setTimeout(() => setSaveNotice(null), 4000);
-  };
+    setTimeout(() => setSaveNotice(null), 4500);
+  }, []);
 
   // Dedicated Supabase fetch for upstream_capacity_config (no localStorage override)
   const fetchUpstreamConfig = useCallback(async () => {
@@ -752,6 +753,13 @@ export const CapacityPlannerView: React.FC = () => {
           )}
         </div>
       </div>
+
+      {/* LIVE MIKROTIK PCQ & SUBNET POOL RATIO / AUTO-BURST MANAGER */}
+      <PcqSubnetPoolManager
+        activeRouter={activeRouter}
+        isAdmin={isAdmin}
+        onNotify={showToast}
+      />
 
       {/* 1. UPSTREAM CAPACITY & SATURATION METER */}
       <div className="bg-slate-900/90 border border-slate-800 rounded-xl p-5 space-y-5">

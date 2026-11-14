@@ -21,6 +21,7 @@ import {
   ShieldAlert,
   Gauge,
   Wallet,
+  MapPin,
 } from 'lucide-react';
 import { ActiveTab } from './Header';
 import { SystemRole, UserAccount } from '../types/auth';
@@ -133,6 +134,15 @@ export const Sidebar: React.FC<SidebarProps> = ({
       badge: `${onus.length} ONUs`,
       badgeColor: 'bg-emerald-950 text-emerald-300 border-emerald-800',
       roles: ['ADMIN', 'MANAGER'],
+    },
+    {
+      id: 'fiber_gis' as ActiveTab,
+      label: 'Fiber GIS & Area Map',
+      subtitle: 'OLT, FOSC Joints & FDB Ports',
+      icon: MapPin,
+      badge: 'FTTH GIS',
+      badgeColor: 'bg-sky-950 text-sky-300 border-sky-800',
+      roles: ['ADMIN', 'MANAGER', 'AGENT'],
     },
     {
       id: 'complaints' as ActiveTab,

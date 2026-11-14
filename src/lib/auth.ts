@@ -61,6 +61,7 @@ export function getTabFromPath(path: string): string | null {
   if (clean === 'settings') return 'settings';
   if (clean === 'architecture') return 'architecture';
   if (clean === 'logs' || clean === 'activity' || clean === 'audit') return 'logs';
+  if (clean === 'fiber-gis' || clean === 'fiber_gis' || clean === 'gis' || clean === 'map') return 'fiber_gis';
   if (clean === 'mobile') return 'mobile';
   if (clean === 'login') return 'login';
   return null;
@@ -80,6 +81,8 @@ export function getPathFromTab(tab: string): string {
       return '/profit-expenses';
     case 'logs':
       return '/logs';
+    case 'fiber_gis':
+      return '/fiber-gis';
     default:
       return `/${tab}`;
   }
@@ -110,6 +113,8 @@ export function isRouteAllowedForRole(role: SystemRole, routeOrTab: string): boo
       'profit_expenses',
       'profit-expenses',
       'olt', // Can view optical status
+      'fiber_gis',
+      'fiber-gis',
       'logs', // Can view audit trail
     ];
     // Explicitly forbidden for Manager
@@ -119,8 +124,8 @@ export function isRouteAllowedForRole(role: SystemRole, routeOrTab: string): boo
   }
 
   if (role === 'AGENT') {
-    // Allowed: /agent/portal, mobile simulator, tickets, cash collection, ont checker
-    const agentAllowed = ['agent', 'agent/portal', 'agent_portal', 'mobile', 'tickets', 'collections', 'ont_checker'];
+    // Allowed: /agent/portal, mobile simulator, tickets, cash collection, ont checker, fiber gis
+    const agentAllowed = ['agent', 'agent/portal', 'agent_portal', 'mobile', 'tickets', 'collections', 'ont_checker', 'fiber_gis', 'fiber-gis'];
     return agentAllowed.some((a) => clean === a || clean.includes(a));
   }
 

@@ -59,6 +59,8 @@ import {
   processIncomingWhatsAppMessage,
   verifyWebhookChallenge,
 } from './src/server/whatsappBotEngine.ts';
+import { syncSessionsFromMikrotik } from './src/server/sessionGeneratorEngine.ts';
+import { runExpirySweep } from './src/server/expirySweepEngine.ts';
 
 dotenv.config();
 
@@ -1776,6 +1778,129 @@ app.post('/api/mikrotik/kick', async (req: Request, res: Response) => {
     success: true,
     message: `PPPoE session for ${username || sessionId || 'user'} disconnected.`,
   });
+});
+
+/**
+ * GET / POST /api/sync-sessions
+ * Fast server-side PPPoE session generator & Supabase batch reconciler
+ */
+app.all('/api/sync-sessions', async (req: Request, res: Response) => {
+  res.removeHeader('www-authenticate');
+  res.removeHeader('WWW-Authenticate');
+
+  try {
+    const body = (req.body && typeof req.body === 'object' ? req.body : {}) as Record<string, any>;
+    const hostHeader = (req.headers['x-router-host'] || req.headers['x-router-ip'] || '') as string;
+    const portHeader = (req.headers['x-router-port'] || '') as string;
+    const sslHeader = (req.headers['x-router-ssl'] || '') as string;
+    const routerIdHeader = (req.headers['x-router-id'] || '') as string;
+
+    let routerHost = body.routerHost || hostHeader || undefined;
+    let routerPort = body.routerPort ? Number(body.routerPort) : portHeader ? Number(portHeader) : undefined;
+    let useSsl = body.useSsl !== undefined ? Boolean(body.useSsl) : sslHeader === 'true';
+    let authHeader = (req.headers['authorization'] as string | undefined) || undefined;
+
+    if (!authHeader || !authHeader.startsWith('Basic ')) {
+      try {
+        let creds = routerIdHeader ? await getRouterCredentials(routerIdHeader).catch(() => null) : null;
+        if (!creds) {
+          const routers = await getAllRouters().catch(() => []);
+          const matched =
+            (routerHost && routers.find((r) => r.ipAddress === routerHost || r.ip === routerHost)) ||
+            routers[0];
+          if (matched) {
+            if (!routerHost) routerHost = matched.ipAddress || matched.ip;
+            if (!routerPort) routerPort = matched.port || matched.apiPort;
+            if (matched.id) creds = await getRouterCredentials(matched.id).catch(() => null);
+          }
+          const user = creds?.username || matched?.username || process.env.MIKROTIK_USER || 'admin';
+          const pass = creds?.password || matched?.password || process.env.MIKROTIK_PASS || 'P@ssword@9595';
+          authHeader = `Basic ${Buffer.from(`${user}:${pass}`).toString('base64')}`;
+        } else {
+          const user = creds.username || process.env.MIKROTIK_USER || 'admin';
+          const pass = creds.password || process.env.MIKROTIK_PASS || 'P@ssword@9595';
+          authHeader = `Basic ${Buffer.from(`${user}:${pass}`).toString('base64')}`;
+        }
+      } catch {}
+    }
+
+    const result = await syncSessionsFromMikrotik({
+      routerHost: routerHost ? String(routerHost) : undefined,
+      routerPort: routerPort && !Number.isNaN(routerPort) ? routerPort : undefined,
+      useSsl,
+      authHeader,
+      activeSessions: Array.isArray(body.activeSessions) ? body.activeSessions : undefined,
+    });
+
+    res.status(result.success ? 200 : 502).json(result);
+  } catch (err: any) {
+    res.status(500).json({
+      success: false,
+      routerStatus: 'unreachable',
+      error: err?.message || 'Failed to sync sessions',
+    });
+  }
+});
+
+/**
+ * GET / POST /api/billing/run-expiry-check
+ * Server-side 2:00 PM PKT Expiry, 24h Grace & 16.16.16.0/24 Suspension Sweep
+ */
+app.all('/api/billing/run-expiry-check', async (req: Request, res: Response) => {
+  res.removeHeader('www-authenticate');
+  res.removeHeader('WWW-Authenticate');
+
+  try {
+    const body = (req.body && typeof req.body === 'object' ? req.body : {}) as Record<string, any>;
+    const hostHeader = (req.headers['x-router-host'] || req.headers['x-router-ip'] || '') as string;
+    const portHeader = (req.headers['x-router-port'] || '') as string;
+    const sslHeader = (req.headers['x-router-ssl'] || '') as string;
+    const routerIdHeader = (req.headers['x-router-id'] || '') as string;
+
+    let routerHost = body.routerHost || hostHeader || undefined;
+    let routerPort = body.routerPort ? Number(body.routerPort) : portHeader ? Number(portHeader) : undefined;
+    const useSsl = body.useSsl !== undefined ? Boolean(body.useSsl) : sslHeader === 'true';
+    let authHeader = (req.headers['authorization'] as string | undefined) || undefined;
+
+    if (!authHeader || !authHeader.startsWith('Basic ')) {
+      try {
+        let creds = routerIdHeader ? await getRouterCredentials(routerIdHeader).catch(() => null) : null;
+        if (!creds) {
+          const routers = await getAllRouters().catch(() => []);
+          const matched =
+            (routerHost && routers.find((r) => r.ipAddress === routerHost || r.ip === routerHost)) ||
+            routers[0];
+          if (matched) {
+            if (!routerHost) routerHost = matched.ipAddress || matched.ip;
+            if (!routerPort) routerPort = matched.port || matched.apiPort;
+            if (matched.id) creds = await getRouterCredentials(matched.id).catch(() => null);
+          }
+          const user = creds?.username || matched?.username || process.env.MIKROTIK_USER || 'admin';
+          const pass = creds?.password || matched?.password || process.env.MIKROTIK_PASS || 'P@ssword@9595';
+          authHeader = `Basic ${Buffer.from(`${user}:${pass}`).toString('base64')}`;
+        } else {
+          const user = creds.username || process.env.MIKROTIK_USER || 'admin';
+          const pass = creds.password || process.env.MIKROTIK_PASS || 'P@ssword@9595';
+          authHeader = `Basic ${Buffer.from(`${user}:${pass}`).toString('base64')}`;
+        }
+      } catch {}
+    }
+
+    const result = await runExpirySweep({
+      routerHost: routerHost ? String(routerHost) : undefined,
+      routerPort: routerPort && !Number.isNaN(routerPort) ? routerPort : undefined,
+      useSsl,
+      authHeader,
+      triggeredBy: body.triggeredBy || 'ADMIN',
+    });
+
+    res.status(result.success ? 200 : 500).json(result);
+  } catch (err: any) {
+    res.status(500).json({
+      success: false,
+      errors: [err?.message || 'Expiry sweep failed'],
+    });
+  }
 });
 
 /**

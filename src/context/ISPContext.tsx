@@ -68,6 +68,7 @@ import {
   removeMikrotikPppSecretRest,
   safeMikrotikFetch,
   notifyRouterAuthError,
+  triggerServerSessionSync,
   FetchRouterLiveResult,
 } from '../services/mikrotikRestClient';
 import { whatsappBusinessService } from '../services/whatsappBusinessService';
@@ -299,22 +300,24 @@ const STORAGE_KEY_DELETED_SECRETS = 'deleted_secret_usernames';
 const STORAGE_KEY_DELETED_PACKAGES = 'deleted_profile_ids';
 
 function sanitizeRouterPorts(r: MikrotikRouter): MikrotikRouter {
+  const isDefaultMikrotik =
+    r.ip === '202.142.186.150' || r.ipAddress === '202.142.186.150';
   let port = r.port || r.apiPort;
-  const useSsl = r.useSsl ?? (port === 443);
-  if (!port || port === 8728 || port === 8729) {
-    if (useSsl) {
-      port = 443;
-    } else if (r.ip === '202.142.186.150' || r.ipAddress === '202.142.186.150') {
-      port = 81;
-    } else {
-      port = 80;
-    }
+  let useSsl = r.useSsl ?? (port === 443);
+
+  if (isDefaultMikrotik && (!port || port === 443 || port === 8728 || port === 8729)) {
+    port = 81;
+    useSsl = false;
+  } else if (!port || port === 8728 || port === 8729) {
+    port = useSsl ? 443 : 80;
   }
+
   return {
     ...r,
     port,
     apiPort: port,
     useSsl,
+    proxyMode: 'proxy',
   };
 }
 
@@ -1095,7 +1098,29 @@ export const ISPProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
 
   const billingEngine = new BillingCronEngine(mikrotikService);
 
-  // Real-time live sync against physical MikroTik device via RouterOS v7 REST API over HTTPS (/rest/*)
+  const persistActiveSessionsToBackend = async (
+    sessions: ActiveSession[],
+    router: MikrotikRouter | undefined,
+    interfaces: RouterInterface[],
+    interfacesFresh: boolean
+  ) => {
+    const serverRes = await triggerServerSessionSync(
+      sessions,
+      router,
+      interfaces,
+      interfacesFresh
+    );
+    if (serverRes.fallbackNeeded) {
+      await sessionSyncEngine.syncCycle(sessions, interfaces, {
+        routerId: router?.id,
+        sessionsPolledOk: true,
+        interfacesFresh,
+        interfacesPolledAtMs: lastInterfaceSyncTimeRef.current || undefined,
+      });
+    }
+  };
+
+  // Real-time live sync against physical MikroTik device via /api/mikrotik proxy
   const syncSelectedRouterNow = async (explicitRouterId?: string): Promise<{
     success: boolean;
     activeCount: number;
@@ -1199,15 +1224,11 @@ export const ISPProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
             lastInterfaceSyncTimeRef.current = Date.now();
           }
           if (telemetryResult.sessionsPolledOk !== false) {
-            void sessionSyncEngine.syncCycle(
+            void persistActiveSessionsToBackend(
               telemetryResult.activeSessions,
+              targetRouter,
               hasFreshInterfaces ? telemetryResult.interfaces : routerInterfacesRef.current,
-              {
-                routerId: targetRouter.id,
-                sessionsPolledOk: telemetryResult.sessionsPolledOk,
-                interfacesFresh: hasFreshInterfaces,
-                interfacesPolledAtMs: lastInterfaceSyncTimeRef.current || undefined,
-              }
+              hasFreshInterfaces
             );
           }
 
@@ -1568,12 +1589,12 @@ export const ISPProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
           }
 
           if (result.sessionsPolledOk !== false) {
-            void sessionSyncEngine.syncCycle(result.activeSessions, effectiveInterfaces, {
-              routerId: selectedRouterId,
-              sessionsPolledOk: result.sessionsPolledOk,
-              interfacesFresh: polledFreshInterfaces,
-              interfacesPolledAtMs: lastInterfaceSyncTimeRef.current || undefined,
-            });
+            void persistActiveSessionsToBackend(
+              result.activeSessions,
+              targetRouter,
+              effectiveInterfaces,
+              polledFreshInterfaces
+            );
           }
 
           if (result.traffic && isViewingTrafficWidget) {
@@ -1605,13 +1626,14 @@ export const ISPProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
               )
             );
             setActiveSessions([...result.activeSessions]);
+            updateRollingSessionHistory(result.activeSessions);
             if (result.sessionsPolledOk !== false) {
-              void sessionSyncEngine.syncCycle(result.activeSessions, routerInterfacesRef.current, {
-                routerId: selectedRouterId,
-                sessionsPolledOk: result.sessionsPolledOk,
-                interfacesFresh: false,
-                interfacesPolledAtMs: lastInterfaceSyncTimeRef.current || undefined,
-              });
+              void persistActiveSessionsToBackend(
+                result.activeSessions,
+                targetRouter,
+                routerInterfacesRef.current,
+                false
+              );
             }
           } else {
             const errorMsg =
@@ -1649,8 +1671,8 @@ export const ISPProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
 
     const startPolling = () => {
       if (pollTimer) clearInterval(pollTimer);
-      // Relaxed 20-second interval to prevent RouterOS REST session flooding
-      pollTimer = setInterval(pollLiveTraffic, 20000);
+      // 25-second interval with inFlight mutex lock to prevent Netlify 10s serverless timeout pile-up
+      pollTimer = setInterval(pollLiveTraffic, 25000);
     };
 
     const stopPolling = () => {
@@ -1681,7 +1703,7 @@ export const ISPProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
       window.addEventListener('focus', handleVisibilityChange);
     }
 
-    // Initial poll and start 20s interval
+    // Initial poll and start 25s interval
     if (typeof document === 'undefined' || !document.hidden) {
       pollLiveTraffic();
       startPolling();
@@ -2775,11 +2797,7 @@ export const ISPProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
 
   const refreshRouterHealth = async (routerId: string) => {
     try {
-      const res = await fetch(`/api/routers/${routerId}/test`, { method: 'POST' });
-      const data = await safeResponseJson(res);
-      if (data.success && data.router) {
-        setRouters((prev) => prev.map((r) => (r.id === routerId ? data.router : r)));
-      }
+      await syncSelectedRouterNow(routerId);
     } catch (err) {
       console.error('Error refreshing router health:', err);
     }

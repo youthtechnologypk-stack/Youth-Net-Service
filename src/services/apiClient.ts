@@ -382,8 +382,32 @@ class ApiClient {
       };
     }
 
+    const contentType = (response.headers.get('content-type') || '').toLowerCase();
+    const rawText = await response.text().catch(() => '');
+    if (!rawText) {
+      return {
+        success: true,
+        status: response.status,
+        data: {} as T,
+        message: 'Success',
+      };
+    }
+
+    if (
+      contentType.includes('text/html') ||
+      rawText.trim().startsWith('<!DOCTYPE') ||
+      rawText.trim().startsWith('<html')
+    ) {
+      return {
+        success: false,
+        status: 502,
+        error: 'Proxy returned HTML instead of RouterOS JSON',
+        message: 'Proxy returned HTML instead of RouterOS JSON',
+      };
+    }
+
     try {
-      const data = await response.json();
+      const data = JSON.parse(rawText);
       return {
         success: true,
         status: response.status,
@@ -392,10 +416,10 @@ class ApiClient {
       };
     } catch {
       return {
-        success: true,
-        status: response.status,
-        data: {} as T,
-        message: 'Success',
+        success: false,
+        status: 502,
+        error: 'RouterOS proxy returned invalid non-JSON payload',
+        message: 'RouterOS proxy returned invalid non-JSON payload',
       };
     }
   }

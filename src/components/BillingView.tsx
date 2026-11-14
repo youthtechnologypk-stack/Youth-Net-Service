@@ -159,7 +159,7 @@ export const BillingView: React.FC<BillingViewProps> = ({
       ] = await Promise.all([
         supabase.from('portal_users').select('*').eq('role', 'AGENT'),
         supabase.from('portal_users').select('*').eq('role', 'CLIENT'),
-        supabase.from('payment_transactions').select('*').order('created_at', { ascending: false }),
+        supabase.from('payment_transactions').select('*').order('payment_date', { ascending: false }),
         fetchPaymentAccounts(),
         fetchWhatsappBillingConfig(),
       ]);
@@ -323,7 +323,10 @@ export const BillingView: React.FC<BillingViewProps> = ({
 
       // Immediately restore subscriber ACTIVE status & MikroTik active PPPoE package profile on PAID
       if (newStatus === 'PAID') {
-        await restoreSubscriberOnInvoicePaid(selectedInvoice.subscriber_username);
+        await restoreSubscriberOnInvoicePaid(selectedInvoice.subscriber_username, {
+          triggeredBy: 'ADMIN',
+          notes: `Payment recorded on Invoice #${selectedInvoice.invoice_no} (${paidPaymentMethod})`,
+        });
       }
 
       // 2. Update collecting agent's cash_in_hand in portal_users by ONLY enteredVal
@@ -361,8 +364,9 @@ export const BillingView: React.FC<BillingViewProps> = ({
           collected_by_id: collectorId,
           collected_by_name: collectorName,
           amount_paid: enteredVal,
-          payment_method: paidPaymentMethod,
-          created_at: nowIso,
+          payment_mode: paidPaymentMethod,
+          payment_date: nowIso,
+          notes: `Billing collection for Invoice #${selectedInvoice.invoice_no}`,
         }]);
 
       if (txError) {
@@ -452,7 +456,10 @@ export const BillingView: React.FC<BillingViewProps> = ({
       }
 
       if (editStatus === 'PAID') {
-        await restoreSubscriberOnInvoicePaid(invoiceToEdit.subscriber_username);
+        await restoreSubscriberOnInvoicePaid(invoiceToEdit.subscriber_username, {
+          triggeredBy: 'ADMIN',
+          notes: `Invoice #${invoiceToEdit.invoice_no} updated to PAID`,
+        });
       }
 
       // Update local state immediately

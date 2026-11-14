@@ -86,7 +86,7 @@ export const ReceivingVsDuesChart: React.FC<ReceivingVsDuesChartProps> = ({
     try {
       const [invRes, txRes] = await Promise.all([
         supabase.from('invoices').select('*').order('created_at', { ascending: false }),
-        supabase.from('payment_transactions').select('*').order('created_at', { ascending: false }),
+        supabase.from('payment_transactions').select('*').order('payment_date', { ascending: false }),
       ]);
       if (Array.isArray(invRes.data)) setFetchedInvoices(invRes.data as SupabaseInvoice[]);
       if (Array.isArray(txRes.data)) setFetchedPayments(txRes.data as SupabasePaymentTransaction[]);

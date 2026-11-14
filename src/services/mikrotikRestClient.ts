@@ -165,10 +165,10 @@ export async function fetchMikrotikLiveTelemetry(
         : Promise.resolve({ success: true, activeSessions: options?.cachedSessions || [], error: undefined });
 
     const ifacesPromise = options?.pollTraffic !== false
-      ? apiClient.get<any[]>('/interface', { router: activeRouter, signal: options?.signal, timeoutMs: 5000 })
+      ? apiClient.get<any[]>('/interface', { router: activeRouter, signal: options?.signal, timeoutMs: 7000 })
       : Promise.resolve({ success: true, data: options?.cachedInterfaces || [], error: undefined as string | undefined });
 
-    const resourcePromise = apiClient.get<any>('/system/resource', { router: activeRouter, signal: options?.signal, timeoutMs: 5000 });
+    const resourcePromise = apiClient.get<any>('/system/resource', { router: activeRouter, signal: options?.signal, timeoutMs: 7000 });
 
     const [sessionsRes, ifacesRes, resRes] = await Promise.all([
       sessionsPromise,
@@ -186,8 +186,8 @@ export async function fetchMikrotikLiveTelemetry(
     }
 
     // ACCURATE ONLINE / HEALTH CHECK:
-    // A router is considered ONLINE if ANY endpoint (/ppp/active, /interface, or /system/resource) responded with valid data.
-    // A router must NOT be marked "UNREACHABLE" if /ppp/active or /interface successfully returned valid active records.
+    // Mark router ONLINE immediately whenever /api/mikrotik/... returns HTTP 200 with valid RouterOS JSON
+    // (system/resource or ppp/active or interface).
     const rData = resRes.success && resRes.data
       ? (Array.isArray(resRes.data) ? resRes.data[0] : resRes.data)
       : null;
@@ -195,7 +195,12 @@ export async function fetchMikrotikLiveTelemetry(
     const hasValidResource = Boolean(
       resRes.success &&
       rData &&
-      (rData['cpu-load'] !== undefined || rData.uptime !== undefined || rData['board-name'] !== undefined)
+      typeof rData === 'object' &&
+      (rData['cpu-load'] !== undefined ||
+        rData.uptime !== undefined ||
+        rData['board-name'] !== undefined ||
+        rData.version !== undefined ||
+        rData['free-memory'] !== undefined)
     );
 
     const hasValidSessions = Boolean(
@@ -473,4 +478,91 @@ export async function monitorInterfaceTraffic(
 ): Promise<{ success: boolean; rxMbps: number; txMbps: number; error?: string }> {
   const targetInterface = (activeRouter as any)?.wanInterface || 'WAN3';
   return monitorInterfaceTrafficRest(activeRouter, targetInterface, signal);
+}
+
+/**
+ * 10. Fast Server-Side PPPoE Session Generator (/api/sync-sessions)
+ * Triggers batch Supabase upsert/insert/disconnect without blocking the browser.
+ */
+export async function triggerServerSessionSync(
+  activeSessions: ActiveSession[],
+  activeRouter?: RouterAuthInfo,
+  interfaces: RouterInterface[] = [],
+  interfacesFresh: boolean = false
+): Promise<{ success: boolean; fallbackNeeded?: boolean }> {
+  if (typeof window === 'undefined') {
+    return { success: false, fallbackNeeded: true };
+  }
+
+  const auth = getActiveRouterAuth(activeRouter);
+  const resolved = resolveRestHostAndPort(activeRouter);
+
+  const compactSessions = activeSessions.map((s) => {
+    const uname = (s.username || '').trim().toLowerCase();
+    const matchedIface = interfacesFresh
+      ? interfaces.find((i) => {
+          const n = (i.name || '').trim().toLowerCase();
+          return n === `<pppoe-${uname}>` || n === `pppoe-${uname}`;
+        })
+      : undefined;
+    const rawBytesIn = Math.max(
+      0,
+      Number(s.rawBytesIn || 0),
+      Number(matchedIface?.rxBytes || 0)
+    );
+    const rawBytesOut = Math.max(
+      0,
+      Number(s.rawBytesOut || 0),
+      Number(matchedIface?.txBytes || 0)
+    );
+    return {
+      '.id': (s as any)['.id'] || s.id || '',
+      name: s.username,
+      address: s.address,
+      'caller-id': s.callerId,
+      uptime: s.uptime,
+      rawBytesIn,
+      rawBytesOut,
+    };
+  });
+
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), 5000);
+  try {
+    const res = await fetch('/api/sync-sessions', {
+      method: 'POST',
+      credentials: 'omit',
+      signal: controller.signal,
+      headers: {
+        'Content-Type': 'application/json',
+        Accept: 'application/json',
+        Authorization: auth.authHeader,
+        'x-router-host': resolved.host,
+        'x-router-ip': resolved.host,
+        'x-router-port': String(resolved.port),
+        'x-router-ssl': resolved.useSsl ? 'true' : 'false',
+        'x-router-id': activeRouter?.id || '',
+      },
+      body: JSON.stringify({
+        routerHost: resolved.host,
+        routerPort: resolved.port,
+        useSsl: resolved.useSsl,
+        activeSessions: compactSessions,
+      }),
+    });
+
+    if (!res.ok) {
+      return { success: false, fallbackNeeded: true };
+    }
+    const contentType = (res.headers.get('content-type') || '').toLowerCase();
+    if (!contentType.includes('application/json')) {
+      return { success: false, fallbackNeeded: true };
+    }
+    const json = await res.json();
+    return { success: Boolean(json?.success), fallbackNeeded: !json?.success };
+  } catch {
+    return { success: false, fallbackNeeded: true };
+  } finally {
+    clearTimeout(timer);
+  }
 }

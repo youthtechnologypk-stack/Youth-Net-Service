@@ -51,6 +51,7 @@ import { ReceiveCashHandoverModal } from './ReceiveCashHandoverModal';
 import { AddOrEditAgentModal } from './AddOrEditAgentModal';
 import { RevenueTrendChart } from './RevenueTrendChart';
 import { whatsappBusinessService, WhatsAppAuditRecord } from '../services/whatsappBusinessService';
+import { restoreSubscriberOnInvoicePaid } from '../lib/billingAndNetwork';
 
 export interface BillingManagementProps {
   onOpenReceiptModal?: (invoice: Invoice) => void;
@@ -534,6 +535,15 @@ export const BillingManagement: React.FC<BillingManagementProps> = ({
         supabase.from('invoices').update({ status: 'PAID', paid_at: new Date().toISOString() }).eq('id', invoice.id);
       } else {
         supabase.from('invoices').update({ status: 'PAID', paid_at: new Date().toISOString() }).eq('invoice_no', invoice.invoiceNumber);
+      }
+
+      const custNameKey = (invoice?.customerName || '').toLowerCase();
+      const linkedCust = customerMap.get(invoice?.customerId) || (custNameKey ? customerMap.get(custNameKey) : undefined);
+      if (linkedCust?.pppoeUsername) {
+        void restoreSubscriberOnInvoicePaid(linkedCust.pppoeUsername, {
+          triggeredBy: 'ADMIN',
+          notes: `NOC Studio payment recorded for Invoice #${invoice.invoiceNumber}`,
+        });
       }
 
       // If collector is an agent, credit cash_in_hand in portal_users

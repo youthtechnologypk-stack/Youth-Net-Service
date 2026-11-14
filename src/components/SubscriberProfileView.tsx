@@ -276,7 +276,7 @@ export const SubscriberProfileView: React.FC<SubscriberProfileViewProps> = ({
         .from('payment_transactions')
         .select('*')
         .eq('subscriber_username', username)
-        .order('created_at', { ascending: false });
+        .order('payment_date', { ascending: false });
 
       if (txData) {
         setTransactions(txData as SupabasePaymentTransaction[]);
@@ -875,7 +875,10 @@ export const SubscriberProfileView: React.FC<SubscriberProfileViewProps> = ({
       await supabase.from('invoices').update(invUpdate).eq('id', inv.id);
 
       if (newStatus === 'PAID') {
-        await restoreSubscriberOnInvoicePaid(username);
+        await restoreSubscriberOnInvoicePaid(username, {
+          triggeredBy: 'ADMIN',
+          notes: `Payment recorded via 360 Profile on Invoice #${inv.invoice_no}`,
+        });
       }
 
       // 2. Increment collecting agent cash

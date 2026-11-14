@@ -179,7 +179,7 @@ export const ProfitLossLedgerView: React.FC = () => {
         supabase
           .from('payment_transactions')
           .select('*')
-          .order('created_at', { ascending: false }),
+          .order('payment_date', { ascending: false }),
         supabase
           .from('agent_cash_transactions')
           .select('*')

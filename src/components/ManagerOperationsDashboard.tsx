@@ -19,6 +19,9 @@ import {
   Server,
   Phone,
   Wrench,
+  FileText,
+  Copy,
+  Check,
 } from 'lucide-react';
 import { useISP } from '../context/ISPContext';
 import { useCurrency } from '../context/CurrencyContext';
@@ -33,6 +36,7 @@ import {
   SupabaseInvoice,
   SupabasePaymentTransaction,
   SupabaseAgentCashTransaction,
+  SupabaseRecoveryLedgerRow,
 } from '../services/supabaseClient';
 import {
   PARENT_FLEET_ROUTER,
@@ -54,6 +58,13 @@ import {
 } from '../lib/dateFilter';
 import { safeMikrotikFetch } from '../services/mikrotikRestClient';
 import { AgentProfileView } from './AgentProfileView';
+import { EditLedgerEntryModal } from './EditLedgerEntryModal';
+import {
+  FieldAuditLedgerRow,
+  buildFieldAuditLedgerRows,
+  computeDatabaseLedgerTotals,
+} from '../lib/ledgerAuditPersistence';
+import { LEDGER_AUDIT_MIGRATION_SQL } from '../lib/ledgerMigrationSql';
 
 interface ManagerOperationsDashboardProps {
   onOpenTicketModal: () => void;
@@ -117,6 +128,7 @@ export const ManagerOperationsDashboard: React.FC<ManagerOperationsDashboardProp
   const [invoices, setInvoices] = useState<SupabaseInvoice[]>([]);
   const [paymentTxns, setPaymentTxns] = useState<SupabasePaymentTransaction[]>([]);
   const [cashLedger, setCashLedger] = useState<SupabaseAgentCashTransaction[]>([]);
+  const [recoveryLedgerRows, setRecoveryLedgerRows] = useState<SupabaseRecoveryLedgerRow[]>([]);
   const [networkAreas, setNetworkAreas] = useState<NetworkAreaNode[]>([]);
   const [liveSessions, setLiveSessions] = useState<LiveMikrotikSession[]>([]);
   const [mikrotikSecrets, setMikrotikSecrets] = useState<LiveMikrotikSecret[]>([]);
@@ -136,9 +148,16 @@ export const ManagerOperationsDashboard: React.FC<ManagerOperationsDashboardProp
   const [selectedAgentLedger, setSelectedAgentLedger] = useState<SupabasePortalUser | null>(null);
   const [dateFilter, setDateFilter] = useState<DateFilterState>(() => createDefaultDateFilter('month'));
   const [isAreaManagerOpen, setIsAreaManagerOpen] = useState<boolean>(false);
-  const [toastNotice, setToastNotice] = useState<string | null>(null);
+  const [toastNotice, setToastNotice] = useState<{ text: string; type: 'success' | 'error' } | null>(null);
   const [kickingUsername, setKickingUsername] = useState<string | null>(null);
   const [approvingAgentId, setApprovingAgentId] = useState<string | null>(null);
+
+  // Verified Field Agent Audit Ledger edit modal state
+  const [editingLedgerEntry, setEditingLedgerEntry] = useState<FieldAuditLedgerRow | null>(null);
+  const [ledgerAgentFilter, setLedgerAgentFilter] = useState<string>('ALL');
+  const [ledgerSearch, setLedgerSearch] = useState<string>('');
+  const [ledgerSchemaNotice, setLedgerSchemaNotice] = useState<boolean>(false);
+  const [copiedLedgerSql, setCopiedLedgerSql] = useState<boolean>(false);
 
   // Edit subscriber state (persisted to Supabase portal_users)
   const [editingSubscriber, setEditingSubscriber] = useState<MergedOperationSubscriber | null>(null);
@@ -147,9 +166,11 @@ export const ManagerOperationsDashboard: React.FC<ManagerOperationsDashboardProp
   const [editArea, setEditArea] = useState('');
   const [isSavingSub, setIsSavingSub] = useState(false);
 
-  const showToast = (msg: string) => {
-    setToastNotice(msg);
-    setTimeout(() => setToastNotice(null), 4000);
+  const showToast = (msg: string, type: 'success' | 'error' = 'success') => {
+    setToastNotice({ text: msg, type });
+    setTimeout(() => {
+      setToastNotice((prev) => (prev?.text === msg ? null : prev));
+    }, 5500);
   };
 
   const fetchOperationsData = useCallback(async (showSpinner = false) => {
@@ -161,6 +182,7 @@ export const ManagerOperationsDashboard: React.FC<ManagerOperationsDashboardProp
         invoicesRes,
         paymentsRes,
         ledgerRes,
+        recoveryRes,
         areasList,
         sessionsRes,
         secretsRes,
@@ -168,8 +190,9 @@ export const ManagerOperationsDashboard: React.FC<ManagerOperationsDashboardProp
         supabase.from('portal_users').select('*').order('full_name', { ascending: true }),
         supabase.from('tickets').select('*').order('created_at', { ascending: false }),
         supabase.from('invoices').select('*').order('created_at', { ascending: false }),
-        supabase.from('payment_transactions').select('*').order('created_at', { ascending: false }),
+        supabase.from('payment_transactions').select('*').order('payment_date', { ascending: false }),
         supabase.from('agent_cash_transactions').select('*').order('created_at', { ascending: false }),
+        supabase.from('recovery_ledger').select('*').order('collected_at', { ascending: false }),
         fetchNetworkAreas(),
         safeMikrotikFetch('/api/mikrotik/ppp/active').then((r) => (r.ok ? r.json() : [])).catch(() => []),
         safeMikrotikFetch('/api/mikrotik/ppp/secret').then((r) => (r.ok ? r.json() : [])).catch(() => []),
@@ -197,6 +220,9 @@ export const ManagerOperationsDashboard: React.FC<ManagerOperationsDashboardProp
       }
       if (Array.isArray(ledgerRes.data)) {
         setCashLedger(ledgerRes.data as SupabaseAgentCashTransaction[]);
+      }
+      if (Array.isArray(recoveryRes.data)) {
+        setRecoveryLedgerRows(recoveryRes.data as SupabaseRecoveryLedgerRow[]);
       }
       if (Array.isArray(areasList)) {
         setNetworkAreas(areasList);
@@ -687,31 +713,40 @@ export const ManagerOperationsDashboard: React.FC<ManagerOperationsDashboardProp
     if (amount <= 0) return;
     setApprovingAgentId(agent.id);
     try {
-      const { error } = await supabase.from('agent_cash_transactions').insert([
-        {
-          agent_id: agent.id,
-          agent_name: agent.full_name,
-          agent_username: agent.username,
-          transaction_type: 'CASH_HANDOVER',
-          amount: Number(amount),
-          received_by: `${managerName} (@${managerUsername})`,
-          notes: `Approved cash vault handover by ${managerName}`,
-          created_at: new Date().toISOString(),
-        },
-      ]);
+      const { data: insertedRow, error } = await supabase
+        .from('agent_cash_transactions')
+        .insert([
+          {
+            agent_id: agent.id,
+            agent_name: agent.full_name,
+            transaction_type: 'CASH_HANDOVER',
+            amount: Number(amount),
+            received_by: `${managerName} (@${managerUsername})`,
+            notes: `Approved cash vault handover by ${managerName}`,
+            created_at: new Date().toISOString(),
+          },
+        ])
+        .select()
+        .single();
 
-      if (error) {
-        showToast(`Handover error: ${error.message}`);
+      if (error || !insertedRow) {
+        showToast(`Handover error: ${error?.message || 'Blocked by RLS policy'}`, 'error');
         return;
       }
 
-      await supabase
+      const { error: updErr } = await supabase
         .from('portal_users')
         .update({ cash_in_hand: 0 })
-        .eq('id', agent.id);
+        .eq('id', agent.id)
+        .select('id')
+        .single();
 
-      showToast(`Approved cash handover of ${formatCurrency(amount)} from ${agent.full_name}.`);
-      await fetchOperationsData();
+      if (updErr) {
+        showToast(`Handover recorded, but agent vault reset failed: ${updErr.message}`, 'error');
+      } else {
+        showToast(`✅ Approved cash handover of ${formatCurrency(amount)} from ${agent.full_name}.`, 'success');
+      }
+      await fetchOperationsData(true);
     } finally {
       setApprovingAgentId(null);
     }
@@ -724,41 +759,96 @@ export const ManagerOperationsDashboard: React.FC<ManagerOperationsDashboardProp
     try {
       let errorMsg: string | null = null;
       if (editingSubscriber.isMikrotikOnly) {
-        const { error } = await supabase.from('portal_users').insert([
-          {
-            username: editingSubscriber.username,
-            full_name: editingSubscriber.full_name || editingSubscriber.username,
-            role: 'CLIENT',
-            phone: editPhone.trim(),
-            address: editAddress.trim(),
-            area: editArea.trim() || 'Saddar Core',
-            package_speed: editingSubscriber.mikrotikProfile || editingSubscriber.package_speed || 'default',
-            account_status: editingSubscriber.account_status || 'ACTIVE',
-          },
-        ]);
+        const { data, error } = await supabase
+          .from('portal_users')
+          .insert([
+            {
+              username: editingSubscriber.username,
+              full_name: editingSubscriber.full_name || editingSubscriber.username,
+              role: 'CLIENT',
+              phone: editPhone.trim(),
+              address: editAddress.trim(),
+              area: editArea.trim() || 'Saddar Core',
+              package_speed: editingSubscriber.mikrotikProfile || editingSubscriber.package_speed || 'default',
+              account_status: editingSubscriber.account_status || 'ACTIVE',
+            },
+          ])
+          .select('id')
+          .single();
         if (error) errorMsg = error.message;
+        else if (!data) errorMsg = 'Supabase insert blocked by RLS policy.';
       } else {
-        const { error } = await supabase
+        const { data, error } = await supabase
           .from('portal_users')
           .update({
             phone: editPhone.trim(),
             address: editAddress.trim(),
             area: editArea.trim(),
           })
-          .eq('id', editingSubscriber.id);
+          .eq('id', editingSubscriber.id)
+          .select('id')
+          .single();
         if (error) errorMsg = error.message;
+        else if (!data) errorMsg = 'Supabase update blocked by RLS policy.';
       }
 
       if (errorMsg) {
-        showToast(`Failed to update subscriber: ${errorMsg}`);
+        showToast(`Failed to update subscriber: ${errorMsg}`, 'error');
         return;
       }
 
-      showToast(`Updated subscriber profile for ${editingSubscriber.full_name} in Supabase.`);
+      showToast(`Updated subscriber profile for ${editingSubscriber.full_name} in Supabase.`, 'success');
       setEditingSubscriber(null);
-      await fetchOperationsData();
+      await fetchOperationsData(true);
     } finally {
       setIsSavingSub(false);
+    }
+  };
+
+  const unifiedAuditLedger = useMemo(() => {
+    const allRows = buildFieldAuditLedgerRows({
+      recoveryLedgerRows,
+      paymentTxns,
+      cashLedger,
+      invoices,
+      agents,
+    });
+    const q = ledgerSearch.trim().toLowerCase();
+    return allRows.filter((row) => {
+      if (!matchesDateFilter(row.collectedAt, dateFilter)) return false;
+      if (ledgerAgentFilter !== 'ALL' && row.agentId !== ledgerAgentFilter) return false;
+      if (q) {
+        const matchesQ =
+          (row.agentName || '').toLowerCase().includes(q) ||
+          (row.subscriberUsername || '').toLowerCase().includes(q) ||
+          (row.invoiceNo || '').toLowerCase().includes(q) ||
+          (row.paymentMethod || '').toLowerCase().includes(q) ||
+          (row.remarks || '').toLowerCase().includes(q);
+        if (!matchesQ) return false;
+      }
+      return true;
+    });
+  }, [recoveryLedgerRows, paymentTxns, cashLedger, invoices, agents, dateFilter, ledgerAgentFilter, ledgerSearch]);
+
+  const databaseLedgerTotals = useMemo(
+    () =>
+      computeDatabaseLedgerTotals({
+        invoices: dateFilteredInvoices,
+        paymentTxns: dateFilteredPayments,
+        cashLedger: dateFilteredCashLedger,
+        recoveryLedgerRows,
+      }),
+    [dateFilteredInvoices, dateFilteredPayments, dateFilteredCashLedger, recoveryLedgerRows]
+  );
+
+  const handleCopyLedgerSql = async () => {
+    try {
+      await navigator.clipboard.writeText(LEDGER_AUDIT_MIGRATION_SQL);
+      setCopiedLedgerSql(true);
+      setTimeout(() => setCopiedLedgerSql(false), 3000);
+      showToast('Copied Ledger RLS & Audit SQL migration to clipboard.', 'success');
+    } catch {
+      showToast('Copy failed — open supabase/migrations/20261114_ledger_audit_rls.sql.', 'error');
     }
   };
 
@@ -785,9 +875,19 @@ export const ManagerOperationsDashboard: React.FC<ManagerOperationsDashboardProp
     <div className="space-y-6 text-xs font-sans max-w-7xl mx-auto">
       {/* Toast Alert */}
       {toastNotice && (
-        <div className="p-3 bg-emerald-950/90 border border-emerald-600 rounded-xl text-emerald-200 text-xs font-mono flex items-center gap-2 animate-fadeIn shadow-lg">
-          <CheckCircle2 className="w-4 h-4 text-emerald-400 shrink-0" />
-          <span>{toastNotice}</span>
+        <div
+          className={`p-3.5 rounded-xl border text-xs font-mono flex items-center gap-2 animate-fadeIn shadow-lg ${
+            toastNotice.type === 'error'
+              ? 'bg-rose-950/95 border-rose-600 text-rose-200'
+              : 'bg-emerald-950/90 border-emerald-600 text-emerald-200'
+          }`}
+        >
+          {toastNotice.type === 'error' ? (
+            <AlertTriangle className="w-4 h-4 text-rose-400 shrink-0" />
+          ) : (
+            <CheckCircle2 className="w-4 h-4 text-emerald-400 shrink-0" />
+          )}
+          <span>{toastNotice.text}</span>
         </div>
       )}
 
@@ -1499,6 +1599,179 @@ export const ManagerOperationsDashboard: React.FC<ManagerOperationsDashboardProp
               </div>
             )}
           </div>
+
+          {/* Field Agent Audit Ledger Table (Verified PostgreSQL Persistence + Edit Modal) */}
+          <div className="bg-slate-900 border border-slate-800 rounded-xl p-5 shadow-lg space-y-4">
+            <div className="flex flex-col lg:flex-row lg:items-center justify-between gap-3 border-b border-slate-800 pb-3">
+              <div>
+                <h3 className="font-bold text-white text-sm flex items-center gap-2">
+                  <FileText className="w-4 h-4 text-cyan-400 shrink-0" />
+                  <span>Field Agent Audit Ledger ({unifiedAuditLedger.length})</span>
+                </h3>
+                <p className="text-slate-400 text-xs mt-0.5">
+                  Every edit executes a verified Supabase <code className="text-cyan-400">.update().eq(&#39;id&#39;).select()</code> commit and re-fetches fresh totals from PostgreSQL.
+                </p>
+              </div>
+
+              <div className="flex flex-wrap items-center gap-2 font-mono text-xs">
+                <div className="px-3 py-1.5 rounded-lg bg-slate-950 border border-slate-800">
+                  <span className="text-slate-400">Cash in Hand: </span>
+                  <strong className="text-cyan-300 tabular-nums">
+                    {formatCurrency(totalAgentCashInHand)}
+                  </strong>
+                </div>
+                <div className="px-3 py-1.5 rounded-lg bg-slate-950 border border-slate-800">
+                  <span className="text-slate-400">Total Collected: </span>
+                  <strong className="text-emerald-400 tabular-nums">
+                    {formatCurrency(databaseLedgerTotals.totalCollected)}
+                  </strong>
+                </div>
+                <div className="px-3 py-1.5 rounded-lg bg-slate-950 border border-slate-800">
+                  <span className="text-slate-400">Billed MRR: </span>
+                  <strong className="text-amber-300 tabular-nums">
+                    {formatCurrency(databaseLedgerTotals.billedRevenueMrr)}
+                  </strong>
+                </div>
+              </div>
+            </div>
+
+            {ledgerSchemaNotice && (
+              <div className="p-3 rounded-xl bg-amber-950/50 border border-amber-700 text-amber-100 flex flex-col sm:flex-row sm:items-center justify-between gap-2 text-xs">
+                <span>
+                  Dedicated audit columns (<code className="text-white">previous_amount</code>, <code className="text-white">edited_by</code>, <code className="text-white">edited_at</code>) are missing in PostgreSQL — audit trail was persisted inside <code className="text-white">notes</code>. Run migration SQL for dedicated columns.
+                </span>
+                <button
+                  type="button"
+                  onClick={handleCopyLedgerSql}
+                  className="px-3 py-1.5 rounded-lg bg-amber-500 hover:bg-amber-400 text-slate-950 font-bold inline-flex items-center gap-1.5 transition cursor-pointer shrink-0"
+                >
+                  {copiedLedgerSql ? <Check className="w-3.5 h-3.5" /> : <Copy className="w-3.5 h-3.5" />}
+                  <span>{copiedLedgerSql ? 'Copied SQL' : 'Copy RLS & Audit SQL'}</span>
+                </button>
+              </div>
+            )}
+
+            <div className="flex flex-wrap items-center gap-2.5">
+              <div className="relative flex-1 min-w-[200px]">
+                <Search className="w-3.5 h-3.5 text-slate-400 absolute left-3 top-1/2 -translate-y-1/2 pointer-events-none" />
+                <input
+                  type="text"
+                  value={ledgerSearch}
+                  onChange={(e) => setLedgerSearch(e.target.value)}
+                  placeholder="Search agent, subscriber, invoice #, or remarks..."
+                  className="w-full bg-slate-950 border border-slate-700 rounded-lg pl-8 pr-3 py-1.5 text-xs text-white placeholder-slate-500 focus:outline-none focus:border-cyan-500 font-mono"
+                />
+              </div>
+
+              <select
+                value={ledgerAgentFilter}
+                onChange={(e) => setLedgerAgentFilter(e.target.value)}
+                className="bg-slate-950 border border-slate-700 rounded-lg px-3 py-1.5 text-xs text-slate-200 font-mono focus:outline-none focus:border-cyan-500 cursor-pointer"
+              >
+                <option value="ALL">All Field Agents</option>
+                {agents.map((ag) => (
+                  <option key={ag.id} value={ag.id}>
+                    {ag.full_name} (@{ag.username})
+                  </option>
+                ))}
+              </select>
+            </div>
+
+            <div className="overflow-x-auto">
+              <table className="w-full text-left font-mono text-xs tabular-nums">
+                <thead>
+                  <tr className="border-b border-slate-800 text-slate-400 text-[11px] uppercase">
+                    <th className="py-2.5 px-3">Date / Time</th>
+                    <th className="py-2.5 px-3">Type / Source</th>
+                    <th className="py-2.5 px-3 font-sans">Subscriber / Ref</th>
+                    <th className="py-2.5 px-3 font-sans">Field Agent</th>
+                    <th className="py-2.5 px-3">Method / Channel</th>
+                    <th className="py-2.5 px-3 text-right">Amount</th>
+                    <th className="py-2.5 px-3 font-sans">Remarks &amp; Audit</th>
+                    <th className="py-2.5 px-3 text-right font-sans">Action</th>
+                  </tr>
+                </thead>
+                <tbody className="divide-y divide-slate-800/70">
+                  {unifiedAuditLedger.length === 0 ? (
+                    <tr>
+                      <td colSpan={8} className="py-8 text-center text-slate-500 font-sans">
+                        No Field Agent Audit Ledger entries match the selected filters.
+                      </td>
+                    </tr>
+                  ) : (
+                    unifiedAuditLedger.map((row) => (
+                      <tr key={row.uid} className="hover:bg-slate-950/60 transition">
+                        <td className="py-2.5 px-3 text-slate-400 whitespace-nowrap">
+                          {row.collectedAt ? new Date(row.collectedAt).toLocaleString() : '—'}
+                        </td>
+                        <td className="py-2.5 px-3 whitespace-nowrap">
+                          <span
+                            className={`px-2 py-0.5 rounded text-[10px] font-bold border ${
+                              row.entryType === 'COLLECTION'
+                                ? 'bg-emerald-950 border-emerald-700 text-emerald-300'
+                                : row.entryType === 'CASH_HANDOVER'
+                                ? 'bg-cyan-950 border-cyan-700 text-cyan-300'
+                                : 'bg-amber-950 border-amber-700 text-amber-300'
+                            }`}
+                          >
+                            {row.entryType.replace(/_/g, ' ')}
+                          </span>
+                        </td>
+                        <td className="py-2.5 px-3 font-sans">
+                          {row.subscriberUsername ? (
+                            <div className="font-bold text-cyan-300 font-mono">
+                              @{row.subscriberUsername}
+                            </div>
+                          ) : (
+                            <div className="text-slate-300">Vault / Staff Entry</div>
+                          )}
+                          {row.invoiceNo && (
+                            <div className="text-[10px] font-mono text-slate-500">
+                              #{row.invoiceNo}
+                            </div>
+                          )}
+                        </td>
+                        <td className="py-2.5 px-3 font-sans text-white font-semibold">
+                          {row.agentName}
+                        </td>
+                        <td className="py-2.5 px-3 text-slate-300">
+                          {row.paymentMethod}
+                        </td>
+                        <td className="py-2.5 px-3 text-right">
+                          <div className="font-bold text-emerald-400">
+                            {formatCurrency(row.amount)}
+                          </div>
+                          {row.previousAmount !== null && row.previousAmount !== undefined && (
+                            <div className="text-[10px] text-amber-300">
+                              Prev: {formatCurrency(row.previousAmount)}
+                            </div>
+                          )}
+                        </td>
+                        <td className="py-2.5 px-3 font-sans max-w-xs">
+                          <div className="text-slate-300 truncate">{row.remarks || '—'}</div>
+                          {row.editedBy && (
+                            <div className="text-[10px] font-mono text-cyan-400 truncate">
+                              Edited by {row.editedBy}
+                            </div>
+                          )}
+                        </td>
+                        <td className="py-2.5 px-3 text-right">
+                          <button
+                            type="button"
+                            onClick={() => setEditingLedgerEntry(row)}
+                            className="px-2.5 py-1 rounded-lg bg-slate-800 hover:bg-slate-700 text-cyan-300 border border-slate-700 font-semibold text-xs inline-flex items-center gap-1 transition cursor-pointer"
+                          >
+                            <Edit className="w-3 h-3" />
+                            <span>Edit</span>
+                          </button>
+                        </td>
+                      </tr>
+                    ))
+                  )}
+                </tbody>
+              </table>
+            </div>
+          </div>
         </FeatureGate>
       )}
 
@@ -1768,6 +2041,21 @@ export const ManagerOperationsDashboard: React.FC<ManagerOperationsDashboardProp
           </div>
         </div>
       )}
+
+      <EditLedgerEntryModal
+        entry={editingLedgerEntry}
+        agents={agents}
+        editedBy={`${managerName} (@${managerUsername})`}
+        onClose={() => setEditingLedgerEntry(null)}
+        onErrorToast={(errMsg) => showToast(`❌ ${errMsg}`, 'error')}
+        onVerifiedSuccess={async (result) => {
+          if (result.auditColumnsMissingInSchema) {
+            setLedgerSchemaNotice(true);
+          }
+          await fetchOperationsData(true);
+          showToast('✅ Ledger updated in Supabase database', 'success');
+        }}
+      />
 
       <AreaNodeManagerModal
         isOpen={isAreaManagerOpen}

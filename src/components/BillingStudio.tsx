@@ -1,24 +1,25 @@
 import React, { useState } from 'react';
 import { BillingManagement, BillingManagementProps } from './BillingManagement';
 import { BillingView } from './BillingView';
-import { Database, Layers } from 'lucide-react';
+import { ExpiryAutomationView } from './ExpiryAutomationView';
+import { Database, Layers, ShieldAlert } from 'lucide-react';
 
 export interface BillingStudioProps extends BillingManagementProps {}
 
 export { BillingView };
 
 export const BillingStudio: React.FC<BillingStudioProps> = (props) => {
-  const [activeMode, setActiveMode] = useState<'postgresql' | 'carrier'>('postgresql');
+  const [activeMode, setActiveMode] = useState<'postgresql' | 'carrier' | 'expiry'>('postgresql');
 
   return (
     <div className="space-y-4">
       {/* View Switcher Bar */}
-      <div className="flex items-center justify-between bg-[#111A2E] p-2 rounded-xl border border-slate-800">
-        <div className="flex items-center gap-1">
+      <div className="flex flex-wrap items-center justify-between gap-2 bg-[#111A2E] p-2 rounded-xl border border-slate-800">
+        <div className="flex flex-wrap items-center gap-1">
           <button
             type="button"
             onClick={() => setActiveMode('postgresql')}
-            className={`px-3 py-1.5 rounded-lg text-xs font-semibold flex items-center gap-1.5 transition ${
+            className={`px-3 py-1.5 rounded-lg text-xs font-semibold flex items-center gap-1.5 transition cursor-pointer ${
               activeMode === 'postgresql'
                 ? 'bg-cyan-600 text-slate-950 font-bold shadow-md'
                 : 'text-slate-400 hover:text-white hover:bg-slate-800/60'
@@ -31,7 +32,7 @@ export const BillingStudio: React.FC<BillingStudioProps> = (props) => {
           <button
             type="button"
             onClick={() => setActiveMode('carrier')}
-            className={`px-3 py-1.5 rounded-lg text-xs font-semibold flex items-center gap-1.5 transition ${
+            className={`px-3 py-1.5 rounded-lg text-xs font-semibold flex items-center gap-1.5 transition cursor-pointer ${
               activeMode === 'carrier'
                 ? 'bg-cyan-600 text-slate-950 font-bold shadow-md'
                 : 'text-slate-400 hover:text-white hover:bg-slate-800/60'
@@ -39,6 +40,19 @@ export const BillingStudio: React.FC<BillingStudioProps> = (props) => {
           >
             <Layers className="w-3.5 h-3.5" />
             <span>NOC Invoicing Studio</span>
+          </button>
+
+          <button
+            type="button"
+            onClick={() => setActiveMode('expiry')}
+            className={`px-3 py-1.5 rounded-lg text-xs font-semibold flex items-center gap-1.5 transition cursor-pointer ${
+              activeMode === 'expiry'
+                ? 'bg-emerald-500 text-slate-950 font-bold shadow-md'
+                : 'text-slate-400 hover:text-white hover:bg-slate-800/60'
+            }`}
+          >
+            <ShieldAlert className="w-3.5 h-3.5" />
+            <span>Auto-Expiry &amp; Grace</span>
           </button>
         </div>
 
@@ -53,6 +67,8 @@ export const BillingStudio: React.FC<BillingStudioProps> = (props) => {
           currentUser={props.currentUser}
           onOpenReceiptModal={props.onOpenReceiptModal}
         />
+      ) : activeMode === 'expiry' ? (
+        <ExpiryAutomationView />
       ) : (
         <BillingManagement {...props} />
       )}

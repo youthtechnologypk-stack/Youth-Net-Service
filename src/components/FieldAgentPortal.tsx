@@ -29,6 +29,7 @@ import { UserAccount } from '../types/auth';
 import { Invoice } from '../types/isp';
 import { FeatureGate } from './FeatureGate';
 import { PWAInstallPrompt } from './PWAInstallPrompt';
+import { FiberGisMapView } from './FiberGisMapView';
 import {
   supabase,
   SupabaseInvoice,
@@ -75,7 +76,7 @@ export const FieldAgentPortal: React.FC<FieldAgentPortalProps> = ({
   } = useISP();
   const { formatCurrency, currencySymbol } = useCurrency();
 
-  const [activeTab, setActiveTab] = useState<'tickets' | 'collections' | 'ledger' | 'ont_checker' | 'directory'>('tickets');
+  const [activeTab, setActiveTab] = useState<'tickets' | 'collections' | 'ledger' | 'ont_checker' | 'directory' | 'fiber_gis'>('tickets');
   const [collectionSuccessToast, setCollectionSuccessToast] = useState<string | null>(null);
   const [ontSearchQuery, setOntSearchQuery] = useState('');
   const [dirSearchQuery, setDirSearchQuery] = useState('');
@@ -717,7 +718,11 @@ export const FieldAgentPortal: React.FC<FieldAgentPortalProps> = ({
   );
 
   return (
-    <div className="max-w-md mx-auto space-y-4 font-sans text-xs pb-12">
+    <div
+      className={`${
+        activeTab === 'fiber_gis' ? 'max-w-6xl' : 'max-w-md'
+      } mx-auto space-y-4 font-sans text-xs pb-12 transition-all`}
+    >
       {/* Agent Identity & Cash Banner */}
       <div className="bg-gradient-to-r from-slate-900 via-emerald-950/40 to-slate-900 border border-emerald-800/60 rounded-2xl p-4 shadow-xl">
         <div className="flex items-center justify-between">
@@ -805,10 +810,10 @@ export const FieldAgentPortal: React.FC<FieldAgentPortalProps> = ({
       )}
 
       {/* Navigation Tabs for Agent */}
-      <div className="grid grid-cols-5 bg-slate-900 p-1 rounded-xl border border-slate-800 text-[10px] sm:text-[11px] font-mono font-bold">
+      <div className="grid grid-cols-3 sm:grid-cols-6 gap-1 bg-slate-900 p-1 rounded-xl border border-slate-800 text-[10px] sm:text-[11px] font-mono font-bold">
         <button
           onClick={() => setActiveTab('tickets')}
-          className={`py-2 rounded-lg transition flex items-center justify-center gap-1 cursor-pointer ${
+          className={`min-h-[40px] py-2 rounded-lg transition flex items-center justify-center gap-1 cursor-pointer ${
             activeTab === 'tickets' ? 'bg-indigo-600 text-white shadow' : 'text-slate-400 hover:text-white'
           }`}
         >
@@ -818,7 +823,7 @@ export const FieldAgentPortal: React.FC<FieldAgentPortalProps> = ({
 
         <button
           onClick={() => setActiveTab('collections')}
-          className={`py-2 rounded-lg transition flex items-center justify-center gap-1 cursor-pointer ${
+          className={`min-h-[40px] py-2 rounded-lg transition flex items-center justify-center gap-1 cursor-pointer ${
             activeTab === 'collections' ? 'bg-indigo-600 text-white shadow' : 'text-slate-400 hover:text-white'
           }`}
         >
@@ -828,7 +833,7 @@ export const FieldAgentPortal: React.FC<FieldAgentPortalProps> = ({
 
         <button
           onClick={() => setActiveTab('ledger')}
-          className={`py-2 rounded-lg transition flex items-center justify-center gap-1 cursor-pointer ${
+          className={`min-h-[40px] py-2 rounded-lg transition flex items-center justify-center gap-1 cursor-pointer ${
             activeTab === 'ledger' ? 'bg-indigo-600 text-white shadow' : 'text-slate-400 hover:text-white'
           }`}
         >
@@ -838,7 +843,7 @@ export const FieldAgentPortal: React.FC<FieldAgentPortalProps> = ({
 
         <button
           onClick={() => setActiveTab('ont_checker')}
-          className={`py-2 rounded-lg transition flex items-center justify-center gap-1 cursor-pointer ${
+          className={`min-h-[40px] py-2 rounded-lg transition flex items-center justify-center gap-1 cursor-pointer ${
             activeTab === 'ont_checker' ? 'bg-indigo-600 text-white shadow' : 'text-slate-400 hover:text-white'
           }`}
         >
@@ -848,12 +853,22 @@ export const FieldAgentPortal: React.FC<FieldAgentPortalProps> = ({
 
         <button
           onClick={() => setActiveTab('directory')}
-          className={`py-2 rounded-lg transition flex items-center justify-center gap-1 cursor-pointer ${
+          className={`min-h-[40px] py-2 rounded-lg transition flex items-center justify-center gap-1 cursor-pointer ${
             activeTab === 'directory' ? 'bg-indigo-600 text-white shadow' : 'text-slate-400 hover:text-white'
           }`}
         >
           <Users className="w-3 h-3" />
           <span>Directory</span>
+        </button>
+
+        <button
+          onClick={() => setActiveTab('fiber_gis')}
+          className={`min-h-[40px] py-2 rounded-lg transition flex items-center justify-center gap-1 cursor-pointer ${
+            activeTab === 'fiber_gis' ? 'bg-sky-600 text-white shadow' : 'text-slate-400 hover:text-white'
+          }`}
+        >
+          <MapPin className="w-3 h-3" />
+          <span>Fiber GIS</span>
         </button>
       </div>
 
@@ -1374,6 +1389,11 @@ export const FieldAgentPortal: React.FC<FieldAgentPortalProps> = ({
           </div>
         );
       })()}
+
+      {/* Tab 5: Live FTTH Fiber GIS & Area Map */}
+      {activeTab === 'fiber_gis' && (
+        <FiberGisMapView currentUser={currentUser} compactMobile />
+      )}
 
       {/* Cash Collection Modal with Partial Payment Support */}
       {isCollectModalOpen && selectedInvForCollection && (() => {

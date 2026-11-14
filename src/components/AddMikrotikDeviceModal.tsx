@@ -411,7 +411,8 @@ export const AddMikrotikDeviceModal: React.FC<AddMikrotikDeviceModalProps> = ({
                   <div className="text-[10px] font-mono text-cyan-300/90 bg-cyan-950/40 p-2 rounded-lg border border-cyan-800/40 flex items-center gap-2">
                     <Zap className="w-3.5 h-3.5 text-cyan-400 shrink-0" />
                     <span>
-                      Target REST endpoint: <code className="text-white">https://{ipAddress || 'host'}:{apiPort}/rest/system/resource</code>
+                      Proxied via <code className="text-white">/api/mikrotik/*</code> to{' '}
+                      <code className="text-white">https://{ipAddress || 'host'}:{apiPort}/rest/system/resource</code>
                     </span>
                   </div>
                 )}

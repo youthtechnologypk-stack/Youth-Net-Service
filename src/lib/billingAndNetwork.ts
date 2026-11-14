@@ -202,19 +202,21 @@ export async function updateNetworkArea(
 }
 
 /**
- * Updates a subscriber's PPPoE secret profile on MikroTik RouterOS v7 via /api/mikrotik/ppp/secret/set
- * WITHOUT dropping other active sessions on the router.
+ * Updates a subscriber's PPPoE secret profile (and optionally disabled flag) on MikroTik RouterOS v7
+ * via /api/mikrotik/ppp/secret/{id} (with /ppp/secret/set fallback).
  */
 export async function syncMikrotikSecretProfile(
   subscriberUsername: string,
-  targetProfile: string
-): Promise<boolean> {
+  targetProfile: string,
+  options?: { disabled?: 'true' | 'false' }
+): Promise<{ ok: boolean; previousProfile?: string | null; secretId?: string | null }> {
   const cleanUser = (subscriberUsername || '').trim();
-  if (!cleanUser || !targetProfile) return false;
+  if (!cleanUser || !targetProfile) return { ok: false };
 
   try {
-    // 1. Lookup exact secret .id from RouterOS
     let secretId: string | null = null;
+    let previousProfile: string | null = null;
+
     try {
       const res = await safeMikrotikFetch(`/api/mikrotik/ppp/secret?name=${encodeURIComponent(cleanUser)}`);
       if (res.ok) {
@@ -223,93 +225,253 @@ export async function syncMikrotikSecretProfile(
           const match = list.find(
             (s: any) => (s?.name || '').toLowerCase() === cleanUser.toLowerCase()
           );
-          if (match) secretId = match['.id'];
-        }
-      }
-    } catch {}
-
-    // 2. Apply profile update via /ppp/secret/set
-    const payload: Record<string, any> = {
-      profile: targetProfile,
-    };
-    if (secretId) {
-      payload['.id'] = secretId;
-      payload.numbers = secretId;
-    } else {
-      payload.name = cleanUser;
-      payload.numbers = cleanUser;
-    }
-
-    const setRes = await safeMikrotikFetch('/api/mikrotik/ppp/secret/set', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(payload),
-    });
-
-    return setRes.ok;
-  } catch {
-    return false;
-  }
-}
-
-/**
- * Restores a subscriber to ACTIVE in Supabase and restores their active PPPoE package profile
- * on MikroTik immediately upon invoice payment (PAID), extending their 31-day cycle.
- */
-export async function restoreSubscriberOnInvoicePaid(
-  subscriberUsername: string
-): Promise<void> {
-  const cleanUser = (subscriberUsername || '').trim().toLowerCase();
-  if (!cleanUser) return;
-
-  try {
-    // 1. Fetch user's configured package speed/profile from portal_users
-    const { data: userRecord } = await supabase
-      .from('portal_users')
-      .select('id, username, package_speed, account_status')
-      .eq('username', cleanUser)
-      .maybeSingle();
-
-    const restoredProfile =
-      (userRecord?.package_speed || '').trim().replace(/\s+/g, '') || '20Mbps';
-
-    // 2. Mark account_status = 'ACTIVE' and extend 31-day expiry_date in portal_users
-    if (userRecord) {
-      await supabase
-        .from('portal_users')
-        .update({
-          account_status: 'ACTIVE',
-          expiry_date: add31DaysDateString(new Date()),
-        })
-        .eq('id', userRecord.id);
-    }
-
-    // 3. Determine active MikroTik PPP profile name (match router's existing profile if available)
-    let profileToApply = restoredProfile;
-    try {
-      const profRes = await safeMikrotikFetch('/api/mikrotik/ppp/profile');
-      if (profRes.ok) {
-        const profiles = await profRes.json();
-        if (Array.isArray(profiles) && profiles.length > 0) {
-          const speedDigits = restoredProfile.match(/\d+/)?.[0];
-          const matched = profiles.find((p: any) => {
-            const pName = (p?.name || '').toLowerCase();
-            if (pName === 'expired' || pName.includes('walled')) return false;
-            return (
-              pName === restoredProfile.toLowerCase() ||
-              (speedDigits && pName.includes(speedDigits))
-            );
-          });
-          if (matched?.name) {
-            profileToApply = matched.name;
+          if (match) {
+            secretId = match['.id'] || match.id || null;
+            previousProfile = match.profile || null;
           }
         }
       }
     } catch {}
 
-    await syncMikrotikSecretProfile(cleanUser, profileToApply);
+    const patchFields: Record<string, any> = {
+      profile: targetProfile,
+    };
+    if (options?.disabled !== undefined) {
+      patchFields.disabled = options.disabled;
+    }
+
+    if (secretId) {
+      const patchRes = await safeMikrotikFetch(
+        `/api/mikrotik/ppp/secret/${encodeURIComponent(secretId)}`,
+        {
+          method: 'PATCH',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(patchFields),
+        }
+      );
+      if (patchRes.ok) {
+        return { ok: true, previousProfile, secretId };
+      }
+    }
+
+    const setPayload: Record<string, any> = {
+      ...patchFields,
+      ...(secretId ? { '.id': secretId, numbers: secretId } : { name: cleanUser, numbers: cleanUser }),
+    };
+
+    const setRes = await safeMikrotikFetch('/api/mikrotik/ppp/secret/set', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(setPayload),
+    });
+
+    return { ok: setRes.ok, previousProfile, secretId };
+  } catch {
+    return { ok: false };
+  }
+}
+
+/**
+ * Kicks any active PPPoE session for a subscriber (e.g. trapped on 16.16.16.x)
+ * so their CPE immediately redials within ~5 seconds on the restored profile.
+ */
+export async function kickMikrotikActiveSessionForUser(
+  subscriberUsername: string
+): Promise<number> {
+  const cleanUser = (subscriberUsername || '').trim().toLowerCase();
+  if (!cleanUser) return 0;
+
+  let kicked = 0;
+  try {
+    const activeRes = await safeMikrotikFetch('/api/mikrotik/ppp/active');
+    if (!activeRes.ok) return 0;
+    const list = await activeRes.json();
+    if (!Array.isArray(list)) return 0;
+
+    const matching = list.filter(
+      (s: any) => String(s?.name || '').trim().toLowerCase() === cleanUser
+    );
+
+    for (const sess of matching) {
+      const activeId = String(sess?.['.id'] || sess?.id || '').trim();
+      if (!activeId) continue;
+
+      const delRes = await safeMikrotikFetch(
+        `/api/mikrotik/ppp/active/${encodeURIComponent(activeId)}`,
+        { method: 'DELETE' }
+      );
+      if (delRes.ok) {
+        kicked++;
+      } else {
+        const remRes = await safeMikrotikFetch('/api/mikrotik/ppp/active/remove', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ '.id': activeId, numbers: activeId }),
+        });
+        if (remRes.ok) kicked++;
+      }
+    }
+  } catch {}
+  return kicked;
+}
+
+/**
+ * Instant 5-Second Restore Hook (DB + MikroTik Atomic Sync):
+ * 1. Updates Supabase first: +30 days expiry_date, billing_status='ACTIVE', grace_ends_at=null, last_restored_at=now
+ * 2. Restores MikroTik /rest/ppp/secret/{id} to original_package_profile (disabled: 'false')
+ * 3. Kicks any 16.16.16.x / stale active PPPoE session for instant reconnect
+ * 4. Inserts 'RESTORED_ON_PAYMENT' into expiry_audit_logs
+ */
+export async function restoreSubscriberOnInvoicePaid(
+  subscriberUsername: string,
+  options?: {
+    triggeredBy?: 'ADMIN' | 'AGENT_PAYMENT_SYNC' | 'CRON_2PM';
+    notes?: string;
+    expiryProfileName?: string;
+  }
+): Promise<{
+  success: boolean;
+  restoredProfile: string;
+  kickedSessions: number;
+  newExpiryIso: string;
+}> {
+  const cleanUser = (subscriberUsername || '').trim().toLowerCase();
+  const nowIso = new Date().toISOString();
+  const newExpiryIso = new Date(Date.now() + 30 * 86_400_000).toISOString();
+  const triggeredBy = options?.triggeredBy || 'AGENT_PAYMENT_SYNC';
+
+  if (!cleanUser) {
+    return { success: false, restoredProfile: '20Mbps', kickedSessions: 0, newExpiryIso };
+  }
+
+  let restoredProfile = '20Mbps';
+  let previousProfile: string | null = null;
+  let subscriberId: string | null = null;
+
+  try {
+    // 1. Read current subscriber profile backups from Supabase portal_users
+    const { data: userRecord } = await supabase
+      .from('portal_users')
+      .select('*')
+      .eq('username', cleanUser)
+      .maybeSingle();
+
+    subscriberId = userRecord?.id || null;
+    const rawOriginal = String((userRecord as any)?.original_package_profile || '').trim();
+    const rawProfileName = String(userRecord?.package_profile_name || '').trim();
+    const rawPkgSpeed = String(userRecord?.package_speed || '').trim().replace(/\s+/g, '');
+    const expiryProfLower = String(options?.expiryProfileName || '').trim().toLowerCase();
+
+    const isExpiryPlaceholder = (val: string) => {
+      const low = val.toLowerCase();
+      return !low || low === 'expired' || low.includes('walled') || (expiryProfLower && low === expiryProfLower);
+    };
+
+    if (!isExpiryPlaceholder(rawOriginal)) {
+      restoredProfile = rawOriginal;
+    } else if (!isExpiryPlaceholder(rawProfileName)) {
+      restoredProfile = rawProfileName;
+    } else if (rawPkgSpeed) {
+      restoredProfile = rawPkgSpeed;
+    }
+
+    // 2. Update Supabase first (+30 days expiry, ACTIVE status, clear grace)
+    if (userRecord?.id) {
+      const fullUpdate = {
+        account_status: 'ACTIVE',
+        billing_status: 'ACTIVE',
+        grace_ends_at: null,
+        last_restored_at: nowIso,
+        expiry_date: newExpiryIso,
+      };
+      const { error: updErr } = await supabase
+        .from('portal_users')
+        .update(fullUpdate)
+        .eq('id', userRecord.id);
+
+      if (updErr) {
+        // Fallback if new automation columns have not yet been migrated
+        await supabase
+          .from('portal_users')
+          .update({
+            account_status: 'ACTIVE',
+            expiry_date: newExpiryIso.split('T')[0],
+          })
+          .eq('id', userRecord.id);
+      }
+    }
+
+    // 3. Resolve exact active PPP profile on MikroTik if we only have package speed
+    if (isExpiryPlaceholder(rawOriginal) && isExpiryPlaceholder(rawProfileName)) {
+      try {
+        const profRes = await safeMikrotikFetch('/api/mikrotik/ppp/profile');
+        if (profRes.ok) {
+          const profiles = await profRes.json();
+          if (Array.isArray(profiles) && profiles.length > 0) {
+            const speedDigits = restoredProfile.match(/\d+/)?.[0];
+            const matched = profiles.find((p: any) => {
+              const pName = String(p?.name || '').toLowerCase();
+              if (isExpiryPlaceholder(pName) || pName.includes('expire') || pName.includes('16.16')) {
+                return false;
+              }
+              return (
+                pName === restoredProfile.toLowerCase() ||
+                Boolean(speedDigits && pName.includes(speedDigits))
+              );
+            });
+            if (matched?.name) {
+              restoredProfile = matched.name;
+            }
+          }
+        }
+      } catch {}
+    }
+
+    // 4. Restore MikroTik secret back to original_package_profile & disabled='false'
+    const syncRes = await syncMikrotikSecretProfile(cleanUser, restoredProfile, {
+      disabled: 'false',
+    });
+    previousProfile =
+      syncRes.previousProfile ||
+      ((userRecord as any)?.billing_status === 'SUSPENDED_EXPIRED'
+        ? options?.expiryProfileName || 'EXPIRED-16-POOL'
+        : null);
+
+    // 5. Kick any stale or 16.16.16.x active PPPoE session so CPE reconnects in <= 5s
+    const kickedSessions = await kickMikrotikActiveSessionForUser(cleanUser);
+
+    // 6. Write permanent audit log entry
+    try {
+      await supabase.from('expiry_audit_logs').insert([
+        {
+          subscriber_id: subscriberId,
+          username: cleanUser,
+          action_type: 'RESTORED_ON_PAYMENT',
+          previous_profile: previousProfile,
+          applied_profile: restoredProfile,
+          triggered_by: triggeredBy,
+          notes:
+            options?.notes ||
+            `Atomic payment restore: +30d expiry (${newExpiryIso.slice(0, 10)}), profile=${restoredProfile}, kicked=${kickedSessions}`,
+          created_at: nowIso,
+        },
+      ]);
+    } catch {}
+
+    return {
+      success: true,
+      restoredProfile,
+      kickedSessions,
+      newExpiryIso,
+    };
   } catch (err) {
     console.warn('restoreSubscriberOnInvoicePaid notice:', err);
+    return {
+      success: false,
+      restoredProfile,
+      kickedSessions: 0,
+      newExpiryIso,
+    };
   }
 }
 

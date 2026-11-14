@@ -527,7 +527,7 @@ async function upsertBotSession(
   }
 }
 
-async function dispatchOutboundWhatsAppReply(
+export async function dispatchOutboundWhatsAppReply(
   provider: string,
   toPhone: string,
   replyText: string,

@@ -10,6 +10,7 @@ import { NocCommandCenter } from './components/NocCommandCenter';
 import { CapacityPlannerView } from './components/CapacityPlannerView';
 import { MikrotikStudio } from './components/MikrotikStudio';
 import { VsolOltStudio } from './components/VsolOltStudio';
+import { FiberGisMapView } from './components/FiberGisMapView';
 import { BillingStudio } from './components/BillingStudio';
 import { ProfitLossLedgerView } from './components/ProfitLossLedgerView';
 import { ComplaintsStudio } from './components/ComplaintsStudio';
@@ -153,6 +154,13 @@ function ISPAppContent() {
     return () => window.removeEventListener('keydown', handleKeyDown);
   }, [isSidebarOpen]);
 
+  const [gmpQuotaExceeded, setGmpQuotaExceeded] = useState(false);
+  useEffect(() => {
+    const onQuotaExceeded = () => setGmpQuotaExceeded(true);
+    window.addEventListener('gmp-quota-exceeded', onQuotaExceeded);
+    return () => window.removeEventListener('gmp-quota-exceeded', onQuotaExceeded);
+  }, []);
+
   // Handle Login success
   const handleLoginSuccess = (user: UserAccount) => {
     setCurrentUser(user);
@@ -285,6 +293,23 @@ function ISPAppContent() {
           onLogout={handleLogout}
         />
 
+        {gmpQuotaExceeded && (
+          <div className="bg-amber-50 border-b border-amber-200 text-amber-900 px-4 py-2.5 text-xs md:text-sm text-center sticky top-0 z-50 shadow-sm">
+            <span>
+              Google Maps Platform quota reached. If you are the app owner, visit{' '}
+              <a
+                href="https://developers.google.com/maps/ai/ai-studio?utm_campaign=gmp_mcp_codeassist_v1_aistudio#quota_exceeded_errors"
+                target="_blank"
+                rel="noopener noreferrer"
+                className="underline font-semibold text-amber-950 hover:text-amber-800"
+              >
+                maps developer site
+              </a>{' '}
+              for instructions to update your account.
+            </span>
+          </div>
+        )}
+
         {/* RBAC Role Indicator Banner (Strictly hidden for logged-in CLIENT, AGENT, and MANAGER) */}
         {currentRole !== 'ADMIN' && isOriginalAdmin && currentUser.role === 'ADMIN' && (
           <div className="bg-slate-900 border-b border-indigo-900/60 text-slate-300 text-xs px-4 py-2 font-mono flex items-center justify-between shrink-0">
@@ -373,6 +398,11 @@ function ISPAppContent() {
 
                 {/* VSOL OLT Studio */}
                 {activeTab === 'olt' && <VsolOltStudio />}
+
+                {/* Full-Stack FTTH Fiber GIS, FOSC Joint Closure & Subscriber Map */}
+                {activeTab === 'fiber_gis' && (
+                  <FiberGisMapView currentUser={currentUser} />
+                )}
 
                 {/* Billing & Invoices */}
                 {activeTab === 'billing' && (
