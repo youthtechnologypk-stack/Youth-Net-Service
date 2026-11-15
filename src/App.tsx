@@ -13,6 +13,7 @@ import { VsolOltStudio } from './components/VsolOltStudio';
 import { FiberGisMapView } from './components/FiberGisMapView';
 import { BillingStudio } from './components/BillingStudio';
 import { ProfitLossLedgerView } from './components/ProfitLossLedgerView';
+import { InventoryHardwareView } from './components/InventoryHardwareView';
 import { ComplaintsStudio } from './components/ComplaintsStudio';
 import { MobileAppSimulator } from './components/MobileAppSimulator';
 import { UserManagementStudio } from './components/UserManagementStudio';
@@ -390,6 +391,9 @@ function ISPAppContent() {
 
                 {/* ISP Expense Tracker & Automated Net Profit Ledger */}
                 {activeTab === 'profit_expenses' && <ProfitLossLedgerView />}
+
+                {/* Hardware Inventory, Sales & Vendor Payables ERP */}
+                {activeTab === 'inventory' && <InventoryHardwareView />}
 
                 {/* Complaints & SLA Ticketing */}
                 {activeTab === 'complaints' && (

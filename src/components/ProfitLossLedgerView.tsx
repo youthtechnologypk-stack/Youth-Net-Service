@@ -31,17 +31,22 @@ import {
   PieChart as PieChartIcon,
   BarChart3,
   Receipt,
+  Package,
+  Layers,
 } from 'lucide-react';
 import {
   supabase,
   IspExpenseCategory,
   IspExpensePaymentMethod,
   SupabaseAgentCashTransaction,
+  SupabaseInventoryItem,
+  SupabaseInventorySale,
   SupabaseInvoice,
   SupabaseIspExpense,
   SupabasePaymentTransaction,
   SupabasePortalUser,
 } from '../services/supabaseClient';
+import { fetchInventoryItems, fetchInventorySales } from '../services/erpInventoryService';
 import { useCurrency } from '../context/CurrencyContext';
 import { getStoredUser } from '../lib/auth';
 import {
@@ -119,6 +124,8 @@ export const ProfitLossLedgerView: React.FC = () => {
     SupabaseAgentCashTransaction[]
   >([]);
   const [staffUsers, setStaffUsers] = useState<SupabasePortalUser[]>([]);
+  const [inventorySales, setInventorySales] = useState<SupabaseInventorySale[]>([]);
+  const [inventoryItems, setInventoryItems] = useState<SupabaseInventoryItem[]>([]);
 
   const [isLoading, setIsLoading] = useState<boolean>(true);
   const [isRefreshing, setIsRefreshing] = useState<boolean>(false);
@@ -164,7 +171,7 @@ export const ProfitLossLedgerView: React.FC = () => {
     if (!quiet) setIsRefreshing(true);
     setLoadError(null);
     try {
-      const [expRes, invRes, payRes, salRes, staffRes] = await Promise.all([
+      const [expRes, invRes, payRes, salRes, staffRes, hwSalesData, hwItemsRes] = await Promise.all([
         supabase
           .from('isp_expenses')
           .select(
@@ -189,6 +196,8 @@ export const ProfitLossLedgerView: React.FC = () => {
           .from('portal_users')
           .select('id,username,full_name,role,base_salary')
           .in('role', ['AGENT', 'MANAGER']),
+        fetchInventorySales(),
+        fetchInventoryItems(),
       ]);
 
       if (expRes.error) throw expRes.error;
@@ -202,6 +211,8 @@ export const ProfitLossLedgerView: React.FC = () => {
         setSalaryTransactions(salRes.data as SupabaseAgentCashTransaction[]);
       if (Array.isArray(staffRes.data))
         setStaffUsers(staffRes.data as SupabasePortalUser[]);
+      setInventorySales(hwSalesData);
+      setInventoryItems(hwItemsRes.data);
     } catch (err: any) {
       setLoadError(err?.message || 'Failed to load financial ledger from Supabase.');
     } finally {
@@ -235,6 +246,16 @@ export const ProfitLossLedgerView: React.FC = () => {
         { event: '*', schema: 'public', table: 'agent_cash_transactions' },
         () => fetchFinancialLedgerData(true)
       )
+      .on(
+        'postgres_changes',
+        { event: '*', schema: 'public', table: 'inventory_sales' },
+        () => fetchFinancialLedgerData(true)
+      )
+      .on(
+        'postgres_changes',
+        { event: '*', schema: 'public', table: 'agent_commissions' },
+        () => fetchFinancialLedgerData(true)
+      )
       .subscribe();
 
     return () => {
@@ -250,6 +271,8 @@ export const ProfitLossLedgerView: React.FC = () => {
         expenses,
         salaryTransactions,
         staffUsers,
+        inventorySales,
+        inventoryItems,
         filter: dateFilter,
         includeProjectedBaseSalaries,
       }),
@@ -259,6 +282,8 @@ export const ProfitLossLedgerView: React.FC = () => {
       expenses,
       salaryTransactions,
       staffUsers,
+      inventorySales,
+      inventoryItems,
       dateFilter,
       includeProjectedBaseSalaries,
     ]
@@ -598,6 +623,224 @@ export const ProfitLossLedgerView: React.FC = () => {
         filteredCount={unifiedRows.length}
         recordLabel="ledger entries"
       />
+
+      {/* Segmented Business Profit Overview: Subscription vs Hardware vs Combined */}
+      <div className="grid grid-cols-1 lg:grid-cols-3 gap-4">
+        {/* Card 1: Internet Subscription Profit */}
+        <div className="bg-white dark:bg-[#111A2E] border border-slate-200 dark:border-slate-800 rounded-xl p-4 space-y-3 shadow-sm">
+          <div className="flex items-center justify-between gap-2">
+            <div>
+              <span className="text-[11px] font-bold uppercase tracking-wider text-sky-600 dark:text-cyan-400">
+                1. Internet Subscription Profit
+              </span>
+              <p className="text-[11px] text-slate-500 dark:text-slate-400">
+                Broadband Billing &minus; Bandwidth, Salaries &amp; Commissions
+              </p>
+            </div>
+            <Server className="w-5 h-5 text-sky-500 shrink-0" />
+          </div>
+          <div className="flex items-baseline justify-between gap-2">
+            <span
+              className={`text-2xl font-bold font-mono tabular-nums ${
+                summary.netProfit >= 0
+                  ? 'text-emerald-600 dark:text-emerald-400'
+                  : 'text-rose-600 dark:text-rose-400'
+              }`}
+            >
+              {isLoading ? '—' : formatCurrency(summary.netProfit, 0)}
+            </span>
+            <span className="text-xs font-mono tabular-nums text-slate-500 dark:text-slate-400">
+              {summary.marginPct.toFixed(1)}% Margin
+            </span>
+          </div>
+          <div className="pt-2 border-t border-slate-200 dark:border-slate-800 grid grid-cols-3 gap-2 text-[11px] font-mono tabular-nums">
+            <div>
+              <span className="text-slate-500 dark:text-slate-400 block">Billing</span>
+              <strong className="text-slate-900 dark:text-white">
+                {formatCurrency(summary.totalCollections, 0)}
+              </strong>
+            </div>
+            <div>
+              <span className="text-slate-500 dark:text-slate-400 block">Commissions</span>
+              <strong className="text-purple-600 dark:text-purple-400">
+                {formatCurrency(summary.agentCommissionsCost, 0)}
+              </strong>
+            </div>
+            <div>
+              <span className="text-slate-500 dark:text-slate-400 block">All Costs</span>
+              <strong className="text-rose-600 dark:text-rose-400">
+                {formatCurrency(summary.totalOutgoing, 0)}
+              </strong>
+            </div>
+          </div>
+        </div>
+
+        {/* Card 2: Hardware & Accessories Profit (Separate Section) */}
+        <div className="bg-white dark:bg-[#111A2E] border border-slate-200 dark:border-slate-800 rounded-xl p-4 space-y-3 shadow-sm">
+          <div className="flex items-center justify-between gap-2">
+            <div>
+              <span className="text-[11px] font-bold uppercase tracking-wider text-emerald-600 dark:text-emerald-400">
+                2. Hardware &amp; Accessories Profit
+              </span>
+              <p className="text-[11px] text-slate-500 dark:text-slate-400">
+                Routers/ONTs, Patch Cords, FDB Splitters, Cat6 &amp; Fiber
+              </p>
+            </div>
+            <Package className="w-5 h-5 text-emerald-500 shrink-0" />
+          </div>
+          <div className="flex items-baseline justify-between gap-2">
+            <span
+              className={`text-2xl font-bold font-mono tabular-nums ${
+                summary.hardwareNetProfit >= 0
+                  ? 'text-emerald-600 dark:text-emerald-400'
+                  : 'text-rose-600 dark:text-rose-400'
+              }`}
+            >
+              {isLoading ? '—' : formatCurrency(summary.hardwareNetProfit, 0)}
+            </span>
+            <span className="text-xs font-mono tabular-nums text-slate-500 dark:text-slate-400">
+              {summary.hardwareMarginPct.toFixed(1)}% Margin
+            </span>
+          </div>
+          <div className="pt-2 border-t border-slate-200 dark:border-slate-800 grid grid-cols-3 gap-2 text-[11px] font-mono tabular-nums">
+            <div>
+              <span className="text-slate-500 dark:text-slate-400 block">Sales Rev</span>
+              <strong className="text-slate-900 dark:text-white">
+                {formatCurrency(summary.hardwareRevenue, 0)}
+              </strong>
+            </div>
+            <div>
+              <span className="text-slate-500 dark:text-slate-400 block">Item COGS</span>
+              <strong className="text-amber-600 dark:text-amber-400">
+                {formatCurrency(summary.hardwareCogs, 0)}
+              </strong>
+            </div>
+            <div>
+              <span className="text-slate-500 dark:text-slate-400 block">Sales Count</span>
+              <strong className="text-sky-600 dark:text-cyan-400">
+                {summary.hardwareSalesCount} txns
+              </strong>
+            </div>
+          </div>
+        </div>
+
+        {/* Card 3: Combined Net Business Profit */}
+        <div className="bg-white dark:bg-[#111A2E] border border-sky-300 dark:border-sky-500/40 rounded-xl p-4 space-y-3 shadow-sm">
+          <div className="flex items-center justify-between gap-2">
+            <div>
+              <span className="text-[11px] font-bold uppercase tracking-wider text-indigo-600 dark:text-indigo-400">
+                3. Combined Net Business Profit
+              </span>
+              <p className="text-[11px] text-slate-500 dark:text-slate-400">
+                ISP Subscriptions + Hardware Sales ({describeDateFilter(dateFilter)})
+              </p>
+            </div>
+            <Layers className="w-5 h-5 text-indigo-500 shrink-0" />
+          </div>
+          <div className="flex items-baseline justify-between gap-2">
+            <span
+              className={`text-2xl font-bold font-mono tabular-nums ${
+                summary.combinedNetProfit >= 0
+                  ? 'text-sky-600 dark:text-cyan-300'
+                  : 'text-rose-600 dark:text-rose-400'
+              }`}
+            >
+              {isLoading ? '—' : formatCurrency(summary.combinedNetProfit, 0)}
+            </span>
+            <span className="text-xs font-mono tabular-nums text-slate-500 dark:text-slate-400">
+              {summary.combinedMarginPct.toFixed(1)}% Combined
+            </span>
+          </div>
+          <div className="pt-2 border-t border-slate-200 dark:border-slate-800 grid grid-cols-3 gap-2 text-[11px] font-mono tabular-nums">
+            <div>
+              <span className="text-slate-500 dark:text-slate-400 block">Total Rev</span>
+              <strong className="text-slate-900 dark:text-white">
+                {formatCurrency(summary.combinedGrossRevenue, 0)}
+              </strong>
+            </div>
+            <div>
+              <span className="text-slate-500 dark:text-slate-400 block">ISP Net</span>
+              <strong className="text-emerald-600 dark:text-emerald-400">
+                {formatCurrency(summary.netProfit, 0)}
+              </strong>
+            </div>
+            <div>
+              <span className="text-slate-500 dark:text-slate-400 block">HW Net</span>
+              <strong className="text-sky-600 dark:text-cyan-400">
+                {formatCurrency(summary.hardwareNetProfit, 0)}
+              </strong>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      {/* Hardware & Accessories Profit Breakdown by Category */}
+      <div className="bg-white dark:bg-[#111A2E] border border-slate-200 dark:border-slate-800 rounded-xl overflow-hidden shadow-sm">
+        <div className="px-4 py-3 border-b border-slate-200 dark:border-slate-800 flex flex-wrap items-center justify-between gap-2">
+          <div className="flex items-center gap-2">
+            <Package className="w-4 h-4 text-emerald-500 shrink-0" />
+            <h2 className="text-sm font-bold text-slate-900 dark:text-white">
+              Hardware &amp; Accessories Profit Breakdown by Category
+            </h2>
+          </div>
+          <span className="text-xs font-mono tabular-nums text-slate-600 dark:text-slate-400">
+            Net Hardware Profit:{' '}
+            <strong className="text-emerald-600 dark:text-emerald-400">
+              {formatCurrency(summary.hardwareNetProfit, 0)}
+            </strong>
+          </span>
+        </div>
+        <div className="overflow-x-auto">
+          <table className="w-full text-left border-collapse text-xs">
+            <thead>
+              <tr className="bg-slate-50 dark:bg-slate-950/80 border-b border-slate-200 dark:border-slate-800 text-[11px] font-mono uppercase tracking-wider text-slate-600 dark:text-slate-400">
+                <th className="py-2.5 px-4">Hardware Category</th>
+                <th className="py-2.5 px-4 text-right">Sales</th>
+                <th className="py-2.5 px-4 text-right">Units Sold</th>
+                <th className="py-2.5 px-4 text-right">Sales Revenue</th>
+                <th className="py-2.5 px-4 text-right">Cost (COGS)</th>
+                <th className="py-2.5 px-4 text-right">Net Hardware Profit</th>
+              </tr>
+            </thead>
+            <tbody className="divide-y divide-slate-200/70 dark:divide-slate-800/80 font-mono tabular-nums">
+              {summary.hardwareCategoryBreakdown.map((cat) => (
+                <tr key={cat.categoryKey} className="hover:bg-slate-50 dark:hover:bg-slate-900/40 transition">
+                  <td className="py-2.5 px-4 font-sans font-semibold text-slate-900 dark:text-white whitespace-nowrap">
+                    <span className="inline-flex items-center gap-2">
+                      <span
+                        className="w-2.5 h-2.5 rounded-full shrink-0"
+                        style={{ backgroundColor: cat.color }}
+                      />
+                      <span>{cat.label}</span>
+                    </span>
+                  </td>
+                  <td className="py-2.5 px-4 text-right text-slate-600 dark:text-slate-300">
+                    {cat.salesCount}
+                  </td>
+                  <td className="py-2.5 px-4 text-right text-slate-700 dark:text-slate-200">
+                    {cat.qtySold}
+                  </td>
+                  <td className="py-2.5 px-4 text-right text-slate-900 dark:text-white">
+                    {formatCurrency(cat.revenue, 0)}
+                  </td>
+                  <td className="py-2.5 px-4 text-right text-amber-600 dark:text-amber-400">
+                    {formatCurrency(cat.cogs, 0)}
+                  </td>
+                  <td
+                    className={`py-2.5 px-4 text-right font-bold ${
+                      cat.netProfit >= 0
+                        ? 'text-emerald-600 dark:text-emerald-400'
+                        : 'text-rose-600 dark:text-rose-400'
+                    }`}
+                  >
+                    {formatCurrency(cat.netProfit, 0)}
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      </div>
 
       {/* 5 Top KPI Summary Cards */}
       <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-5 gap-3.5">

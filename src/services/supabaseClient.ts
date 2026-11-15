@@ -173,6 +173,7 @@ export type IspExpenseCategory =
   | 'POWER_SOLAR_UPS'
   | 'FIELD_MAINTENANCE'
   | 'OFFICE_RENT_UTILS'
+  | 'AGENT_COMMISSION'
   | 'OTHER';
 
 export type IspExpensePaymentMethod =
@@ -461,6 +462,106 @@ export interface SupabaseGisSplitterOutput {
   estimated_rx_dbm?: number | null;
   updated_at?: string;
 }
+
+// ============================================================================
+// ERP UPGRADE: FIELD AGENT COMMISSIONS, HARDWARE INVENTORY & VENDOR LEDGER
+// ============================================================================
+export type AgentCommissionStatus = 'UNPAID' | 'PAID';
+
+export interface SupabaseAgentCommission {
+  id: string;
+  agent_id: string;
+  agent_name: string;
+  subscriber_id?: string | null;
+  subscriber_username: string;
+  client_name: string;
+  package_name: string;
+  commission_amount: number;
+  status: AgentCommissionStatus;
+  paid_at?: string | null;
+  ledger_entry_id?: string | null;
+  notes?: string | null;
+  created_at?: string;
+}
+
+export type InventoryItemCategory =
+  | 'ROUTER_ONT'
+  | 'PATCH_CORD'
+  | 'FDB_SPLITTER'
+  | 'CAT6_CABLE'
+  | 'FIBER_CABLE'
+  | 'ACCESSORY';
+
+export interface SupabaseInventoryItem {
+  id: string;
+  item_name: string;
+  category: InventoryItemCategory | string;
+  unit: string;
+  avg_purchase_cost: number;
+  default_sale_price: number;
+  stock_qty: number;
+  low_stock_alert: number;
+  updated_at?: string;
+}
+
+export interface SupabaseVendor {
+  id: string;
+  vendor_name: string;
+  company_name?: string | null;
+  phone?: string | null;
+  total_purchased: number;
+  total_paid: number;
+  balance_payable: number;
+  created_at?: string;
+}
+
+export type VendorTransactionType = 'PURCHASE_BILL' | 'PAYMENT_PAID' | 'ADJUSTMENT';
+
+export interface SupabaseVendorTransaction {
+  id: string;
+  vendor_id: string;
+  tx_type: VendorTransactionType | string;
+  amount: number;
+  reference_note?: string | null;
+  tx_date: string;
+}
+
+export type InventoryPurchasePaymentStatus = 'PAID' | 'CREDIT_PAYABLE' | 'PARTIAL';
+
+export interface SupabaseInventoryPurchase {
+  id: string;
+  item_id: string;
+  item_name: string;
+  vendor_id?: string | null;
+  vendor_name?: string | null;
+  qty: number;
+  unit_cost: number;
+  total_cost: number;
+  payment_status: InventoryPurchasePaymentStatus;
+  amount_paid: number;
+  purchase_date: string;
+  notes?: string | null;
+}
+
+export type InventorySalePaymentStatus = 'PAID' | 'UNPAID_BILLED';
+
+export interface SupabaseInventorySale {
+  id: string;
+  item_id: string;
+  item_name: string;
+  subscriber_username?: string | null;
+  customer_name?: string | null;
+  sold_by_agent?: string | null;
+  qty: number;
+  unit_cost_snapshot: number;
+  unit_sale_price: number;
+  total_sale: number;
+  net_profit: number;
+  payment_status: InventorySalePaymentStatus;
+  sale_date: string;
+  notes?: string | null;
+}
+
 
 
 

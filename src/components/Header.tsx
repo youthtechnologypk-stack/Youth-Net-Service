@@ -25,6 +25,7 @@ import {
   Gauge,
   Wallet,
   MapPin,
+  Package,
 } from 'lucide-react';
 import { useISP } from '../context/ISPContext';
 import { SystemRole, UserAccount } from '../types/auth';
@@ -43,6 +44,7 @@ export type ActiveTab =
   | 'fiber_gis'
   | 'billing'
   | 'profit_expenses'
+  | 'inventory'
   | 'complaints'
   | 'mobile'
   | 'users'
@@ -518,6 +520,14 @@ export const Header: React.FC<HeaderProps> = ({
               </button>
 
               <button
+                onClick={() => setActiveTab('inventory')}
+                className={`shrink-0 whitespace-nowrap snap-start flex items-center gap-2 px-3 py-2 text-xs sm:text-sm font-medium rounded-xl transition cursor-pointer ${getTabClassName('inventory')}`}
+              >
+                <Package className={`w-4 h-4 shrink-0 ${activeTab === 'inventory' ? 'text-white dark:text-sky-300' : 'text-amber-500 dark:text-amber-400'}`} />
+                <span>Inventory &amp; Hardware</span>
+              </button>
+
+              <button
                 onClick={() => setActiveTab('complaints')}
                 className={`shrink-0 whitespace-nowrap snap-start flex items-center gap-2 px-3 py-2 text-xs sm:text-sm font-medium rounded-xl transition cursor-pointer ${getTabClassName('complaints')}`}
               >
@@ -650,6 +660,14 @@ export const Header: React.FC<HeaderProps> = ({
               >
                 <Wallet className={`w-4 h-4 shrink-0 ${activeTab === 'profit_expenses' ? 'text-white dark:text-indigo-300' : 'text-emerald-500 dark:text-emerald-400'}`} />
                 <span>Profit &amp; Expenses</span>
+              </button>
+
+              <button
+                onClick={() => setActiveTab('inventory')}
+                className={`shrink-0 whitespace-nowrap snap-start flex items-center gap-2 px-3 py-2 text-xs sm:text-sm font-medium rounded-xl transition cursor-pointer ${getTabClassName('inventory', 'indigo')}`}
+              >
+                <Package className={`w-4 h-4 shrink-0 ${activeTab === 'inventory' ? 'text-white dark:text-indigo-300' : 'text-amber-500 dark:text-amber-400'}`} />
+                <span>Inventory &amp; Hardware</span>
               </button>
             </>
           )}

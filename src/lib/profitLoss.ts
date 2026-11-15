@@ -2,6 +2,8 @@ import {
   IspExpenseCategory,
   IspExpensePaymentMethod,
   SupabaseAgentCashTransaction,
+  SupabaseInventoryItem,
+  SupabaseInventorySale,
   SupabaseInvoice,
   SupabaseIspExpense,
   SupabasePaymentTransaction,
@@ -52,6 +54,12 @@ export const ISP_EXPENSE_CATEGORIES: ExpenseCategoryMeta[] = [
     label: 'NOC Office Rent & Utilities',
     shortLabel: 'Office Rent & Utils',
     color: '#8b5cf6', // violet-500
+  },
+  {
+    value: 'AGENT_COMMISSION',
+    label: 'Agent New-Connection Commissions',
+    shortLabel: 'Agent Commissions',
+    color: '#a855f7', // purple-500
   },
   {
     value: 'OTHER',
@@ -157,6 +165,17 @@ export interface ExpenseDistributionItem {
   color: string;
 }
 
+export interface HardwareCategoryBreakdownItem {
+  categoryKey: string;
+  label: string;
+  color: string;
+  salesCount: number;
+  qtySold: number;
+  revenue: number;
+  cogs: number;
+  netProfit: number;
+}
+
 export interface ProfitLossSummary {
   totalCollections: number;
   paymentTxCount: number;
@@ -165,11 +184,23 @@ export interface ProfitLossSummary {
   projectedBaseSalaries: number;
   staffSalaries: number;
   infraMaintenanceCost: number;
+  agentCommissionsCost: number;
   totalOutgoing: number;
   netProfit: number;
   marginPct: number;
+  // Segmented Hardware & Combined Profit Metrics
+  hardwareRevenue: number;
+  hardwareCogs: number;
+  hardwareNetProfit: number;
+  hardwareMarginPct: number;
+  hardwareSalesCount: number;
+  hardwareCategoryBreakdown: HardwareCategoryBreakdownItem[];
+  combinedGrossRevenue: number;
+  combinedNetProfit: number;
+  combinedMarginPct: number;
   filteredExpenses: SupabaseIspExpense[];
   filteredSalaries: SupabaseAgentCashTransaction[];
+  filteredHardwareSales: SupabaseInventorySale[];
   periodSeries: ProfitLossPeriodBucket[];
   distribution: ExpenseDistributionItem[];
 }
@@ -197,6 +228,8 @@ export function computeProfitLossSummary(params: {
   expenses: SupabaseIspExpense[];
   salaryTransactions: SupabaseAgentCashTransaction[];
   staffUsers?: SupabasePortalUser[];
+  inventorySales?: SupabaseInventorySale[];
+  inventoryItems?: SupabaseInventoryItem[];
   filter: DateFilterState;
   includeProjectedBaseSalaries?: boolean;
 }): ProfitLossSummary {
@@ -206,6 +239,8 @@ export function computeProfitLossSummary(params: {
     expenses,
     salaryTransactions,
     staffUsers = [],
+    inventorySales = [],
+    inventoryItems = [],
     filter,
     includeProjectedBaseSalaries = false,
   } = params;
@@ -282,9 +317,11 @@ export function computeProfitLossSummary(params: {
 
   let upstreamCost = 0;
   let infraMaintenanceCost = 0;
+  let agentCommissionsCost = 0;
   const categoryTotals: Record<string, number> = {
     UPSTREAM_BANDWIDTH: 0,
     SALARY_PAYOUT: 0,
+    AGENT_COMMISSION: 0,
     FIBER_HARDWARE: 0,
     POWER_SOLAR_UPS: 0,
     FIELD_MAINTENANCE: 0,
@@ -298,6 +335,8 @@ export function computeProfitLossSummary(params: {
     const cat = (exp.expense_category || 'OTHER').toUpperCase();
     if (cat === 'UPSTREAM_BANDWIDTH') {
       upstreamCost += amt;
+    } else if (cat === 'AGENT_COMMISSION') {
+      agentCommissionsCost += amt;
     } else {
       infraMaintenanceCost += amt;
     }
@@ -366,12 +405,127 @@ export function computeProfitLossSummary(params: {
 
   categoryTotals.SALARY_PAYOUT = staffSalaries;
 
-  const totalOutgoing = upstreamCost + staffSalaries + infraMaintenanceCost;
+  const totalOutgoing =
+    upstreamCost + staffSalaries + agentCommissionsCost + infraMaintenanceCost;
   const netProfit = totalCollections - totalOutgoing;
   const marginPct =
     totalCollections > 0
       ? (netProfit / totalCollections) * 100
       : netProfit < 0
+      ? -100
+      : 0;
+
+  // Segmented Hardware & Accessories Sales Profit (Independent of Subscription MRR)
+  const itemCategoryById = new Map<string, string>();
+  for (const it of inventoryItems || []) {
+    if (it?.id) {
+      itemCategoryById.set(it.id, (it.category || 'ACCESSORY').toUpperCase());
+    }
+  }
+
+  const inferHardwareCategory = (sale: SupabaseInventorySale): string => {
+    if (sale.item_id && itemCategoryById.has(sale.item_id)) {
+      return itemCategoryById.get(sale.item_id)!;
+    }
+    const nm = (sale.item_name || '').toLowerCase();
+    if (nm.includes('router') || nm.includes('ont') || nm.includes('onu') || nm.includes('tenda') || nm.includes('tplink')) {
+      return 'ROUTER_ONT';
+    }
+    if (nm.includes('patch')) return 'PATCH_CORD';
+    if (nm.includes('fdb') || nm.includes('splitter') || nm.includes('fosc') || nm.includes('fat')) {
+      return 'FDB_SPLITTER';
+    }
+    if (nm.includes('cat6') || nm.includes('cat-6') || nm.includes('ethernet') || nm.includes('rj45')) {
+      return 'CAT6_CABLE';
+    }
+    if (nm.includes('fiber') || nm.includes('drop') || nm.includes('wire')) return 'FIBER_CABLE';
+    return 'ACCESSORY';
+  };
+
+  const HARDWARE_CAT_META: Record<string, { label: string; color: string }> = {
+    ROUTER_ONT: { label: 'Routers / ONTs', color: '#06b6d4' },
+    PATCH_CORD: { label: 'Fiber Patch Cords', color: '#8b5cf6' },
+    FDB_SPLITTER: { label: 'FDB Boxes & Splitters', color: '#10b981' },
+    CAT6_CABLE: { label: 'Cat6 Cable', color: '#f59e0b' },
+    FIBER_CABLE: { label: 'Fiber Drop Cable', color: '#3b82f6' },
+    ACCESSORY: { label: 'Accessories & Connectors', color: '#ec4899' },
+  };
+
+  const filteredHardwareSales = (inventorySales || []).filter((sale) =>
+    matchesDateFilter(sale.sale_date, filter)
+  );
+
+  let hardwareRevenue = 0;
+  let hardwareCogs = 0;
+  let hardwareNetProfit = 0;
+  const hwCatMap = new Map<string, HardwareCategoryBreakdownItem>();
+
+  for (const key of Object.keys(HARDWARE_CAT_META)) {
+    hwCatMap.set(key, {
+      categoryKey: key,
+      label: HARDWARE_CAT_META[key].label,
+      color: HARDWARE_CAT_META[key].color,
+      salesCount: 0,
+      qtySold: 0,
+      revenue: 0,
+      cogs: 0,
+      netProfit: 0,
+    });
+  }
+
+  for (const sale of filteredHardwareSales) {
+    const qty = Number(sale.qty) || 0;
+    const rev = Number(sale.total_sale) || qty * (Number(sale.unit_sale_price) || 0);
+    const cogs = qty * (Number(sale.unit_cost_snapshot) || 0);
+    const profit =
+      sale.net_profit !== undefined && sale.net_profit !== null
+        ? Number(sale.net_profit)
+        : rev - cogs;
+
+    hardwareRevenue += rev;
+    hardwareCogs += cogs;
+    hardwareNetProfit += profit;
+
+    const catKey = inferHardwareCategory(sale);
+    const existingCat = hwCatMap.get(catKey) || {
+      categoryKey: catKey,
+      label: catKey.replace(/_/g, ' '),
+      color: '#64748b',
+      salesCount: 0,
+      qtySold: 0,
+      revenue: 0,
+      cogs: 0,
+      netProfit: 0,
+    };
+    existingCat.salesCount += 1;
+    existingCat.qtySold += qty;
+    existingCat.revenue += rev;
+    existingCat.cogs += cogs;
+    existingCat.netProfit += profit;
+    hwCatMap.set(catKey, existingCat);
+  }
+
+  const hardwareMarginPct =
+    hardwareRevenue > 0
+      ? (hardwareNetProfit / hardwareRevenue) * 100
+      : hardwareNetProfit < 0
+      ? -100
+      : 0;
+
+  const hardwareCategoryBreakdown = Array.from(hwCatMap.values()).map((c) => ({
+    ...c,
+    qtySold: Math.round(c.qtySold * 100) / 100,
+    revenue: Math.round(c.revenue * 100) / 100,
+    cogs: Math.round(c.cogs * 100) / 100,
+    netProfit: Math.round(c.netProfit * 100) / 100,
+  }));
+
+  const combinedGrossRevenue = totalCollections + hardwareRevenue;
+  const combinedNetProfit = netProfit + hardwareNetProfit;
+  const combinedMarginPct =
+    combinedGrossRevenue > 0
+      ? (combinedNetProfit / combinedGrossRevenue) * 100
+      : combinedNetProfit < 0
       ? -100
       : 0;
 
@@ -392,6 +546,7 @@ export function computeProfitLossSummary(params: {
   const distributionOrder = [
     'UPSTREAM_BANDWIDTH',
     'SALARY_PAYOUT',
+    'AGENT_COMMISSION',
     'FIBER_HARDWARE',
     'POWER_SOLAR_UPS',
     'FIELD_MAINTENANCE',
@@ -420,11 +575,22 @@ export function computeProfitLossSummary(params: {
     projectedBaseSalaries,
     staffSalaries,
     infraMaintenanceCost,
+    agentCommissionsCost,
     totalOutgoing,
     netProfit,
     marginPct,
+    hardwareRevenue: Math.round(hardwareRevenue * 100) / 100,
+    hardwareCogs: Math.round(hardwareCogs * 100) / 100,
+    hardwareNetProfit: Math.round(hardwareNetProfit * 100) / 100,
+    hardwareMarginPct,
+    hardwareSalesCount: filteredHardwareSales.length,
+    hardwareCategoryBreakdown,
+    combinedGrossRevenue: Math.round(combinedGrossRevenue * 100) / 100,
+    combinedNetProfit: Math.round(combinedNetProfit * 100) / 100,
+    combinedMarginPct,
     filteredExpenses,
     filteredSalaries,
+    filteredHardwareSales,
     periodSeries,
     distribution,
   };

@@ -11,9 +11,10 @@ import {
   FolderTree,
   ExternalLink,
 } from 'lucide-react';
+import { ERP_MIGRATION_SQL } from '../lib/erpMigrationSql';
 
 export const ArchitectureStudio: React.FC = () => {
-  const [activeCodeTab, setActiveCodeTab] = useState<'sql' | 'mikrotik' | 'cron' | 'nextjs'>('sql');
+  const [activeCodeTab, setActiveCodeTab] = useState<'sql' | 'erp_sql' | 'mikrotik' | 'cron' | 'nextjs'>('sql');
   const [copied, setCopied] = useState<boolean>(false);
 
   const sqlSchemaCode = `-- ============================================================================
@@ -372,6 +373,8 @@ export default async function BillingPage() {
   const currentCode =
     activeCodeTab === 'sql'
       ? sqlSchemaCode
+      : activeCodeTab === 'erp_sql'
+      ? ERP_MIGRATION_SQL
       : activeCodeTab === 'mikrotik'
       ? mikrotikTsCode
       : activeCodeTab === 'cron'
@@ -418,7 +421,7 @@ export default async function BillingPage() {
           <div className="flex space-x-1 overflow-x-auto text-xs font-mono scrollbar-none">
             <button
               onClick={() => setActiveCodeTab('sql')}
-              className={`px-3 py-1.5 rounded-md flex items-center gap-1.5 transition ${
+              className={`shrink-0 whitespace-nowrap px-3 py-1.5 rounded-md flex items-center gap-1.5 transition cursor-pointer ${
                 activeCodeTab === 'sql'
                   ? 'bg-slate-800 text-cyan-300 border border-cyan-800/80 font-bold'
                   : 'text-slate-400 hover:text-slate-200'
@@ -426,6 +429,18 @@ export default async function BillingPage() {
             >
               <Database className="w-3.5 h-3.5 text-cyan-400" />
               1. PostgreSQL DDL (schema.sql)
+            </button>
+
+            <button
+              onClick={() => setActiveCodeTab('erp_sql')}
+              className={`shrink-0 whitespace-nowrap px-3 py-1.5 rounded-md flex items-center gap-1.5 transition cursor-pointer ${
+                activeCodeTab === 'erp_sql'
+                  ? 'bg-slate-800 text-amber-300 border border-amber-700/80 font-bold'
+                  : 'text-slate-400 hover:text-slate-200'
+              }`}
+            >
+              <Database className="w-3.5 h-3.5 text-amber-400" />
+              1b. ERP Commissions &amp; Inventory SQL
             </button>
 
             <button

@@ -10,6 +10,8 @@ import {
   NetworkAreaNode,
   NETWORK_AREAS_UPDATED_EVENT,
 } from '../lib/billingAndNetwork';
+import { supabase, SupabasePortalUser } from '../services/supabaseClient';
+import { createAgentCommission } from '../services/erpInventoryService';
 
 interface ProvisionSecretModalProps {
   isOpen: boolean;
@@ -64,6 +66,9 @@ export const ProvisionSecretModal: React.FC<ProvisionSecretModalProps> = ({ isOp
   const [assignedAgentId, setAssignedAgentId] = useState(agents[0]?.id || '');
   const [ponPort, setPonPort] = useState('PON-01');
   const [cnic, setCnic] = useState('');
+  const [portalAgents, setPortalAgents] = useState<SupabasePortalUser[]>([]);
+  const [referredByAgentId, setReferredByAgentId] = useState('');
+  const [commissionAmount, setCommissionAmount] = useState('500');
   const [isSubmitting, setIsSubmitting] = useState(false);
 
   useEffect(() => {
@@ -73,6 +78,20 @@ export const ProvisionSecretModal: React.FC<ProvisionSecretModalProps> = ({ isOp
     loadAreas();
     window.addEventListener(NETWORK_AREAS_UPDATED_EVENT, loadAreas);
     return () => window.removeEventListener(NETWORK_AREAS_UPDATED_EVENT, loadAreas);
+  }, [isOpen]);
+
+  useEffect(() => {
+    if (!isOpen) return;
+    supabase
+      .from('portal_users')
+      .select('id,username,full_name,area,role')
+      .eq('role', 'AGENT')
+      .order('full_name', { ascending: true })
+      .then(({ data }) => {
+        if (Array.isArray(data)) {
+          setPortalAgents(data as SupabasePortalUser[]);
+        }
+      });
   }, [isOpen]);
 
   const handlePppoeUsernameChange = (rawVal: string) => {
@@ -189,6 +208,32 @@ export const ProvisionSecretModal: React.FC<ProvisionSecretModalProps> = ({ isOp
         priceMonthly: selectedProfilePrice,
       } as any),
     });
+
+    const commAmtNum = Number(commissionAmount) || 0;
+    const refAgent = portalAgents.find((a) => a.id === referredByAgentId);
+    if (refAgent && commAmtNum > 0) {
+      try {
+        const cleanSubUsername = pppoeUsername.trim().toLowerCase();
+        const { data: subRow } = await supabase
+          .from('portal_users')
+          .select('id')
+          .ilike('username', cleanSubUsername)
+          .maybeSingle();
+
+        await createAgentCommission({
+          agent_id: refAgent.id,
+          agent_name: refAgent.full_name || refAgent.username,
+          subscriber_id: subRow?.id || null,
+          subscriber_username: cleanSubUsername,
+          client_name: name.trim() || cleanSubUsername,
+          package_name: packageId,
+          commission_amount: commAmtNum,
+          notes: `New PPPoE connection referred by ${refAgent.full_name || refAgent.username}`,
+        });
+      } catch (commErr) {
+        console.warn('Could not save agent commission to Supabase:', commErr);
+      }
+    }
 
     setIsSubmitting(false);
     onClose();
@@ -329,6 +374,53 @@ export const ProvisionSecretModal: React.FC<ProvisionSecretModalProps> = ({ isOp
                   </option>
                 ))}
               </select>
+            </div>
+          </div>
+
+          {/* Field Agent New-Connection Commission Tracker */}
+          <div className="bg-slate-950/80 border border-slate-800 rounded-xl p-3.5 space-y-2.5">
+            <div className="flex items-center justify-between">
+              <span className="font-semibold text-slate-200 flex items-center gap-1.5 text-xs">
+                <DollarSign className="w-4 h-4 text-emerald-400" />
+                <span>Agent New-Connection Commission (Optional)</span>
+              </span>
+              <span className="text-[10px] font-mono text-slate-400">
+                Saved as UNPAID in Supabase
+              </span>
+            </div>
+            <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+              <div>
+                <label className="block text-slate-400 mb-1 font-medium">
+                  Connection Referred / Brought By Agent
+                </label>
+                <select
+                  value={referredByAgentId}
+                  onChange={(e) => setReferredByAgentId(e.target.value)}
+                  className="w-full bg-slate-900 border border-slate-700 text-slate-100 p-2.5 rounded-lg focus:outline-none focus:border-cyan-500"
+                >
+                  <option value="">None / Direct Walk-in</option>
+                  {portalAgents.map((ag) => (
+                    <option key={ag.id} value={ag.id}>
+                      {ag.full_name} (@{ag.username}) · {ag.area || 'Field'}
+                    </option>
+                  ))}
+                </select>
+              </div>
+              <div>
+                <label className="block text-slate-400 mb-1 font-medium">
+                  Commission Amount (Rs.)
+                </label>
+                <input
+                  type="number"
+                  min="0"
+                  step="50"
+                  disabled={!referredByAgentId}
+                  placeholder="e.g. 500"
+                  value={commissionAmount}
+                  onChange={(e) => setCommissionAmount(e.target.value)}
+                  className="w-full bg-slate-900 border border-slate-700 text-emerald-300 font-mono tabular-nums p-2.5 rounded-lg focus:outline-none focus:border-cyan-500 disabled:opacity-40"
+                />
+              </div>
             </div>
           </div>
 

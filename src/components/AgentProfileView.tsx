@@ -19,8 +19,27 @@ import {
   Building,
   Check,
   Edit,
+  Award,
+  Plus,
+  Trash2,
+  Copy,
+  Database,
 } from 'lucide-react';
-import { supabase, SupabasePortalUser, SupabasePaymentTransaction, SupabaseAgentCashTransaction } from '../services/supabaseClient';
+import {
+  supabase,
+  SupabasePortalUser,
+  SupabasePaymentTransaction,
+  SupabaseAgentCashTransaction,
+  SupabaseAgentCommission,
+} from '../services/supabaseClient';
+import {
+  fetchAgentCommissions,
+  createAgentCommission,
+  markCommissionPaidAndPostToLedger,
+  updateAgentCommission,
+  deleteAgentCommission,
+} from '../services/erpInventoryService';
+import { ERP_MIGRATION_SQL } from '../lib/erpMigrationSql';
 import { useCurrency } from '../context/CurrencyContext';
 import { useAuth } from '../context/AuthContext';
 import { EditStaffModal } from './EditStaffModal';
@@ -53,8 +72,11 @@ export const AgentProfileView: React.FC<AgentProfileViewProps> = ({
   const [allAgents, setAllAgents] = useState<SupabasePortalUser[]>([]);
   const [collections, setCollections] = useState<SupabasePaymentTransaction[]>([]);
   const [cashTransactions, setCashTransactions] = useState<SupabaseAgentCashTransaction[]>([]);
+  const [commissions, setCommissions] = useState<SupabaseAgentCommission[]>([]);
+  const [missingCommissionTable, setMissingCommissionTable] = useState<boolean>(false);
+  const [copiedErpSql, setCopiedErpSql] = useState<boolean>(false);
   const [isLoading, setIsLoading] = useState<boolean>(true);
-  const [activeTab, setActiveTab] = useState<'collections' | 'ledger'>('collections');
+  const [activeTab, setActiveTab] = useState<'collections' | 'ledger' | 'commissions'>('collections');
   const [dateFilter, setDateFilter] = useState<DateFilterState>(() => createDefaultDateFilter('month'));
   const [toastMessage, setToastMessage] = useState<{ text: string; type: 'success' | 'error' } | null>(null);
 
@@ -65,6 +87,25 @@ export const AgentProfileView: React.FC<AgentProfileViewProps> = ({
   const [isAdvanceModalOpen, setIsAdvanceModalOpen] = useState(false);
   const [isAdvanceReturnModalOpen, setIsAdvanceReturnModalOpen] = useState(false);
   const [isSalaryPayoutModalOpen, setIsSalaryPayoutModalOpen] = useState(false);
+  const [isCommissionModalOpen, setIsCommissionModalOpen] = useState(false);
+  const [editingCommission, setEditingCommission] = useState<SupabaseAgentCommission | null>(null);
+  const [deletingCommission, setDeletingCommission] = useState<SupabaseAgentCommission | null>(null);
+  const [markingPaidId, setMarkingPaidId] = useState<string | null>(null);
+  const [commForm, setCommForm] = useState<{
+    subscriber_username: string;
+    client_name: string;
+    package_name: string;
+    commission_amount: string;
+    status: 'UNPAID' | 'PAID';
+    notes: string;
+  }>({
+    subscriber_username: '',
+    client_name: '',
+    package_name: '30Mbps Fiber',
+    commission_amount: '500',
+    status: 'UNPAID',
+    notes: '',
+  });
 
   // Form Inputs
   const [handoverAmount, setHandoverAmount] = useState<string>('');
@@ -228,6 +269,11 @@ export const AgentProfileView: React.FC<AgentProfileViewProps> = ({
       setAgent({ ...userData, cash_in_hand: actualCashInHand, advance_balance: actualAdvanceBalance });
       setHandoverAmount(String(actualCashInHand));
       setSalaryPayoutAmount(String(userData.base_salary ?? 0));
+
+      // 1.4 Fetch agent new-connection commissions from Supabase
+      const commRes = await fetchAgentCommissions(userData.id);
+      setCommissions(commRes.data);
+      setMissingCommissionTable(commRes.missingTable);
     } catch (err) {
       console.error('Error fetching agent profile:', err);
     } finally {
@@ -251,6 +297,9 @@ export const AgentProfileView: React.FC<AgentProfileViewProps> = ({
         fetchAgentProfile();
       })
       .on('postgres_changes', { event: '*', schema: 'public', table: 'invoices' }, () => {
+        fetchAgentProfile();
+      })
+      .on('postgres_changes', { event: '*', schema: 'public', table: 'agent_commissions' }, () => {
         fetchAgentProfile();
       })
       .subscribe();
@@ -288,6 +337,147 @@ export const AgentProfileView: React.FC<AgentProfileViewProps> = ({
       })
       .reduce((sum, item) => sum + (Number(item.amount) || 0), 0);
   }, [filteredCashTransactions]);
+
+  const commissionStats = useMemo(() => {
+    const totalEarned = commissions.reduce((sum, c) => sum + (Number(c.commission_amount) || 0), 0);
+    const paidTotal = commissions
+      .filter((c) => c.status === 'PAID')
+      .reduce((sum, c) => sum + (Number(c.commission_amount) || 0), 0);
+    const unpaidTotal = commissions
+      .filter((c) => c.status !== 'PAID')
+      .reduce((sum, c) => sum + (Number(c.commission_amount) || 0), 0);
+    return {
+      totalEarned,
+      paidTotal,
+      unpaidTotal,
+      paidCount: commissions.filter((c) => c.status === 'PAID').length,
+      unpaidCount: commissions.filter((c) => c.status !== 'PAID').length,
+    };
+  }, [commissions]);
+
+  const handleCopyErpSql = async () => {
+    try {
+      await navigator.clipboard.writeText(ERP_MIGRATION_SQL);
+      setCopiedErpSql(true);
+      showToast('ERP SQL script copied! Paste & run in Supabase SQL Editor.');
+      setTimeout(() => setCopiedErpSql(false), 3000);
+    } catch {
+      showToast('Could not copy automatically. Please check clipboard permissions.', 'error');
+    }
+  };
+
+  const openAddCommissionModal = () => {
+    setEditingCommission(null);
+    setCommForm({
+      subscriber_username: '',
+      client_name: '',
+      package_name: '30Mbps Fiber',
+      commission_amount: '500',
+      status: 'UNPAID',
+      notes: '',
+    });
+    setIsCommissionModalOpen(true);
+  };
+
+  const openEditCommissionModal = (comm: SupabaseAgentCommission) => {
+    setEditingCommission(comm);
+    setCommForm({
+      subscriber_username: comm.subscriber_username || '',
+      client_name: comm.client_name || '',
+      package_name: comm.package_name || '',
+      commission_amount: String(comm.commission_amount ?? 0),
+      status: comm.status === 'PAID' ? 'PAID' : 'UNPAID',
+      notes: comm.notes || '',
+    });
+    setIsCommissionModalOpen(true);
+  };
+
+  const handleSaveCommission = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!agent) return;
+    const amt = Number(commForm.commission_amount);
+    if (!Number.isFinite(amt) || amt <= 0) {
+      showToast('Please enter a positive commission amount.', 'error');
+      return;
+    }
+    if (!commForm.subscriber_username.trim() && !commForm.client_name.trim()) {
+      showToast('Please enter client username or name.', 'error');
+      return;
+    }
+
+    setIsSubmitting(true);
+    try {
+      const recordedBy = currentUser?.fullName || currentUser?.username || 'Admin';
+      if (editingCommission) {
+        await updateAgentCommission(
+          editingCommission,
+          {
+            subscriber_username: commForm.subscriber_username,
+            client_name: commForm.client_name,
+            package_name: commForm.package_name,
+            commission_amount: amt,
+            status: commForm.status,
+            notes: commForm.notes,
+          },
+          recordedBy
+        );
+        showToast('Commission record updated & expense ledger synced.');
+      } else {
+        const created = await createAgentCommission({
+          agent_id: agent.id,
+          agent_name: agent.full_name || agent.username,
+          subscriber_username: commForm.subscriber_username || commForm.client_name,
+          client_name: commForm.client_name || commForm.subscriber_username,
+          package_name: commForm.package_name,
+          commission_amount: amt,
+          notes: commForm.notes,
+        });
+        if (commForm.status === 'PAID') {
+          await markCommissionPaidAndPostToLedger(created, recordedBy);
+          showToast(`Commission added, marked PAID, and posted to Profit & Expense Ledger.`);
+        } else {
+          showToast(`Commission of ${formatCurrency(amt)} logged as UNPAID.`);
+        }
+      }
+      setIsCommissionModalOpen(false);
+      await fetchAgentProfile();
+    } catch (err: any) {
+      showToast(`Commission save failed: ${err?.message || 'Unknown error'}`, 'error');
+    } finally {
+      setIsSubmitting(false);
+    }
+  };
+
+  const handleMarkCommissionPaid = async (comm: SupabaseAgentCommission) => {
+    setMarkingPaidId(comm.id);
+    try {
+      const recordedBy = currentUser?.fullName || currentUser?.username || 'Admin';
+      await markCommissionPaidAndPostToLedger(comm, recordedBy);
+      showToast(
+        `Commission (${formatCurrency(comm.commission_amount)}) marked PAID & posted to Expense Ledger!`
+      );
+      await fetchAgentProfile();
+    } catch (err: any) {
+      showToast(`Failed to mark commission paid: ${err?.message || 'Unknown error'}`, 'error');
+    } finally {
+      setMarkingPaidId(null);
+    }
+  };
+
+  const handleConfirmDeleteCommission = async () => {
+    if (!deletingCommission) return;
+    setIsSubmitting(true);
+    try {
+      await deleteAgentCommission(deletingCommission);
+      showToast('Commission deleted (and linked ledger expense removed if paid).');
+      setDeletingCommission(null);
+      await fetchAgentProfile();
+    } catch (err: any) {
+      showToast(`Delete failed: ${err?.message || 'Unknown error'}`, 'error');
+    } finally {
+      setIsSubmitting(false);
+    }
+  };
 
   // ACTION 1: Handover Cash
   const handleHandoverCash = async (e: React.FormEvent) => {
@@ -694,29 +884,46 @@ export const AgentProfileView: React.FC<AgentProfileViewProps> = ({
       />
 
       {/* Financial Navigation Tabs */}
-      <div className="flex items-center gap-2 border-b border-slate-800 pb-2 font-mono">
+      <div className="flex items-center overflow-x-auto gap-2 border-b border-slate-800 pb-2 font-mono no-scrollbar">
         <button
           onClick={() => setActiveTab('collections')}
-          className={`flex items-center gap-2 px-4 py-2 rounded-xl font-bold text-xs transition cursor-pointer ${
+          className={`shrink-0 whitespace-nowrap flex items-center gap-2 px-4 py-2 rounded-xl font-bold text-xs transition cursor-pointer ${
             activeTab === 'collections'
               ? 'bg-cyan-600 text-slate-950 shadow-md shadow-cyan-950/40'
-              : 'bg-slate-900 text-slate-400 hover:text-white border border-slate-800'
+              : 'bg-slate-900 text-slate-300 hover:text-white border border-slate-800'
           }`}
         >
-          <Receipt className="w-3.5 h-3.5" />
+          <Receipt className="w-3.5 h-3.5 shrink-0" />
           <span>Client Collections Breakdown ({filteredCollections.length})</span>
         </button>
 
         <button
           onClick={() => setActiveTab('ledger')}
-          className={`flex items-center gap-2 px-4 py-2 rounded-xl font-bold text-xs transition cursor-pointer ${
+          className={`shrink-0 whitespace-nowrap flex items-center gap-2 px-4 py-2 rounded-xl font-bold text-xs transition cursor-pointer ${
             activeTab === 'ledger'
               ? 'bg-cyan-600 text-slate-950 shadow-md shadow-cyan-950/40'
-              : 'bg-slate-900 text-slate-400 hover:text-white border border-slate-800'
+              : 'bg-slate-900 text-slate-300 hover:text-white border border-slate-800'
           }`}
         >
-          <FileText className="w-3.5 h-3.5" />
+          <FileText className="w-3.5 h-3.5 shrink-0" />
           <span>Handover &amp; Settlement Audit Ledger ({filteredCashTransactions.length})</span>
+        </button>
+
+        <button
+          onClick={() => setActiveTab('commissions')}
+          className={`shrink-0 whitespace-nowrap flex items-center gap-2 px-4 py-2 rounded-xl font-bold text-xs transition cursor-pointer ${
+            activeTab === 'commissions'
+              ? 'bg-purple-600 text-white shadow-md shadow-purple-950/40'
+              : 'bg-slate-900 text-slate-300 hover:text-white border border-slate-800'
+          }`}
+        >
+          <Award className="w-3.5 h-3.5 shrink-0" />
+          <span>Commissions ({commissions.length})</span>
+          {commissionStats.unpaidCount > 0 && (
+            <span className="px-1.5 py-0.5 rounded-full bg-amber-500/20 text-amber-300 border border-amber-500/40 text-[10px]">
+              {commissionStats.unpaidCount} Unpaid
+            </span>
+          )}
         </button>
       </div>
 
@@ -906,6 +1113,199 @@ export const AgentProfileView: React.FC<AgentProfileViewProps> = ({
                 )}
               </tbody>
             </table>
+          </div>
+        </div>
+      )}
+
+      {/* TAB 3: New-Connection Commissions Tracker */}
+      {activeTab === 'commissions' && (
+        <div className="space-y-4">
+          {missingCommissionTable && (
+            <div className="p-4 rounded-2xl bg-amber-950/40 border border-amber-700/60 flex flex-col sm:flex-row sm:items-center justify-between gap-3">
+              <div className="space-y-1">
+                <div className="flex items-center gap-2 text-amber-300 font-bold text-xs">
+                  <Database className="w-4 h-4 shrink-0" />
+                  <span>Supabase `agent_commissions` Table Setup Required</span>
+                </div>
+                <p className="text-[11px] text-amber-200/80">
+                  Copy the one-click ERP SQL script and run it in Supabase SQL Editor to persist new-connection commissions &amp; hardware inventory.
+                </p>
+              </div>
+              <button
+                type="button"
+                onClick={handleCopyErpSql}
+                className="shrink-0 whitespace-nowrap px-3.5 py-2 rounded-xl bg-amber-500 hover:bg-amber-400 text-slate-950 font-bold text-xs flex items-center gap-1.5 cursor-pointer transition"
+              >
+                <Copy className="w-3.5 h-3.5" />
+                <span>{copiedErpSql ? 'Copied ERP SQL!' : 'Copy ERP SQL'}</span>
+              </button>
+            </div>
+          )}
+
+          {/* 3 Commission Summary Cards + Add Button */}
+          <div className="flex flex-col lg:flex-row lg:items-stretch justify-between gap-3">
+            <div className="grid grid-cols-1 sm:grid-cols-3 gap-3 flex-1">
+              <div className="p-4 rounded-xl bg-slate-900 border border-slate-800 space-y-1">
+                <span className="text-[10px] text-slate-400 font-mono uppercase block">
+                  Total Earned Commission
+                </span>
+                <div className="text-xl font-bold font-mono tabular-nums text-white">
+                  {formatCurrency(commissionStats.totalEarned)}
+                </div>
+                <span className="text-[10px] text-slate-400 font-mono block">
+                  {commissions.length} referred connection{commissions.length === 1 ? '' : 's'}
+                </span>
+              </div>
+
+              <div className="p-4 rounded-xl bg-slate-900 border border-emerald-800/50 space-y-1">
+                <span className="text-[10px] text-emerald-400 font-mono uppercase block">
+                  Paid Commission (In Ledger)
+                </span>
+                <div className="text-xl font-bold font-mono tabular-nums text-emerald-400">
+                  {formatCurrency(commissionStats.paidTotal)}
+                </div>
+                <span className="text-[10px] text-slate-400 font-mono block">
+                  {commissionStats.paidCount} posted to isp_expenses
+                </span>
+              </div>
+
+              <div className="p-4 rounded-xl bg-slate-900 border border-amber-700/50 space-y-1">
+                <span className="text-[10px] text-amber-400 font-mono uppercase block">
+                  Pending Unpaid Commission
+                </span>
+                <div className="text-xl font-bold font-mono tabular-nums text-amber-300">
+                  {formatCurrency(commissionStats.unpaidTotal)}
+                </div>
+                <span className="text-[10px] text-slate-400 font-mono block">
+                  {commissionStats.unpaidCount} awaiting payout
+                </span>
+              </div>
+            </div>
+
+            <div className="flex items-center justify-end lg:items-start">
+              <button
+                type="button"
+                onClick={openAddCommissionModal}
+                className="w-full lg:w-auto shrink-0 whitespace-nowrap px-4 py-2.5 rounded-xl bg-purple-600 hover:bg-purple-500 text-white font-bold text-xs flex items-center justify-center gap-1.5 shadow-md transition cursor-pointer"
+              >
+                <Plus className="w-4 h-4" />
+                <span>+ Add Commission</span>
+              </button>
+            </div>
+          </div>
+
+          {/* Commissions CRUD Table */}
+          <div className="bg-slate-900 border border-slate-800 rounded-2xl overflow-hidden shadow-xl">
+            <div className="overflow-x-auto">
+              <table className="w-full text-left border-collapse text-xs">
+                <thead>
+                  <tr className="bg-slate-950 border-b border-slate-800 text-slate-400 font-mono text-[11px] uppercase tracking-wider">
+                    <th className="py-3.5 px-4">Date</th>
+                    <th className="py-3.5 px-4">Client / Username</th>
+                    <th className="py-3.5 px-4">Package</th>
+                    <th className="py-3.5 px-4 text-right">Commission (Rs.)</th>
+                    <th className="py-3.5 px-4">Status &amp; Ledger</th>
+                    <th className="py-3.5 px-4">Notes</th>
+                    <th className="py-3.5 px-4 text-right">Actions</th>
+                  </tr>
+                </thead>
+                <tbody className="divide-y divide-slate-800/80 font-mono">
+                  {commissions.length === 0 ? (
+                    <tr>
+                      <td colSpan={7} className="py-12 text-center text-slate-400 font-mono">
+                        No new-connection commissions recorded yet for @{agent.username}.
+                      </td>
+                    </tr>
+                  ) : (
+                    commissions.map((c) => {
+                      const isPaid = c.status === 'PAID';
+                      const dateLabel = c.created_at
+                        ? new Date(c.created_at).toLocaleDateString()
+                        : 'Recent';
+                      return (
+                        <tr key={c.id} className="hover:bg-slate-950/50 transition">
+                          <td className="py-3.5 px-4 text-slate-400 whitespace-nowrap">
+                            {dateLabel}
+                          </td>
+                          <td className="py-3.5 px-4">
+                            <div className="font-bold text-cyan-400">
+                              @{c.subscriber_username || 'subscriber'}
+                            </div>
+                            <div className="text-[11px] text-slate-300 font-sans">
+                              {c.client_name}
+                            </div>
+                          </td>
+                          <td className="py-3.5 px-4 text-slate-200 whitespace-nowrap">
+                            {c.package_name || 'Standard Fiber'}
+                          </td>
+                          <td className="py-3.5 px-4 text-right font-bold tabular-nums text-white whitespace-nowrap">
+                            {formatCurrency(Number(c.commission_amount) || 0)}
+                          </td>
+                          <td className="py-3.5 px-4 whitespace-nowrap">
+                            {isPaid ? (
+                              <div className="space-y-0.5">
+                                <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded text-[10px] font-bold bg-emerald-950 text-emerald-300 border border-emerald-700">
+                                  <Check className="w-3 h-3" />
+                                  PAID
+                                </span>
+                                {c.paid_at && (
+                                  <div className="text-[10px] text-slate-400">
+                                    {new Date(c.paid_at).toLocaleDateString()}
+                                    {c.ledger_entry_id ? ' · Ledger Synced' : ''}
+                                  </div>
+                                )}
+                              </div>
+                            ) : (
+                              <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded text-[10px] font-bold bg-amber-950 text-amber-300 border border-amber-700">
+                                <Clock className="w-3 h-3" />
+                                UNPAID
+                              </span>
+                            )}
+                          </td>
+                          <td className="py-3.5 px-4 text-slate-400 max-w-[200px] truncate font-sans">
+                            {c.notes || '—'}
+                          </td>
+                          <td className="py-3.5 px-4 text-right whitespace-nowrap">
+                            <div className="inline-flex items-center gap-1.5">
+                              {!isPaid && (
+                                <button
+                                  type="button"
+                                  disabled={markingPaidId === c.id}
+                                  onClick={() => handleMarkCommissionPaid(c)}
+                                  className="px-2.5 py-1 rounded-lg bg-emerald-600 hover:bg-emerald-500 text-slate-950 font-bold text-[11px] inline-flex items-center gap-1 transition cursor-pointer disabled:opacity-50"
+                                  title="Mark Paid & Auto-Post Expense to Profit & Expense Ledger"
+                                >
+                                  <CheckCircle2 className="w-3 h-3" />
+                                  <span>
+                                    {markingPaidId === c.id ? 'Posting...' : 'Mark Paid & Post'}
+                                  </span>
+                                </button>
+                              )}
+                              <button
+                                type="button"
+                                onClick={() => openEditCommissionModal(c)}
+                                className="p-1.5 rounded-lg bg-slate-800 hover:bg-slate-700 text-cyan-300 border border-slate-700 transition cursor-pointer"
+                                title="Edit Commission"
+                              >
+                                <Edit className="w-3.5 h-3.5" />
+                              </button>
+                              <button
+                                type="button"
+                                onClick={() => setDeletingCommission(c)}
+                                className="p-1.5 rounded-lg bg-slate-800 hover:bg-rose-950 text-rose-400 border border-slate-700 hover:border-rose-800 transition cursor-pointer"
+                                title="Delete Commission"
+                              >
+                                <Trash2 className="w-3.5 h-3.5" />
+                              </button>
+                            </div>
+                          </td>
+                        </tr>
+                      );
+                    })
+                  )}
+                </tbody>
+              </table>
+            </div>
           </div>
         </div>
       )}
@@ -1223,6 +1623,175 @@ export const AgentProfileView: React.FC<AgentProfileViewProps> = ({
           fetchAgentProfile();
         }}
       />
+
+      {/* MODAL 5: Add / Edit New-Connection Commission */}
+      {isCommissionModalOpen && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-slate-950/80 backdrop-blur-sm animate-fadeIn font-sans">
+          <div className="bg-slate-900 border border-slate-800 rounded-2xl w-full max-w-md shadow-2xl overflow-hidden">
+            <div className="flex items-center justify-between p-4 bg-slate-950 border-b border-slate-800">
+              <div className="flex items-center gap-2">
+                <Award className="w-4 h-4 text-purple-400" />
+                <h3 className="font-bold text-white text-sm">
+                  {editingCommission ? 'Edit Agent Commission' : 'Add New-Connection Commission'}
+                </h3>
+              </div>
+              <button
+                type="button"
+                onClick={() => setIsCommissionModalOpen(false)}
+                className="p-1 text-slate-400 hover:text-white rounded-lg transition cursor-pointer"
+              >
+                <X className="w-4 h-4" />
+              </button>
+            </div>
+
+            <form onSubmit={handleSaveCommission} className="p-5 space-y-3.5 text-xs">
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                <div>
+                  <label className="text-slate-300 font-bold block mb-1">Subscriber Username</label>
+                  <input
+                    type="text"
+                    value={commForm.subscriber_username}
+                    onChange={(e) =>
+                      setCommForm((p) => ({ ...p, subscriber_username: e.target.value }))
+                    }
+                    placeholder="e.g. ali_fiber"
+                    className="w-full bg-slate-950 border border-slate-700 rounded-xl px-3 py-2 text-white font-mono focus:outline-none focus:border-purple-500"
+                  />
+                </div>
+                <div>
+                  <label className="text-slate-300 font-bold block mb-1">Client Full Name *</label>
+                  <input
+                    type="text"
+                    required
+                    value={commForm.client_name}
+                    onChange={(e) => setCommForm((p) => ({ ...p, client_name: e.target.value }))}
+                    placeholder="e.g. Ali Raza"
+                    className="w-full bg-slate-950 border border-slate-700 rounded-xl px-3 py-2 text-white focus:outline-none focus:border-purple-500"
+                  />
+                </div>
+              </div>
+
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                <div>
+                  <label className="text-slate-300 font-bold block mb-1">Package Name</label>
+                  <input
+                    type="text"
+                    value={commForm.package_name}
+                    onChange={(e) => setCommForm((p) => ({ ...p, package_name: e.target.value }))}
+                    placeholder="e.g. 30Mbps Fiber"
+                    className="w-full bg-slate-950 border border-slate-700 rounded-xl px-3 py-2 text-white focus:outline-none focus:border-purple-500"
+                  />
+                </div>
+                <div>
+                  <label className="text-slate-300 font-bold block mb-1">Commission Amount (Rs.) *</label>
+                  <input
+                    type="number"
+                    required
+                    min="1"
+                    step="any"
+                    value={commForm.commission_amount}
+                    onChange={(e) =>
+                      setCommForm((p) => ({ ...p, commission_amount: e.target.value }))
+                    }
+                    className="w-full bg-slate-950 border border-slate-700 rounded-xl px-3 py-2 text-white font-mono focus:outline-none focus:border-purple-500"
+                  />
+                </div>
+              </div>
+
+              <div>
+                <label className="text-slate-300 font-bold block mb-1">Payment Status</label>
+                <select
+                  value={commForm.status}
+                  onChange={(e) =>
+                    setCommForm((p) => ({ ...p, status: e.target.value as 'UNPAID' | 'PAID' }))
+                  }
+                  className="w-full bg-slate-950 border border-slate-700 rounded-xl px-3 py-2 text-white focus:outline-none focus:border-purple-500"
+                >
+                  <option value="UNPAID">UNPAID (Pending Agent Payout)</option>
+                  <option value="PAID">PAID (Auto-Post to Expense Ledger)</option>
+                </select>
+              </div>
+
+              <div>
+                <label className="text-slate-300 font-bold block mb-1">Notes</label>
+                <textarea
+                  rows={2}
+                  value={commForm.notes}
+                  onChange={(e) => setCommForm((p) => ({ ...p, notes: e.target.value }))}
+                  placeholder="Optional installation or area reference..."
+                  className="w-full bg-slate-950 border border-slate-700 rounded-xl px-3 py-2 text-white focus:outline-none focus:border-purple-500 resize-none"
+                />
+              </div>
+
+              <div className="flex items-center justify-end gap-2 pt-2 border-t border-slate-800">
+                <button
+                  type="button"
+                  onClick={() => setIsCommissionModalOpen(false)}
+                  className="px-4 py-2 bg-slate-800 hover:bg-slate-700 text-slate-300 rounded-xl font-bold cursor-pointer transition"
+                >
+                  Cancel
+                </button>
+                <button
+                  type="submit"
+                  disabled={isSubmitting}
+                  className="px-4 py-2 bg-purple-600 hover:bg-purple-500 text-white rounded-xl font-bold cursor-pointer transition disabled:opacity-50"
+                >
+                  {isSubmitting
+                    ? 'Saving...'
+                    : editingCommission
+                    ? 'Save Changes'
+                    : 'Save Commission'}
+                </button>
+              </div>
+            </form>
+          </div>
+        </div>
+      )}
+
+      {/* MODAL 6: Delete Commission Confirmation */}
+      {deletingCommission && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-slate-950/80 backdrop-blur-sm animate-fadeIn font-sans">
+          <div className="bg-slate-900 border border-rose-800/70 rounded-2xl w-full max-w-md shadow-2xl p-5 space-y-4 text-xs">
+            <div className="flex items-start gap-3">
+              <div className="p-2 rounded-xl bg-rose-950 border border-rose-800 text-rose-400 shrink-0">
+                <Trash2 className="w-5 h-5" />
+              </div>
+              <div>
+                <h3 className="text-sm font-bold text-white">Delete Commission Record?</h3>
+                <p className="text-slate-300 mt-1">
+                  This removes the commission for{' '}
+                  <strong className="text-cyan-400">
+                    @{deletingCommission.subscriber_username || deletingCommission.client_name}
+                  </strong>{' '}
+                  ({formatCurrency(deletingCommission.commission_amount)}).
+                  {deletingCommission.ledger_entry_id
+                    ? ' Its linked entry in the ISP Expense Ledger will also be removed.'
+                    : ''}
+                </p>
+              </div>
+            </div>
+
+            <div className="flex items-center justify-end gap-2 pt-2 border-t border-slate-800">
+              <button
+                type="button"
+                onClick={() => setDeletingCommission(null)}
+                disabled={isSubmitting}
+                className="px-4 py-2 bg-slate-800 hover:bg-slate-700 text-slate-200 rounded-xl font-bold cursor-pointer transition"
+              >
+                Cancel
+              </button>
+              <button
+                type="button"
+                onClick={handleConfirmDeleteCommission}
+                disabled={isSubmitting}
+                className="px-4 py-2 bg-rose-600 hover:bg-rose-500 text-white rounded-xl font-bold cursor-pointer transition disabled:opacity-50"
+              >
+                {isSubmitting ? 'Deleting...' : 'Confirm Delete'}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 };

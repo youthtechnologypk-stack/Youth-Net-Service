@@ -22,6 +22,7 @@ import {
   Gauge,
   Wallet,
   MapPin,
+  Package,
 } from 'lucide-react';
 import { ActiveTab } from './Header';
 import { SystemRole, UserAccount } from '../types/auth';
@@ -115,6 +116,15 @@ export const Sidebar: React.FC<SidebarProps> = ({
       icon: Wallet,
       badge: 'P&L Ledger',
       badgeColor: 'bg-emerald-950 text-emerald-300 border-emerald-800',
+      roles: ['ADMIN', 'MANAGER'],
+    },
+    {
+      id: 'inventory' as ActiveTab,
+      label: 'Inventory & Hardware',
+      subtitle: 'Stock, Sales & Vendor Ledger',
+      icon: Package,
+      badge: 'ERP Stock',
+      badgeColor: 'bg-amber-950 text-amber-300 border-amber-800',
       roles: ['ADMIN', 'MANAGER'],
     },
     {

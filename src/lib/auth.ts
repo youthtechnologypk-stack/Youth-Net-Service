@@ -53,6 +53,7 @@ export function getTabFromPath(path: string): string | null {
   if (clean === 'manager/dashboard' || clean === 'manager' || clean === 'dashboard/operations' || clean === 'operations') return 'operations';
   if (clean === 'billing') return 'billing';
   if (clean === 'profit-expenses' || clean === 'profit_expenses') return 'profit_expenses';
+  if (clean === 'inventory' || clean === 'hardware-inventory') return 'inventory';
   if (clean === 'complaints') return 'complaints';
   if (clean === 'mikrotik') return 'mikrotik';
   if (clean === 'olt') return 'olt';
@@ -112,6 +113,7 @@ export function isRouteAllowedForRole(role: SystemRole, routeOrTab: string): boo
       'billing', // Can view collections & agent cash
       'profit_expenses',
       'profit-expenses',
+      'inventory',
       'olt', // Can view optical status
       'fiber_gis',
       'fiber-gis',

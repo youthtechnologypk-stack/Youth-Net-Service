@@ -18,9 +18,12 @@ import {
   Clock,
   Hourglass,
   ShieldAlert,
+  DollarSign,
 } from 'lucide-react';
 import { useISP } from '../context/ISPContext';
 import { useSubscribers } from '../hooks/useSubscribers';
+import { supabase, SupabasePortalUser } from '../services/supabaseClient';
+import { createAgentCommission } from '../services/erpInventoryService';
 import { safeResponseJson } from '../lib/safeFetch';
 import { saveUnifiedPortalUser } from '../lib/userRepository';
 import { AreaNodeSelector } from './AreaNodeSelector';
@@ -96,6 +99,9 @@ export const AddUserModal: React.FC<AddUserModalProps> = ({ isOpen, onClose, onS
   const [ponPort, setPonPort] = useState('PON-01');
   const [feederLine, setFeederLine] = useState('Feeder-North-01');
   const [cnic, setCnic] = useState('');
+  const [portalAgents, setPortalAgents] = useState<SupabasePortalUser[]>([]);
+  const [referredByAgentId, setReferredByAgentId] = useState('');
+  const [commissionAmount, setCommissionAmount] = useState('500');
 
   useEffect(() => {
     const loadAreas = () => {
@@ -104,6 +110,20 @@ export const AddUserModal: React.FC<AddUserModalProps> = ({ isOpen, onClose, onS
     loadAreas();
     window.addEventListener(NETWORK_AREAS_UPDATED_EVENT, loadAreas);
     return () => window.removeEventListener(NETWORK_AREAS_UPDATED_EVENT, loadAreas);
+  }, [isOpen]);
+
+  useEffect(() => {
+    if (!isOpen) return;
+    supabase
+      .from('portal_users')
+      .select('id,username,full_name,area,role')
+      .eq('role', 'AGENT')
+      .order('full_name', { ascending: true })
+      .then(({ data }) => {
+        if (Array.isArray(data)) {
+          setPortalAgents(data as SupabasePortalUser[]);
+        }
+      });
   }, [isOpen]);
 
   const handleUsernameChange = (rawVal: string) => {
@@ -359,6 +379,33 @@ export const AddUserModal: React.FC<AddUserModalProps> = ({ isOpen, onClose, onS
         });
       } catch (err) {
         console.warn('Failed saving to USERS_STORAGE_KEY:', err);
+      }
+
+      // Persist agent referral commission to Supabase if selected
+      const commAmtNum = Number(commissionAmount) || 0;
+      const refAgent = portalAgents.find((a) => a.id === referredByAgentId);
+      if (refAgent && commAmtNum > 0) {
+        try {
+          const cleanUname = username.trim().toLowerCase();
+          const { data: subRow } = await supabase
+            .from('portal_users')
+            .select('id')
+            .ilike('username', cleanUname)
+            .maybeSingle();
+
+          await createAgentCommission({
+            agent_id: refAgent.id,
+            agent_name: refAgent.full_name || refAgent.username,
+            subscriber_id: subRow?.id || null,
+            subscriber_username: cleanUname,
+            client_name: fullName.trim() || cleanUname,
+            package_name: profile || 'default',
+            commission_amount: commAmtNum,
+            notes: `New PPPoE connection referred by ${refAgent.full_name || refAgent.username}`,
+          });
+        } catch (commErr) {
+          console.warn('Could not insert agent commission:', commErr);
+        }
       }
 
       if (res.schedulerWarning) {
@@ -949,6 +996,53 @@ export const AddUserModal: React.FC<AddUserModalProps> = ({ isOpen, onClose, onS
                     </option>
                   ))}
                 </select>
+              </div>
+
+              {/* Field Agent New-Connection Commission Tracker */}
+              <div className="bg-slate-950/90 border border-slate-800 rounded-xl p-3 space-y-2">
+                <div className="flex items-center justify-between">
+                  <span className="text-slate-200 font-semibold flex items-center gap-1.5 text-xs">
+                    <DollarSign className="w-3.5 h-3.5 text-emerald-400" />
+                    <span>New Connection Commission (Optional)</span>
+                  </span>
+                  <span className="text-[10px] font-mono text-slate-400">
+                    Supabase UNPAID Entry
+                  </span>
+                </div>
+                <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                  <div>
+                    <label className="block text-slate-400 mb-1">
+                      Connection Referred / Brought By Agent
+                    </label>
+                    <select
+                      value={referredByAgentId}
+                      onChange={(e) => setReferredByAgentId(e.target.value)}
+                      className="w-full bg-slate-900 border border-slate-700 text-slate-100 p-2 rounded-lg focus:outline-none focus:border-cyan-500 font-sans"
+                    >
+                      <option value="">None / Direct Walk-in</option>
+                      {portalAgents.map((ag) => (
+                        <option key={ag.id} value={ag.id}>
+                          {ag.full_name} (@{ag.username}) · {ag.area || 'Field'}
+                        </option>
+                      ))}
+                    </select>
+                  </div>
+                  <div>
+                    <label className="block text-slate-400 mb-1">
+                      Commission Amount (Rs.)
+                    </label>
+                    <input
+                      type="number"
+                      min="0"
+                      step="50"
+                      disabled={!referredByAgentId}
+                      placeholder="e.g. 500"
+                      value={commissionAmount}
+                      onChange={(e) => setCommissionAmount(e.target.value)}
+                      className="w-full bg-slate-900 border border-slate-700 text-emerald-300 font-mono tabular-nums p-2 rounded-lg focus:outline-none focus:border-cyan-500 disabled:opacity-40"
+                    />
+                  </div>
+                </div>
               </div>
             </div>
 
