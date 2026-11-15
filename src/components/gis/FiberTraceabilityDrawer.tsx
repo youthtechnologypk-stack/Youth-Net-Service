@@ -17,6 +17,7 @@ import {
   getFbtLegOutputs,
   getHealthBadgeColors,
   getNodeTypeLabel,
+  resolveHopSpliceLoss,
 } from '../../lib/fiberOpticEngine';
 import type { SupabaseGisSplitterOutput } from '../../services/supabaseClient';
 
@@ -43,7 +44,11 @@ export const FiberTraceabilityDrawer: React.FC<FiberTraceabilityDrawerProps> = (
   const healthStyle = getHealthBadgeColors(budget?.healthBand || 'UNLINKED');
   const splitterSpec = SPLITTER_SPECS[targetNode.splitter_type] || SPLITTER_SPECS['none'];
   const fbtPreview = splitterSpec.isAsymmetricFbt
-    ? getFbtLegOutputs(budget?.inputDbm ?? null, targetNode.splitter_type, targetNode.loss_per_splice)
+    ? getFbtLegOutputs(
+        budget?.inputDbm ?? null,
+        targetNode.splitter_type,
+        resolveHopSpliceLoss(targetNode.loss_per_splice)
+      )
     : null;
 
   return (

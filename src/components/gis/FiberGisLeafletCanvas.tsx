@@ -171,9 +171,9 @@ export const FiberGisLeafletCanvas: React.FC<FiberGisLeafletCanvasProps> = ({
 
       if (layerType === 'hybrid') {
         labelsLayerRef.current = L.tileLayer(
-          'https://{s}.basemaps.cartocdn.com/dark_only_labels/{z}/{x}/{y}{r}.png',
+          'https://server.arcgisonline.com/ArcGIS/rest/services/Reference/World_Boundaries_and_Places/MapServer/tile/{z}/{y}/{x}',
           {
-            attribution: '&copy; OpenStreetMap &copy; CARTO',
+            attribution: 'Labels &copy; Esri',
             maxZoom: 19,
             pane: 'overlayPane',
           }
@@ -384,25 +384,48 @@ export const FiberGisLeafletCanvas: React.FC<FiberGisLeafletCanvasProps> = ({
         </div>`;
       } else if (node.node_type === 'DIST_NODE') {
         const ratioBadge = splitterSpec.type !== 'none' ? splitterSpec.type : `${node.tray_capacity}C`;
+        const distOutputDbm =
+          splitterSpec.isAsymmetricFbt
+            ? budget?.thruOutputDbm
+            : splitterSpec.type !== 'none'
+            ? budget?.ontRxDbm
+            : budget?.thruOutputDbm ?? budget?.inputDbm;
+        const healthColor = budget && budget.healthBand !== 'UNLINKED' ? getHealthBadgeColors(budget.healthBand).hex : '#a5b4fc';
         const dbTxt =
-          budget?.inputDbm !== null && budget?.inputDbm !== undefined
-            ? ` ${budget.inputDbm.toFixed(1)}dB`
+          distOutputDbm !== null && distOutputDbm !== undefined
+            ? ` ${distOutputDbm.toFixed(1)}dBm`
             : '';
         tooltipText = `${node.name} · Dist Node (${ratioBadge})${
           totalPorts > 0 ? ` · ${usedPortsCount}/${totalPorts} Used · ${freePorts} Free` : ''
+        }${
+          budget?.inputDbm !== null && budget?.inputDbm !== undefined && distOutputDbm !== null && distOutputDbm !== undefined
+            ? ` · In ${budget.inputDbm.toFixed(1)} → Out ${distOutputDbm.toFixed(1)} dBm`
+            : ''
         }`;
         html = `<div style="display:inline-flex;align-items:center;gap:4px;padding:4px 8px;border-radius:8px;border:1.5px solid ${
-          isSelected ? '#ffffff' : '#a5b4fc'
+          isSelected ? '#ffffff' : healthColor
         };background:${isSelected ? '#6366f1' : '#4338ca'};color:#fff;font-family:monospace;font-size:10px;font-weight:700;white-space:nowrap;box-shadow:0 4px 12px rgba(0,0,0,0.45);transform:translate(-50%,-50%);cursor:${
           toolMode === 'pan' ? 'grab' : 'pointer'
         };">
-          <span>DIST</span><span style="background:rgba(0,0,0,0.28);padding:1px 4px;border-radius:4px">${ratioBadge}</span><span>${dbTxt}</span>
+          <span>DIST</span><span style="background:rgba(0,0,0,0.28);padding:1px 4px;border-radius:4px">${ratioBadge}</span>${
+            dbTxt ? `<span style="color:${healthColor}">${dbTxt}</span>` : ''
+          }
         </div>`;
       } else if (node.node_type === 'FOSC_JOINT') {
         const splitTag = splitterSpec.type !== 'none' ? ` · ${splitterSpec.type}` : '';
+        const foscOutDbm =
+          splitterSpec.type !== 'none' && !splitterSpec.isAsymmetricFbt
+            ? budget?.ontRxDbm
+            : budget?.thruOutputDbm ?? budget?.inputDbm;
+        const dbTxt =
+          foscOutDbm !== null && foscOutDbm !== undefined
+            ? ` ${foscOutDbm.toFixed(1)}dBm`
+            : '';
         tooltipText = `${node.name} · FOSC Joint (${node.tray_capacity}C${splitTag})${
           budget?.inputDbm !== null && budget?.inputDbm !== undefined
-            ? ` · In ${budget.inputDbm.toFixed(1)} dBm`
+            ? ` · In ${budget.inputDbm.toFixed(1)}${
+                foscOutDbm !== null && foscOutDbm !== undefined ? ` → Out ${foscOutDbm.toFixed(1)}` : ''
+              } dBm`
             : ''
         }`;
         html = `<div style="display:inline-flex;align-items:center;gap:4px;padding:4px 8px;border-radius:8px;border:1.5px solid ${
@@ -410,7 +433,9 @@ export const FiberGisLeafletCanvas: React.FC<FiberGisLeafletCanvasProps> = ({
         };background:${isSelected ? '#a855f7' : '#7e22ce'};color:#fff;font-family:monospace;font-size:10px;font-weight:700;white-space:nowrap;box-shadow:0 4px 12px rgba(0,0,0,0.45);transform:translate(-50%,-50%);cursor:${
           toolMode === 'pan' ? 'grab' : 'pointer'
         };">
-          <span>FOSC</span><span>${node.tray_capacity}C${splitterSpec.type !== 'none' ? `·${splitterSpec.type}` : ''}</span>
+          <span>FOSC</span><span>${node.tray_capacity}C${splitterSpec.type !== 'none' ? `·${splitterSpec.type}` : ''}</span>${
+            dbTxt ? `<span style="background:rgba(0,0,0,0.28);padding:1px 4px;border-radius:4px">${dbTxt}</span>` : ''
+          }
         </div>`;
       } else {
         const bg =
@@ -420,21 +445,37 @@ export const FiberGisLeafletCanvas: React.FC<FiberGisLeafletCanvasProps> = ({
             ? '#f59e0b'
             : '#059669';
         const fg = freePorts > 0 && freePorts <= 2 ? '#0f172a' : '#ffffff';
+        const signalHex =
+          budget && budget.healthBand !== 'UNLINKED'
+            ? getHealthBadgeColors(budget.healthBand).hex
+            : '#94a3b8';
         const dbTxt =
           budget?.ontRxDbm !== null && budget?.ontRxDbm !== undefined
-            ? ` ${budget.ontRxDbm.toFixed(1)}dB`
+            ? `${budget.ontRxDbm.toFixed(1)}dBm`
             : '';
         tooltipText = `${node.name} · ${node.splitter_type} · ${usedPortsCount}/${totalPorts} Used · ${freePorts} Free${
+          budget?.inputDbm !== null && budget?.inputDbm !== undefined
+            ? ` · In ${budget.inputDbm.toFixed(1)} dBm`
+            : ''
+        }${
           budget?.ontRxDbm !== null && budget?.ontRxDbm !== undefined
-            ? ` · Rx ${budget.ontRxDbm.toFixed(1)} dBm`
+            ? ` → Out ${budget.ontRxDbm.toFixed(1)} dBm`
             : ''
         }`;
         html = `<div style="display:inline-flex;align-items:center;gap:5px;padding:4px 8px;border-radius:8px;border:1.5px solid ${
-          isSelected ? '#ffffff' : 'rgba(255,255,255,0.7)'
+          isSelected
+            ? '#ffffff'
+            : budget?.healthBand === 'CRITICAL LOS RISK'
+            ? '#f43f5e'
+            : 'rgba(255,255,255,0.75)'
         };background:${bg};color:${fg};font-family:monospace;font-size:10px;font-weight:700;white-space:nowrap;box-shadow:0 4px 12px rgba(0,0,0,0.45);transform:translate(-50%,-50%);cursor:${
           toolMode === 'pan' ? 'grab' : 'pointer'
         };">
-          <span>FDB</span><span style="background:rgba(0,0,0,0.22);padding:1px 4px;border-radius:4px">${freePorts}/${totalPorts}</span><span>${dbTxt}</span>
+          <span>FDB</span><span style="background:rgba(0,0,0,0.22);padding:1px 4px;border-radius:4px">${freePorts}/${totalPorts}</span>${
+            dbTxt
+              ? `<span style="background:rgba(15,23,42,0.82);color:${signalHex};padding:1px 4px;border-radius:4px">${dbTxt}</span>`
+              : ''
+          }
         </div>`;
       }
 

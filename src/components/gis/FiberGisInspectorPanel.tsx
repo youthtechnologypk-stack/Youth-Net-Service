@@ -44,10 +44,12 @@ import type {
 import type { GisSubscriberSummary } from '../../services/fiberGisService';
 import {
   CABLE_CAPACITY_PRESETS,
+  DEFAULT_FUSION_SPLICE_LOSS_DB,
   NodeOpticalBudgetResult,
   SFP_TX_PRESETS,
   SPLITTER_SPECS,
   cableCoresToType,
+  calculateTopologyOpticalBudgets,
   coreStatusToLedgerStatus,
   coreStatusToUsageType,
   generateDefaultSpliceTray,
@@ -55,11 +57,13 @@ import {
   getFbtLegOutputs,
   getHealthBadgeColors,
   getNodeTypeLabel,
+  getOpticalHealthLabel,
   getTia598Color,
   inferSfpClassFromDbm,
   inferSplitterCategory,
   ledgerStatusToCoreStatus,
   normalizeCableCores,
+  resolveHopSpliceLoss,
   summarizeCableCores,
 } from '../../lib/fiberOpticEngine';
 import { DEFAULT_NETWORK_AREAS } from '../../lib/billingAndNetwork';
@@ -164,7 +168,7 @@ export const FiberGisInspectorPanel: React.FC<FiberGisInspectorPanelProps> = ({
   const [nodeFeedCorePair, setNodeFeedCorePair] = useState<string>('');
   const [nodePonPortId, setNodePonPortId] = useState<string>('');
   const [nodeTrayCapacity, setNodeTrayCapacity] = useState<number>(12);
-  const [nodeLossPerSplice, setNodeLossPerSplice] = useState<number>(0.08);
+  const [nodeLossPerSplice, setNodeLossPerSplice] = useState<number>(DEFAULT_FUSION_SPLICE_LOSS_DB);
   const [nodeNotes, setNodeNotes] = useState('');
   const [spliceTrayDraft, setSpliceTrayDraft] = useState<GisSpliceEntry[]>([]);
 
@@ -211,7 +215,7 @@ export const FiberGisInspectorPanel: React.FC<FiberGisInspectorPanelProps> = ({
       setNodePonPortId(selectedNode.pon_port_id || '');
       const cap = Number(selectedNode.tray_capacity ?? 12);
       setNodeTrayCapacity(cap);
-      setNodeLossPerSplice(Number(selectedNode.loss_per_splice ?? 0.08));
+      setNodeLossPerSplice(resolveHopSpliceLoss(selectedNode.loss_per_splice));
       setNodeNotes(selectedNode.notes || '');
       setSpliceTrayDraft(
         Array.isArray(selectedNode.splice_tray_json) && selectedNode.splice_tray_json.length > 0
@@ -287,6 +291,50 @@ export const FiberGisInspectorPanel: React.FC<FiberGisInspectorPanelProps> = ({
       .slice(0, 40);
   }, [subscribers, subSearch]);
 
+  const hasUnsavedOpticalEdits = useMemo(() => {
+    if (!selectedNode) return false;
+    return (
+      (selectedNode.feed_cable_id || '') !== nodeFeedCableId ||
+      (selectedNode.splitter_type || 'none') !== nodeSplitter ||
+      (selectedNode.pon_port_id || '') !== nodePonPortId ||
+      Math.abs(resolveHopSpliceLoss(selectedNode.loss_per_splice) - Number(nodeLossPerSplice || DEFAULT_FUSION_SPLICE_LOSS_DB)) > 0.001 ||
+      (selectedNode.node_type === 'OLT' && Math.abs(Number(selectedNode.tx_power_dbm ?? 5.0) - Number(nodeTxPower)) > 0.01)
+    );
+  }, [selectedNode, nodeFeedCableId, nodeSplitter, nodePonPortId, nodeLossPerSplice, nodeTxPower]);
+
+  const liveDraftBudget = useMemo(() => {
+    if (!selectedNode || !hasUnsavedOpticalEdits) return null;
+    const patchedNodes = nodes.map((n) =>
+      n.id === selectedNode.id
+        ? {
+            ...n,
+            feed_cable_id: nodeFeedCableId || null,
+            feed_core_number: Number(nodeFeedCore) || 1,
+            pon_port_id: nodePonPortId || null,
+            splitter_type: nodeSplitter,
+            splitter_category: nodeSplitterCat,
+            loss_per_splice: Number(nodeLossPerSplice) || DEFAULT_FUSION_SPLICE_LOSS_DB,
+            tx_power_dbm: Number(nodeTxPower),
+          }
+        : n
+    );
+    const liveMap = calculateTopologyOpticalBudgets(patchedNodes, cables, ponPortsById);
+    return liveMap[selectedNode.id] || null;
+  }, [
+    selectedNode,
+    hasUnsavedOpticalEdits,
+    nodes,
+    cables,
+    ponPortsById,
+    nodeFeedCableId,
+    nodeFeedCore,
+    nodePonPortId,
+    nodeSplitter,
+    nodeSplitterCat,
+    nodeLossPerSplice,
+    nodeTxPower,
+  ]);
+
   if (!selectedNode && !selectedCable) {
     return null;
   }
@@ -314,7 +362,7 @@ export const FiberGisInspectorPanel: React.FC<FiberGisInspectorPanelProps> = ({
       feed_core_pair: nodeFeedCorePair.trim(),
       pon_port_id: nodePonPortId || null,
       tray_capacity: Math.max(2, Math.min(48, Number(nodeTrayCapacity) || 12)),
-      loss_per_splice: Number(nodeLossPerSplice) || 0.08,
+      loss_per_splice: Number(nodeLossPerSplice) || DEFAULT_FUSION_SPLICE_LOSS_DB,
       splice_tray_json: spliceTrayDraft,
       notes: nodeNotes,
     });
@@ -341,8 +389,9 @@ export const FiberGisInspectorPanel: React.FC<FiberGisInspectorPanelProps> = ({
   };
 
   const renderNodeInspector = (node: SupabaseGisNode) => {
-    const budget = budgetsByNodeId[node.id];
+    const budget = liveDraftBudget || budgetsByNodeId[node.id];
     const healthStyle = getHealthBadgeColors(budget?.healthBand || 'UNLINKED');
+    const healthLabel = getOpticalHealthLabel(budget?.healthBand || 'UNLINKED');
     const nodePorts = portsByNodeId[node.id] || [];
     const nodeOutputs = splitterOutputsByNodeId[node.id] || [];
     const portsByNumber: Record<number, SupabaseGisFdbPort> = {};
@@ -1044,21 +1093,84 @@ export const FiberGisInspectorPanel: React.FC<FiberGisInspectorPanelProps> = ({
           {(node.node_type === 'FDB_FAT' || node.node_type === 'DIST_NODE') && fdbSubTab === 'signal' && (
             <div className="space-y-4">
               {/* Optical Signal Budget Breakdown */}
-              <div className={`p-3.5 rounded-xl border ${healthStyle.bgClass} ${healthStyle.borderClass} space-y-2.5`}>
-                <div className="flex items-center justify-between">
-                  <span className="text-[11px] font-mono uppercase tracking-wider text-slate-300 font-bold">
-                    Optical Power Budget
-                  </span>
-                  <span className={`text-xs font-mono font-bold ${healthStyle.textClass}`}>
-                    {budget?.healthBand || 'UNLINKED'}
+              <div className={`p-3.5 rounded-xl border ${healthStyle.bgClass} ${healthStyle.borderClass} space-y-3`}>
+                <div className="flex items-center justify-between gap-2">
+                  <div>
+                    <span className="text-[11px] font-mono uppercase tracking-wider text-slate-200 font-bold block">
+                      Optical Power Budget
+                    </span>
+                    {hasUnsavedOpticalEdits && (
+                      <span className="text-[10px] font-mono text-amber-300">
+                        Live Preview (Click Save Node Changes to persist)
+                      </span>
+                    )}
+                  </div>
+                  <span className={`text-[11px] font-mono font-bold text-right ${healthStyle.textClass}`}>
+                    {healthLabel}
                   </span>
                 </div>
 
+                {/* Cascaded Link Budget Chain */}
+                {budget && budget.budgetSteps && budget.budgetSteps.length > 0 && (
+                  <div className="p-2.5 rounded-lg bg-slate-950/85 border border-slate-800 space-y-1.5 font-mono">
+                    <div className="flex items-center justify-between text-[10px] uppercase tracking-wider text-cyan-300 font-bold">
+                      <span>Optical Power Link Budget Chain</span>
+                      <span className="text-slate-400">
+                        {budget.hopCount} Hop{budget.hopCount === 1 ? '' : 's'}
+                      </span>
+                    </div>
+                    <div className="space-y-1">
+                      {budget.budgetSteps.map((step, idx) => (
+                        <div
+                          key={step.id}
+                          className="flex items-center justify-between gap-2 text-[11px] py-1 px-2 rounded bg-slate-900/90 border border-slate-800/80"
+                        >
+                          <div className="min-w-0">
+                            <div className="text-slate-200 font-semibold truncate">
+                              {idx + 1}. {step.label}
+                            </div>
+                            <div className="text-[10px] text-slate-400 truncate">{step.detail}</div>
+                          </div>
+                          <div className="text-right shrink-0 tabular-nums">
+                            {step.deltaDb !== null && step.deltaDb !== 0 && (
+                              <span className="text-amber-300 font-bold mr-2">
+                                {step.deltaDb > 0 ? `+${step.deltaDb.toFixed(2)}` : step.deltaDb.toFixed(2)} dB
+                              </span>
+                            )}
+                            <span
+                              className={`font-bold ${
+                                idx === budget.budgetSteps.length - 1
+                                  ? healthStyle.textClass
+                                  : 'text-sky-300'
+                              }`}
+                            >
+                              {step.powerAfterDbm >= 0 ? '+' : ''}
+                              {step.powerAfterDbm.toFixed(2)} dBm
+                            </span>
+                          </div>
+                        </div>
+                      ))}
+                    </div>
+                    <div className="pt-1.5 mt-1 border-t border-slate-800 flex items-center justify-between text-xs font-bold tabular-nums">
+                      <span className="text-slate-300">Final Splitter Output Power</span>
+                      <span className={healthStyle.textClass}>
+                        {budget.ontRxDbm !== null ? `${budget.ontRxDbm.toFixed(2)} dBm` : '—'}
+                      </span>
+                    </div>
+                  </div>
+                )}
+
                 <div className="grid grid-cols-2 gap-2 text-[11px] font-mono bg-slate-950/70 p-2.5 rounded-lg border border-slate-800/80">
                   <div>
-                    <span className="text-slate-400 block text-[10px]">Upstream OLT TX</span>
+                    <span className="text-slate-400 block text-[10px]">
+                      {budget?.parentOutputDbm !== null && budget?.parentOutputDbm !== undefined
+                        ? `Inherited Parent (${nodesById[budget.parentNodeId || '']?.name || 'Upstream'})`
+                        : 'Upstream OLT TX'}
+                    </span>
                     <span className="text-sky-300 font-bold tabular-nums block">
-                      {budget?.oltTxDbm !== null && budget?.oltTxDbm !== undefined
+                      {budget?.parentOutputDbm !== null && budget?.parentOutputDbm !== undefined
+                        ? `${budget.parentOutputDbm >= 0 ? '+' : ''}${budget.parentOutputDbm.toFixed(2)} dBm`
+                        : budget?.oltTxDbm !== null && budget?.oltTxDbm !== undefined
                         ? `${budget.oltTxDbm >= 0 ? '+' : ''}${budget.oltTxDbm.toFixed(2)} dBm`
                         : 'No OLT Path'}
                     </span>
@@ -1079,7 +1191,7 @@ export const FiberGisInspectorPanel: React.FC<FiberGisInspectorPanelProps> = ({
                   </div>
                   <div>
                     <span className="text-slate-400 block text-[10px]">
-                      Span Loss ({budget?.totalDistanceMeters ?? 0}m)
+                      Total Span ({budget?.totalDistanceMeters ?? 0}m)
                     </span>
                     <span className="text-amber-300 tabular-nums">
                       -{budget ? budget.fiberLossDb.toFixed(2) : '0.00'} dB
@@ -1087,20 +1199,20 @@ export const FiberGisInspectorPanel: React.FC<FiberGisInspectorPanelProps> = ({
                   </div>
                   <div>
                     <span className="text-slate-400 block text-[10px]">
-                      Splices ({budget?.spliceCount ?? 0}×) &amp; Thru
+                      Splices ({budget?.spliceCount ?? 0}×) &amp; Upstream Split
                     </span>
                     <span className="text-amber-300 tabular-nums">
                       -{budget ? (budget.spliceLossDb + budget.upstreamThruLossDb).toFixed(2) : '0.00'} dB
                     </span>
                   </div>
                   <div>
-                    <span className="text-slate-400 block text-[10px]">Splitter ({nodeSplitter})</span>
+                    <span className="text-slate-400 block text-[10px]">This Splitter ({nodeSplitter})</span>
                     <span className="text-amber-300 tabular-nums">
                       -{(SPLITTER_SPECS[nodeSplitter]?.dropLossDb ?? 0).toFixed(2)} dB
                     </span>
                   </div>
                   <div>
-                    <span className="text-slate-400 block text-[10px]">Est. ONT Rx</span>
+                    <span className="text-slate-400 block text-[10px]">Final Output / ONT Rx</span>
                     <span className={`font-bold text-sm tabular-nums ${healthStyle.textClass}`}>
                       {budget?.ontRxDbm !== null && budget?.ontRxDbm !== undefined
                         ? `${budget.ontRxDbm.toFixed(2)} dBm`
@@ -1731,14 +1843,32 @@ export const FiberGisInspectorPanel: React.FC<FiberGisInspectorPanelProps> = ({
                         {connectedCables.map((c) => {
                           const otherId =
                             c.source_node_id === node.id ? c.target_node_id : c.source_node_id;
-                          const otherName = nodesById[otherId]?.name || 'Node';
+                          const otherNode = nodesById[otherId];
+                          const otherName = otherNode?.name || 'Node';
+                          const otherBudget = budgetsByNodeId[otherId];
+                          const otherOutDbm =
+                            otherNode?.node_type === 'OLT'
+                              ? otherBudget?.oltTxDbm
+                              : SPLITTER_SPECS[otherNode?.splitter_type || 'none']?.isAsymmetricFbt
+                              ? otherBudget?.thruOutputDbm
+                              : otherBudget?.ontRxDbm ?? otherBudget?.thruOutputDbm;
                           return (
                             <option key={c.id} value={c.id}>
-                              From {otherName} ({c.cable_cores}C · {c.distance_meters}m)
+                              From {otherName} ({c.cable_cores}C · {c.distance_meters}m
+                              {otherOutDbm !== null && otherOutDbm !== undefined
+                                ? ` · ${otherOutDbm >= 0 ? '+' : ''}${otherOutDbm.toFixed(1)}dBm`
+                                : ''}
+                              )
                             </option>
                           );
                         })}
                       </select>
+                      {budget?.parentOutputDbm !== null && budget?.parentOutputDbm !== undefined && (
+                        <span className="block text-[10px] font-mono text-cyan-400 mt-1">
+                          Inherits {nodesById[budget.parentNodeId || '']?.name || 'parent'} output ({budget.parentOutputDbm >= 0 ? '+' : ''}
+                          {budget.parentOutputDbm.toFixed(1)} dBm)
+                        </span>
+                      )}
                     </div>
                     <div>
                       <label className="block text-[10px] font-mono text-slate-400 mb-1">

@@ -14,6 +14,8 @@ import {
   SupabasePortalUser,
 } from './supabaseClient';
 import {
+  DEFAULT_FUSION_SPLICE_LOSS_DB,
+  SPLITTER_SPECS,
   buildCableSplitPlan,
   cableCoresToType,
   calculateTopologyOpticalBudgets,
@@ -25,7 +27,7 @@ import {
   inferSfpClassFromDbm,
   inferSplitterCategory,
   normalizeCableCores,
-  SPLITTER_SPECS,
+  resolveHopSpliceLoss,
 } from '../lib/fiberOpticEngine';
 import type {
   GisCableTypeCode,
@@ -186,7 +188,7 @@ export function normalizeGisNodeRow(n: any): SupabaseGisNode {
     splitter_type: splitterType,
     total_ports: Number(n.total_ports ?? 8),
     tray_capacity: Number(n.tray_capacity ?? 12),
-    loss_per_splice: Number(n.loss_per_splice ?? 0.08),
+    loss_per_splice: resolveHopSpliceLoss(n.loss_per_splice),
     calculated_input_dbm:
       n.calculated_input_dbm !== null && n.calculated_input_dbm !== undefined
         ? Number(n.calculated_input_dbm)
@@ -271,7 +273,10 @@ async function syncNodeToFiberNodesTable(
       optical_power_dbm:
         node.node_type === 'OLT'
           ? Number(node.tx_power_dbm ?? 5.0)
-          : node.calculated_input_dbm ?? null,
+          : node.calculated_ont_rx_dbm ??
+            node.calculated_output_dbm ??
+            node.calculated_input_dbm ??
+            null,
       address_note: [node.area_name, node.notes].filter(Boolean).join(' · '),
     };
     await supabase.from('fiber_nodes').upsert(payload, { onConflict: 'id' });
@@ -967,7 +972,7 @@ export async function saveOltWithPonPorts(params: {
           splitter_type: 'none',
           total_ports: 0,
           tray_capacity: 12,
-          loss_per_splice: 0.08,
+          loss_per_splice: DEFAULT_FUSION_SPLICE_LOSS_DB,
           splice_tray_json: [],
           notes: `${olt.pon_mode} · ${olt.total_pon_ports} PON Ports · ${olt.mgmt_ip || ''}`,
           updated_by: params.updatedBy || 'admin',
@@ -1071,7 +1076,7 @@ export async function placeOrMoveOltOnMap(params: {
         splitter_type: 'none',
         total_ports: 0,
         tray_capacity: 12,
-        loss_per_splice: 0.08,
+        loss_per_splice: DEFAULT_FUSION_SPLICE_LOSS_DB,
         splice_tray_json: [],
         updated_by: params.updatedBy || 'admin',
         updated_at: nowIso,
@@ -1190,7 +1195,7 @@ export async function createGisNode(params: {
     splitter_type: splitterType,
     total_ports: totalPorts,
     tray_capacity: trayCapacity,
-    loss_per_splice: 0.08,
+    loss_per_splice: DEFAULT_FUSION_SPLICE_LOSS_DB,
     splice_tray_json:
       params.nodeType === 'FOSC_JOINT' || params.nodeType === 'DIST_NODE'
         ? generateDefaultSpliceTray(trayCapacity)
@@ -1453,7 +1458,7 @@ export async function splitCableWithFoscJoint(params: {
       splitter_type: 'none',
       total_ports: 0,
       tray_capacity: Math.max(2, Math.min(48, params.cable.cable_cores)),
-      loss_per_splice: 0.08,
+      loss_per_splice: DEFAULT_FUSION_SPLICE_LOSS_DB,
       splice_tray_json: plan.defaultSpliceTray,
       notes: `Split from ${params.cable.name || `${params.sourceNode?.name || 'Start'} → ${params.targetNode?.name || 'End'}`}`,
       updated_by: params.updatedBy || 'admin',
@@ -1697,14 +1702,14 @@ export async function initializeSplitterOutputsForNode(params: {
     existingByPort[o.port_number] = o;
   }
 
+  const nodeSplice = resolveHopSpliceLoss(params.node.loss_per_splice);
   const fbtLegs = spec.isAsymmetricFbt
-    ? getFbtLegOutputs(params.inputDbm ?? null, spec.type, params.node.loss_per_splice || 0.08)
+    ? getFbtLegOutputs(params.inputDbm ?? null, spec.type, nodeSplice)
     : null;
 
   const plcRx =
     params.inputDbm !== null && params.inputDbm !== undefined
-      ? Math.round((Number(params.inputDbm) - spec.dropLossDb - (params.node.loss_per_splice || 0.08)) * 100) /
-        100
+      ? Math.round((Number(params.inputDbm) - spec.dropLossDb - nodeSplice) * 100) / 100
       : null;
 
   const rows: Array<Record<string, any>> = [];
@@ -1766,7 +1771,8 @@ function numericDiffers(a: number | null | undefined, b: number | null | undefin
 }
 
 /**
- * Persists calculated optical input, thru output & ONT RX levels back to gis_nodes in background.
+ * Persists calculated optical input, thru output & ONT RX levels back to gis_nodes and
+ * fiber_nodes.optical_power_dbm in background whenever topology/splitters/OLT TX change.
  * Uses a 0.01 dB threshold so cross-client Realtime broadcasts never ping-pong updates.
  */
 export async function syncOpticalBudgetsToDb(
@@ -1775,17 +1781,20 @@ export async function syncOpticalBudgetsToDb(
   ponPortsById: Record<string, SupabaseGisOltPonPort> = {}
 ): Promise<void> {
   const budgets = calculateTopologyOpticalBudgets(nodes, cables, ponPortsById);
-  const updates = nodes
-    .filter((n) => n.node_type !== 'OLT')
-    .map((n) => {
-      const b = budgets[n.id];
-      if (!b) return null;
-      const changed =
-        numericDiffers(n.calculated_input_dbm, b.inputDbm) ||
-        numericDiffers(n.calculated_output_dbm, b.thruOutputDbm) ||
-        numericDiffers(n.calculated_ont_rx_dbm, b.ontRxDbm);
-      if (!changed) return null;
-      return Promise.resolve(
+  const updates: Array<Promise<any>> = [];
+
+  for (const n of nodes) {
+    if (n.node_type === 'OLT') continue;
+    const b = budgets[n.id];
+    if (!b) continue;
+    const changed =
+      numericDiffers(n.calculated_input_dbm, b.inputDbm) ||
+      numericDiffers(n.calculated_output_dbm, b.thruOutputDbm) ||
+      numericDiffers(n.calculated_ont_rx_dbm, b.ontRxDbm);
+    if (!changed) continue;
+
+    updates.push(
+      Promise.resolve(
         supabase
           .from('gis_nodes')
           .update({
@@ -1794,9 +1803,19 @@ export async function syncOpticalBudgetsToDb(
             calculated_ont_rx_dbm: b.ontRxDbm,
           })
           .eq('id', n.id)
-      );
-    })
-    .filter((p): p is Promise<any> => Boolean(p));
+      )
+    );
+
+    const outPower = b.ontRxDbm ?? b.thruOutputDbm ?? b.inputDbm;
+    updates.push(
+      Promise.resolve(
+        supabase
+          .from('fiber_nodes')
+          .update({ optical_power_dbm: outPower })
+          .eq('id', n.id)
+      )
+    );
+  }
 
   if (updates.length > 0) {
     await Promise.allSettled(updates);

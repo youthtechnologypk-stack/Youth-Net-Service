@@ -719,7 +719,9 @@ export const FiberGisMapView: React.FC<FiberGisMapViewProps> = ({
           notes: params.notes,
           updatedBy: actorUsername,
         });
-        setCables((prev) => applyRealtimeCableDelta(prev, 'INSERT', created));
+        const nextCables = applyRealtimeCableDelta(cables, 'INSERT', created);
+        setCables(nextCables);
+        syncOpticalBudgetsToDb(nodes, nextCables, ponPortsById).catch(() => {});
         setConnectSourceNodeId(null);
         setConnectTargetNodeId(null);
         setDraftWaypoints([]);
@@ -736,7 +738,7 @@ export const FiberGisMapView: React.FC<FiberGisMapViewProps> = ({
         setIsSaving(false);
       }
     },
-    [ponPortsById, draftCableCores, actorUsername, showToast]
+    [nodes, cables, ponPortsById, draftCableCores, actorUsername, showToast]
   );
 
   const handleNodeClick = useCallback(
@@ -894,7 +896,11 @@ export const FiberGisMapView: React.FC<FiberGisMapViewProps> = ({
       setIsSaving(true);
       try {
         const updatedPort = await updateOltPonPort(portId, patch);
-        setPonPorts((prev) => applyRealtimePonPortDelta(prev, 'UPDATE', updatedPort));
+        const nextPorts = applyRealtimePonPortDelta(ponPorts, 'UPDATE', updatedPort);
+        setPonPorts(nextPorts);
+        const nextPortMap: Record<string, SupabaseGisOltPonPort> = {};
+        for (const pp of nextPorts) nextPortMap[pp.id] = pp;
+        syncOpticalBudgetsToDb(nodes, cables, nextPortMap).catch(() => {});
         showToast(
           `Updated PON-${updatedPort.port_number} TX to +${Number(updatedPort.tx_power_dbm).toFixed(1)} dBm (${updatedPort.sfp_class}).`
         );
@@ -904,15 +910,17 @@ export const FiberGisMapView: React.FC<FiberGisMapViewProps> = ({
         setIsSaving(false);
       }
     },
-    [showToast]
+    [ponPorts, nodes, cables, showToast]
   );
 
   const handleSaveNode = async (nodeId: string, patch: Partial<SupabaseGisNode>) => {
     setIsSaving(true);
     try {
       const updated = await updateGisNode(nodeId, { ...patch, updated_by: actorUsername });
-      setNodes((prev) => applyRealtimeNodeDelta(prev, 'UPDATE', updated));
-      showToast('✅ Saved to Supabase DB — Node & optical parameters updated.');
+      const nextNodes = applyRealtimeNodeDelta(nodes, 'UPDATE', updated);
+      setNodes(nextNodes);
+      syncOpticalBudgetsToDb(nextNodes, cables, ponPortsById).catch(() => {});
+      showToast('✅ Saved to Supabase DB — Node & cascaded optical power updated.');
     } catch (err: any) {
       showToast(err?.message || 'Failed to update node', 'err');
     } finally {
@@ -924,12 +932,13 @@ export const FiberGisMapView: React.FC<FiberGisMapViewProps> = ({
     setIsSaving(true);
     try {
       await deleteGisNode(nodeId);
-      setNodes((prev) => applyRealtimeNodeDelta(prev, 'DELETE', undefined, { id: nodeId }));
-      setCables((prev) =>
-        prev.filter((c) => c.source_node_id !== nodeId && c.target_node_id !== nodeId)
-      );
+      const nextNodes = applyRealtimeNodeDelta(nodes, 'DELETE', undefined, { id: nodeId });
+      const nextCables = cables.filter((c) => c.source_node_id !== nodeId && c.target_node_id !== nodeId);
+      setNodes(nextNodes);
+      setCables(nextCables);
       setPorts((prev) => prev.filter((p) => p.fdb_node_id !== nodeId));
       setSelectedNodeId(null);
+      syncOpticalBudgetsToDb(nextNodes, nextCables, ponPortsById).catch(() => {});
       showToast('Node deleted from Supabase GIS topology.');
     } catch (err: any) {
       showToast(err?.message || 'Failed to delete node', 'err');
@@ -953,8 +962,10 @@ export const FiberGisMapView: React.FC<FiberGisMapViewProps> = ({
         { ...patch, updated_by: actorUsername },
         { startNodeName, endNodeName }
       );
-      setCables((prev) => applyRealtimeCableDelta(prev, 'UPDATE', updated));
-      showToast('✅ Saved to Supabase DB — Fiber core routing ledger updated.');
+      const nextCables = applyRealtimeCableDelta(cables, 'UPDATE', updated);
+      setCables(nextCables);
+      syncOpticalBudgetsToDb(nodes, nextCables, ponPortsById).catch(() => {});
+      showToast('✅ Saved to Supabase DB — Fiber core routing & optical power updated.');
     } catch (err: any) {
       showToast(err?.message || 'Failed to save cable cores', 'err');
     } finally {
@@ -966,8 +977,10 @@ export const FiberGisMapView: React.FC<FiberGisMapViewProps> = ({
     setIsSaving(true);
     try {
       await deleteGisCable(cableId);
-      setCables((prev) => applyRealtimeCableDelta(prev, 'DELETE', undefined, { id: cableId }));
+      const nextCables = applyRealtimeCableDelta(cables, 'DELETE', undefined, { id: cableId });
+      setCables(nextCables);
       setSelectedCableId(null);
+      syncOpticalBudgetsToDb(nodes, nextCables, ponPortsById).catch(() => {});
       showToast('Fiber cable span deleted from Supabase.');
     } catch (err: any) {
       showToast(err?.message || 'Failed to delete cable', 'err');
@@ -988,13 +1001,13 @@ export const FiberGisMapView: React.FC<FiberGisMapViewProps> = ({
         splitPoint,
         updatedBy: actorUsername,
       });
-      setNodes((prev) => applyRealtimeNodeDelta(prev, 'INSERT', res.jointNode));
-      setCables((prev) => {
-        let next = applyRealtimeCableDelta(prev, 'DELETE', undefined, { id: cable.id });
-        next = applyRealtimeCableDelta(next, 'INSERT', res.spanA);
-        next = applyRealtimeCableDelta(next, 'INSERT', res.spanB);
-        return next;
-      });
+      const nextNodes = applyRealtimeNodeDelta(nodes, 'INSERT', res.jointNode);
+      let nextCables = applyRealtimeCableDelta(cables, 'DELETE', undefined, { id: cable.id });
+      nextCables = applyRealtimeCableDelta(nextCables, 'INSERT', res.spanA);
+      nextCables = applyRealtimeCableDelta(nextCables, 'INSERT', res.spanB);
+      setNodes(nextNodes);
+      setCables(nextCables);
+      syncOpticalBudgetsToDb(nextNodes, nextCables, ponPortsById).catch(() => {});
       setSelectedCableId(null);
       setSelectedNodeId(res.jointNode.id);
       setCableClickPoint(null);
