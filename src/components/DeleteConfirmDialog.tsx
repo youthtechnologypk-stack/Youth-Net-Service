@@ -44,8 +44,8 @@ export const DeleteConfirmDialog: React.FC<DeleteConfirmDialogProps> = ({
   const stepsToDisplay = cleanupSteps || defaultCleanupSteps;
 
   return (
-    <div className="fixed inset-0 z-50 bg-black/80 flex items-center justify-center p-4 backdrop-blur-sm animate-fade-in">
-      <div className="bg-slate-900 border border-rose-800/60 rounded-2xl max-w-md w-full overflow-hidden shadow-2xl shadow-rose-950/40">
+    <div className="fixed inset-0 z-[9999] flex items-center justify-center bg-black/75 backdrop-blur-sm p-3 overflow-y-auto animate-fade-in">
+      <div className="w-[95vw] sm:w-full max-w-lg max-h-[90vh] overflow-y-auto mx-auto my-auto rounded-2xl box-border bg-slate-900 border border-rose-800/60 shadow-2xl shadow-rose-950/40">
         {/* Header */}
         <div className="bg-rose-950/40 border-b border-rose-800/40 p-5 flex items-start justify-between">
           <div className="flex items-center gap-3">

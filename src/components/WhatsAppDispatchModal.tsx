@@ -62,8 +62,8 @@ export const WhatsAppDispatchModal: React.FC<WhatsAppDispatchModalProps> = ({
   };
 
   return (
-    <div className="fixed inset-0 z-50 bg-black/80 flex items-center justify-center p-4 backdrop-blur-sm animate-fade-in font-sans">
-      <div className="bg-slate-900 border border-emerald-800/60 rounded-2xl max-w-lg w-full overflow-hidden shadow-2xl shadow-emerald-950/40">
+    <div className="fixed inset-0 z-[9999] flex items-center justify-center bg-black/75 backdrop-blur-sm p-3 overflow-y-auto animate-fade-in font-sans">
+      <div className="w-[95vw] sm:w-full max-w-lg max-h-[90vh] overflow-y-auto mx-auto my-auto rounded-2xl box-border bg-slate-900 border border-emerald-800/60 shadow-2xl shadow-emerald-950/40">
         {/* Header */}
         <div className="bg-gradient-to-r from-emerald-950/80 via-slate-900 to-emerald-950/80 border-b border-emerald-800/40 p-5 flex items-center justify-between">
           <div className="flex items-center gap-3">
@@ -124,8 +124,8 @@ export const WhatsAppDispatchModal: React.FC<WhatsAppDispatchModalProps> = ({
               </button>
             </div>
 
-            <div className="relative">
-              <pre className="w-full bg-slate-950 border border-slate-800 rounded-xl p-3.5 text-slate-200 text-xs font-mono whitespace-pre-wrap leading-relaxed select-all">
+            <div className="relative min-w-0 w-full">
+              <pre className="w-full max-w-full bg-slate-950 border border-slate-800 rounded-xl p-3.5 text-slate-200 text-xs font-mono whitespace-pre-wrap break-words overflow-x-hidden leading-relaxed select-all">
                 {messageText}
               </pre>
             </div>

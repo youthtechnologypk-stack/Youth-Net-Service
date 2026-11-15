@@ -1572,8 +1572,8 @@ export const InventoryHardwareView: React.FC = () => {
       {/* MODAL 1: ADD / EDIT HARDWARE ITEM                                      */}
       {/* ====================================================================== */}
       {isItemModalOpen && (
-        <div className="fixed inset-0 z-50 bg-slate-950/75 backdrop-blur-sm flex items-center justify-center p-4">
-          <div className="bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 rounded-2xl w-full max-w-lg shadow-2xl overflow-hidden">
+        <div className="fixed inset-0 z-[9999] flex items-center justify-center bg-black/75 backdrop-blur-sm p-3 overflow-y-auto">
+          <div className="w-[95vw] sm:w-full max-w-lg max-h-[90vh] overflow-y-auto mx-auto my-auto rounded-2xl box-border bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 shadow-2xl">
             <div className="px-5 py-4 border-b border-slate-200 dark:border-slate-800 flex items-center justify-between">
               <h3 className="text-sm font-bold text-slate-900 dark:text-white flex items-center gap-2">
                 <Package className="w-4 h-4 text-sky-500" />
@@ -1724,8 +1724,8 @@ export const InventoryHardwareView: React.FC = () => {
       {/* MODAL 2: RECORD / EDIT HARDWARE SALE                                   */}
       {/* ====================================================================== */}
       {isSaleModalOpen && (
-        <div className="fixed inset-0 z-50 bg-slate-950/75 backdrop-blur-sm flex items-center justify-center p-4">
-          <div className="bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 rounded-2xl w-full max-w-lg shadow-2xl overflow-hidden max-h-[92vh] flex flex-col">
+        <div className="fixed inset-0 z-[9999] flex items-center justify-center bg-black/75 backdrop-blur-sm p-3 overflow-y-auto">
+          <div className="w-[95vw] sm:w-full max-w-lg max-h-[90vh] overflow-y-auto mx-auto my-auto rounded-2xl box-border bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 shadow-2xl flex flex-col">
             <div className="px-5 py-4 border-b border-slate-200 dark:border-slate-800 flex items-center justify-between shrink-0">
               <h3 className="text-sm font-bold text-slate-900 dark:text-white flex items-center gap-2">
                 <ShoppingCart className="w-4 h-4 text-emerald-500" />
@@ -1960,8 +1960,8 @@ export const InventoryHardwareView: React.FC = () => {
       {/* MODAL 3: RECORD STOCK PURCHASE                                         */}
       {/* ====================================================================== */}
       {isPurchaseModalOpen && (
-        <div className="fixed inset-0 z-50 bg-slate-950/75 backdrop-blur-sm flex items-center justify-center p-4">
-          <div className="bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 rounded-2xl w-full max-w-lg shadow-2xl overflow-hidden">
+        <div className="fixed inset-0 z-[9999] flex items-center justify-center bg-black/75 backdrop-blur-sm p-3 overflow-y-auto">
+          <div className="w-[95vw] sm:w-full max-w-lg max-h-[90vh] overflow-y-auto mx-auto my-auto rounded-2xl box-border bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 shadow-2xl">
             <div className="px-5 py-4 border-b border-slate-200 dark:border-slate-800 flex items-center justify-between">
               <h3 className="text-sm font-bold text-slate-900 dark:text-white flex items-center gap-2">
                 <Truck className="w-4 h-4 text-sky-500" />
@@ -2154,8 +2154,8 @@ export const InventoryHardwareView: React.FC = () => {
       {/* MODAL 4: ADD / EDIT VENDOR                                             */}
       {/* ====================================================================== */}
       {isVendorModalOpen && (
-        <div className="fixed inset-0 z-50 bg-slate-950/75 backdrop-blur-sm flex items-center justify-center p-4">
-          <div className="bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 rounded-2xl w-full max-w-md shadow-2xl overflow-hidden">
+        <div className="fixed inset-0 z-[9999] flex items-center justify-center bg-black/75 backdrop-blur-sm p-3 overflow-y-auto">
+          <div className="w-[95vw] sm:w-full max-w-lg max-h-[90vh] overflow-y-auto mx-auto my-auto rounded-2xl box-border bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 shadow-2xl">
             <div className="px-5 py-4 border-b border-slate-200 dark:border-slate-800 flex items-center justify-between">
               <h3 className="text-sm font-bold text-slate-900 dark:text-white flex items-center gap-2">
                 <Building2 className="w-4 h-4 text-indigo-500" />
@@ -2232,8 +2232,8 @@ export const InventoryHardwareView: React.FC = () => {
       {/* MODAL 5: RECORD VENDOR PAYMENT                                         */}
       {/* ====================================================================== */}
       {payingVendor && (
-        <div className="fixed inset-0 z-50 bg-slate-950/75 backdrop-blur-sm flex items-center justify-center p-4">
-          <div className="bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 rounded-2xl w-full max-w-md shadow-2xl overflow-hidden">
+        <div className="fixed inset-0 z-[9999] flex items-center justify-center bg-black/75 backdrop-blur-sm p-3 overflow-y-auto">
+          <div className="w-[95vw] sm:w-full max-w-lg max-h-[90vh] overflow-y-auto mx-auto my-auto rounded-2xl box-border bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 shadow-2xl">
             <div className="px-5 py-4 border-b border-slate-200 dark:border-slate-800 flex items-center justify-between">
               <h3 className="text-sm font-bold text-slate-900 dark:text-white flex items-center gap-2">
                 <DollarSign className="w-4 h-4 text-emerald-500" />
@@ -2356,8 +2356,8 @@ export const InventoryHardwareView: React.FC = () => {
       {/* MODAL 6: VENDOR LEDGER & ITEM-WISE PURCHASE HISTORY                    */}
       {/* ====================================================================== */}
       {ledgerVendor && (
-        <div className="fixed inset-0 z-50 bg-slate-950/75 backdrop-blur-sm flex items-center justify-center p-4">
-          <div className="bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 rounded-2xl w-full max-w-3xl shadow-2xl overflow-hidden max-h-[90vh] flex flex-col">
+        <div className="fixed inset-0 z-[9999] flex items-center justify-center bg-black/75 backdrop-blur-sm p-3 overflow-y-auto">
+          <div className="w-[95vw] sm:w-full max-w-lg md:max-w-3xl max-h-[90vh] overflow-y-auto mx-auto my-auto rounded-2xl box-border bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 shadow-2xl flex flex-col">
             <div className="px-5 py-4 border-b border-slate-200 dark:border-slate-800 flex items-center justify-between shrink-0">
               <div>
                 <h3 className="text-sm font-bold text-slate-900 dark:text-white flex items-center gap-2">
@@ -2515,8 +2515,8 @@ export const InventoryHardwareView: React.FC = () => {
       {/* MODAL 7: ONE-CLICK ERP SQL SETUP MODAL                                 */}
       {/* ====================================================================== */}
       {isSqlModalOpen && (
-        <div className="fixed inset-0 z-50 bg-slate-950/75 backdrop-blur-sm flex items-center justify-center p-4">
-          <div className="bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 rounded-2xl w-full max-w-3xl shadow-2xl overflow-hidden max-h-[90vh] flex flex-col">
+        <div className="fixed inset-0 z-[9999] flex items-center justify-center bg-black/75 backdrop-blur-sm p-3 overflow-y-auto">
+          <div className="w-[95vw] sm:w-full max-w-lg md:max-w-3xl max-h-[90vh] overflow-y-auto mx-auto my-auto rounded-2xl box-border bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 shadow-2xl flex flex-col">
             <div className="px-5 py-4 border-b border-slate-200 dark:border-slate-800 flex items-center justify-between shrink-0">
               <div className="flex items-center gap-2">
                 <Database className="w-4 h-4 text-amber-500" />
@@ -2549,7 +2549,7 @@ export const InventoryHardwareView: React.FC = () => {
                   <span>{copiedSql ? 'Copied ERP SQL!' : 'Copy Full ERP SQL'}</span>
                 </button>
               </div>
-              <pre className="p-3.5 rounded-xl bg-slate-950 border border-slate-800 text-emerald-300 font-mono text-[11px] overflow-x-auto max-h-[50vh]">
+              <pre className="w-full max-w-full p-3.5 rounded-xl bg-slate-950 border border-slate-800 text-emerald-300 font-mono text-[11px] overflow-x-auto max-h-[50vh]">
                 {ERP_MIGRATION_SQL}
               </pre>
             </div>
@@ -2561,8 +2561,8 @@ export const InventoryHardwareView: React.FC = () => {
       {/* DELETE CONFIRMATIONS (ITEM / SALE / PURCHASE / VENDOR)                 */}
       {/* ====================================================================== */}
       {(deletingItem || deletingSale || deletingPurchase || deletingVendor) && (
-        <div className="fixed inset-0 z-50 bg-slate-950/75 backdrop-blur-sm flex items-center justify-center p-4">
-          <div className="bg-white dark:bg-slate-900 border border-rose-300 dark:border-rose-800 rounded-2xl w-full max-w-md shadow-2xl p-5 space-y-4 text-xs">
+        <div className="fixed inset-0 z-[9999] flex items-center justify-center bg-black/75 backdrop-blur-sm p-3 overflow-y-auto">
+          <div className="w-[95vw] sm:w-full max-w-lg max-h-[90vh] overflow-y-auto mx-auto my-auto rounded-2xl box-border bg-white dark:bg-slate-900 border border-rose-300 dark:border-rose-800 shadow-2xl p-4 sm:p-5 space-y-4 text-xs">
             <div className="flex items-start gap-3">
               <div className="p-2 rounded-xl bg-rose-100 dark:bg-rose-950 text-rose-600 dark:text-rose-400 shrink-0">
                 <Trash2 className="w-5 h-5" />

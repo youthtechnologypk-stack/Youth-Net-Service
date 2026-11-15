@@ -1405,8 +1405,8 @@ export const FieldAgentPortal: React.FC<FieldAgentPortalProps> = ({
         const willBeFullyPaid = projectedTotalPaid >= totalAmount;
 
         return (
-          <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/75 backdrop-blur-sm animate-fade-in font-sans">
-            <div className="bg-[#111A2E] border border-slate-700 rounded-2xl w-full max-w-sm p-5 shadow-2xl relative">
+          <div className="fixed inset-0 z-[9999] flex items-center justify-center bg-black/75 backdrop-blur-sm p-3 overflow-y-auto animate-fade-in font-sans">
+            <div className="w-[95vw] sm:w-full max-w-lg max-h-[90vh] overflow-y-auto mx-auto my-auto rounded-2xl box-border bg-[#111A2E] border border-slate-700 p-4 sm:p-5 shadow-2xl relative">
               <div className="flex items-center justify-between pb-3 border-b border-slate-800">
                 <h3 className="text-sm font-bold text-white flex items-center gap-2">
                   <DollarSign className="w-4 h-4 text-emerald-400" />

@@ -1312,8 +1312,8 @@ export const AgentProfileView: React.FC<AgentProfileViewProps> = ({
 
       {/* MODAL 1: Cash Handover Modal */}
       {isHandoverModalOpen && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-slate-950/80 backdrop-blur-sm animate-fadeIn font-sans">
-          <div className="bg-slate-900 border border-slate-800 rounded-2xl w-full max-w-md shadow-2xl overflow-hidden">
+        <div className="fixed inset-0 z-[9999] flex items-center justify-center bg-black/75 backdrop-blur-sm p-3 overflow-y-auto animate-fadeIn font-sans">
+          <div className="w-[95vw] sm:w-full max-w-lg max-h-[90vh] overflow-y-auto mx-auto my-auto rounded-2xl box-border bg-slate-900 border border-slate-800 shadow-2xl">
             <div className="flex items-center justify-between p-4 bg-slate-950 border-b border-slate-800">
               <div className="flex items-center gap-2">
                 <Wallet className="w-4 h-4 text-emerald-400" />
@@ -1392,8 +1392,8 @@ export const AgentProfileView: React.FC<AgentProfileViewProps> = ({
 
       {/* MODAL 2: Issue Advance Modal */}
       {isAdvanceModalOpen && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-slate-950/80 backdrop-blur-sm animate-fadeIn font-sans">
-          <div className="bg-slate-900 border border-slate-800 rounded-2xl w-full max-w-md shadow-2xl overflow-hidden">
+        <div className="fixed inset-0 z-[9999] flex items-center justify-center bg-black/75 backdrop-blur-sm p-3 overflow-y-auto animate-fadeIn font-sans">
+          <div className="w-[95vw] sm:w-full max-w-lg max-h-[90vh] overflow-y-auto mx-auto my-auto rounded-2xl box-border bg-slate-900 border border-slate-800 shadow-2xl">
             <div className="flex items-center justify-between p-4 bg-slate-950 border-b border-slate-800">
               <div className="flex items-center gap-2">
                 <DollarSign className="w-4 h-4 text-amber-400" />
@@ -1461,8 +1461,8 @@ export const AgentProfileView: React.FC<AgentProfileViewProps> = ({
 
       {/* MODAL 3: Advance Return Modal */}
       {isAdvanceReturnModalOpen && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-slate-950/80 backdrop-blur-sm animate-fadeIn font-sans">
-          <div className="bg-slate-900 border border-slate-800 rounded-2xl w-full max-w-md shadow-2xl overflow-hidden">
+        <div className="fixed inset-0 z-[9999] flex items-center justify-center bg-black/75 backdrop-blur-sm p-3 overflow-y-auto animate-fadeIn font-sans">
+          <div className="w-[95vw] sm:w-full max-w-lg max-h-[90vh] overflow-y-auto mx-auto my-auto rounded-2xl box-border bg-slate-900 border border-slate-800 shadow-2xl">
             <div className="flex items-center justify-between p-4 bg-slate-950 border-b border-slate-800">
               <div className="flex items-center gap-2">
                 <Receipt className="w-4 h-4 text-purple-400" />
@@ -1531,8 +1531,8 @@ export const AgentProfileView: React.FC<AgentProfileViewProps> = ({
 
       {/* MODAL 4: Salary Payout Modal */}
       {isSalaryPayoutModalOpen && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-slate-950/80 backdrop-blur-sm animate-fadeIn font-sans">
-          <div className="bg-slate-900 border border-slate-800 rounded-2xl w-full max-w-md shadow-2xl overflow-hidden">
+        <div className="fixed inset-0 z-[9999] flex items-center justify-center bg-black/75 backdrop-blur-sm p-3 overflow-y-auto animate-fadeIn font-sans">
+          <div className="w-[95vw] sm:w-full max-w-lg max-h-[90vh] overflow-y-auto mx-auto my-auto rounded-2xl box-border bg-slate-900 border border-slate-800 shadow-2xl">
             <div className="flex items-center justify-between p-4 bg-slate-950 border-b border-slate-800">
               <div className="flex items-center gap-2">
                 <CreditCard className="w-4 h-4 text-cyan-400" />
@@ -1626,8 +1626,8 @@ export const AgentProfileView: React.FC<AgentProfileViewProps> = ({
 
       {/* MODAL 5: Add / Edit New-Connection Commission */}
       {isCommissionModalOpen && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-slate-950/80 backdrop-blur-sm animate-fadeIn font-sans">
-          <div className="bg-slate-900 border border-slate-800 rounded-2xl w-full max-w-md shadow-2xl overflow-hidden">
+        <div className="fixed inset-0 z-[9999] flex items-center justify-center bg-black/75 backdrop-blur-sm p-3 overflow-y-auto animate-fadeIn font-sans">
+          <div className="w-[95vw] sm:w-full max-w-lg max-h-[90vh] overflow-y-auto mx-auto my-auto rounded-2xl box-border bg-slate-900 border border-slate-800 shadow-2xl">
             <div className="flex items-center justify-between p-4 bg-slate-950 border-b border-slate-800">
               <div className="flex items-center gap-2">
                 <Award className="w-4 h-4 text-purple-400" />
@@ -1750,8 +1750,8 @@ export const AgentProfileView: React.FC<AgentProfileViewProps> = ({
 
       {/* MODAL 6: Delete Commission Confirmation */}
       {deletingCommission && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-slate-950/80 backdrop-blur-sm animate-fadeIn font-sans">
-          <div className="bg-slate-900 border border-rose-800/70 rounded-2xl w-full max-w-md shadow-2xl p-5 space-y-4 text-xs">
+        <div className="fixed inset-0 z-[9999] flex items-center justify-center bg-black/75 backdrop-blur-sm p-3 overflow-y-auto animate-fadeIn font-sans">
+          <div className="w-[95vw] sm:w-full max-w-lg max-h-[90vh] overflow-y-auto mx-auto my-auto rounded-2xl box-border bg-slate-900 border border-rose-800/70 shadow-2xl p-4 sm:p-5 space-y-4 text-xs">
             <div className="flex items-start gap-3">
               <div className="p-2 rounded-xl bg-rose-950 border border-rose-800 text-rose-400 shrink-0">
                 <Trash2 className="w-5 h-5" />

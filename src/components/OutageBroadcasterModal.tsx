@@ -55,8 +55,8 @@ export const OutageBroadcasterModal: React.FC<OutageBroadcasterModalProps> = ({ 
   };
 
   return (
-    <div className="fixed inset-0 z-50 bg-black/80 flex items-center justify-center p-4 backdrop-blur-sm animate-fade-in">
-      <div className="bg-slate-900 border border-slate-800 rounded-2xl max-w-xl w-full overflow-hidden shadow-2xl flex flex-col max-h-[92vh]">
+    <div className="fixed inset-0 z-[9999] flex items-center justify-center bg-black/75 backdrop-blur-sm p-3 overflow-y-auto animate-fade-in">
+      <div className="w-[95vw] sm:w-full max-w-lg sm:max-w-xl max-h-[90vh] overflow-y-auto mx-auto my-auto rounded-2xl box-border bg-slate-900 border border-slate-800 shadow-2xl flex flex-col">
         {/* Modal Header */}
         <div className="bg-rose-950 p-5 border-b border-rose-900 flex items-center justify-between shrink-0">
           <div className="flex items-center gap-3">

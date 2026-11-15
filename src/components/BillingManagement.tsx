@@ -2137,8 +2137,8 @@ export const BillingManagement: React.FC<BillingManagementProps> = ({
 
       {/* MODAL 2: REVERT PAYMENT CONFIRMATION (Admin Only) */}
       {isRevertModalOpen && invoiceToRevert && (
-        <div className="fixed inset-0 z-50 bg-black/80 backdrop-blur-sm flex items-center justify-center p-4">
-          <div className="bg-slate-900 border border-rose-800/80 rounded-2xl max-w-md w-full p-6 shadow-2xl space-y-4 text-xs font-sans">
+        <div className="fixed inset-0 z-[9999] flex items-center justify-center bg-black/75 backdrop-blur-sm p-3 overflow-y-auto">
+          <div className="w-[95vw] sm:w-full max-w-lg max-h-[90vh] overflow-y-auto mx-auto my-auto rounded-2xl box-border bg-slate-900 border border-rose-800/80 p-4 sm:p-6 shadow-2xl space-y-4 text-xs font-sans">
             <div className="flex items-center gap-3">
               <div className="p-2.5 bg-rose-950 border border-rose-800 rounded-xl text-rose-400">
                 <AlertTriangle className="w-6 h-6" />
@@ -2275,8 +2275,8 @@ export const BillingManagement: React.FC<BillingManagementProps> = ({
 
       {/* MODAL 9: ADD EXPENSE MODAL */}
       {showAddExpenseModal && (
-        <div className="fixed inset-0 z-50 bg-black/80 backdrop-blur-sm flex items-center justify-center p-4">
-          <div className="bg-slate-900 border border-slate-800 rounded-2xl max-w-md w-full p-6 shadow-2xl space-y-4 text-xs font-sans">
+        <div className="fixed inset-0 z-[9999] flex items-center justify-center bg-black/75 backdrop-blur-sm p-3 overflow-y-auto">
+          <div className="w-[95vw] sm:w-full max-w-lg max-h-[90vh] overflow-y-auto mx-auto my-auto rounded-2xl box-border bg-slate-900 border border-slate-800 p-4 sm:p-6 shadow-2xl space-y-4 text-xs font-sans">
             <div className="flex items-center justify-between pb-3 border-b border-slate-800">
               <h3 className="text-base font-bold text-white flex items-center gap-2">
                 <Briefcase className="w-5 h-5 text-indigo-400" />
@@ -2367,8 +2367,8 @@ export const BillingManagement: React.FC<BillingManagementProps> = ({
 
       {/* MODAL 5: WHATSAPP BUSINESS CLOUD API INSPECT MODAL */}
       {selectedAuditRecord && (
-        <div className="fixed inset-0 z-50 bg-black/80 backdrop-blur-sm flex items-center justify-center p-4 overflow-y-auto">
-          <div className="bg-slate-900 border border-slate-800 rounded-2xl max-w-2xl w-full p-6 shadow-2xl space-y-4 text-xs font-sans">
+        <div className="fixed inset-0 z-[9999] flex items-center justify-center bg-black/75 backdrop-blur-sm p-3 overflow-y-auto">
+          <div className="w-[95vw] sm:w-full max-w-lg sm:max-w-2xl max-h-[90vh] overflow-y-auto mx-auto my-auto rounded-2xl box-border bg-slate-900 border border-slate-800 p-4 sm:p-6 shadow-2xl space-y-4 text-xs font-sans">
             {/* Modal Header */}
             <div className="flex items-center justify-between pb-3 border-b border-slate-800">
               <div className="flex items-center gap-2.5">
@@ -2415,8 +2415,8 @@ export const BillingManagement: React.FC<BillingManagementProps> = ({
                 <span className="text-slate-400 text-[10px] uppercase tracking-wider block mb-1">
                   Request JSON Payload (Template Schema)
                 </span>
-                <div className="bg-slate-950 p-3 rounded-lg border border-slate-800 overflow-x-auto max-h-48 text-slate-300 text-[10px] font-mono leading-relaxed">
-                  <pre>{JSON.stringify(selectedAuditRecord.rawPayload, null, 2)}</pre>
+                <div className="bg-slate-950 p-3 rounded-lg border border-slate-800 overflow-x-hidden max-h-48 text-slate-300 text-[10px] font-mono leading-relaxed">
+                  <pre className="w-full max-w-full whitespace-pre-wrap break-all">{JSON.stringify(selectedAuditRecord.rawPayload, null, 2)}</pre>
                 </div>
               </div>
 
@@ -2425,8 +2425,8 @@ export const BillingManagement: React.FC<BillingManagementProps> = ({
                 <span className="text-slate-400 text-[10px] uppercase tracking-wider block mb-1">
                   Meta Graph API Response (200 OK)
                 </span>
-                <div className="bg-slate-950 p-3 rounded-lg border border-slate-800 overflow-x-auto max-h-36 text-emerald-300 text-[10px] font-mono leading-relaxed">
-                  <pre>{JSON.stringify(selectedAuditRecord.rawResponse, null, 2)}</pre>
+                <div className="bg-slate-950 p-3 rounded-lg border border-slate-800 overflow-x-hidden max-h-36 text-emerald-300 text-[10px] font-mono leading-relaxed">
+                  <pre className="w-full max-w-full whitespace-pre-wrap break-all">{JSON.stringify(selectedAuditRecord.rawResponse, null, 2)}</pre>
                 </div>
               </div>
 

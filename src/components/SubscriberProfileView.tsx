@@ -2053,8 +2053,8 @@ export const SubscriberProfileView: React.FC<SubscriberProfileViewProps> = ({
 
       {/* MODAL 1: KICK / DISCONNECT CONFIRMATION */}
       {isKickModalOpen && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/75 backdrop-blur-sm animate-fade-in font-sans">
-          <div className="bg-[#111A2E] border border-rose-800 rounded-2xl w-full max-w-sm p-5 shadow-2xl relative">
+        <div className="fixed inset-0 z-[9999] flex items-center justify-center bg-black/75 backdrop-blur-sm p-3 overflow-y-auto animate-fade-in font-sans">
+          <div className="w-[95vw] sm:w-full max-w-lg max-h-[90vh] overflow-y-auto mx-auto my-auto rounded-2xl box-border bg-[#111A2E] border border-rose-800 p-4 sm:p-5 shadow-2xl relative">
             <div className="flex items-center gap-2.5 text-rose-400 pb-3 border-b border-slate-800">
               <WifiOff className="w-5 h-5 text-rose-400" />
               <h3 className="text-base font-bold text-white">Disconnect PPPoE Session?</h3>
@@ -2085,8 +2085,8 @@ export const SubscriberProfileView: React.FC<SubscriberProfileViewProps> = ({
 
       {/* MODAL 2: CHANGE PASSWORD */}
       {isPasswordModalOpen && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/75 backdrop-blur-sm animate-fade-in font-sans">
-          <div className="bg-[#111A2E] border border-slate-700 rounded-2xl w-full max-w-sm p-5 shadow-2xl relative">
+        <div className="fixed inset-0 z-[9999] flex items-center justify-center bg-black/75 backdrop-blur-sm p-3 overflow-y-auto animate-fade-in font-sans">
+          <div className="w-[95vw] sm:w-full max-w-lg max-h-[90vh] overflow-y-auto mx-auto my-auto rounded-2xl box-border bg-[#111A2E] border border-slate-700 p-4 sm:p-5 shadow-2xl relative">
             <div className="flex items-center justify-between pb-3 border-b border-slate-800">
               <h3 className="text-sm font-bold text-white flex items-center gap-2">
                 <Key className="w-4 h-4 text-amber-400" />
@@ -2161,8 +2161,8 @@ export const SubscriberProfileView: React.FC<SubscriberProfileViewProps> = ({
 
       {/* MODAL 3: EDIT CUSTOMER & HARDWARE METADATA */}
       {isEditUserModalOpen && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/75 backdrop-blur-sm animate-fade-in font-sans">
-          <div className="bg-[#111A2E] border border-slate-700 rounded-2xl w-full max-w-lg p-5 shadow-2xl relative max-h-[90vh] overflow-y-auto">
+        <div className="fixed inset-0 z-[9999] flex items-center justify-center bg-black/75 backdrop-blur-sm p-3 overflow-y-auto animate-fade-in font-sans">
+          <div className="w-[95vw] sm:w-full max-w-lg max-h-[90vh] overflow-y-auto mx-auto my-auto rounded-2xl box-border bg-[#111A2E] border border-slate-700 p-4 sm:p-5 shadow-2xl relative">
             <div className="flex items-center justify-between pb-3 border-b border-slate-800">
               <h3 className="text-sm font-bold text-white flex items-center gap-2">
                 <Edit className="w-4 h-4 text-cyan-400" />
@@ -2379,8 +2379,8 @@ export const SubscriberProfileView: React.FC<SubscriberProfileViewProps> = ({
 
       {/* MODAL 4: ADD MATERIAL / WIRE CHARGE (TAB 1) */}
       {isAddMaterialModalOpen && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/75 backdrop-blur-sm animate-fade-in font-sans">
-          <div className="bg-[#111A2E] border border-slate-700 rounded-2xl w-full max-w-md p-5 shadow-2xl relative">
+        <div className="fixed inset-0 z-[9999] flex items-center justify-center bg-black/75 backdrop-blur-sm p-3 overflow-y-auto animate-fade-in font-sans">
+          <div className="w-[95vw] sm:w-full max-w-lg max-h-[90vh] overflow-y-auto mx-auto my-auto rounded-2xl box-border bg-[#111A2E] border border-slate-700 p-4 sm:p-5 shadow-2xl relative">
             <div className="flex items-center justify-between pb-3 border-b border-slate-800">
               <h3 className="text-sm font-bold text-white flex items-center gap-2">
                 <Wrench className="w-4 h-4 text-cyan-400" />
@@ -2532,8 +2532,8 @@ export const SubscriberProfileView: React.FC<SubscriberProfileViewProps> = ({
 
       {/* MODAL 5: LOG NEW COMPLAINT TICKET (TAB 4) */}
       {isNewTicketModalOpen && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/75 backdrop-blur-sm animate-fade-in font-sans">
-          <div className="bg-[#111A2E] border border-slate-700 rounded-2xl w-full max-w-md p-5 shadow-2xl relative">
+        <div className="fixed inset-0 z-[9999] flex items-center justify-center bg-black/75 backdrop-blur-sm p-3 overflow-y-auto animate-fade-in font-sans">
+          <div className="w-[95vw] sm:w-full max-w-lg max-h-[90vh] overflow-y-auto mx-auto my-auto rounded-2xl box-border bg-[#111A2E] border border-slate-700 p-4 sm:p-5 shadow-2xl relative">
             <div className="flex items-center justify-between pb-3 border-b border-slate-800">
               <h3 className="text-sm font-bold text-white flex items-center gap-2">
                 <MessageSquareWarning className="w-4 h-4 text-amber-400" />
@@ -2623,8 +2623,8 @@ export const SubscriberProfileView: React.FC<SubscriberProfileViewProps> = ({
 
       {/* MODAL 6: QUICK RECORD PAYMENT (TAB 2) */}
       {isRecordPaymentModalOpen && selectedInvoiceForPayment && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/75 backdrop-blur-sm animate-fade-in font-sans">
-          <div className="bg-[#111A2E] border border-slate-700 rounded-2xl w-full max-w-sm p-5 shadow-2xl relative text-xs">
+        <div className="fixed inset-0 z-[9999] flex items-center justify-center bg-black/75 backdrop-blur-sm p-3 overflow-y-auto animate-fade-in font-sans">
+          <div className="w-[95vw] sm:w-full max-w-lg max-h-[90vh] overflow-y-auto mx-auto my-auto rounded-2xl box-border bg-[#111A2E] border border-slate-700 p-4 sm:p-5 shadow-2xl relative text-xs">
             <div className="flex items-center justify-between pb-3 border-b border-slate-800">
               <h3 className="text-sm font-bold text-white flex items-center gap-2">
                 <DollarSign className="w-4 h-4 text-emerald-400" />

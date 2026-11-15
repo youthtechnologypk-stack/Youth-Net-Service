@@ -13,7 +13,9 @@ import {
   Search,
   Server,
   ShieldAlert,
+  Sliders,
   TrendingUp,
+  Tv,
   Users,
   X,
 } from 'lucide-react';
@@ -47,6 +49,19 @@ import { PcqSubnetPoolManager } from './PcqSubnetPoolManager';
 import { safeMikrotikFetch } from '../services/mikrotikRestClient';
 import { useISP } from '../context/ISPContext';
 import { useAuth } from '../context/AuthContext';
+import {
+  CONTENTION_RATIOS,
+  ContentionRatioOption,
+  DEFAULT_CDN_GUARDRAIL_MBPS,
+  DiscoveredQueuesSnapshot,
+  MikrotikQueueTypeRaw,
+  MikrotikSimpleQueueRaw,
+  QueuePoolKey,
+  buildDiscoveredQueuesSnapshot,
+  calculateQueueRatioPlan,
+  getCdnTierRateMbps,
+  isCdnQueueName,
+} from '../services/pcqQueueManager';
 
 interface MikrotikInterfaceRow {
   '.id'?: string;
@@ -90,12 +105,15 @@ interface WanTrafficPoint {
 const DEFAULT_CONFIG: SupabaseUpstreamCapacityConfig = {
   id: '',
   provider_name: 'Multinet Dedicated CIR',
-  total_dedicated_mbps: 50,
+  total_dedicated_mbps: 400,
   contention_ratio: 6,
   warning_threshold_pct: 80,
   critical_threshold_pct: 92,
   wan_interface_name: 'ether1-WAN',
 };
+
+const PEAK_CONCURRENT_CAP_STORAGE_KEY = 'netpulse_peak_concurrent_cap';
+const DEFAULT_PEAK_CONCURRENT_CAP = 390;
 
 /**
  * Extracts package bandwidth in Mbps from strings like "20Mbps", "15M", "50 Mbps Unlimited"
@@ -151,9 +169,31 @@ export const CapacityPlannerView: React.FC = () => {
   const [userLiveMbps, setUserLiveMbps] = useState<Record<string, number>>({});
   const mohallahPeakMbpsRef = useRef<Record<string, number>>({});
 
-  // Filtering
+  // Auto-scanned MikroTik Simple Queues snapshot (grouping 'CDN' queues into YouTube + Meta CDN Pool)
+  const [simpleQueuesSnapshot, setSimpleQueuesSnapshot] = useState<DiscoveredQueuesSnapshot | null>(null);
+  const [poolManagerTargetPool, setPoolManagerTargetPool] = useState<QueuePoolKey | undefined>(undefined);
+  const [poolManagerSelectNonce, setPoolManagerSelectNonce] = useState<number>(0);
+  const poolManagerSectionRef = useRef<HTMLDivElement | null>(null);
+
+  // Filtering & Real-world Peak Concurrent Calibration (default 390 max concurrent online)
   const [areaSearch, setAreaSearch] = useState<string>('');
   const [showAllAreas, setShowAllAreas] = useState<boolean>(true);
+  const [peakConcurrentCap, setPeakConcurrentCap] = useState<number>(() => {
+    if (typeof window !== 'undefined') {
+      const saved = Number(localStorage.getItem(PEAK_CONCURRENT_CAP_STORAGE_KEY));
+      if (Number.isFinite(saved) && saved >= 1) return Math.round(saved);
+    }
+    return DEFAULT_PEAK_CONCURRENT_CAP;
+  });
+  const [isUpdatingRatio, setIsUpdatingRatio] = useState<boolean>(false);
+
+  const handleUpdatePeakCap = useCallback((rawVal: number) => {
+    const clamped = Number.isFinite(rawVal) && rawVal >= 1 ? Math.min(10000, Math.round(rawVal)) : DEFAULT_PEAK_CONCURRENT_CAP;
+    setPeakConcurrentCap(clamped);
+    if (typeof window !== 'undefined') {
+      localStorage.setItem(PEAK_CONCURRENT_CAP_STORAGE_KEY, String(clamped));
+    }
+  }, []);
 
   const showToast = useCallback((text: string, type: 'success' | 'error' = 'success') => {
     setSaveNotice({ text, type });
@@ -186,17 +226,19 @@ export const CapacityPlannerView: React.FC = () => {
     }
   }, []);
 
-  // Load Supabase config, portal_users, network_areas, and MikroTik secrets/active
+  // Load Supabase config, portal_users, network_areas, and MikroTik secrets/active/queues
   const fetchPlannerDatasets = useCallback(async (showSpinner = false) => {
     if (showSpinner) setIsRefreshing(true);
     try {
-      const [, usersRes, areasRes, secretsRes, activeRes, ifaceRes] = await Promise.all([
+      const [, usersRes, areasRes, secretsRes, activeRes, ifaceRes, simpleQueuesRes, queueTypesRes] = await Promise.all([
         fetchUpstreamConfig(),
         supabase.from('portal_users').select('*').eq('role', 'CLIENT'),
         fetchNetworkAreas(),
         safeMikrotikFetch('/api/mikrotik/ppp/secret', {}, activeRouter).then((r) => (r.ok ? r.json() : null)).catch(() => null),
         safeMikrotikFetch('/api/mikrotik/ppp/active', {}, activeRouter).then((r) => (r.ok ? r.json() : null)).catch(() => null),
         safeMikrotikFetch('/api/mikrotik/interface', {}, activeRouter).then((r) => (r.ok ? r.json() : null)).catch(() => null),
+        safeMikrotikFetch('/api/mikrotik/queue/simple', {}, activeRouter).then((r) => (r.ok ? r.json() : null)).catch(() => null),
+        safeMikrotikFetch('/api/mikrotik/queue/type', {}, activeRouter).then((r) => (r.ok ? r.json() : null)).catch(() => null),
       ]);
 
       if (Array.isArray(usersRes.data)) {
@@ -216,6 +258,14 @@ export const CapacityPlannerView: React.FC = () => {
       }
       if (Array.isArray(ifaceRes)) {
         setInterfaces(ifaceRes as MikrotikInterfaceRow[]);
+      }
+      if (Array.isArray(simpleQueuesRes)) {
+        const snapshot = buildDiscoveredQueuesSnapshot({
+          rawQueues: simpleQueuesRes as MikrotikSimpleQueueRaw[],
+          queueTypes: Array.isArray(queueTypesRes) ? (queueTypesRes as MikrotikQueueTypeRaw[]) : [],
+          activeSessions: Array.isArray(activeRes) ? (activeRes as MikrotikPppActive[]) : [],
+        });
+        setSimpleQueuesSnapshot(snapshot);
       }
     } catch (err) {
       console.warn('Capacity planner sync notice:', err);
@@ -464,8 +514,8 @@ export const CapacityPlannerView: React.FC = () => {
     return rows;
   }, [portalClients, pppSecrets, pppActive, networkAreas, userLiveMbps]);
 
-  // Core upstream capacity metrics
-  const totalDedicatedMbps = Math.max(1, Number(config.total_dedicated_mbps) || 50);
+  // Core upstream capacity metrics + 390 Peak Concurrent Calibration
+  const totalDedicatedMbps = Math.max(1, Number(config.total_dedicated_mbps) || 400);
   const contentionRatio = Math.max(1, Number(config.contention_ratio) || 6);
   const warningThreshold = Number(config.warning_threshold_pct) || 80;
   const criticalThreshold = Number(config.critical_threshold_pct) || 92;
@@ -475,15 +525,76 @@ export const CapacityPlannerView: React.FC = () => {
     [unifiedPoolSubscribers]
   );
 
+  const registeredActiveCount = activeSubscribers.length;
+  const effectivePeakConcurrentCap = Math.max(1, Number(peakConcurrentCap) || DEFAULT_PEAK_CONCURRENT_CAP);
+  const peakConcurrencyFactor = useMemo(() => {
+    if (registeredActiveCount <= 0) return 1;
+    return Math.min(1, effectivePeakConcurrentCap / registeredActiveCount);
+  }, [registeredActiveCount, effectivePeakConcurrentCap]);
+
+  const calibratedPeakUsersTotal = useMemo(
+    () => Math.min(registeredActiveCount, effectivePeakConcurrentCap),
+    [registeredActiveCount, effectivePeakConcurrentCap]
+  );
+
   const totalSoldBandwidthMbps = useMemo(
     () => activeSubscribers.reduce((sum, s) => sum + s.packageMbps, 0),
     [activeSubscribers]
   );
 
-  const contendedDemandMbps = totalSoldBandwidthMbps / contentionRatio;
+  const totalCdnBandwidthMbps = useMemo(
+    () => activeSubscribers.reduce((sum, s) => sum + getCdnTierRateMbps(s.packageMbps), 0),
+    [activeSubscribers]
+  );
+
+  const calibratedSubscribedMbps = totalSoldBandwidthMbps * peakConcurrencyFactor;
+  const calibratedCdnPoolMbps = totalCdnBandwidthMbps * peakConcurrencyFactor;
+
+  const unscaledContendedDemandMbps = totalSoldBandwidthMbps / contentionRatio;
+  const contendedDemandMbps = calibratedSubscribedMbps / contentionRatio;
+  const calibratedCdnDemandMbps = calibratedCdnPoolMbps / contentionRatio;
+
   const saturationPctRaw = Math.min(100, (liveDownloadMbps / totalDedicatedMbps) * 100);
   const saturationPctStr = saturationPctRaw.toFixed(1);
   const contendedRatioPct = Math.min(999, (contendedDemandMbps / totalDedicatedMbps) * 100);
+
+  // Instant 1:1 - 1:10 Contention Ratio Switcher (optimistic + Supabase sync)
+  const handleQuickSelectRatio = useCallback(
+    async (nextRatio: ContentionRatioOption) => {
+      setConfig((prev) => ({ ...prev, contention_ratio: nextRatio }));
+      if (!isAdmin) return;
+      setIsUpdatingRatio(true);
+      try {
+        if (config?.id) {
+          const { error } = await supabase
+            .from('upstream_capacity_config')
+            .update({ contention_ratio: nextRatio, updated_at: new Date().toISOString() })
+            .eq('id', config.id);
+          if (!error) {
+            showToast(`Contention ratio updated to 1:${nextRatio} (calibrated to ${effectivePeakConcurrentCap} peak concurrent users).`);
+          }
+        } else {
+          const { data: existing } = await supabase
+            .from('upstream_capacity_config')
+            .select('id')
+            .limit(1)
+            .maybeSingle();
+          if (existing?.id) {
+            await supabase
+              .from('upstream_capacity_config')
+              .update({ contention_ratio: nextRatio, updated_at: new Date().toISOString() })
+              .eq('id', existing.id);
+          }
+          showToast(`Contention ratio set to 1:${nextRatio}.`);
+        }
+      } catch {
+        // Optimistic preview remains active
+      } finally {
+        setIsUpdatingRatio(false);
+      }
+    },
+    [config?.id, effectivePeakConcurrentCap, isAdmin, showToast]
+  );
 
   // Semantic gauge state
   const gaugeStatus = useMemo(() => {
@@ -605,17 +716,21 @@ export const CapacityPlannerView: React.FC = () => {
       });
   }, [networkAreas, unifiedPoolSubscribers, contentionRatio, areaSearch, showAllAreas]);
 
-  // 3. Package Pool Distribution (1:6 Contention Matrix)
+  // 3. Package Pool Distribution (1:1 to 1:10 Contention Matrix calibrated to 390 Peak Concurrent Online)
   const packagePools = useMemo(() => {
     const tierMap: Record<
       string,
       {
         tierLabel: string;
         tierMbps: number;
+        cdnRateMbps: number;
         activeUsers: number;
         onlineUsers: number;
         totalSubscribedMbps: number;
+        peakCalibratedUsers: number;
+        peakSubscribedMbps: number;
         contendedCirMbps: number;
+        peakCdnDemandMbps: number;
         upstreamSharePct: number;
       }
     > = {};
@@ -626,10 +741,14 @@ export const CapacityPlannerView: React.FC = () => {
         tierMap[key] = {
           tierLabel: sub.packageLabel,
           tierMbps: sub.packageMbps,
+          cdnRateMbps: getCdnTierRateMbps(sub.packageMbps),
           activeUsers: 0,
           onlineUsers: 0,
           totalSubscribedMbps: 0,
+          peakCalibratedUsers: 0,
+          peakSubscribedMbps: 0,
           contendedCirMbps: 0,
+          peakCdnDemandMbps: 0,
           upstreamSharePct: 0,
         };
       }
@@ -640,18 +759,48 @@ export const CapacityPlannerView: React.FC = () => {
 
     return Object.values(tierMap)
       .map((row) => {
-        const contendedCirMbps = row.totalSubscribedMbps / contentionRatio;
+        const peakCalibratedUsers = row.activeUsers * peakConcurrencyFactor;
+        const peakSubscribedMbps = row.totalSubscribedMbps * peakConcurrencyFactor;
+        const contendedCirMbps = peakSubscribedMbps / contentionRatio;
+        const peakCdnDemandMbps = (peakCalibratedUsers * row.cdnRateMbps) / contentionRatio;
         const upstreamSharePct = (contendedCirMbps / totalDedicatedMbps) * 100;
         return {
           ...row,
+          peakCalibratedUsers,
+          peakSubscribedMbps,
           contendedCirMbps,
+          peakCdnDemandMbps,
           upstreamSharePct,
         };
       })
       .sort((a, b) => a.tierMbps - b.tierMbps);
-  }, [activeSubscribers, contentionRatio, totalDedicatedMbps]);
+  }, [activeSubscribers, contentionRatio, peakConcurrencyFactor, totalDedicatedMbps]);
 
-  // Upgrade Recommendation Calculations (85% safety target of dedicated CIR link)
+  // All 6 Contention Ratios Comparison Matrix (1:1, 1:2, 1:4, 1:6, 1:8, 1:10) calibrated to Peak Concurrent Cap
+  const ratioComparisonMatrix = useMemo(() => {
+    const safeCapMbps = totalDedicatedMbps * 0.85;
+    return CONTENTION_RATIOS.map((ratio) => {
+      const regularCirMbps = calibratedSubscribedMbps / ratio;
+      const cdnDemandMbps = calibratedCdnPoolMbps / ratio;
+      const upstreamPct = (regularCirMbps / totalDedicatedMbps) * 100;
+      const status: 'optimal' | 'tight' | 'over' =
+        regularCirMbps <= safeCapMbps
+          ? 'optimal'
+          : regularCirMbps <= totalDedicatedMbps
+          ? 'tight'
+          : 'over';
+      return {
+        ratio,
+        regularCirMbps,
+        cdnDemandMbps,
+        cdnOverSafe240: cdnDemandMbps > DEFAULT_CDN_GUARDRAIL_MBPS,
+        upstreamPct,
+        status,
+      };
+    });
+  }, [calibratedSubscribedMbps, calibratedCdnPoolMbps, totalDedicatedMbps]);
+
+  // Upgrade Recommendation Calculations (85% safety target of dedicated CIR link, calibrated to peak concurrent cap)
   const upgradeRecommendation = useMemo(() => {
     const safeCeilingMbps = totalDedicatedMbps * 0.85;
     const headroomMbps = safeCeilingMbps - contendedDemandMbps;
@@ -660,13 +809,13 @@ export const CapacityPlannerView: React.FC = () => {
       activeSubscribers.length > 0
         ? totalSoldBandwidthMbps / activeSubscribers.length
         : 20;
-    const avgPerUserCir = Math.max(0.1, avgPkgMbps / contentionRatio);
+    const avgPerUserCir = Math.max(0.1, (avgPkgMbps * peakConcurrencyFactor) / contentionRatio);
     const additionalAvgUsers = headroomMbps > 0 ? Math.floor(headroomMbps / avgPerUserCir) : 0;
 
     // Concrete tier headroom examples
-    const add10M = headroomMbps > 0 ? Math.floor(headroomMbps / (10 / contentionRatio)) : 0;
-    const add20M = headroomMbps > 0 ? Math.floor(headroomMbps / (20 / contentionRatio)) : 0;
-    const add30M = headroomMbps > 0 ? Math.floor(headroomMbps / (30 / contentionRatio)) : 0;
+    const add10M = headroomMbps > 0 ? Math.floor(headroomMbps / ((10 * peakConcurrencyFactor) / contentionRatio)) : 0;
+    const add20M = headroomMbps > 0 ? Math.floor(headroomMbps / ((20 * peakConcurrencyFactor) / contentionRatio)) : 0;
+    const add30M = headroomMbps > 0 ? Math.floor(headroomMbps / ((30 * peakConcurrencyFactor) / contentionRatio)) : 0;
 
     return {
       safeCeilingMbps,
@@ -679,7 +828,76 @@ export const CapacityPlannerView: React.FC = () => {
       isOver85Pct: headroomMbps <= 0,
       recommendedUpgradeMbps: Math.ceil((contendedDemandMbps / 0.7) / 10) * 10,
     };
-  }, [totalDedicatedMbps, contendedDemandMbps, activeSubscribers.length, totalSoldBandwidthMbps, contentionRatio]);
+  }, [totalDedicatedMbps, contendedDemandMbps, activeSubscribers.length, totalSoldBandwidthMbps, contentionRatio, peakConcurrencyFactor]);
+
+  // Auto-scanned 'YouTube + Meta CDN Pool' grouped from MikroTik Simple Queues containing 'CDN'
+  const youtubeMetaCdnPool = useMemo(() => {
+    const allScanned = simpleQueuesSnapshot?.queues || [];
+    const cdnQueues = allScanned.filter((q) => q.isCdn || isCdnQueueName(q.name));
+
+    const nearestRatio: ContentionRatioOption = (CONTENTION_RATIOS.find((r) => r === contentionRatio) ||
+      CONTENTION_RATIOS.reduce((prev, curr) =>
+        Math.abs(curr - contentionRatio) < Math.abs(prev - contentionRatio) ? curr : prev
+      )) as ContentionRatioOption;
+
+    const uniqueUserSet = new Set<string>();
+    let totalLiveDownloadMbps = 0;
+    let totalLiveUploadMbps = 0;
+    let totalCurrentMaxLimitMbps = 0;
+    let totalRecommendedMaxMbps = 0;
+    let innCdnCount = 0;
+    let twCdnCount = 0;
+    let otherCdnCount = 0;
+
+    const rows = cdnQueues.map((queue) => {
+      for (const uname of queue.matchedUsernames) {
+        uniqueUserSet.add(uname);
+      }
+      if (queue.sourcePool === 'inn') innCdnCount += 1;
+      else if (queue.sourcePool === 'tw') twCdnCount += 1;
+      else otherCdnCount += 1;
+
+      totalLiveDownloadMbps += queue.liveRate.downloadMbps;
+      totalLiveUploadMbps += queue.liveRate.uploadMbps;
+      if (!queue.currentMaxLimit.isUnlimited) {
+        totalCurrentMaxLimitMbps += queue.currentMaxLimit.downloadMbps;
+      }
+
+      const plan = calculateQueueRatioPlan({
+        activeUsers: queue.activeUsers,
+        packageMbps: queue.packageMbps,
+        ratioDivisor: nearestRatio,
+        isCdn: true,
+      });
+      totalRecommendedMaxMbps += plan.poolMaxMbps;
+
+      return {
+        queue,
+        plan,
+      };
+    });
+
+    return {
+      rows,
+      queueCount: cdnQueues.length,
+      innCdnCount,
+      twCdnCount,
+      otherCdnCount,
+      uniqueOnlineUsers: uniqueUserSet.size,
+      totalLiveDownloadMbps: Math.round(totalLiveDownloadMbps * 100) / 100,
+      totalLiveUploadMbps: Math.round(totalLiveUploadMbps * 100) / 100,
+      totalCurrentMaxLimitMbps: Math.round(totalCurrentMaxLimitMbps * 100) / 100,
+      totalRecommendedMaxMbps,
+      nearestRatio,
+      overSafe240: totalRecommendedMaxMbps > DEFAULT_CDN_GUARDRAIL_MBPS,
+    };
+  }, [simpleQueuesSnapshot, contentionRatio]);
+
+  const handleOpenCdnPoolInManager = useCallback(() => {
+    setPoolManagerTargetPool('cdn');
+    setPoolManagerSelectNonce((n) => n + 1);
+    poolManagerSectionRef.current?.scrollIntoView({ behavior: 'smooth', block: 'start' });
+  }, []);
 
   // Open Edit Modal
   const handleOpenEditModal = () => {
@@ -731,6 +949,26 @@ export const CapacityPlannerView: React.FC = () => {
         </div>
 
         <div className="flex flex-wrap items-center gap-2.5 shrink-0">
+          {/* Quick 6-Ratio Selector (1:1 to 1:10) */}
+          <div className="flex flex-wrap items-center gap-1 bg-slate-950 border border-slate-800 rounded-lg p-1">
+            <span className="text-[10px] font-mono text-slate-400 px-1.5">Ratio:</span>
+            {CONTENTION_RATIOS.map((r) => (
+              <button
+                key={r}
+                type="button"
+                disabled={isUpdatingRatio}
+                onClick={() => handleQuickSelectRatio(r)}
+                className={`px-2 py-1 rounded text-[11px] font-mono font-bold transition cursor-pointer ${
+                  contentionRatio === r
+                    ? 'bg-sky-600 text-white shadow-sm'
+                    : 'text-slate-300 hover:bg-slate-800 hover:text-white'
+                }`}
+              >
+                1:{r}
+              </button>
+            ))}
+          </div>
+
           <button
             type="button"
             onClick={() => fetchPlannerDatasets(true)}
@@ -755,11 +993,17 @@ export const CapacityPlannerView: React.FC = () => {
       </div>
 
       {/* LIVE MIKROTIK PCQ & SUBNET POOL RATIO / AUTO-BURST MANAGER */}
-      <PcqSubnetPoolManager
-        activeRouter={activeRouter}
-        isAdmin={isAdmin}
-        onNotify={showToast}
-      />
+      <div ref={poolManagerSectionRef}>
+        <PcqSubnetPoolManager
+          activeRouter={activeRouter}
+          isAdmin={isAdmin}
+          upstreamDedicatedMbps={totalDedicatedMbps}
+          externalSelectedPool={poolManagerTargetPool}
+          poolSelectNonce={poolManagerSelectNonce}
+          onSnapshotUpdated={setSimpleQueuesSnapshot}
+          onNotify={showToast}
+        />
+      </div>
 
       {/* 1. UPSTREAM CAPACITY & SATURATION METER */}
       <div className="bg-slate-900/90 border border-slate-800 rounded-xl p-5 space-y-5">
@@ -840,18 +1084,18 @@ export const CapacityPlannerView: React.FC = () => {
           </div>
 
           <div className="space-y-1">
-            <span className="text-slate-400 text-[11px] block">Total Sold Bandwidth</span>
+            <span className="text-slate-400 text-[11px] block">Peak-Calibrated Sold Pool</span>
             <span className="text-xl font-bold font-mono tabular-nums text-cyan-400 block">
-              {totalSoldBandwidthMbps.toLocaleString()} Mbps
+              {Math.round(calibratedSubscribedMbps).toLocaleString()} Mbps
             </span>
             <span className="text-[11px] text-slate-500 font-mono">
-              {activeSubscribers.length} Active Subscribers ({pppActive.length} Online)
+              {calibratedPeakUsersTotal} Peak Cap / {registeredActiveCount} Reg ({pppActive.length} Online)
             </span>
           </div>
 
           <div className="space-y-1">
             <span className="text-slate-400 text-[11px] block">
-              Contended Demand (1:{contentionRatio})
+              Peak CIR Demand (1:{contentionRatio})
             </span>
             <span
               className={`text-xl font-bold font-mono tabular-nums block ${
@@ -860,10 +1104,10 @@ export const CapacityPlannerView: React.FC = () => {
                   : 'text-emerald-400'
               }`}
             >
-              {contendedDemandMbps.toFixed(2)} Mbps
+              {contendedDemandMbps.toFixed(1)} Mbps
             </span>
             <span className="text-[11px] text-slate-500 font-mono">
-              {contendedRatioPct.toFixed(1)}% of {totalDedicatedMbps}M CIR Committed
+              {contendedRatioPct.toFixed(1)}% of {totalDedicatedMbps}M · Unscaled {unscaledContendedDemandMbps.toFixed(1)}M
             </span>
           </div>
 
@@ -875,11 +1119,11 @@ export const CapacityPlannerView: React.FC = () => {
               }`}
             >
               {upgradeRecommendation.headroomMbps > 0
-                ? `+${upgradeRecommendation.headroomMbps.toFixed(2)} Mbps`
-                : `${upgradeRecommendation.headroomMbps.toFixed(2)} Mbps`}
+                ? `+${upgradeRecommendation.headroomMbps.toFixed(1)} Mbps`
+                : `${upgradeRecommendation.headroomMbps.toFixed(1)} Mbps`}
             </span>
             <span className="text-[11px] text-slate-500 font-mono">
-              85% Safe Cap: {upgradeRecommendation.safeCeilingMbps.toFixed(1)} Mbps
+              85% Cap: {upgradeRecommendation.safeCeilingMbps.toFixed(1)}M · CDN 1:{contentionRatio}: {calibratedCdnDemandMbps.toFixed(1)}M
             </span>
           </div>
         </div>
@@ -1057,7 +1301,187 @@ export const CapacityPlannerView: React.FC = () => {
         })()}
       </div>
 
-      {/* 2. MOHALLAH / AREA BANDWIDTH CONSUMPTION BREAKDOWN */}
+      {/* 2. YOUTUBE + META CDN POOL (AUTO-SCANNED MIKROTIK SIMPLE QUEUES CONTAINING 'CDN') */}
+      <div className="bg-slate-900/90 border border-slate-800 rounded-xl p-5 space-y-4">
+        <div className="flex flex-col lg:flex-row lg:items-center justify-between gap-3">
+          <div>
+            <h3 className="text-sm font-bold text-white flex items-center gap-2">
+              <Tv className="w-4 h-4 text-rose-400" />
+              <span>YouTube + Meta CDN Pool (Auto-Scanned Simple Queues)</span>
+            </h3>
+            <p className="text-xs text-slate-400 mt-0.5">
+              Automatically scans MikroTik <code className="text-slate-300">/queue/simple</code> for any queue names containing{' '}
+              <strong className="text-rose-300">&apos;CDN&apos;</strong> and groups them with Priority 8 &amp; 8s/8s burst isolation.
+            </p>
+          </div>
+
+          <div className="flex flex-wrap items-center gap-2 shrink-0">
+            <button
+              type="button"
+              onClick={() => fetchPlannerDatasets(true)}
+              disabled={isRefreshing}
+              className="px-3 py-1.5 rounded-lg bg-slate-800 hover:bg-slate-700 text-slate-200 border border-slate-700 font-semibold text-xs flex items-center gap-1.5 transition cursor-pointer disabled:opacity-50 whitespace-nowrap"
+            >
+              <RefreshCw className={`w-3.5 h-3.5 ${isRefreshing ? 'animate-spin' : ''}`} />
+              <span>Rescan CDN Queues</span>
+            </button>
+            <button
+              type="button"
+              onClick={handleOpenCdnPoolInManager}
+              className="px-3 py-1.5 rounded-lg bg-rose-600 hover:bg-rose-500 text-white font-bold text-xs flex items-center gap-1.5 transition cursor-pointer whitespace-nowrap shadow-sm"
+            >
+              <Sliders className="w-3.5 h-3.5" />
+              <span>Tune CDN Ratios</span>
+            </button>
+          </div>
+        </div>
+
+        {/* CDN Pool Summary KPIs */}
+        <div className="grid grid-cols-2 lg:grid-cols-4 gap-3 pt-2 border-t border-slate-800">
+          <div className="p-3 rounded-lg bg-slate-950/75 border border-slate-800 space-y-0.5">
+            <span className="text-[11px] text-slate-400 block">Matched CDN Queues</span>
+            <span className="text-lg font-bold font-mono tabular-nums text-white block">
+              {youtubeMetaCdnPool.queueCount} Queues
+            </span>
+            <span className="text-[11px] font-mono text-slate-500">
+              {youtubeMetaCdnPool.innCdnCount} Inn · {youtubeMetaCdnPool.twCdnCount} TW
+              {youtubeMetaCdnPool.otherCdnCount > 0 ? ` · ${youtubeMetaCdnPool.otherCdnCount} Other` : ''}
+            </span>
+          </div>
+
+          <div className="p-3 rounded-lg bg-slate-950/75 border border-slate-800 space-y-0.5">
+            <span className="text-[11px] text-slate-400 block">Live CDN Throughput</span>
+            <span className="text-lg font-bold font-mono tabular-nums text-rose-400 block">
+              {youtubeMetaCdnPool.totalLiveDownloadMbps.toFixed(2)} Mbps DL
+            </span>
+            <span className="text-[11px] font-mono text-slate-500">
+              UL: {youtubeMetaCdnPool.totalLiveUploadMbps.toFixed(2)} Mbps
+            </span>
+          </div>
+
+          <div className="p-3 rounded-lg bg-slate-950/75 border border-slate-800 space-y-0.5">
+            <span className="text-[11px] text-slate-400 block">Online Users on CDN Subnets</span>
+            <span className="text-lg font-bold font-mono tabular-nums text-emerald-400 block">
+              {youtubeMetaCdnPool.uniqueOnlineUsers} Online
+            </span>
+            <span className="text-[11px] font-mono text-slate-500">
+              Matched across target CIDRs
+            </span>
+          </div>
+
+          <div className="p-3 rounded-lg bg-slate-950/75 border border-slate-800 space-y-0.5">
+            <span className="text-[11px] text-slate-400 block">
+              1:{youtubeMetaCdnPool.nearestRatio} CDN Cap vs {DEFAULT_CDN_GUARDRAIL_MBPS}M Safe Ceiling
+            </span>
+            <span
+              className={`text-lg font-bold font-mono tabular-nums block ${
+                youtubeMetaCdnPool.overSafe240 ? 'text-amber-400' : 'text-cyan-400'
+              }`}
+            >
+              {youtubeMetaCdnPool.totalRecommendedMaxMbps} Mbps
+            </span>
+            <span className="text-[11px] font-mono text-slate-500">
+              Live RouterOS Cap: {youtubeMetaCdnPool.totalCurrentMaxLimitMbps} Mbps
+            </span>
+          </div>
+        </div>
+
+        {/* Discovered CDN Simple Queues Table */}
+        <div className="overflow-x-auto">
+          <table className="w-full text-left font-mono text-xs tabular-nums">
+            <thead>
+              <tr className="border-b border-slate-800 text-slate-400">
+                <th className="py-2.5 px-3 font-sans">CDN Queue Name</th>
+                <th className="py-2.5 px-3">Origin / Target</th>
+                <th className="py-2.5 px-3 text-right">Tier → CDN</th>
+                <th className="py-2.5 px-3 text-right">Online</th>
+                <th className="py-2.5 px-3 text-right">Live DL / UL</th>
+                <th className="py-2.5 px-3 text-right">Active Max-Limit</th>
+                <th className="py-2.5 px-3 text-right">Priority</th>
+                <th className="py-2.5 px-3 text-right">1:{youtubeMetaCdnPool.nearestRatio} Target</th>
+              </tr>
+            </thead>
+            <tbody className="divide-y divide-slate-800/60">
+              {isLoading && !simpleQueuesSnapshot ? (
+                <tr>
+                  <td colSpan={8} className="py-6 text-center text-slate-500">
+                    Scanning MikroTik Simple Queues for CDN entries...
+                  </td>
+                </tr>
+              ) : youtubeMetaCdnPool.rows.length === 0 ? (
+                <tr>
+                  <td colSpan={8} className="py-6 text-center text-slate-500">
+                    No Simple Queues containing &quot;CDN&quot; detected on {activeRouter?.name || 'active router'}. Queues like &quot;2 MB - CDN - TW&quot; or &quot;4 MB - CDN - Inn&quot; appear here automatically.
+                  </td>
+                </tr>
+              ) : (
+                youtubeMetaCdnPool.rows.map(({ queue, plan }) => (
+                  <tr key={queue.id || queue.name} className="hover:bg-slate-800/30">
+                    <td className="py-2.5 px-3 font-sans font-bold text-white">
+                      <div className="flex items-center gap-2">
+                        <span>{queue.name}</span>
+                        {queue.disabled && (
+                          <span className="text-[10px] font-mono text-amber-400">(Disabled)</span>
+                        )}
+                      </div>
+                    </td>
+                    <td className="py-2.5 px-3 text-slate-300">
+                      <span className="uppercase text-rose-300 font-bold mr-1.5">
+                        {queue.sourcePool === 'inn' ? 'Inn' : queue.sourcePool === 'tw' ? 'TW' : 'Custom'}
+                      </span>
+                      <span className="text-slate-400 text-[11px]">{queue.target}</span>
+                    </td>
+                    <td className="py-2.5 px-3 text-right text-slate-200">
+                      {queue.packageMbps}M → <strong className="text-rose-300">{queue.cdnTierRateMbps}M</strong>
+                    </td>
+                    <td className="py-2.5 px-3 text-right text-emerald-400 font-bold">
+                      {queue.activeUsers}
+                    </td>
+                    <td className="py-2.5 px-3 text-right text-cyan-300">
+                      {queue.liveRate.downloadMbps.toFixed(2)}M / {queue.liveRate.uploadMbps.toFixed(2)}M
+                    </td>
+                    <td className="py-2.5 px-3 text-right text-slate-200">
+                      {queue.currentMaxLimit.displayLabel}
+                    </td>
+                    <td className="py-2.5 px-3 text-right text-amber-300 font-semibold">
+                      {queue.currentPriority}
+                    </td>
+                    <td className="py-2.5 px-3 text-right text-indigo-300 font-bold">
+                      {plan.poolMaxMbps}M/{plan.poolMaxMbps}M
+                    </td>
+                  </tr>
+                ))
+              )}
+            </tbody>
+            {youtubeMetaCdnPool.rows.length > 0 && (
+              <tfoot>
+                <tr className="border-t border-slate-700 bg-slate-950/70 font-bold">
+                  <td className="py-2.5 px-3 font-sans text-white">
+                    YouTube + Meta CDN Pool Total ({youtubeMetaCdnPool.queueCount})
+                  </td>
+                  <td className="py-2.5 px-3 text-slate-400">Priority 8/8 · 8s/8s</td>
+                  <td className="py-2.5 px-3 text-right text-slate-300">—</td>
+                  <td className="py-2.5 px-3 text-right text-emerald-400">
+                    {youtubeMetaCdnPool.uniqueOnlineUsers}
+                  </td>
+                  <td className="py-2.5 px-3 text-right text-cyan-300">
+                    {youtubeMetaCdnPool.totalLiveDownloadMbps.toFixed(2)}M / {youtubeMetaCdnPool.totalLiveUploadMbps.toFixed(2)}M
+                  </td>
+                  <td className="py-2.5 px-3 text-right text-slate-200">
+                    {youtubeMetaCdnPool.totalCurrentMaxLimitMbps}M
+                  </td>
+                  <td className="py-2.5 px-3 text-right text-amber-300">8/8</td>
+                  <td className="py-2.5 px-3 text-right text-rose-300">
+                    {youtubeMetaCdnPool.totalRecommendedMaxMbps}M / {DEFAULT_CDN_GUARDRAIL_MBPS}M Cap
+                  </td>
+                </tr>
+              </tfoot>
+            )}
+          </table>
+        </div>
+      </div>
+
+      {/* 3. MOHALLAH / AREA BANDWIDTH CONSUMPTION BREAKDOWN */}
       <div className="bg-slate-900/90 border border-slate-800 rounded-xl p-5 space-y-4">
         <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3">
           <div>
@@ -1226,21 +1650,160 @@ export const CapacityPlannerView: React.FC = () => {
         </div>
       </div>
 
-      {/* 3. PACKAGE POOL DISTRIBUTION (1:6 CONTENTION MATRIX) */}
-      <div className="bg-slate-900/90 border border-slate-800 rounded-xl p-5 space-y-4">
-        <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2">
+      {/* 3. PACKAGE POOL DISTRIBUTION (1:1–1:10 CONTENTION ENGINE + 390 PEAK CONCURRENT CALIBRATION) */}
+      <div className="bg-slate-900/90 border border-slate-800 rounded-xl p-5 space-y-5">
+        <div className="flex flex-col lg:flex-row lg:items-center justify-between gap-3">
           <div>
             <h3 className="text-sm font-bold text-white flex items-center gap-2">
               <Layers className="w-4 h-4 text-indigo-400" />
-              <span>Package Pool Distribution (1:{contentionRatio} Contention Matrix)</span>
+              <span>Package Pool Distribution &amp; 1:{contentionRatio} Contention Matrix</span>
             </h3>
             <p className="text-xs text-slate-400 mt-0.5">
-              Breakdown of active subscriber tiers against the {totalDedicatedMbps} Mbps dedicated upstream link.
+              Calibrated against <strong className="text-cyan-300">{effectivePeakConcurrentCap}</strong> Peak Concurrent Online Cap ({Math.round(peakConcurrencyFactor * 1000) / 10}% of {registeredActiveCount} registered active) on your {totalDedicatedMbps} Mbps upstream link.
             </p>
           </div>
-          <span className="text-xs font-mono text-slate-400 tabular-nums">
-            {packagePools.length} Active Tiers · {activeSubscribers.length} Active Subscribers
-          </span>
+
+          {/* Peak Concurrent Online Cap Control + Ratio Buttons */}
+          <div className="flex flex-wrap items-center gap-2.5">
+            <div className="flex items-center gap-2 bg-slate-950 border border-slate-800 rounded-lg px-2.5 py-1.5">
+              <Users className="w-3.5 h-3.5 text-cyan-400 shrink-0" />
+              <label htmlFor="peak-concurrent-cap-input" className="text-[11px] font-mono text-slate-400 whitespace-nowrap">
+                Peak Online Cap:
+              </label>
+              <input
+                id="peak-concurrent-cap-input"
+                type="number"
+                min={1}
+                max={10000}
+                step={1}
+                value={peakConcurrentCap}
+                onChange={(e) => handleUpdatePeakCap(parseInt(e.target.value, 10))}
+                className="w-16 bg-slate-900 border border-slate-700 rounded px-2 py-0.5 text-xs font-mono font-bold text-cyan-300 text-center focus:outline-none focus:border-cyan-500"
+              />
+              {peakConcurrentCap !== DEFAULT_PEAK_CONCURRENT_CAP && (
+                <button
+                  type="button"
+                  onClick={() => handleUpdatePeakCap(DEFAULT_PEAK_CONCURRENT_CAP)}
+                  className="text-[10px] font-mono text-slate-400 hover:text-cyan-300 cursor-pointer"
+                  title="Reset to 390 default"
+                >
+                  Reset 390
+                </button>
+              )}
+            </div>
+
+            <div className="flex flex-wrap items-center gap-1 bg-slate-950 border border-slate-800 rounded-lg p-1">
+              {CONTENTION_RATIOS.map((r) => (
+                <button
+                  key={r}
+                  type="button"
+                  disabled={isUpdatingRatio}
+                  onClick={() => handleQuickSelectRatio(r)}
+                  className={`px-2 py-1 rounded text-[11px] font-mono font-bold transition cursor-pointer ${
+                    contentionRatio === r
+                      ? 'bg-indigo-600 text-white shadow-sm'
+                      : 'text-slate-300 hover:bg-slate-800 hover:text-white'
+                  }`}
+                >
+                  1:{r}
+                </button>
+              ))}
+            </div>
+          </div>
+        </div>
+
+        {/* 400 Mbps Upstream Utilization Bar (Calibrated to 390 Peak Concurrent Online) */}
+        <div className="p-4 rounded-xl bg-slate-950/75 border border-slate-800 space-y-2.5">
+          <div className="flex flex-wrap items-center justify-between gap-2 text-xs">
+            <span className="font-bold text-white flex items-center gap-2">
+              <Gauge className="w-4 h-4 text-cyan-400" />
+              <span>
+                {totalDedicatedMbps} Mbps Upstream Utilization @ 1:{contentionRatio} ({calibratedPeakUsersTotal} Peak Concurrent Users)
+              </span>
+            </span>
+            <span className="font-mono tabular-nums text-xs">
+              <strong className={contendedRatioPct > 85 ? 'text-amber-400' : 'text-emerald-400'}>
+                {contendedDemandMbps.toFixed(1)} Mbps
+              </strong>{' '}
+              <span className="text-slate-400">
+                / {totalDedicatedMbps} Mbps ({contendedRatioPct.toFixed(1)}%)
+              </span>
+            </span>
+          </div>
+          <div className="relative h-3.5 w-full rounded-full bg-slate-900 border border-slate-800 overflow-hidden">
+            <div
+              className={`h-full transition-all duration-300 ${
+                contendedRatioPct >= 100
+                  ? 'bg-rose-500'
+                  : contendedRatioPct >= 85
+                  ? 'bg-amber-500'
+                  : 'bg-emerald-500'
+              }`}
+              style={{ width: `${Math.min(100, contendedRatioPct)}%` }}
+            />
+            <div
+              className="absolute top-0 bottom-0 w-0.5 bg-amber-400"
+              style={{ left: '85%' }}
+              title={`85% Safe Cap (${(totalDedicatedMbps * 0.85).toFixed(1)} Mbps)`}
+            />
+          </div>
+          <div className="flex flex-wrap items-center justify-between gap-2 text-[11px] font-mono text-slate-400 tabular-nums">
+            <span>
+              Calibrated Concurrent Pool: {calibratedPeakUsersTotal} of {registeredActiveCount} subs ({(peakConcurrencyFactor * 100).toFixed(1)}%)
+            </span>
+            <span>
+              85% Safe Ceiling: {(totalDedicatedMbps * 0.85).toFixed(1)} Mbps · CDN Pool @ 1:{contentionRatio}: {calibratedCdnDemandMbps.toFixed(1)} Mbps
+            </span>
+          </div>
+        </div>
+
+        {/* 6-Ratio Contention Comparison Matrix (1:1, 1:2, 1:4, 1:6, 1:8, 1:10) */}
+        <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-6 gap-2.5">
+          {ratioComparisonMatrix.map((item) => {
+            const isSelected = item.ratio === contentionRatio;
+            return (
+              <button
+                key={item.ratio}
+                type="button"
+                onClick={() => handleQuickSelectRatio(item.ratio)}
+                className={`text-left p-3 rounded-xl border transition cursor-pointer space-y-1.5 ${
+                  isSelected
+                    ? 'bg-sky-600/15 border-sky-500 ring-1 ring-sky-500/40'
+                    : 'bg-slate-950/75 border-slate-800 hover:border-slate-700'
+                }`}
+              >
+                <div className="flex items-center justify-between gap-1">
+                  <span className="font-mono font-bold text-xs text-white">1:{item.ratio}</span>
+                  <span
+                    className={`text-[10px] font-mono font-bold ${
+                      item.status === 'optimal'
+                        ? 'text-emerald-400'
+                        : item.status === 'tight'
+                        ? 'text-amber-400'
+                        : 'text-rose-400'
+                    }`}
+                  >
+                    {item.upstreamPct.toFixed(0)}%
+                  </span>
+                </div>
+                <div className="font-mono tabular-nums space-y-0.5 text-[11px]">
+                  <div className="text-slate-300">
+                    Reg CIR: <strong className="text-cyan-300">{item.regularCirMbps.toFixed(1)}M</strong>
+                  </div>
+                  <div className={item.cdnOverSafe240 ? 'text-amber-300' : 'text-slate-400'}>
+                    CDN Pool: <strong>{item.cdnDemandMbps.toFixed(1)}M</strong>
+                  </div>
+                </div>
+                <div className="text-[10px] font-mono text-slate-500">
+                  {item.status === 'optimal'
+                    ? 'Safe ≤85%'
+                    : item.status === 'tight'
+                    ? 'Near Cap'
+                    : 'Exceeds Link'}
+                </div>
+              </button>
+            );
+          })}
         </div>
 
         {/* Automatic Upgrade Recommendation Banner */}
@@ -1260,17 +1823,17 @@ export const CapacityPlannerView: React.FC = () => {
             <div className="space-y-1">
               <div className="text-xs font-bold text-white">
                 {upgradeRecommendation.isOver85Pct
-                  ? `Upstream Upgrade Recommended — Contended 1:${contentionRatio} Pool Exceeds 85% Safe Threshold`
+                  ? `Upstream Upgrade Recommended — Peak-Calibrated 1:${contentionRatio} Pool Exceeds 85% Safe Threshold`
                   : `Safe Onboarding Capacity: Up to +${upgradeRecommendation.additionalAvgUsers} More Subscribers Before 85% Dedicated Cap`}
               </div>
               <p className="text-xs text-slate-300 font-mono tabular-nums">
                 {upgradeRecommendation.isOver85Pct ? (
                   <>
-                    Current 1:{contentionRatio} demand ({contendedDemandMbps.toFixed(2)} Mbps) exceeds the 85% safe ceiling ({upgradeRecommendation.safeCeilingMbps.toFixed(1)} Mbps) on your {totalDedicatedMbps} Mbps link. Upgrade dedicated CIR to at least <strong>{upgradeRecommendation.recommendedUpgradeMbps} Mbps</strong> to maintain optimal 1:{contentionRatio} contention.
+                    Peak-calibrated 1:{contentionRatio} demand ({contendedDemandMbps.toFixed(1)} Mbps @ {effectivePeakConcurrentCap} online) exceeds the 85% safe ceiling ({upgradeRecommendation.safeCeilingMbps.toFixed(1)} Mbps) on your {totalDedicatedMbps} Mbps link. Switch to 1:6–1:10 or upgrade CIR to <strong>{upgradeRecommendation.recommendedUpgradeMbps} Mbps</strong>.
                   </>
                 ) : (
                   <>
-                    Remaining safe CIR headroom: <strong>{upgradeRecommendation.headroomMbps.toFixed(2)} Mbps</strong> (before {upgradeRecommendation.safeCeilingMbps.toFixed(1)} Mbps cap) — supports <strong>+{upgradeRecommendation.add10M}</strong> users @ 10M, <strong>+{upgradeRecommendation.add20M}</strong> users @ 20M, or <strong>+{upgradeRecommendation.add30M}</strong> users @ 30M.
+                    Remaining safe CIR headroom: <strong>{upgradeRecommendation.headroomMbps.toFixed(1)} Mbps</strong> (before {upgradeRecommendation.safeCeilingMbps.toFixed(1)} Mbps cap) — supports <strong>+{upgradeRecommendation.add10M}</strong> users @ 10M, <strong>+{upgradeRecommendation.add20M}</strong> users @ 20M, or <strong>+{upgradeRecommendation.add30M}</strong> users @ 30M.
                   </>
                 )}
               </p>
@@ -1293,18 +1856,20 @@ export const CapacityPlannerView: React.FC = () => {
           <table className="w-full text-left font-mono text-xs tabular-nums">
             <thead>
               <tr className="border-b border-slate-800 text-slate-400">
-                <th className="py-2.5 px-3 font-sans">Package Tier</th>
-                <th className="py-2.5 px-3 text-right">Active Users</th>
+                <th className="py-2.5 px-3 font-sans">Package Tier (Reg / CDN)</th>
+                <th className="py-2.5 px-3 text-right">Registered</th>
                 <th className="py-2.5 px-3 text-right">Online Now</th>
-                <th className="py-2.5 px-3 text-right">Total Subscribed</th>
-                <th className="py-2.5 px-3 text-right">1:{contentionRatio} CIR Req.</th>
-                <th className="py-2.5 px-3 w-52">Share of {totalDedicatedMbps}M Upstream</th>
+                <th className="py-2.5 px-3 text-right">Peak Cap (≤{effectivePeakConcurrentCap})</th>
+                <th className="py-2.5 px-3 text-right">Peak Subscribed</th>
+                <th className="py-2.5 px-3 text-right">1:{contentionRatio} Reg CIR</th>
+                <th className="py-2.5 px-3 text-right">1:{contentionRatio} CDN Req</th>
+                <th className="py-2.5 px-3 w-48">Share of {totalDedicatedMbps}M</th>
               </tr>
             </thead>
             <tbody className="divide-y divide-slate-800/60">
               {packagePools.length === 0 ? (
                 <tr>
-                  <td colSpan={6} className="py-8 text-center text-slate-500">
+                  <td colSpan={8} className="py-8 text-center text-slate-500">
                     No active package tiers found across subscribers.
                   </td>
                 </tr>
@@ -1312,7 +1877,10 @@ export const CapacityPlannerView: React.FC = () => {
                 packagePools.map((pool) => (
                   <tr key={pool.tierLabel} className="hover:bg-slate-800/30">
                     <td className="py-2.5 px-3 font-sans font-bold text-white">
-                      {pool.tierLabel}
+                      {pool.tierLabel}{' '}
+                      <span className="text-[11px] font-mono font-normal text-rose-300">
+                        ({pool.cdnRateMbps}M CDN)
+                      </span>
                     </td>
                     <td className="py-2.5 px-3 text-right text-slate-200 font-semibold">
                       {pool.activeUsers}
@@ -1321,10 +1889,16 @@ export const CapacityPlannerView: React.FC = () => {
                       {pool.onlineUsers}
                     </td>
                     <td className="py-2.5 px-3 text-right text-cyan-300 font-semibold">
-                      {pool.totalSubscribedMbps.toLocaleString()} Mbps
+                      {pool.peakCalibratedUsers.toFixed(1)}
+                    </td>
+                    <td className="py-2.5 px-3 text-right text-slate-300">
+                      {Math.round(pool.peakSubscribedMbps).toLocaleString()} Mbps
                     </td>
                     <td className="py-2.5 px-3 text-right text-indigo-300 font-bold">
                       {pool.contendedCirMbps.toFixed(2)} Mbps
+                    </td>
+                    <td className="py-2.5 px-3 text-right text-rose-300 font-semibold">
+                      {pool.peakCdnDemandMbps.toFixed(2)} Mbps
                     </td>
                     <td className="py-2.5 px-3">
                       <div className="flex items-center gap-2">
@@ -1346,14 +1920,18 @@ export const CapacityPlannerView: React.FC = () => {
             {packagePools.length > 0 && (
               <tfoot>
                 <tr className="border-t border-slate-700 bg-slate-950/70 font-bold">
-                  <td className="py-2.5 px-3 font-sans text-white">Total Fleet Commitment</td>
-                  <td className="py-2.5 px-3 text-right text-white">{activeSubscribers.length}</td>
+                  <td className="py-2.5 px-3 font-sans text-white">Total Peak-Calibrated Fleet</td>
+                  <td className="py-2.5 px-3 text-right text-white">{registeredActiveCount}</td>
                   <td className="py-2.5 px-3 text-right text-emerald-400">{pppActive.length}</td>
+                  <td className="py-2.5 px-3 text-right text-cyan-300">{calibratedPeakUsersTotal}</td>
                   <td className="py-2.5 px-3 text-right text-cyan-400">
-                    {totalSoldBandwidthMbps.toLocaleString()} Mbps
+                    {Math.round(calibratedSubscribedMbps).toLocaleString()} Mbps
                   </td>
                   <td className="py-2.5 px-3 text-right text-indigo-300">
                     {contendedDemandMbps.toFixed(2)} Mbps
+                  </td>
+                  <td className="py-2.5 px-3 text-right text-rose-300">
+                    {calibratedCdnDemandMbps.toFixed(2)} Mbps
                   </td>
                   <td className="py-2.5 px-3 text-right text-white">
                     {contendedRatioPct.toFixed(1)}% of {totalDedicatedMbps}M

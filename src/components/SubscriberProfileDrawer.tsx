@@ -796,15 +796,15 @@ export const SubscriberProfileDrawer: React.FC<SubscriberProfileDrawerProps> = (
   if (!isOpen || !username) return null;
 
   return (
-    <div className="fixed inset-0 z-50 overflow-hidden flex justify-end animate-fadeIn">
-      {/* Backdrop */}
+    <div
+      className="fixed inset-0 z-[9999] flex items-center justify-center bg-black/75 backdrop-blur-sm p-3 overflow-y-auto animate-fadeIn"
+      onClick={onClose}
+    >
+      {/* Responsive Modal Container */}
       <div
-        onClick={onClose}
-        className="fixed inset-0 bg-slate-950/80 backdrop-blur-sm transition-opacity"
-      />
-
-      {/* Slide-over Drawer Container */}
-      <div className="relative w-full max-w-2xl bg-slate-900 border-l border-slate-800 shadow-2xl flex flex-col h-full z-10 overflow-hidden">
+        onClick={(e) => e.stopPropagation()}
+        className="relative w-[95vw] sm:w-full max-w-lg sm:max-w-2xl max-h-[90vh] overflow-y-auto overflow-x-hidden mx-auto my-auto rounded-2xl box-border bg-slate-900 border border-slate-800 shadow-2xl flex flex-col"
+      >
         {/* DRAWER HEADER */}
         <div className="p-5 border-b border-slate-800 bg-slate-950 flex items-start justify-between">
           <div className="flex items-start gap-3.5">

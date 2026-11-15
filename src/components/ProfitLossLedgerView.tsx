@@ -1342,8 +1342,8 @@ export const ProfitLossLedgerView: React.FC = () => {
 
       {/* Record / Edit Expense Modal */}
       {isFormModalOpen && (
-        <div className="fixed inset-0 z-50 bg-slate-950/80 backdrop-blur-sm flex items-center justify-center p-4">
-          <div className="bg-slate-900 border border-slate-800 rounded-2xl w-full max-w-lg shadow-2xl overflow-hidden">
+        <div className="fixed inset-0 z-[9999] flex items-center justify-center bg-black/75 backdrop-blur-sm p-3 overflow-y-auto">
+          <div className="w-[95vw] sm:w-full max-w-lg max-h-[90vh] overflow-y-auto mx-auto my-auto rounded-2xl box-border bg-slate-900 border border-slate-800 shadow-2xl">
             <div className="px-5 py-4 border-b border-slate-800 flex items-center justify-between">
               <div>
                 <h3 className="text-sm font-bold text-white">
@@ -1527,8 +1527,8 @@ export const ProfitLossLedgerView: React.FC = () => {
 
       {/* Inline Delete Confirmation Modal */}
       {pendingDeleteExpense && (
-        <div className="fixed inset-0 z-50 bg-slate-950/80 backdrop-blur-sm flex items-center justify-center p-4">
-          <div className="bg-slate-900 border border-rose-800/70 rounded-2xl w-full max-w-md shadow-2xl p-5 space-y-4 text-xs">
+        <div className="fixed inset-0 z-[9999] flex items-center justify-center bg-black/75 backdrop-blur-sm p-3 overflow-y-auto">
+          <div className="w-[95vw] sm:w-full max-w-lg max-h-[90vh] overflow-y-auto mx-auto my-auto rounded-2xl box-border bg-slate-900 border border-rose-800/70 shadow-2xl p-4 sm:p-5 space-y-4 text-xs">
             <div className="flex items-start gap-3">
               <div className="p-2 rounded-xl bg-rose-950 border border-rose-800 text-rose-400 shrink-0">
                 <Trash2 className="w-5 h-5" />

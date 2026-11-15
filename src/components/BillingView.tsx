@@ -1171,8 +1171,8 @@ export const BillingView: React.FC<BillingViewProps> = ({
         const willBeFullyPaid = projectedTotalPaid >= totalAmount;
 
         return (
-          <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/75 backdrop-blur-sm animate-fade-in font-sans">
-            <div className="bg-[#111A2E] border border-slate-700 rounded-2xl w-full max-w-md p-6 shadow-2xl relative">
+          <div className="fixed inset-0 z-[9999] flex items-center justify-center bg-black/75 backdrop-blur-sm p-3 overflow-y-auto animate-fade-in font-sans">
+            <div className="w-[95vw] sm:w-full max-w-lg max-h-[90vh] overflow-y-auto mx-auto my-auto rounded-2xl box-border bg-[#111A2E] border border-slate-700 p-4 sm:p-6 shadow-2xl relative">
               <div className="flex items-center justify-between pb-4 border-b border-slate-800">
                 <h2 className="text-lg font-bold text-white flex items-center gap-2">
                   <DollarSign className="w-5 h-5 text-emerald-400" />
@@ -1328,8 +1328,8 @@ export const BillingView: React.FC<BillingViewProps> = ({
 
       {/* Modal: Edit Invoice */}
       {isEditModalOpen && invoiceToEdit && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/75 backdrop-blur-sm animate-fade-in font-sans">
-          <div className="bg-[#111A2E] border border-slate-700 rounded-2xl w-full max-w-md p-6 shadow-2xl relative">
+        <div className="fixed inset-0 z-[9999] flex items-center justify-center bg-black/75 backdrop-blur-sm p-3 overflow-y-auto animate-fade-in font-sans">
+          <div className="w-[95vw] sm:w-full max-w-lg max-h-[90vh] overflow-y-auto mx-auto my-auto rounded-2xl box-border bg-[#111A2E] border border-slate-700 p-4 sm:p-6 shadow-2xl relative">
             <div className="flex items-center justify-between pb-4 border-b border-slate-800">
               <div className="flex items-center gap-2.5">
                 <div className="p-2 bg-indigo-950 border border-indigo-700/60 text-indigo-400 rounded-xl">
@@ -1468,8 +1468,8 @@ export const BillingView: React.FC<BillingViewProps> = ({
 
       {/* Modal: Delete Invoice Confirmation */}
       {invoiceToDelete && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/75 backdrop-blur-sm animate-fade-in font-sans">
-          <div className="bg-[#111A2E] border border-rose-800/80 rounded-2xl w-full max-w-sm p-6 shadow-2xl relative space-y-4">
+        <div className="fixed inset-0 z-[9999] flex items-center justify-center bg-black/75 backdrop-blur-sm p-3 overflow-y-auto animate-fade-in font-sans">
+          <div className="w-[95vw] sm:w-full max-w-lg max-h-[90vh] overflow-y-auto mx-auto my-auto rounded-2xl box-border bg-[#111A2E] border border-rose-800/80 p-4 sm:p-6 shadow-2xl relative space-y-4">
             <div className="flex items-center gap-3">
               <div className="p-3 bg-rose-950/90 border border-rose-700 text-rose-400 rounded-xl">
                 <Trash2 className="w-5 h-5" />

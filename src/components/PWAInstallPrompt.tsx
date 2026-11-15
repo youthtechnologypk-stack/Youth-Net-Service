@@ -271,8 +271,8 @@ export const PWAInstallPrompt: React.FC<PWAInstallPromptProps> = ({
  * Step-by-step iOS Safari Install Guide Modal
  */
 const IOSInstallModal: React.FC<{ onClose: () => void; title: string }> = ({ onClose, title }) => (
-  <div className="fixed inset-0 z-50 bg-black/80 backdrop-blur-sm flex items-center justify-center p-4">
-    <div className="bg-slate-900 border border-slate-800 rounded-2xl max-w-sm w-full p-5 shadow-2xl space-y-4 text-xs font-sans">
+  <div className="fixed inset-0 z-[9999] flex items-center justify-center bg-black/75 backdrop-blur-sm p-3 overflow-y-auto">
+    <div className="w-[95vw] sm:w-full max-w-lg max-h-[90vh] overflow-y-auto mx-auto my-auto rounded-2xl box-border bg-slate-900 border border-slate-800 p-4 sm:p-5 shadow-2xl space-y-4 text-xs font-sans">
       <div className="flex items-center justify-between pb-2 border-b border-slate-800">
         <div className="flex items-center gap-2 text-white font-bold text-sm">
           <Smartphone className="w-4 h-4 text-cyan-400" />
@@ -347,8 +347,8 @@ const AndroidInstallModal: React.FC<{ onClose: () => void; title: string }> = ({
   onClose,
   title,
 }) => (
-  <div className="fixed inset-0 z-50 bg-black/80 backdrop-blur-sm flex items-center justify-center p-4">
-    <div className="bg-slate-900 border border-slate-800 rounded-2xl max-w-sm w-full p-5 shadow-2xl space-y-4 text-xs font-sans">
+  <div className="fixed inset-0 z-[9999] flex items-center justify-center bg-black/75 backdrop-blur-sm p-3 overflow-y-auto">
+    <div className="w-[95vw] sm:w-full max-w-lg max-h-[90vh] overflow-y-auto mx-auto my-auto rounded-2xl box-border bg-slate-900 border border-slate-800 p-4 sm:p-5 shadow-2xl space-y-4 text-xs font-sans">
       <div className="flex items-center justify-between pb-2 border-b border-slate-800">
         <div className="flex items-center gap-2 text-white font-bold text-sm">
           <Smartphone className="w-4 h-4 text-emerald-400" />

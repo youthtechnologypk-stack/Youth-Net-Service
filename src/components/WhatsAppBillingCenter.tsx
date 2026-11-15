@@ -402,23 +402,26 @@ export const WhatsAppBillingCenter: React.FC<WhatsAppBillingCenterProps> = ({
   };
 
   return (
-    <div className="fixed inset-0 z-50 bg-slate-950/80 backdrop-blur-sm flex justify-end">
-      {/* Backdrop click closes drawer */}
-      <div className="flex-1" onClick={onClose} aria-hidden="true" />
-
-      {/* Slide-over Management Drawer */}
-      <div className="w-full max-w-3xl bg-[#0B111E] border-l border-slate-800 h-full flex flex-col shadow-2xl overflow-hidden">
-        {/* Drawer Header */}
-        <div className="px-6 py-4 bg-slate-900 border-b border-slate-800 flex items-center justify-between gap-4 shrink-0">
+    <div
+      className="fixed inset-0 z-[9999] flex items-center justify-center bg-black/75 backdrop-blur-sm p-3 overflow-y-auto"
+      onClick={onClose}
+    >
+      {/* Centered Responsive Modal Dialog */}
+      <div
+        onClick={(e) => e.stopPropagation()}
+        className="w-[95vw] sm:w-full max-w-lg sm:max-w-2xl max-h-[90vh] overflow-y-auto overflow-x-hidden mx-auto my-auto rounded-2xl box-border bg-[#0B111E] border border-slate-800 flex flex-col shadow-2xl"
+      >
+        {/* Modal Header */}
+        <div className="px-4 sm:px-6 py-4 bg-slate-900 border-b border-slate-800 flex items-center justify-between gap-3 shrink-0">
           <div className="flex items-center gap-3 min-w-0">
             <div className="p-2 rounded-xl bg-emerald-950 border border-emerald-800/70 text-emerald-400 shrink-0">
               <Landmark className="w-5 h-5" />
             </div>
             <div className="min-w-0">
-              <h2 className="text-base font-bold text-white truncate">
+              <h2 className="text-sm sm:text-base font-bold text-white break-words">
                 Payment Accounts &amp; WhatsApp Billing Config
               </h2>
-              <p className="text-xs text-slate-400 truncate">
+              <p className="text-xs text-slate-400 break-words">
                 Manage Bank / Wallet IBANs and NOC WhatsApp support details for automated billing templates
               </p>
             </div>
@@ -428,14 +431,14 @@ export const WhatsAppBillingCenter: React.FC<WhatsAppBillingCenterProps> = ({
             type="button"
             onClick={onClose}
             className="p-2 rounded-lg text-slate-400 hover:text-white hover:bg-slate-800 transition cursor-pointer shrink-0"
-            aria-label="Close Payment Accounts Drawer"
+            aria-label="Close Payment Accounts Modal"
           >
             <X className="w-5 h-5" />
           </button>
         </div>
 
         {/* Scrollable Content */}
-        <div className="flex-1 overflow-y-auto p-6 space-y-6">
+        <div className="flex-1 overflow-y-auto overflow-x-hidden p-3.5 sm:p-6 space-y-5 min-w-0 w-full">
           {/* Feedback Banner */}
           {banner && (
             <div
@@ -445,18 +448,18 @@ export const WhatsAppBillingCenter: React.FC<WhatsAppBillingCenterProps> = ({
                   : 'bg-rose-950/80 border-rose-700/60 text-rose-200'
               }`}
             >
-              <span className="flex items-center gap-2">
+              <span className="flex items-center gap-2 min-w-0">
                 {banner.type === 'success' ? (
                   <CheckCircle2 className="w-4 h-4 text-emerald-400 shrink-0" />
                 ) : (
                   <AlertCircle className="w-4 h-4 text-rose-400 shrink-0" />
                 )}
-                <span>{banner.text}</span>
+                <span className="break-words">{banner.text}</span>
               </span>
               <button
                 type="button"
                 onClick={() => setBanner(null)}
-                className="text-slate-400 hover:text-white cursor-pointer"
+                className="text-slate-400 hover:text-white cursor-pointer shrink-0"
               >
                 <X className="w-4 h-4" />
               </button>
@@ -466,12 +469,12 @@ export const WhatsAppBillingCenter: React.FC<WhatsAppBillingCenterProps> = ({
           {/* 1. NOC Support WhatsApp & Cloud API Settings */}
           <form
             onSubmit={handleSaveConfig}
-            className="bg-slate-900 border border-slate-800 rounded-xl p-5 space-y-4"
+            className="bg-slate-900 border border-slate-800 rounded-xl p-3.5 sm:p-5 space-y-4 min-w-0 w-full"
           >
-            <div className="flex items-center justify-between gap-3 pb-3 border-b border-slate-800">
-              <div className="flex items-center gap-2">
+            <div className="flex flex-wrap items-center justify-between gap-2.5 pb-3 border-b border-slate-800">
+              <div className="flex items-center gap-2 min-w-0">
                 <MessageSquare className="w-4 h-4 text-emerald-400 shrink-0" />
-                <h3 className="text-sm font-bold text-white">
+                <h3 className="text-sm font-bold text-white break-words">
                   NOC Support WhatsApp &amp; Cloud API Config
                 </h3>
               </div>
@@ -592,14 +595,14 @@ export const WhatsAppBillingCenter: React.FC<WhatsAppBillingCenterProps> = ({
           </form>
 
           {/* 2. Dynamic Bank & Mobile Wallet Accounts Manager */}
-          <div className="bg-slate-900 border border-slate-800 rounded-xl p-5 space-y-4">
+          <div className="bg-slate-900 border border-slate-800 rounded-xl p-3.5 sm:p-5 space-y-4 min-w-0 w-full">
             <div className="flex flex-wrap items-center justify-between gap-3 pb-3 border-b border-slate-800">
-              <div>
-                <h3 className="text-sm font-bold text-white flex items-center gap-2">
+              <div className="min-w-0">
+                <h3 className="text-sm font-bold text-white flex items-center gap-2 flex-wrap">
                   <Smartphone className="w-4 h-4 text-cyan-400 shrink-0" />
                   <span>Bank &amp; Mobile Wallet Accounts ({accounts.length})</span>
                 </h3>
-                <p className="text-xs text-slate-400 mt-0.5 font-mono tabular-nums">
+                <p className="text-xs text-slate-400 mt-0.5 font-mono tabular-nums break-words">
                   {activeAccounts.length} active account{activeAccounts.length === 1 ? '' : 's'} synced to Supabase `payment_accounts`
                 </p>
               </div>
@@ -824,7 +827,7 @@ export const WhatsAppBillingCenter: React.FC<WhatsAppBillingCenterProps> = ({
                             </span>
                           </div>
 
-                          <div className="flex items-center gap-2">
+                          <div className="flex flex-wrap items-center gap-2">
                             <span className="font-mono text-xs text-emerald-300 select-all break-all">
                               {acc.account_number_or_iban}
                             </span>
@@ -849,7 +852,7 @@ export const WhatsAppBillingCenter: React.FC<WhatsAppBillingCenterProps> = ({
                           </div>
                         </div>
 
-                        <div className="flex items-center gap-2 shrink-0">
+                        <div className="flex flex-wrap items-center gap-2 shrink-0">
                           {/* Active / Inactive Switch */}
                           <button
                             type="button"
@@ -940,8 +943,8 @@ export const WhatsAppBillingCenter: React.FC<WhatsAppBillingCenterProps> = ({
           </div>
 
           {/* 3. Live WhatsApp Template Preview */}
-          <div className="bg-slate-900 border border-slate-800 rounded-xl p-5 space-y-3">
-            <div className="flex items-center justify-between gap-2 pb-2 border-b border-slate-800">
+          <div className="bg-slate-900 border border-slate-800 rounded-xl p-3.5 sm:p-5 space-y-3 min-w-0 w-full">
+            <div className="flex flex-wrap items-center justify-between gap-2 pb-2 border-b border-slate-800">
               <h3 className="text-xs font-bold uppercase tracking-wider text-slate-300">
                 Live 3-Day Pre-Expiry Message Preview
               </h3>
@@ -949,7 +952,7 @@ export const WhatsAppBillingCenter: React.FC<WhatsAppBillingCenterProps> = ({
                 {activeAccounts.length} active account{activeAccounts.length === 1 ? '' : 's'} injected
               </span>
             </div>
-            <pre className="bg-slate-950 border border-slate-800 rounded-xl p-4 text-xs font-mono text-slate-200 whitespace-pre-wrap leading-relaxed">
+            <pre className="w-full max-w-full bg-slate-950 border border-slate-800 rounded-xl p-3.5 sm:p-4 text-xs font-mono text-slate-200 whitespace-pre-wrap break-words overflow-x-hidden leading-relaxed">
               {liveSamplePreview}
             </pre>
           </div>

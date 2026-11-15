@@ -571,8 +571,8 @@ export const ActivityLogsStudio: React.FC = () => {
 
       {/* 4. Log Detail Modal / Slide-Out */}
       {selectedLogForDetail && (
-        <div className="fixed inset-0 z-50 bg-black/80 flex items-center justify-center p-4 backdrop-blur-sm animate-fade-in font-sans">
-          <div className="bg-slate-900 border border-slate-800 rounded-2xl max-w-xl w-full overflow-hidden shadow-2xl flex flex-col max-h-[85vh]">
+        <div className="fixed inset-0 z-[9999] flex items-center justify-center bg-black/75 backdrop-blur-sm p-3 overflow-y-auto animate-fade-in font-sans">
+          <div className="w-[95vw] sm:w-full max-w-lg sm:max-w-xl max-h-[90vh] overflow-y-auto mx-auto my-auto rounded-2xl box-border bg-slate-900 border border-slate-800 shadow-2xl flex flex-col">
             {/* Modal Header */}
             <div className="bg-slate-950 p-4 border-b border-slate-800 flex items-center justify-between">
               <div className="flex items-center gap-2.5">
@@ -663,7 +663,7 @@ export const ActivityLogsStudio: React.FC = () => {
                     )}
                   </button>
                 </div>
-                <pre className="bg-slate-950 p-3 rounded-lg border border-slate-800 text-cyan-300 font-mono text-[11px] overflow-x-auto max-h-48">
+                <pre className="w-full max-w-full bg-slate-950 p-3 rounded-lg border border-slate-800 text-cyan-300 font-mono text-[11px] whitespace-pre-wrap break-all overflow-x-hidden max-h-48">
                   {JSON.stringify(selectedLogForDetail, null, 2)}
                 </pre>
               </div>
@@ -684,8 +684,8 @@ export const ActivityLogsStudio: React.FC = () => {
 
       {/* 5. Manual Audit Event Logging Modal */}
       {isManualModalOpen && (
-        <div className="fixed inset-0 z-50 bg-black/80 flex items-center justify-center p-4 backdrop-blur-sm animate-fade-in font-sans">
-          <div className="bg-slate-900 border border-slate-800 rounded-2xl max-w-md w-full overflow-hidden shadow-2xl">
+        <div className="fixed inset-0 z-[9999] flex items-center justify-center bg-black/75 backdrop-blur-sm p-3 overflow-y-auto animate-fade-in font-sans">
+          <div className="w-[95vw] sm:w-full max-w-lg max-h-[90vh] overflow-y-auto mx-auto my-auto rounded-2xl box-border bg-slate-900 border border-slate-800 shadow-2xl">
             <div className="bg-slate-950 p-4 border-b border-slate-800 flex items-center justify-between">
               <div className="flex items-center gap-2">
                 <Plus className="w-4 h-4 text-cyan-400" />
@@ -788,8 +788,8 @@ export const ActivityLogsStudio: React.FC = () => {
 
       {/* 6. Clear Logs Confirmation Modal */}
       {isClearModalOpen && (
-        <div className="fixed inset-0 z-50 bg-black/80 flex items-center justify-center p-4 backdrop-blur-sm animate-fade-in font-sans">
-          <div className="bg-slate-900 border border-slate-800 rounded-2xl max-w-sm w-full p-5 space-y-4 shadow-2xl">
+        <div className="fixed inset-0 z-[9999] flex items-center justify-center bg-black/75 backdrop-blur-sm p-3 overflow-y-auto animate-fade-in font-sans">
+          <div className="w-[95vw] sm:w-full max-w-lg max-h-[90vh] overflow-y-auto mx-auto my-auto rounded-2xl box-border bg-slate-900 border border-slate-800 p-4 sm:p-5 space-y-4 shadow-2xl">
             <div className="flex items-center gap-3 text-rose-400">
               <AlertTriangle className="w-5 h-5 shrink-0" />
               <h3 className="text-base font-bold text-white">Clear Audit Trail?</h3>

@@ -47,8 +47,8 @@ export const FiberTraceabilityDrawer: React.FC<FiberTraceabilityDrawerProps> = (
     : null;
 
   return (
-    <div className="fixed inset-0 z-50 bg-black/75 backdrop-blur-sm flex items-center justify-center p-3 sm:p-5">
-      <div className="w-full max-w-4xl max-h-[90vh] bg-slate-900 border border-slate-700 rounded-2xl shadow-2xl flex flex-col overflow-hidden text-slate-100">
+    <div className="fixed inset-0 z-[9999] flex items-center justify-center bg-black/75 backdrop-blur-sm p-3 overflow-y-auto">
+      <div className="w-[95vw] sm:w-full max-w-lg lg:max-w-4xl max-h-[90vh] overflow-y-auto mx-auto my-auto rounded-2xl box-border bg-slate-900 border border-slate-700 shadow-2xl flex flex-col text-slate-100">
         {/* Header */}
         <div className="px-5 py-4 border-b border-slate-800 bg-slate-950/95 flex items-start justify-between gap-3 shrink-0">
           <div className="min-w-0">

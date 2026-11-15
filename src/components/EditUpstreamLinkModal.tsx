@@ -236,14 +236,14 @@ export const EditUpstreamLinkModal: React.FC<EditUpstreamLinkModalProps> = ({
 
   return (
     <div
-      className="fixed inset-0 z-50 bg-black/80 backdrop-blur-sm flex items-center justify-center p-4"
+      className="fixed inset-0 z-[9999] flex items-center justify-center bg-black/75 backdrop-blur-sm p-3 overflow-y-auto"
       role="dialog"
       aria-modal="true"
       aria-labelledby="edit-upstream-modal-title"
     >
       <form
         onSubmit={handleSubmit}
-        className="bg-slate-900 border border-slate-800 rounded-2xl max-w-lg w-full p-5 space-y-4 shadow-2xl"
+        className="w-[95vw] sm:w-full max-w-lg max-h-[90vh] overflow-y-auto mx-auto my-auto rounded-2xl box-border bg-slate-900 border border-slate-800 p-4 sm:p-5 space-y-4 shadow-2xl"
       >
         <div className="flex items-center justify-between pb-3 border-b border-slate-800">
           <div className="flex items-center gap-2">
@@ -287,19 +287,19 @@ export const EditUpstreamLinkModal: React.FC<EditUpstreamLinkModalProps> = ({
           {/* Dedicated CIR + Contention Ratio */}
           <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
             <div>
-              <div className="flex items-center justify-between mb-1">
+              <div className="flex flex-wrap items-center justify-between gap-1 mb-1">
                 <label className="text-slate-400 text-[11px] font-medium">
                   Dedicated CIR (Mbps)
                 </label>
-                <div className="flex items-center gap-1 font-mono text-[10px]">
-                  {[50, 100, 200].map((preset) => (
+                <div className="flex flex-wrap items-center gap-1 font-mono text-[10px]">
+                  {[50, 100, 200, 400].map((preset) => (
                     <button
                       key={preset}
                       type="button"
                       onClick={() => setTotalDedicatedMbps(String(preset))}
                       className={`px-1.5 py-0.5 rounded border transition cursor-pointer ${
                         Number(totalDedicatedMbps) === preset
-                          ? 'bg-cyan-600 text-slate-950 border-cyan-500 font-bold'
+                          ? 'bg-sky-600 text-white border-sky-500 font-bold'
                           : 'bg-slate-950 text-slate-400 border-slate-800 hover:text-white'
                       }`}
                     >
@@ -320,12 +320,12 @@ export const EditUpstreamLinkModal: React.FC<EditUpstreamLinkModalProps> = ({
             </div>
 
             <div>
-              <div className="flex items-center justify-between mb-1">
+              <div className="flex flex-wrap items-center justify-between gap-1 mb-1">
                 <label className="text-slate-400 text-[11px] font-medium">
                   Contention Ratio (1 : N)
                 </label>
-                <div className="flex items-center gap-1 font-mono text-[10px]">
-                  {[4, 6, 8, 10].map((preset) => (
+                <div className="flex flex-wrap items-center gap-1 font-mono text-[10px]">
+                  {[1, 2, 4, 6, 8, 10].map((preset) => (
                     <button
                       key={preset}
                       type="button"
@@ -479,7 +479,7 @@ export const EditUpstreamLinkModal: React.FC<EditUpstreamLinkModalProps> = ({
           <button
             type="submit"
             disabled={isSaving}
-            className="px-4 py-2 rounded-lg bg-cyan-600 hover:bg-cyan-500 text-slate-950 font-bold flex items-center gap-1.5 transition cursor-pointer disabled:opacity-50"
+            className="px-4 py-2 rounded-lg bg-sky-600 hover:bg-sky-500 text-white font-bold flex items-center gap-1.5 transition cursor-pointer disabled:opacity-50"
           >
             <Save className="w-3.5 h-3.5" />
             <span>{isSaving ? 'Saving...' : 'Save Upstream Config'}</span>

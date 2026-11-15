@@ -188,8 +188,8 @@ export const AddBandwidthProfileModal: React.FC<AddBandwidthProfileModalProps> =
   };
 
   return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-slate-950/80 backdrop-blur-sm animate-fade-in font-sans">
-      <div className="bg-slate-900 border border-slate-800 rounded-2xl w-full max-w-2xl shadow-2xl overflow-hidden flex flex-col max-h-[90vh]">
+    <div className="fixed inset-0 z-[9999] flex items-center justify-center bg-black/75 backdrop-blur-sm p-3 overflow-y-auto animate-fade-in font-sans">
+      <div className="w-[95vw] sm:w-full max-w-lg sm:max-w-2xl max-h-[90vh] overflow-y-auto mx-auto my-auto rounded-2xl box-border bg-slate-900 border border-slate-800 shadow-2xl flex flex-col">
         {/* Header */}
         <div className="flex items-center justify-between p-4 bg-slate-950 border-b border-slate-800">
           <div className="flex items-center gap-3">
@@ -521,7 +521,7 @@ export const AddBandwidthProfileModal: React.FC<AddBandwidthProfileModalProps> =
                 <span>{copiedCli ? 'Copied!' : 'Copy Script'}</span>
               </button>
             </div>
-            <pre className="p-2.5 rounded bg-slate-900/90 text-slate-300 text-[10px] font-mono overflow-x-auto border border-slate-800 whitespace-pre">
+            <pre className="w-full max-w-full p-2.5 rounded bg-slate-900/90 text-slate-300 text-[10px] font-mono border border-slate-800 whitespace-pre-wrap break-words overflow-x-hidden">
               {generatedCli}
             </pre>
           </div>

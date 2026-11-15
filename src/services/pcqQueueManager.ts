@@ -2,10 +2,38 @@ import { apiClient, RouterAuthInfo } from './apiClient';
 
 export type ContentionRatioOption = 1 | 2 | 4 | 6 | 8 | 10;
 export type BurstTimeOption = '8s/8s' | '12s/12s' | '16s/16s' | '32s/32s';
-export type QueuePoolKey = 'inn' | 'tw' | 'other';
+export type QueuePoolKey = 'inn' | 'tw' | 'cdn' | 'other';
+export type RegularPriorityOption = 4 | 5;
 
 export const CONTENTION_RATIOS: ContentionRatioOption[] = [1, 2, 4, 6, 8, 10];
 export const BURST_TIME_OPTIONS: BurstTimeOption[] = ['8s/8s', '12s/12s', '16s/16s', '32s/32s'];
+export const DEFAULT_CDN_GUARDRAIL_MBPS = 240;
+
+/**
+ * Per-user YouTube + Meta CDN rate mapping by subscriber package tier (Mbps).
+ */
+export const CDN_TIER_RATE_MAP: Record<number, number> = {
+  2: 3,
+  3: 4,
+  4: 5,
+  5: 7,
+  6: 8,
+  8: 10,
+  10: 12,
+  15: 18,
+  20: 25,
+  30: 35,
+  50: 60,
+};
+
+export function getCdnTierRateMbps(packageMbps: number): number {
+  const pkg = Math.max(1, Math.round(Number(packageMbps) || 2));
+  if (CDN_TIER_RATE_MAP[pkg] !== undefined) {
+    return CDN_TIER_RATE_MAP[pkg];
+  }
+  if (pkg <= 1) return 2;
+  return Math.max(pkg + 1, Math.ceil(pkg * 1.2));
+}
 
 export interface MikrotikSimpleQueueRaw {
   '.id'?: string;
@@ -20,6 +48,7 @@ export interface MikrotikSimpleQueueRaw {
   'burst-limit'?: string;
   'burst-threshold'?: string;
   'burst-time'?: string;
+  priority?: string;
   rate?: string;
   bytes?: string;
   packets?: string;
@@ -62,8 +91,11 @@ export interface DiscoveredPoolQueue {
   target: string;
   targets: string[];
   pool: QueuePoolKey;
+  sourcePool: 'inn' | 'tw' | 'other';
+  isCdn: boolean;
   packageMbps: number;
   packageLabel: string;
+  cdnTierRateMbps: number;
   packetMarks: string;
   isSpeedtest: boolean;
   disabled: boolean;
@@ -78,22 +110,38 @@ export interface DiscoveredPoolQueue {
   currentBurstLimit: ParsedRatePair;
   currentBurstThreshold: ParsedRatePair;
   currentBurstTime: string;
+  currentPriority: string;
   liveRate: ParsedRatePair;
   comment: string;
 }
 
 export interface CalculatedQueuePlan {
   ratioDivisor: ContentionRatioOption;
+  isCdn: boolean;
   activeUsers: number;
   effectiveUsers: number;
   packageMbps: number;
+  tierRateMbps: number;
   rawDemandMbps: number;
   calculatedMaxMbps: number;
   poolMaxMbps: number;
+  uncappedMaxMbps: number;
+  wasGuardrailCapped: boolean;
   limitAtMbps: number;
   burstLimitMbps: number;
   burstThresholdMbps: number;
   burstTime: BurstTimeOption;
+  priorityLevel: number;
+  priorityString: string;
+}
+
+export interface CdnGuardrailSummary {
+  uncappedTotalMbps: number;
+  effectiveTotalMbps: number;
+  capMbps: number;
+  isOverCap: boolean;
+  guardrailApplied: boolean;
+  plansById: Record<string, CalculatedQueuePlan>;
 }
 
 export interface SimpleQueuePatchPayload {
@@ -102,12 +150,14 @@ export interface SimpleQueuePatchPayload {
   'burst-limit': string;
   'burst-threshold': string;
   'burst-time': string;
+  priority?: string;
 }
 
 export interface DiscoveredQueuesSnapshot {
   queues: DiscoveredPoolQueue[];
   innQueues: DiscoveredPoolQueue[];
   twQueues: DiscoveredPoolQueue[];
+  cdnQueues: DiscoveredPoolQueue[];
   otherQueues: DiscoveredPoolQueue[];
   excludedSpeedtestQueues: DiscoveredPoolQueue[];
   queueTypes: MikrotikQueueTypeRaw[];
@@ -234,9 +284,16 @@ export function isSpeedtestQueue(queue: MikrotikSimpleQueueRaw): boolean {
 }
 
 /**
- * Classify a queue into Multinet/Inn (80.10.x.0/24), Transworld/TW (60.10.x.0/24), or Other.
+ * Detect whether a Simple Queue name belongs to YouTube / Meta CDN pools.
  */
-export function classifyQueuePool(name: string, targets: string[]): QueuePoolKey {
+export function isCdnQueueName(name?: string | null): boolean {
+  return /\bcdn\b/i.test(String(name || '')) || /cdn/i.test(String(name || ''));
+}
+
+/**
+ * Detect origin subnet pool (Inn vs TW vs Other) independently of CDN classification.
+ */
+export function detectOriginPool(name: string, targets: string[]): 'inn' | 'tw' | 'other' {
   const joinedTargets = targets.join(',');
   if (/(^|,|\s)80\.10\./.test(joinedTargets)) return 'inn';
   if (/(^|,|\s)60\.10\./.test(joinedTargets)) return 'tw';
@@ -248,7 +305,15 @@ export function classifyQueuePool(name: string, targets: string[]): QueuePoolKey
 }
 
 /**
- * Extract numeric package bandwidth in Mbps from queue name (e.g. "2 MB -Inn", "15 MB - Tw"),
+ * Classify a queue into YouTube+Meta CDN, Multinet/Inn (80.10.x.0/24), Transworld/TW (60.10.x.0/24), or Other.
+ */
+export function classifyQueuePool(name: string, targets: string[]): QueuePoolKey {
+  if (isCdnQueueName(name)) return 'cdn';
+  return detectOriginPool(name, targets);
+}
+
+/**
+ * Extract numeric package bandwidth in Mbps from queue name (e.g. "2 MB -Inn", "15 MB - Tw", "4 MB - CDN - Inn"),
  * falling back to PCQ queue type name or current max-limit.
  */
 export function extractPackageMbpsFromQueue(
@@ -294,30 +359,38 @@ export function parseQueueTypesPair(rawQueueField?: string | null): {
 }
 
 /**
- * Compute default burst-time for a given contention ratio.
- * 1:2-1:8 => 16s/16s (also 16s/16s for 1:1), 1:10 => 12s/12s.
+ * Compute default burst-time for a given contention ratio or pool type.
+ * CDN queues default to 8s/8s; Regular queues use 16s/16s (or 12s/12s at 1:10).
  */
-export function getDefaultBurstTimeForRatio(ratioDivisor: ContentionRatioOption): BurstTimeOption {
+export function getDefaultBurstTimeForRatio(
+  ratioDivisor: ContentionRatioOption,
+  isCdn = false
+): BurstTimeOption {
+  if (isCdn) return '8s/8s';
   return ratioDivisor === 10 ? '12s/12s' : '16s/16s';
 }
 
 /**
- * Exact Ratio (1:1 to 1:10) & Auto-Burst Calculation Engine.
+ * Exact Ratio (1:1 to 1:10) & Auto-Burst Calculation Engine for both Regular and CDN pools.
  */
 export function calculateQueueRatioPlan(params: {
   activeUsers: number;
   packageMbps: number;
   ratioDivisor: ContentionRatioOption;
+  isCdn?: boolean;
+  regularPriority?: RegularPriorityOption;
   overrideMaxMbps?: number;
   burstTime?: BurstTimeOption;
 }): CalculatedQueuePlan {
+  const isCdn = Boolean(params.isCdn);
   const packageMbps = Math.max(1, Number(params.packageMbps) || 1);
+  const tierRateMbps = isCdn ? getCdnTierRateMbps(packageMbps) : packageMbps;
   const activeUsers = Math.max(0, Math.floor(Number(params.activeUsers) || 0));
-  const effectiveUsers = Math.max(1, activeUsers);
+  const effectiveUsers = isCdn ? activeUsers : Math.max(1, activeUsers);
   const ratioDivisor = params.ratioDivisor;
 
-  const rawDemandMbps = effectiveUsers * packageMbps;
-  const calculatedMaxMbps = Math.max(packageMbps, Math.ceil(rawDemandMbps / ratioDivisor));
+  const rawDemandMbps = effectiveUsers * tierRateMbps;
+  const calculatedMaxMbps = Math.max(tierRateMbps, Math.ceil(rawDemandMbps / ratioDivisor));
 
   const hasValidOverride =
     params.overrideMaxMbps !== undefined &&
@@ -330,20 +403,107 @@ export function calculateQueueRatioPlan(params: {
   const limitAtMbps = Math.max(1, Math.round(poolMaxMbps * 0.5));
   const burstLimitMbps = Math.max(poolMaxMbps, Math.round(poolMaxMbps * 1.25));
   const burstThresholdMbps = Math.max(1, Math.round(poolMaxMbps * 0.75));
-  const burstTime = params.burstTime || getDefaultBurstTimeForRatio(ratioDivisor);
+  const burstTime = params.burstTime || getDefaultBurstTimeForRatio(ratioDivisor, isCdn);
+  const priorityLevel = isCdn ? 8 : (params.regularPriority ?? 4);
+  const priorityString = `${priorityLevel}/${priorityLevel}`;
 
   return {
     ratioDivisor,
+    isCdn,
     activeUsers,
     effectiveUsers,
     packageMbps,
+    tierRateMbps,
     rawDemandMbps,
     calculatedMaxMbps,
     poolMaxMbps,
+    uncappedMaxMbps: poolMaxMbps,
+    wasGuardrailCapped: false,
     limitAtMbps,
     burstLimitMbps,
     burstThresholdMbps,
     burstTime,
+    priorityLevel,
+    priorityString,
+  };
+}
+
+/**
+ * Apply the 400 Mbps Upstream Link Protection Guardrail (Max 240 Mbps Combined CDN Cap)
+ * across all CDN queues while preserving per-tier minimum floor where feasible.
+ */
+export function applyCdnGuardrailToPlans(
+  items: Array<{ queue: DiscoveredPoolQueue; plan: CalculatedQueuePlan }>,
+  guardrailEnabled: boolean,
+  capMbps = DEFAULT_CDN_GUARDRAIL_MBPS
+): CdnGuardrailSummary {
+  const uncappedTotalMbps = items.reduce((sum, item) => sum + item.plan.poolMaxMbps, 0);
+  const isOverCap = uncappedTotalMbps > capMbps;
+  const plansById: Record<string, CalculatedQueuePlan> = {};
+
+  if (!guardrailEnabled || !isOverCap || items.length === 0) {
+    for (const { queue, plan } of items) {
+      plansById[queue.id || queue.name] = plan;
+    }
+    return {
+      uncappedTotalMbps,
+      effectiveTotalMbps: uncappedTotalMbps,
+      capMbps,
+      isOverCap,
+      guardrailApplied: false,
+      plansById,
+    };
+  }
+
+  // Reserve minimum tier floor per queue (unless total floors itself exceeds capMbps)
+  const totalFloors = items.reduce(
+    (sum, item) => sum + Math.min(item.plan.tierRateMbps, item.plan.poolMaxMbps),
+    0
+  );
+
+  const scaledValues: number[] = [];
+  if (totalFloors >= capMbps) {
+    const scale = capMbps / Math.max(1, uncappedTotalMbps);
+    for (const { plan } of items) {
+      scaledValues.push(Math.max(1, Math.floor(plan.poolMaxMbps * scale)));
+    }
+  } else {
+    const remainingBudget = capMbps - totalFloors;
+    const totalExcess = items.reduce(
+      (sum, item) => sum + Math.max(0, item.plan.poolMaxMbps - item.plan.tierRateMbps),
+      0
+    );
+    for (const { plan } of items) {
+      const floor = Math.min(plan.tierRateMbps, plan.poolMaxMbps);
+      const excess = Math.max(0, plan.poolMaxMbps - floor);
+      const share = totalExcess > 0 ? Math.floor((excess / totalExcess) * remainingBudget) : 0;
+      scaledValues.push(floor + share);
+    }
+  }
+
+  let effectiveTotalMbps = 0;
+  items.forEach(({ queue, plan }, idx) => {
+    const cappedMax = Math.max(1, scaledValues[idx]);
+    effectiveTotalMbps += cappedMax;
+    const updatedPlan: CalculatedQueuePlan = {
+      ...plan,
+      poolMaxMbps: cappedMax,
+      uncappedMaxMbps: plan.poolMaxMbps,
+      wasGuardrailCapped: cappedMax < plan.poolMaxMbps,
+      limitAtMbps: Math.max(1, Math.round(cappedMax * 0.5)),
+      burstLimitMbps: Math.max(cappedMax, Math.round(cappedMax * 1.25)),
+      burstThresholdMbps: Math.max(1, Math.round(cappedMax * 0.75)),
+    };
+    plansById[queue.id || queue.name] = updatedPlan;
+  });
+
+  return {
+    uncappedTotalMbps,
+    effectiveTotalMbps,
+    capMbps,
+    isOverCap,
+    guardrailApplied: true,
+    plansById,
   };
 }
 
@@ -354,6 +514,7 @@ export function buildApplyPatchPayload(plan: CalculatedQueuePlan): SimpleQueuePa
     'burst-limit': `${plan.burstLimitMbps}M/${plan.burstLimitMbps}M`,
     'burst-threshold': `${plan.burstThresholdMbps}M/${plan.burstThresholdMbps}M`,
     'burst-time': plan.burstTime,
+    priority: plan.priorityString,
   };
 }
 
@@ -364,6 +525,7 @@ export function buildUnlimitedResetPayload(burstTimeReset: '0/0' | '0s/0s' = '0/
     'burst-limit': '0/0',
     'burst-threshold': '0/0',
     'burst-time': burstTimeReset,
+    priority: '8/8',
   };
 }
 
@@ -405,6 +567,7 @@ export function buildDiscoveredQueuesSnapshot(params: {
 
   const innQueues: DiscoveredPoolQueue[] = [];
   const twQueues: DiscoveredPoolQueue[] = [];
+  const cdnQueues: DiscoveredPoolQueue[] = [];
   const otherQueues: DiscoveredPoolQueue[] = [];
   const excludedSpeedtestQueues: DiscoveredPoolQueue[] = [];
   const queues: DiscoveredPoolQueue[] = [];
@@ -418,7 +581,9 @@ export function buildDiscoveredQueuesSnapshot(params: {
     const targetDisplay = targets.join(', ') || '0.0.0.0/0';
     const packetMarks = String(raw['packet-marks'] || raw.packetMarks || '').trim();
     const speedtest = isSpeedtestQueue(raw);
-    const pool = classifyQueuePool(name, targets);
+    const isCdn = isCdnQueueName(name);
+    const sourcePool = detectOriginPool(name, targets);
+    const pool: QueuePoolKey = isCdn ? 'cdn' : sourcePool;
 
     const { uploadQueueType, downloadQueueType } = parseQueueTypesPair(raw.queue);
     const currentMaxLimit = parseRouterOsRatePair(raw['max-limit']);
@@ -426,10 +591,12 @@ export function buildDiscoveredQueuesSnapshot(params: {
     const currentBurstLimit = parseRouterOsRatePair(raw['burst-limit']);
     const currentBurstThreshold = parseRouterOsRatePair(raw['burst-threshold']);
     const currentBurstTime = String(raw['burst-time'] || '0/0').trim() || '0/0';
+    const currentPriority = String(raw.priority || '8/8').trim() || '8/8';
     const liveRate = parseRouterOsRatePair(raw.rate);
 
     const packageMbps = extractPackageMbpsFromQueue(name, downloadQueueType, currentMaxLimit);
     const packageLabel = `${packageMbps} MB`;
+    const cdnTierRateMbps = getCdnTierRateMbps(packageMbps);
 
     // Match online PPPoE sessions by IP subnet
     const matchedUserSet = new Set<string>();
@@ -449,8 +616,11 @@ export function buildDiscoveredQueuesSnapshot(params: {
       target: targetDisplay,
       targets,
       pool,
+      sourcePool,
+      isCdn,
       packageMbps,
       packageLabel,
+      cdnTierRateMbps,
       packetMarks,
       isSpeedtest: speedtest,
       disabled: raw.disabled === true || raw.disabled === 'true',
@@ -465,6 +635,7 @@ export function buildDiscoveredQueuesSnapshot(params: {
       currentBurstLimit,
       currentBurstThreshold,
       currentBurstTime,
+      currentPriority,
       liveRate,
       comment: String(raw.comment || '').trim(),
     };
@@ -475,7 +646,9 @@ export function buildDiscoveredQueuesSnapshot(params: {
     }
 
     queues.push(item);
-    if (pool === 'inn') {
+    if (pool === 'cdn') {
+      cdnQueues.push(item);
+    } else if (pool === 'inn') {
       innQueues.push(item);
     } else if (pool === 'tw') {
       twQueues.push(item);
@@ -491,6 +664,7 @@ export function buildDiscoveredQueuesSnapshot(params: {
 
   innQueues.sort(sortByTier);
   twQueues.sort(sortByTier);
+  cdnQueues.sort(sortByTier);
   otherQueues.sort(sortByTier);
   queues.sort(sortByTier);
   excludedSpeedtestQueues.sort(sortByTier);
@@ -499,6 +673,7 @@ export function buildDiscoveredQueuesSnapshot(params: {
     queues,
     innQueues,
     twQueues,
+    cdnQueues,
     otherQueues,
     excludedSpeedtestQueues,
     queueTypes: params.queueTypes || [],
@@ -540,7 +715,7 @@ export async function fetchMikrotikQueuesSnapshot(
 }
 
 /**
- * PATCH /rest/queue/simple/{id} via /api/mikrotik/... with Ratio & Auto-Burst settings.
+ * PATCH /rest/queue/simple/{id} via /api/mikrotik/... with Ratio, Auto-Burst & Priority settings.
  * Never modifies /rest/queue/type (preserves per-user PCQ caps).
  */
 export async function applyRatioBurstToSimpleQueue(
