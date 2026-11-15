@@ -121,11 +121,11 @@ export const Header: React.FC<HeaderProps> = ({
     const isActive = activeTab === tab;
     if (isActive) {
       if (themeColor === 'indigo') {
-        return 'bg-indigo-50 dark:bg-slate-800 text-indigo-700 dark:text-indigo-400 border border-indigo-200 dark:border-indigo-500/30 shadow-sm font-semibold';
+        return 'bg-indigo-600 text-white border border-indigo-600 dark:bg-indigo-500/20 dark:text-indigo-300 dark:border-indigo-400/60 dark:shadow-[0_0_15px_rgba(99,102,241,0.18)] shadow-sm font-bold';
       }
-      return 'bg-cyan-50 dark:bg-slate-800 text-cyan-700 dark:text-cyan-400 border border-cyan-200 dark:border-cyan-500/30 shadow-sm font-semibold';
+      return 'bg-sky-600 text-white border border-sky-600 dark:bg-sky-500/20 dark:text-sky-300 dark:border-sky-400/60 dark:shadow-[0_0_15px_rgba(56,189,248,0.18)] shadow-sm font-bold';
     }
-    return 'text-slate-600 dark:text-slate-400 hover:text-slate-900 dark:hover:text-slate-200 hover:bg-slate-100 dark:hover:bg-slate-900';
+    return 'text-slate-700 dark:text-slate-200 hover:text-slate-900 dark:hover:text-white hover:bg-slate-100 dark:hover:bg-slate-800/70 border border-transparent';
   };
 
   // ==========================================================================
@@ -397,7 +397,7 @@ export const Header: React.FC<HeaderProps> = ({
               <>
                 <button
                   onClick={() => onOpenProvisionModal()}
-                  className="flex items-center gap-1 bg-cyan-600 hover:bg-cyan-500 text-slate-950 font-semibold px-2.5 py-1.5 rounded text-xs transition shadow-sm shrink-0 cursor-pointer"
+                  className="flex items-center gap-1 bg-sky-600 hover:bg-sky-500 text-white font-bold px-2.5 py-1.5 rounded text-xs transition shadow-sm shrink-0 cursor-pointer"
                   title="Provision PPPoE Customer"
                 >
                   <PlusCircle className="w-3.5 h-3.5 shrink-0" />
@@ -441,11 +441,7 @@ export const Header: React.FC<HeaderProps> = ({
             <>
               <button
                 onClick={() => setActiveTab('noc')}
-                className={`shrink-0 whitespace-nowrap snap-start flex items-center gap-2 px-3 py-2 text-xs sm:text-sm font-medium rounded-xl transition cursor-pointer ${
-                  activeTab === 'noc'
-                    ? 'bg-cyan-50 dark:bg-slate-800 text-cyan-700 dark:text-cyan-400 border border-cyan-200 dark:border-cyan-500/30 shadow-sm font-semibold'
-                    : 'text-slate-600 dark:text-slate-400 hover:text-slate-900 dark:hover:text-slate-200 hover:bg-slate-100 dark:hover:bg-slate-900'
-                }`}
+                className={`shrink-0 whitespace-nowrap snap-start flex items-center gap-2 px-3 py-2 text-xs sm:text-sm font-medium rounded-xl transition cursor-pointer ${getTabClassName('noc')}`}
               >
                 <Activity className="w-4 h-4 shrink-0" />
                 <span>NOC Command Center</span>
@@ -455,7 +451,7 @@ export const Header: React.FC<HeaderProps> = ({
                 onClick={() => setActiveTab('capacity')}
                 className={`shrink-0 whitespace-nowrap snap-start flex items-center gap-2 px-3 py-2 text-xs sm:text-sm font-medium rounded-xl transition cursor-pointer ${getTabClassName('capacity')}`}
               >
-                <Gauge className="w-4 h-4 shrink-0 text-cyan-600 dark:text-cyan-400" />
+                <Gauge className={`w-4 h-4 shrink-0 ${activeTab === 'capacity' ? 'text-white dark:text-sky-300' : 'text-cyan-600 dark:text-cyan-400'}`} />
                 <span>Capacity &amp; Pools</span>
               </button>
 
@@ -473,7 +469,11 @@ export const Header: React.FC<HeaderProps> = ({
               >
                 <Radio className="w-4 h-4 shrink-0" />
                 <span>MikroTik RouterOS v7</span>
-                <span className="text-[10px] px-1.5 py-0.5 rounded bg-cyan-100 dark:bg-cyan-900/60 text-cyan-800 dark:text-cyan-300 font-mono font-bold">
+                <span className={`text-[10px] px-1.5 py-0.5 rounded font-mono font-bold ${
+                  activeTab === 'mikrotik'
+                    ? 'bg-white/20 text-white dark:bg-sky-500/30 dark:text-sky-200'
+                    : 'bg-cyan-100 dark:bg-cyan-900/60 text-cyan-800 dark:text-cyan-300'
+                }`}>
                   Live
                 </span>
               </button>
@@ -482,9 +482,13 @@ export const Header: React.FC<HeaderProps> = ({
                 onClick={() => setActiveTab('olt')}
                 className={`shrink-0 whitespace-nowrap snap-start flex items-center gap-2 px-3 py-2 text-xs sm:text-sm font-medium rounded-xl transition cursor-pointer ${getTabClassName('olt')}`}
               >
-                <Layers className="w-4 h-4 shrink-0 text-cyan-600 dark:text-cyan-400" />
+                <Layers className={`w-4 h-4 shrink-0 ${activeTab === 'olt' ? 'text-white dark:text-sky-300' : 'text-cyan-600 dark:text-cyan-400'}`} />
                 <span>VSOL OLT</span>
-                <span className="text-[10px] px-1.5 py-0.5 rounded bg-emerald-100 dark:bg-emerald-900/60 text-emerald-800 dark:text-emerald-300 font-mono font-bold">
+                <span className={`text-[10px] px-1.5 py-0.5 rounded font-mono font-bold ${
+                  activeTab === 'olt'
+                    ? 'bg-white/20 text-white dark:bg-emerald-500/30 dark:text-emerald-200'
+                    : 'bg-emerald-100 dark:bg-emerald-900/60 text-emerald-800 dark:text-emerald-300'
+                }`}>
                   GPON
                 </span>
               </button>
@@ -493,7 +497,7 @@ export const Header: React.FC<HeaderProps> = ({
                 onClick={() => setActiveTab('fiber_gis')}
                 className={`shrink-0 whitespace-nowrap snap-start flex items-center gap-2 px-3 py-2 text-xs sm:text-sm font-medium rounded-xl transition cursor-pointer ${getTabClassName('fiber_gis')}`}
               >
-                <MapPin className="w-4 h-4 shrink-0 text-sky-500 dark:text-sky-400" />
+                <MapPin className={`w-4 h-4 shrink-0 ${activeTab === 'fiber_gis' ? 'text-white dark:text-sky-300' : 'text-sky-500 dark:text-sky-400'}`} />
                 <span>Fiber GIS &amp; Map</span>
               </button>
 
@@ -509,7 +513,7 @@ export const Header: React.FC<HeaderProps> = ({
                 onClick={() => setActiveTab('profit_expenses')}
                 className={`shrink-0 whitespace-nowrap snap-start flex items-center gap-2 px-3 py-2 text-xs sm:text-sm font-medium rounded-xl transition cursor-pointer ${getTabClassName('profit_expenses')}`}
               >
-                <Wallet className="w-4 h-4 shrink-0 text-emerald-500 dark:text-emerald-400" />
+                <Wallet className={`w-4 h-4 shrink-0 ${activeTab === 'profit_expenses' ? 'text-white dark:text-sky-300' : 'text-emerald-500 dark:text-emerald-400'}`} />
                 <span>Profit &amp; Expenses</span>
               </button>
 
@@ -530,7 +534,7 @@ export const Header: React.FC<HeaderProps> = ({
                 onClick={() => setActiveTab('users')}
                 className={`shrink-0 whitespace-nowrap snap-start flex items-center gap-2 px-3 py-2 text-xs sm:text-sm font-medium rounded-xl transition cursor-pointer ${getTabClassName('users')}`}
               >
-                <Shield className="w-4 h-4 shrink-0 text-cyan-600 dark:text-cyan-400" />
+                <Shield className={`w-4 h-4 shrink-0 ${activeTab === 'users' ? 'text-white dark:text-sky-300' : 'text-cyan-600 dark:text-cyan-400'}`} />
                 <span>User &amp; Access Management</span>
               </button>
 
@@ -538,7 +542,7 @@ export const Header: React.FC<HeaderProps> = ({
                 onClick={() => setActiveTab('permissions')}
                 className={`shrink-0 whitespace-nowrap snap-start flex items-center gap-2 px-3 py-2 text-xs sm:text-sm font-medium rounded-xl transition cursor-pointer ${getTabClassName('permissions')}`}
               >
-                <ShieldCheck className="w-4 h-4 shrink-0 text-emerald-600 dark:text-emerald-400" />
+                <ShieldCheck className={`w-4 h-4 shrink-0 ${activeTab === 'permissions' ? 'text-white dark:text-sky-300' : 'text-emerald-600 dark:text-emerald-400'}`} />
                 <span>Feature Matrix</span>
               </button>
 
@@ -546,7 +550,7 @@ export const Header: React.FC<HeaderProps> = ({
                 onClick={() => setActiveTab('logs')}
                 className={`shrink-0 whitespace-nowrap snap-start flex items-center gap-2 px-3 py-2 text-xs sm:text-sm font-medium rounded-xl transition cursor-pointer ${getTabClassName('logs')}`}
               >
-                <ShieldAlert className="w-4 h-4 shrink-0 text-amber-600 dark:text-amber-400" />
+                <ShieldAlert className={`w-4 h-4 shrink-0 ${activeTab === 'logs' ? 'text-white dark:text-sky-300' : 'text-amber-600 dark:text-amber-400'}`} />
                 <span>Activity Logs</span>
               </button>
 
@@ -570,7 +574,7 @@ export const Header: React.FC<HeaderProps> = ({
                 onClick={() => setActiveTab('settings')}
                 className={`shrink-0 whitespace-nowrap snap-start flex items-center gap-2 px-3 py-2 text-xs sm:text-sm font-medium rounded-xl transition cursor-pointer ${getTabClassName('settings')}`}
               >
-                <Settings className="w-4 h-4 shrink-0 text-cyan-600 dark:text-cyan-400" />
+                <Settings className={`w-4 h-4 shrink-0 ${activeTab === 'settings' ? 'text-white dark:text-sky-300' : 'text-cyan-600 dark:text-cyan-400'}`} />
                 <span>Settings</span>
               </button>
             </>
@@ -620,7 +624,7 @@ export const Header: React.FC<HeaderProps> = ({
                 onClick={() => setActiveTab('olt')}
                 className={`shrink-0 whitespace-nowrap snap-start flex items-center gap-2 px-3 py-2 text-xs sm:text-sm font-medium rounded-xl transition cursor-pointer ${getTabClassName('olt', 'indigo')}`}
               >
-                <Layers className="w-4 h-4 shrink-0 text-cyan-600 dark:text-cyan-400" />
+                <Layers className={`w-4 h-4 shrink-0 ${activeTab === 'olt' ? 'text-white dark:text-indigo-300' : 'text-cyan-600 dark:text-cyan-400'}`} />
                 <span>VSOL OLT</span>
               </button>
 
@@ -628,7 +632,7 @@ export const Header: React.FC<HeaderProps> = ({
                 onClick={() => setActiveTab('fiber_gis')}
                 className={`shrink-0 whitespace-nowrap snap-start flex items-center gap-2 px-3 py-2 text-xs sm:text-sm font-medium rounded-xl transition cursor-pointer ${getTabClassName('fiber_gis', 'indigo')}`}
               >
-                <MapPin className="w-4 h-4 shrink-0 text-sky-500 dark:text-sky-400" />
+                <MapPin className={`w-4 h-4 shrink-0 ${activeTab === 'fiber_gis' ? 'text-white dark:text-indigo-300' : 'text-sky-500 dark:text-sky-400'}`} />
                 <span>Fiber GIS &amp; Map</span>
               </button>
 
@@ -644,7 +648,7 @@ export const Header: React.FC<HeaderProps> = ({
                 onClick={() => setActiveTab('profit_expenses')}
                 className={`shrink-0 whitespace-nowrap snap-start flex items-center gap-2 px-3 py-2 text-xs sm:text-sm font-medium rounded-xl transition cursor-pointer ${getTabClassName('profit_expenses', 'indigo')}`}
               >
-                <Wallet className="w-4 h-4 shrink-0 text-emerald-500 dark:text-emerald-400" />
+                <Wallet className={`w-4 h-4 shrink-0 ${activeTab === 'profit_expenses' ? 'text-white dark:text-indigo-300' : 'text-emerald-500 dark:text-emerald-400'}`} />
                 <span>Profit &amp; Expenses</span>
               </button>
             </>
@@ -654,8 +658,8 @@ export const Header: React.FC<HeaderProps> = ({
 
       {/* CRON Status Strip if triggered */}
       {lastCronMessage && (
-        <div className="bg-slate-900 border-t border-cyan-900/40 px-4 py-1 text-center text-xs text-cyan-300 flex items-center justify-center gap-2 animate-fade-in">
-          <RotateCw className="w-3 h-3 text-cyan-400 animate-spin" />
+        <div className="bg-sky-50 dark:bg-slate-900 border-t border-sky-200 dark:border-cyan-900/40 px-4 py-1 text-center text-xs text-sky-700 dark:text-cyan-300 flex items-center justify-center gap-2 animate-fade-in">
+          <RotateCw className="w-3 h-3 text-sky-600 dark:text-cyan-400 animate-spin" />
           <span>{lastCronMessage}</span>
         </div>
       )}

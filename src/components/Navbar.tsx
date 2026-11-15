@@ -238,7 +238,7 @@ export const Navbar: React.FC<NavbarProps> = ({
           {effectiveRole === 'ADMIN' && onOpenProvisionModal && (
             <button
               onClick={onOpenProvisionModal}
-              className="hidden sm:flex items-center gap-1.5 bg-cyan-600 hover:bg-cyan-500 text-slate-950 px-2.5 py-1.5 rounded-lg text-xs font-bold transition shadow-sm cursor-pointer"
+              className="hidden sm:flex items-center gap-1.5 bg-sky-600 hover:bg-sky-500 text-white px-2.5 py-1.5 rounded-lg text-xs font-bold transition shadow-sm cursor-pointer"
               title="Fast PPPoE Provisioning"
             >
               <PlusCircle className="w-3.5 h-3.5" />

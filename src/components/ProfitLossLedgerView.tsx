@@ -538,7 +538,7 @@ export const ProfitLossLedgerView: React.FC = () => {
           <button
             type="button"
             onClick={openCreateModal}
-            className="px-3.5 py-2 rounded-lg bg-cyan-600 hover:bg-cyan-500 text-slate-950 font-bold text-xs flex items-center gap-1.5 transition shadow-sm cursor-pointer whitespace-nowrap shrink-0"
+            className="px-3.5 py-2 rounded-lg bg-sky-600 hover:bg-sky-500 text-white font-bold text-xs flex items-center gap-1.5 transition shadow-sm cursor-pointer whitespace-nowrap shrink-0"
           >
             <PlusCircle className="w-4 h-4" />
             <span>+ Record Expense</span>

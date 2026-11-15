@@ -168,10 +168,10 @@ export const VsolOltStudio: React.FC = () => {
                 <select
                   value={selectedOltId}
                   onChange={(e) => setSelectedOltId(e.target.value)}
-                  className="bg-transparent text-white font-bold text-xs focus:outline-none cursor-pointer"
+                  className="bg-transparent text-slate-900 dark:text-white font-bold text-xs focus:outline-none cursor-pointer"
                 >
                   {olts.map((olt) => (
-                    <option key={olt.id} value={olt.id} className="bg-slate-900 text-white">
+                    <option key={olt.id} value={olt.id} className="bg-white dark:bg-slate-900 text-slate-900 dark:text-white">
                       {olt.name} ({olt.ponType} - {olt.ipAddress})
                     </option>
                   ))}
@@ -204,7 +204,7 @@ export const VsolOltStudio: React.FC = () => {
                 setOltToEdit(null);
                 setIsAddModalOpen(true);
               }}
-              className="px-3 py-2 bg-gradient-to-r from-cyan-600 to-blue-600 hover:from-cyan-500 hover:to-blue-500 text-slate-950 rounded-xl font-bold text-xs transition flex items-center gap-1.5 cursor-pointer shadow-md shadow-cyan-950/40"
+              className="px-3 py-2 bg-sky-600 hover:bg-sky-500 text-white rounded-xl font-bold text-xs transition flex items-center gap-1.5 cursor-pointer shadow-sm"
               title="Register a New OLT"
             >
               <Plus className="w-3.5 h-3.5" />
@@ -469,10 +469,10 @@ export const VsolOltStudio: React.FC = () => {
             <button
               key={tab.id}
               onClick={() => setQualityFilter(tab.id as any)}
-              className={`px-3 py-1.5 rounded-lg font-semibold whitespace-nowrap transition cursor-pointer ${
+              className={`px-3 py-1.5 rounded-lg font-semibold whitespace-nowrap transition cursor-pointer border ${
                 qualityFilter === tab.id
-                  ? 'bg-cyan-600 text-slate-950 font-bold'
-                  : 'bg-slate-950 text-slate-400 hover:text-slate-200 border border-slate-800'
+                  ? 'bg-sky-600 text-white border-sky-600 font-bold shadow-sm dark:bg-sky-500/20 dark:text-sky-300 dark:border-sky-400/60 dark:shadow-[0_0_15px_rgba(56,189,248,0.18)]'
+                  : 'bg-slate-100 text-slate-700 hover:text-slate-900 hover:bg-slate-200 border-slate-200 dark:bg-slate-950 dark:text-slate-300 dark:hover:text-white dark:border-slate-800'
               }`}
             >
               {tab.label}

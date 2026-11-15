@@ -218,23 +218,23 @@ export const MobileAppSimulator: React.FC<MobileAppSimulatorProps> = ({
 
         {/* Switcher Controls */}
         <div className="flex items-center gap-3">
-          <div className="flex bg-slate-950 p-1 rounded-lg border border-slate-800">
+          <div className="flex bg-slate-100 dark:bg-slate-950 p-1 rounded-lg border border-slate-200 dark:border-slate-800">
             <button
               onClick={() => setDeviceMode('agent')}
-              className={`px-3 py-1.5 rounded-md text-xs font-semibold transition ${
+              className={`px-3 py-1.5 rounded-md text-xs font-semibold transition cursor-pointer border ${
                 deviceMode === 'agent'
-                  ? 'bg-cyan-600 text-slate-950 shadow-sm'
-                  : 'text-slate-400 hover:text-slate-200'
+                  ? 'bg-sky-600 text-white border-sky-600 shadow-sm dark:bg-sky-500/20 dark:text-sky-300 dark:border-sky-400/60'
+                  : 'border-transparent text-slate-700 hover:text-slate-900 dark:text-slate-400 dark:hover:text-slate-200'
               }`}
             >
               Field Agent App
             </button>
             <button
               onClick={() => setDeviceMode('client')}
-              className={`px-3 py-1.5 rounded-md text-xs font-semibold transition ${
+              className={`px-3 py-1.5 rounded-md text-xs font-semibold transition cursor-pointer border ${
                 deviceMode === 'client'
-                  ? 'bg-indigo-600 text-white shadow-sm'
-                  : 'text-slate-400 hover:text-slate-200'
+                  ? 'bg-indigo-600 text-white border-indigo-600 shadow-sm dark:bg-indigo-500/20 dark:text-indigo-300 dark:border-indigo-400/60'
+                  : 'border-transparent text-slate-700 hover:text-slate-900 dark:text-slate-400 dark:hover:text-slate-200'
               }`}
             >
               Subscriber Portal App

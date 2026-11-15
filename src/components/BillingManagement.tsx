@@ -775,17 +775,17 @@ export const BillingManagement: React.FC<BillingManagementProps> = ({
         <div className="flex items-center gap-1.5 w-full sm:w-auto overflow-x-auto pb-1 sm:pb-0">
           <button
             onClick={() => setActiveTab('invoices')}
-            className={`px-3.5 py-2 rounded-lg text-xs font-semibold flex items-center gap-2 transition ${
+            className={`px-3.5 py-2 rounded-lg text-xs font-semibold flex items-center gap-2 transition cursor-pointer shrink-0 border ${
               activeTab === 'invoices'
-                ? 'bg-cyan-600 text-slate-950 font-bold shadow-md'
-                : 'text-slate-400 hover:text-slate-200 hover:bg-slate-800'
+                ? 'bg-sky-600 text-white border-sky-600 font-bold shadow-sm dark:bg-sky-500/20 dark:text-sky-300 dark:border-sky-400/60 dark:shadow-[0_0_15px_rgba(56,189,248,0.18)]'
+                : 'text-slate-700 hover:text-slate-900 hover:bg-slate-100 border-transparent dark:text-slate-300 dark:hover:text-white dark:hover:bg-slate-800'
             }`}
           >
             <CreditCard className="w-4 h-4" />
             <span>Billing Invoices</span>
             <span
               className={`text-[10px] px-1.5 py-0.2 rounded-full font-mono ${
-                activeTab === 'invoices' ? 'bg-cyan-950 text-cyan-200' : 'bg-slate-800 text-slate-400'
+                activeTab === 'invoices' ? 'bg-white/20 text-white dark:bg-sky-500/30 dark:text-sky-200' : 'bg-slate-200 text-slate-700 dark:bg-slate-800 dark:text-slate-300'
               }`}
             >
               {invoices.length}
@@ -794,17 +794,17 @@ export const BillingManagement: React.FC<BillingManagementProps> = ({
 
           <button
             onClick={() => setActiveTab('recurring')}
-            className={`px-3.5 py-2 rounded-lg text-xs font-semibold flex items-center gap-2 transition ${
+            className={`px-3.5 py-2 rounded-lg text-xs font-semibold flex items-center gap-2 transition cursor-pointer shrink-0 border ${
               activeTab === 'recurring'
-                ? 'bg-cyan-600 text-slate-950 font-bold shadow-md'
-                : 'text-slate-400 hover:text-slate-200 hover:bg-slate-800'
+                ? 'bg-sky-600 text-white border-sky-600 font-bold shadow-sm dark:bg-sky-500/20 dark:text-sky-300 dark:border-sky-400/60 dark:shadow-[0_0_15px_rgba(56,189,248,0.18)]'
+                : 'text-slate-700 hover:text-slate-900 hover:bg-slate-100 border-transparent dark:text-slate-300 dark:hover:text-white dark:hover:bg-slate-800'
             }`}
           >
             <TrendingUp className="w-4 h-4" />
             <span>Recurring MRR Subscribers</span>
             <span
               className={`text-[10px] px-1.5 py-0.2 rounded-full font-mono ${
-                activeTab === 'recurring' ? 'bg-cyan-950 text-cyan-200' : 'bg-slate-800 text-slate-400'
+                activeTab === 'recurring' ? 'bg-white/20 text-white dark:bg-sky-500/30 dark:text-sky-200' : 'bg-slate-200 text-slate-700 dark:bg-slate-800 dark:text-slate-300'
               }`}
             >
               {mrrSubscribers.length}
@@ -813,17 +813,17 @@ export const BillingManagement: React.FC<BillingManagementProps> = ({
 
           <button
             onClick={() => setActiveTab('ledger')}
-            className={`px-3.5 py-2 rounded-lg text-xs font-semibold flex items-center gap-2 transition ${
+            className={`px-3.5 py-2 rounded-lg text-xs font-semibold flex items-center gap-2 transition cursor-pointer shrink-0 border ${
               activeTab === 'ledger'
-                ? 'bg-cyan-600 text-slate-950 font-bold shadow-md'
-                : 'text-slate-400 hover:text-slate-200 hover:bg-slate-800'
+                ? 'bg-sky-600 text-white border-sky-600 font-bold shadow-sm dark:bg-sky-500/20 dark:text-sky-300 dark:border-sky-400/60 dark:shadow-[0_0_15px_rgba(56,189,248,0.18)]'
+                : 'text-slate-700 hover:text-slate-900 hover:bg-slate-100 border-transparent dark:text-slate-300 dark:hover:text-white dark:hover:bg-slate-800'
             }`}
           >
             <Layers className="w-4 h-4" />
             <span>Ledger History</span>
             <span
               className={`text-[10px] px-1.5 py-0.2 rounded-full font-mono ${
-                activeTab === 'ledger' ? 'bg-cyan-950 text-cyan-200' : 'bg-slate-800 text-slate-400'
+                activeTab === 'ledger' ? 'bg-white/20 text-white dark:bg-sky-500/30 dark:text-sky-200' : 'bg-slate-200 text-slate-700 dark:bg-slate-800 dark:text-slate-300'
               }`}
             >
               {ledgerEntries.length}
@@ -832,17 +832,17 @@ export const BillingManagement: React.FC<BillingManagementProps> = ({
 
           <button
             onClick={() => setActiveTab('agents')}
-            className={`px-3.5 py-2 rounded-lg text-xs font-semibold flex items-center gap-2 transition ${
+            className={`px-3.5 py-2 rounded-lg text-xs font-semibold flex items-center gap-2 transition cursor-pointer shrink-0 border ${
               activeTab === 'agents'
-                ? 'bg-cyan-600 text-slate-950 font-bold shadow-md'
-                : 'text-slate-400 hover:text-slate-200 hover:bg-slate-800'
+                ? 'bg-sky-600 text-white border-sky-600 font-bold shadow-sm dark:bg-sky-500/20 dark:text-sky-300 dark:border-sky-400/60 dark:shadow-[0_0_15px_rgba(56,189,248,0.18)]'
+                : 'text-slate-700 hover:text-slate-900 hover:bg-slate-100 border-transparent dark:text-slate-300 dark:hover:text-white dark:hover:bg-slate-800'
             }`}
           >
             <Users className="w-4 h-4" />
             <span>Field Agents &amp; Cash Recovery</span>
             <span
               className={`text-[10px] px-1.5 py-0.2 rounded-full font-mono ${
-                activeTab === 'agents' ? 'bg-cyan-950 text-cyan-200' : 'bg-slate-800 text-slate-400'
+                activeTab === 'agents' ? 'bg-white/20 text-white dark:bg-sky-500/30 dark:text-sky-200' : 'bg-slate-200 text-slate-700 dark:bg-slate-800 dark:text-slate-300'
               }`}
             >
               {agents.length}
@@ -851,17 +851,17 @@ export const BillingManagement: React.FC<BillingManagementProps> = ({
 
           <button
             onClick={() => setActiveTab('expenses')}
-            className={`px-3.5 py-2 rounded-lg text-xs font-semibold flex items-center gap-2 transition ${
+            className={`px-3.5 py-2 rounded-lg text-xs font-semibold flex items-center gap-2 transition cursor-pointer shrink-0 border ${
               activeTab === 'expenses'
-                ? 'bg-cyan-600 text-slate-950 font-bold shadow-md'
-                : 'text-slate-400 hover:text-slate-200 hover:bg-slate-800'
+                ? 'bg-sky-600 text-white border-sky-600 font-bold shadow-sm dark:bg-sky-500/20 dark:text-sky-300 dark:border-sky-400/60 dark:shadow-[0_0_15px_rgba(56,189,248,0.18)]'
+                : 'text-slate-700 hover:text-slate-900 hover:bg-slate-100 border-transparent dark:text-slate-300 dark:hover:text-white dark:hover:bg-slate-800'
             }`}
           >
             <Briefcase className="w-4 h-4" />
             <span>ISP Expenses</span>
             <span
               className={`text-[10px] px-1.5 py-0.2 rounded-full font-mono ${
-                activeTab === 'expenses' ? 'bg-cyan-950 text-cyan-200' : 'bg-slate-800 text-slate-400'
+                activeTab === 'expenses' ? 'bg-white/20 text-white dark:bg-sky-500/30 dark:text-sky-200' : 'bg-slate-200 text-slate-700 dark:bg-slate-800 dark:text-slate-300'
               }`}
             >
               {expenses.length}
@@ -870,17 +870,17 @@ export const BillingManagement: React.FC<BillingManagementProps> = ({
 
           <button
             onClick={() => setActiveTab('whatsapp')}
-            className={`px-3.5 py-2 rounded-lg text-xs font-semibold flex items-center gap-2 transition ${
+            className={`px-3.5 py-2 rounded-lg text-xs font-semibold flex items-center gap-2 transition cursor-pointer shrink-0 border ${
               activeTab === 'whatsapp'
-                ? 'bg-cyan-600 text-slate-950 font-bold shadow-md'
-                : 'text-slate-400 hover:text-slate-200 hover:bg-slate-800'
+                ? 'bg-sky-600 text-white border-sky-600 font-bold shadow-sm dark:bg-sky-500/20 dark:text-sky-300 dark:border-sky-400/60 dark:shadow-[0_0_15px_rgba(56,189,248,0.18)]'
+                : 'text-slate-700 hover:text-slate-900 hover:bg-slate-100 border-transparent dark:text-slate-300 dark:hover:text-white dark:hover:bg-slate-800'
             }`}
           >
             <Send className="w-4 h-4" />
             <span>WhatsApp Billing Dispatch</span>
             <span
               className={`text-[10px] px-1.5 py-0.2 rounded-full font-mono ${
-                activeTab === 'whatsapp' ? 'bg-cyan-950 text-cyan-200' : 'bg-slate-800 text-slate-400'
+                activeTab === 'whatsapp' ? 'bg-white/20 text-white dark:bg-sky-500/30 dark:text-sky-200' : 'bg-slate-200 text-slate-700 dark:bg-slate-800 dark:text-slate-300'
               }`}
             >
               {whatsAppLogs.length}

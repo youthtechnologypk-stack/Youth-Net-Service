@@ -313,13 +313,13 @@ export const Sidebar: React.FC<SidebarProps> = ({
         </div>
 
         {/* Quick Actions Strip */}
-        <div className="px-3 pt-3 pb-2 border-b border-slate-800/80 grid grid-cols-2 gap-1.5 text-[11px] font-mono">
+        <div className="px-3 pt-3 pb-2 border-b border-slate-200 dark:border-slate-800/80 grid grid-cols-2 gap-1.5 text-[11px] font-mono">
           <button
             onClick={() => {
               onOpenProvisionModal();
               onClose();
             }}
-            className="px-2 py-1.5 bg-cyan-600 hover:bg-cyan-500 text-slate-950 font-bold rounded-lg transition flex items-center justify-center gap-1 shadow-sm cursor-pointer"
+            className="px-2 py-1.5 bg-sky-600 hover:bg-sky-500 text-white font-bold rounded-lg transition flex items-center justify-center gap-1 shadow-sm cursor-pointer"
             title="Fast Provision PPPoE Secret & Customer"
           >
             <PlusCircle className="w-3 h-3" />
@@ -331,7 +331,7 @@ export const Sidebar: React.FC<SidebarProps> = ({
               onOpenTicketModal();
               onClose();
             }}
-            className="px-2 py-1.5 bg-slate-800 hover:bg-slate-700 text-slate-200 font-bold rounded-lg border border-slate-700 transition flex items-center justify-center gap-1 cursor-pointer"
+            className="px-2 py-1.5 bg-slate-800 hover:bg-slate-700 text-white font-bold rounded-lg border border-slate-700 transition flex items-center justify-center gap-1 cursor-pointer"
             title="Open New SLA Ticket"
           >
             <AlertTriangle className="w-3 h-3 text-amber-400" />
@@ -341,7 +341,7 @@ export const Sidebar: React.FC<SidebarProps> = ({
 
         {/* Main Navigation Menu List */}
         <nav className="flex-1 overflow-y-auto p-3 space-y-1 scrollbar-thin scrollbar-thumb-slate-800">
-          <div className="text-[10px] text-slate-500 font-mono font-bold uppercase tracking-wider px-2 py-1">
+          <div className="text-[10px] text-slate-600 dark:text-slate-400 font-mono font-bold uppercase tracking-wider px-2 py-1">
             Carrier Modules
           </div>
 
@@ -355,16 +355,16 @@ export const Sidebar: React.FC<SidebarProps> = ({
                 onClick={() => handleSelectTab(item.id)}
                 className={`w-full flex items-center justify-between px-3 py-2.5 rounded-xl text-left transition cursor-pointer group ${
                   isActive
-                    ? 'bg-cyan-50 dark:bg-gradient-to-r dark:from-cyan-600/20 dark:to-blue-600/10 text-cyan-800 dark:text-cyan-300 border border-cyan-200 dark:border-cyan-500/40 shadow-sm font-semibold'
-                    : 'text-slate-600 dark:text-slate-400 hover:text-slate-900 dark:hover:text-slate-100 hover:bg-slate-100 dark:hover:bg-slate-800/60 border border-transparent'
+                    ? 'bg-sky-600 text-white border border-sky-600 shadow-sm font-bold dark:bg-sky-500/20 dark:border-sky-400/60 dark:text-sky-300 dark:shadow-[0_0_15px_rgba(56,189,248,0.18)]'
+                    : 'text-slate-800 dark:text-slate-200 hover:text-slate-950 dark:hover:text-white hover:bg-slate-100 dark:hover:bg-slate-800/70 border border-transparent'
                 }`}
               >
                 <div className="flex items-center gap-3 min-w-0">
                   <div
-                    className={`p-1.5 rounded-lg transition ${
+                    className={`p-1.5 rounded-lg transition shrink-0 ${
                       isActive
-                        ? 'bg-cyan-600 text-white dark:text-slate-950 font-bold shadow-md shadow-cyan-600/30'
-                        : 'bg-slate-100 dark:bg-slate-800/80 text-slate-500 dark:text-slate-400 group-hover:text-cyan-600 dark:group-hover:text-cyan-400 group-hover:bg-slate-200 dark:group-hover:bg-slate-800'
+                        ? 'bg-white/20 text-white dark:bg-sky-500/30 dark:text-sky-300 dark:border dark:border-sky-400/40 font-bold'
+                        : 'bg-slate-100 dark:bg-slate-800/80 text-slate-600 dark:text-slate-300 group-hover:text-sky-600 dark:group-hover:text-sky-300 group-hover:bg-sky-50 dark:group-hover:bg-slate-800'
                     }`}
                   >
                     <Icon className="w-4 h-4 shrink-0" />
@@ -372,12 +372,16 @@ export const Sidebar: React.FC<SidebarProps> = ({
                   <div className="truncate">
                     <span
                       className={`block text-xs font-bold truncate ${
-                        isActive ? 'text-cyan-900 dark:text-white' : 'text-slate-800 dark:text-slate-300'
+                        isActive ? 'text-white dark:text-sky-300' : 'text-slate-900 dark:text-slate-200'
                       }`}
                     >
                       {item.label}
                     </span>
-                    <span className="block text-[10px] text-slate-500 dark:text-slate-400 font-mono truncate">
+                    <span
+                      className={`block text-[10px] font-mono truncate ${
+                        isActive ? 'text-sky-100 dark:text-slate-300' : 'text-slate-600 dark:text-slate-400'
+                      }`}
+                    >
                       {item.subtitle}
                     </span>
                   </div>
@@ -385,7 +389,11 @@ export const Sidebar: React.FC<SidebarProps> = ({
 
                 {item.badge && (
                   <span
-                    className={`text-[9px] px-1.5 py-0.5 rounded font-mono font-bold border shrink-0 ml-1.5 ${item.badgeColor}`}
+                    className={`text-[9px] px-1.5 py-0.5 rounded font-mono font-bold border shrink-0 ml-1.5 ${
+                      isActive
+                        ? 'bg-sky-700/80 text-white border-sky-400/50 dark:bg-sky-500/25 dark:text-sky-200 dark:border-sky-400/50'
+                        : item.badgeColor
+                    }`}
                   >
                     {item.badge}
                   </span>

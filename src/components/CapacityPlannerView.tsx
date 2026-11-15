@@ -745,7 +745,7 @@ export const CapacityPlannerView: React.FC = () => {
             <button
               type="button"
               onClick={handleOpenEditModal}
-              className="px-4 py-2 rounded-lg bg-cyan-600 hover:bg-cyan-500 text-slate-950 font-bold text-xs flex items-center gap-1.5 transition cursor-pointer whitespace-nowrap"
+              className="px-4 py-2 rounded-lg bg-sky-600 hover:bg-sky-500 text-white font-bold text-xs flex items-center gap-1.5 transition cursor-pointer whitespace-nowrap shadow-sm"
             >
               <Edit3 className="w-3.5 h-3.5" />
               <span>Edit Upstream Link</span>
@@ -1080,12 +1080,14 @@ export const CapacityPlannerView: React.FC = () => {
               <span>Manage Areas</span>
             </button>
 
-            <div className="flex items-center gap-1 p-1 bg-slate-950 border border-slate-800 rounded-lg font-mono text-[11px]">
+            <div className="flex items-center gap-1 p-1 bg-slate-100 dark:bg-slate-950 border border-slate-200 dark:border-slate-800 rounded-lg font-mono text-[11px]">
               <button
                 type="button"
                 onClick={() => setShowAllAreas(true)}
-                className={`px-2.5 py-1 rounded transition cursor-pointer ${
-                  showAllAreas ? 'bg-cyan-600 text-slate-950 font-bold' : 'text-slate-400 hover:text-white'
+                className={`px-2.5 py-1 rounded transition cursor-pointer border ${
+                  showAllAreas
+                    ? 'bg-sky-600 text-white border-sky-600 font-bold dark:bg-sky-500/20 dark:text-sky-300 dark:border-sky-400/60'
+                    : 'border-transparent text-slate-700 hover:text-slate-900 dark:text-slate-400 dark:hover:text-white'
                 }`}
               >
                 All Nodes ({networkAreas.length})
@@ -1093,8 +1095,10 @@ export const CapacityPlannerView: React.FC = () => {
               <button
                 type="button"
                 onClick={() => setShowAllAreas(false)}
-                className={`px-2.5 py-1 rounded transition cursor-pointer ${
-                  !showAllAreas ? 'bg-cyan-600 text-slate-950 font-bold' : 'text-slate-400 hover:text-white'
+                className={`px-2.5 py-1 rounded transition cursor-pointer border ${
+                  !showAllAreas
+                    ? 'bg-sky-600 text-white border-sky-600 font-bold dark:bg-sky-500/20 dark:text-sky-300 dark:border-sky-400/60'
+                    : 'border-transparent text-slate-700 hover:text-slate-900 dark:text-slate-400 dark:hover:text-white'
                 }`}
               >
                 Active Only

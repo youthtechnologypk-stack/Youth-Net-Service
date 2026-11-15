@@ -38,17 +38,20 @@ html.dark {
 }
 
 /* ==========================================================================
-   LIGHT MODE COLOR TOKENS & SURFACE ELEVATION (Auto-adapting NOC components)
+   LIGHT MODE COLOR TOKENS & HIGH-CONTRAST SURFACES (Auto-adapting NOC views)
    ========================================================================== */
-:root:not(.dark) {
+:root:not(.dark),
+html.light,
+[data-theme="light"] {
   --bg-app: #f8fafc;
   --bg-card: #ffffff;
   --border-card: #e2e8f0;
   --text-main: #0f172a;
-  --text-muted: #64748b;
+  --text-muted: #475569;
 }
 
-html.dark {
+html.dark,
+[data-theme="dark"] {
   --bg-app: #0B111E;
   --bg-card: #111A2E;
   --border-card: #1e293b;
@@ -56,37 +59,122 @@ html.dark {
   --text-muted: #94a3b8;
 }
 
-/* When in Light Mode: map deep dark panels to clean enterprise light styling */
-:root:not(.dark) .bg-slate-900 {
+/* Light Mode: Crisp white cards & subtle inner wells */
+:root:not(.dark) .bg-slate-900,
+:root:not(.dark) .bg-slate-900\/95,
+:root:not(.dark) .bg-slate-900\/90,
+:root:not(.dark) .bg-slate-900\/85,
+:root:not(.dark) .bg-slate-900\/80,
+:root:not(.dark) .bg-slate-900\/75,
+:root:not(.dark) .bg-slate-900\/70,
+:root:not(.dark) .bg-slate-900\/60,
+:root:not(.dark) .bg-\[\#111A2E\],
+:root:not(.dark) .bg-\[\#0B111E\] {
   background-color: #ffffff;
   border-color: #e2e8f0;
   color: #0f172a;
 }
 
-:root:not(.dark) .bg-slate-900\/90,
-:root:not(.dark) .bg-slate-900\/80,
-:root:not(.dark) .bg-slate-900\/70 {
-  background-color: rgba(255, 255, 255, 0.96);
+:root:not(.dark) .rounded-xl.bg-slate-900,
+:root:not(.dark) .rounded-xl.bg-slate-900\/90,
+:root:not(.dark) .rounded-xl.bg-\[\#111A2E\],
+:root:not(.dark) .rounded-2xl.bg-slate-900,
+:root:not(.dark) .rounded-2xl.bg-slate-900\/90,
+:root:not(.dark) .rounded-2xl.bg-\[\#111A2E\] {
+  box-shadow: 0 1px 3px 0 rgba(15, 23, 42, 0.06), 0 1px 2px -1px rgba(15, 23, 42, 0.04);
+}
+
+:root:not(.dark) .bg-slate-950:not(.fixed),
+:root:not(.dark) .bg-slate-950\/95:not(.fixed),
+:root:not(.dark) .bg-slate-950\/90:not(.fixed),
+:root:not(.dark) .bg-slate-950\/85:not(.fixed),
+:root:not(.dark) .bg-slate-950\/80:not(.fixed),
+:root:not(.dark) .bg-slate-950\/75:not(.fixed),
+:root:not(.dark) .bg-slate-950\/70:not(.fixed),
+:root:not(.dark) .bg-slate-950\/60:not(.fixed),
+:root:not(.dark) .bg-slate-950\/50:not(.fixed),
+:root:not(.dark) .bg-slate-950\/40:not(.fixed) {
+  background-color: #f8fafc;
   border-color: #e2e8f0;
   color: #0f172a;
 }
 
-:root:not(.dark) .bg-slate-950 {
-  background-color: #f8fafc;
-  color: #0f172a;
+:root:not(.dark) div.bg-slate-800,
+:root:not(.dark) div.bg-slate-800\/80,
+:root:not(.dark) div.bg-slate-800\/70,
+:root:not(.dark) div.bg-slate-800\/60,
+:root:not(.dark) span.bg-slate-800,
+:root:not(.dark) span.bg-slate-800\/80 {
+  background-color: #f1f5f9;
+  border-color: #cbd5e1;
+  color: #1e293b;
 }
 
-:root:not(.dark) .bg-slate-950\/90,
-:root:not(.dark) .bg-slate-950\/80,
-:root:not(.dark) .bg-slate-950\/70,
-:root:not(.dark) .bg-slate-950\/60 {
-  background-color: rgba(248, 250, 252, 0.95);
-  color: #0f172a;
+/* Light Mode: Tinted 950 badges/banners become clean light tinted surfaces */
+:root:not(.dark) .bg-cyan-950,
+:root:not(.dark) .bg-cyan-950\/90,
+:root:not(.dark) .bg-cyan-950\/80,
+:root:not(.dark) .bg-cyan-950\/70,
+:root:not(.dark) .bg-cyan-950\/60,
+:root:not(.dark) .bg-cyan-950\/50,
+:root:not(.dark) .bg-cyan-950\/40,
+:root:not(.dark) .bg-sky-950,
+:root:not(.dark) .bg-sky-950\/90,
+:root:not(.dark) .bg-sky-950\/80,
+:root:not(.dark) .bg-sky-950\/60 {
+  background-color: #e0f2fe;
+  border-color: #bae6fd;
+  color: #0369a1;
+}
+
+:root:not(.dark) .bg-emerald-950,
+:root:not(.dark) .bg-emerald-950\/90,
+:root:not(.dark) .bg-emerald-950\/80,
+:root:not(.dark) .bg-emerald-950\/60,
+:root:not(.dark) .bg-emerald-950\/50,
+:root:not(.dark) .bg-emerald-950\/40 {
+  background-color: #ecfdf5;
+  border-color: #a7f3d0;
+  color: #047857;
+}
+
+:root:not(.dark) .bg-amber-950,
+:root:not(.dark) .bg-amber-950\/90,
+:root:not(.dark) .bg-amber-950\/80,
+:root:not(.dark) .bg-amber-950\/70,
+:root:not(.dark) .bg-amber-950\/60 {
+  background-color: #fffbeb;
+  border-color: #fde68a;
+  color: #b45309;
+}
+
+:root:not(.dark) .bg-rose-950,
+:root:not(.dark) .bg-rose-950\/90,
+:root:not(.dark) .bg-rose-950\/80,
+:root:not(.dark) .bg-rose-950\/60,
+:root:not(.dark) .bg-rose-950\/40,
+:root:not(.dark) .bg-rose-950\/35 {
+  background-color: #fff1f2;
+  border-color: #fecdd3;
+  color: #be123c;
+}
+
+:root:not(.dark) .bg-indigo-950,
+:root:not(.dark) .bg-indigo-950\/90,
+:root:not(.dark) .bg-indigo-950\/80,
+:root:not(.dark) .bg-indigo-950\/60,
+:root:not(.dark) .bg-purple-950 {
+  background-color: #eef2ff;
+  border-color: #c7d2fe;
+  color: #4338ca;
 }
 
 :root:not(.dark) .border-slate-800,
 :root:not(.dark) .border-slate-800\/80,
-:root:not(.dark) .border-slate-800\/60 {
+:root:not(.dark) .border-slate-800\/60,
+:root:not(.dark) .divide-slate-800 > :not(:last-child),
+:root:not(.dark) .divide-slate-800\/80 > :not(:last-child),
+:root:not(.dark) .divide-slate-800\/60 > :not(:last-child) {
   border-color: #e2e8f0;
 }
 
@@ -95,23 +183,59 @@ html.dark {
   border-color: #cbd5e1;
 }
 
-/* Light mode text hierarchy */
-:root:not(.dark) .bg-slate-900 .text-white:not(button *):not([class*="bg-"] *),
-:root:not(.dark) .bg-slate-950 .text-white:not(button *):not([class*="bg-"] *),
-:root:not(.dark) .bg-white .text-white:not(button *):not([class*="bg-"] *) {
+/* Light Mode: Universal readable text hierarchy across views, headers, banners, tooltips & modals */
+:root:not(.dark) .text-white,
+:root:not(.dark) .text-slate-100,
+:root:not(.dark) .text-slate-200 {
   color: #0f172a;
 }
 
-:root:not(.dark) .bg-slate-900 .text-slate-200:not(button *):not([class*="bg-"] *),
-:root:not(.dark) .bg-slate-900 .text-slate-300:not(button *):not([class*="bg-"] *),
-:root:not(.dark) .bg-slate-950 .text-slate-200:not(button *):not([class*="bg-"] *),
-:root:not(.dark) .bg-slate-950 .text-slate-300:not(button *):not([class*="bg-"] *) {
-  color: #1e293b;
+:root:not(.dark) .text-slate-300 {
+  color: #334155;
 }
 
-:root:not(.dark) .bg-slate-900 .text-slate-400:not(button *):not([class*="bg-"] *),
-:root:not(.dark) .bg-slate-950 .text-slate-400:not(button *):not([class*="bg-"] *) {
-  color: #64748b;
+:root:not(.dark) .text-slate-400 {
+  color: #475569;
+}
+
+:root:not(.dark) .text-cyan-300,
+:root:not(.dark) .text-cyan-400,
+:root:not(.dark) .text-sky-300,
+:root:not(.dark) .text-sky-400 {
+  color: #0369a1;
+}
+
+:root:not(.dark) .text-emerald-300,
+:root:not(.dark) .text-emerald-400 {
+  color: #047857;
+}
+
+:root:not(.dark) .text-amber-200,
+:root:not(.dark) .text-amber-300,
+:root:not(.dark) .text-amber-400 {
+  color: #b45309;
+}
+
+:root:not(.dark) .text-rose-200,
+:root:not(.dark) .text-rose-300,
+:root:not(.dark) .text-rose-400 {
+  color: #be123c;
+}
+
+:root:not(.dark) .text-indigo-300,
+:root:not(.dark) .text-indigo-400,
+:root:not(.dark) .text-purple-300,
+:root:not(.dark) .text-purple-400 {
+  color: #4338ca;
+}
+
+/* Light mode secondary dark-surface buttons stay light on hover */
+:root:not(.dark) button.bg-slate-900:hover,
+:root:not(.dark) button.bg-slate-950:hover,
+:root:not(.dark) button.bg-slate-950\/60:hover,
+:root:not(.dark) button.bg-slate-950\/70:hover {
+  background-color: #f1f5f9;
+  color: #0f172a;
 }
 
 /* Light mode form inputs & controls */
@@ -125,11 +249,12 @@ html.dark {
 
 :root:not(.dark) input::placeholder,
 :root:not(.dark) textarea::placeholder {
-  color: #94a3b8;
+  color: #64748b;
 }
 
 /* Light mode tables */
-:root:not(.dark) table thead {
+:root:not(.dark) table thead,
+:root:not(.dark) table thead tr {
   background-color: #f1f5f9;
   border-color: #e2e8f0;
   color: #334155;
@@ -147,13 +272,16 @@ html.dark {
    DARK MODE COLOR TOKENS (YouthNet NOC Standard dark palette #0B111E / #111A2E)
    ========================================================================== */
 html.dark .bg-slate-900,
+html.dark .bg-slate-900\/95,
 html.dark .bg-slate-900\/90,
+html.dark .bg-slate-900\/85,
 html.dark .bg-slate-900\/80 {
   background-color: #111A2E;
   border-color: #1e293b;
 }
 
 html.dark .bg-slate-950,
+html.dark .bg-slate-950\/95,
 html.dark .bg-slate-950\/90,
 html.dark .bg-slate-950\/80 {
   background-color: #0B111E;
@@ -169,17 +297,41 @@ html.dark table tbody tr:hover {
   background-color: rgba(30, 41, 59, 0.5);
 }
 
-/* Always keep CTA action buttons legible */
-button[class*="bg-cyan-600"],
-button[class*="bg-cyan-500"] {
-  color: #020617 !important;
+/* Solid CTA action buttons & active pills ALWAYS stay crisp white-on-color */
+[class*="bg-sky-600"]:not([class*="bg-sky-600/"]),
+[class*="bg-sky-600"]:not([class*="bg-sky-600/"]) *,
+[class*="bg-blue-600"]:not([class*="bg-blue-600/"]),
+[class*="bg-blue-600"]:not([class*="bg-blue-600/"]) *,
+[class*="bg-indigo-600"]:not([class*="bg-indigo-600/"]),
+[class*="bg-indigo-600"]:not([class*="bg-indigo-600/"]) *,
+[class*="bg-rose-600"]:not([class*="bg-rose-600/"]),
+[class*="bg-rose-600"]:not([class*="bg-rose-600/"]) *,
+[class*="bg-emerald-600"]:not([class*="bg-emerald-600/"]),
+[class*="bg-emerald-600"]:not([class*="bg-emerald-600/"]) *,
+[class*="bg-amber-600"]:not([class*="bg-amber-600/"]),
+[class*="bg-amber-600"]:not([class*="bg-amber-600/"]) *,
+[class*="bg-purple-600"]:not([class*="bg-purple-600/"]),
+[class*="bg-purple-600"]:not([class*="bg-purple-600/"]) *,
+button[class*="bg-gradient-"],
+button[class*="bg-gradient-"] *,
+:root:not(.dark) button[class*="bg-slate-800"]:not([class*="bg-slate-800/"]),
+:root:not(.dark) button[class*="bg-slate-800"]:not([class*="bg-slate-800/"]) *,
+:root:not(.dark) button[class*="bg-slate-800/80"],
+:root:not(.dark) button[class*="bg-slate-800/80"] *,
+:root:not(.dark) [class*="bg-gradient-"],
+:root:not(.dark) [class*="bg-gradient-"] * {
+  color: #ffffff !important;
 }
 
-button[class*="bg-blue-600"],
-button[class*="bg-indigo-600"],
-button[class*="bg-rose-600"],
-button[class*="bg-emerald-600"] {
-  color: #ffffff !important;
+:root:not(.dark) button[class*="bg-sky-600"]:not([class*="bg-sky-600/"]) .text-sky-100,
+:root:not(.dark) button[class*="bg-sky-600"]:not([class*="bg-sky-600/"]) [class*="text-sky-100"] {
+  color: #e0f2fe !important;
+}
+
+/* Preserve dark-mode active pill highlight contrast regardless of card overrides */
+html.dark button[class*="bg-sky-500/20"],
+html.dark button[class*="bg-cyan-600/20"] {
+  color: #7dd3fc;
 }
 
 /* Subtle scrollbars */

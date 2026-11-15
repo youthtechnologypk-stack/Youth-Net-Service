@@ -276,7 +276,7 @@ export const NocOverview: React.FC<NocOverviewProps> = ({
           </div>
           <button
             onClick={() => onOpenAddRouterModal ? onOpenAddRouterModal() : onNavigateTab('mikrotik')}
-            className="px-3 py-1 bg-cyan-600 hover:bg-cyan-500 text-slate-950 font-bold rounded-lg transition shrink-0 cursor-pointer"
+            className="px-3 py-1 bg-sky-600 hover:bg-sky-500 text-white font-bold rounded-lg transition shrink-0 cursor-pointer shadow-sm"
           >
             + Add Router
           </button>
@@ -577,7 +577,7 @@ export const NocOverview: React.FC<NocOverviewProps> = ({
 
             <button
               onClick={() => onNavigateTab('mikrotik')}
-              className="w-full bg-slate-800 hover:bg-slate-700 text-cyan-400 font-semibold text-xs py-2 rounded-lg transition text-center"
+              className="w-full bg-slate-800 hover:bg-slate-700 text-white font-semibold text-xs py-2 rounded-lg transition text-center cursor-pointer shadow-sm"
             >
               Open MikroTik v7 Console &rarr;
             </button>
@@ -591,7 +591,7 @@ export const NocOverview: React.FC<NocOverviewProps> = ({
             </p>
             <button
               onClick={() => onOpenAddRouterModal ? onOpenAddRouterModal() : onNavigateTab('mikrotik')}
-              className="bg-cyan-600 hover:bg-cyan-500 text-slate-950 font-bold text-xs px-4 py-2 rounded-lg transition cursor-pointer"
+              className="bg-sky-600 hover:bg-sky-500 text-white font-bold text-xs px-4 py-2 rounded-lg transition cursor-pointer shadow-sm"
             >
               + Add Router
             </button>

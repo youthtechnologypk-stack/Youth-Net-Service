@@ -146,7 +146,7 @@ export const RouterFleet: React.FC<RouterFleetProps> = ({ onOpenAddDeviceModal }
         </div>
         <button
           onClick={onOpenAddDeviceModal}
-          className="bg-cyan-600 hover:bg-cyan-500 text-slate-950 font-bold text-xs px-4 py-2 rounded-lg transition flex items-center gap-1.5 shadow-lg shadow-cyan-950/40 shrink-0 cursor-pointer"
+          className="bg-sky-600 hover:bg-sky-500 text-white font-bold text-xs px-4 py-2 rounded-lg transition flex items-center gap-1.5 shadow-sm shrink-0 cursor-pointer"
         >
           <Plus className="w-4 h-4" />
           <span>+ Add MikroTik Device</span>
@@ -174,7 +174,7 @@ export const RouterFleet: React.FC<RouterFleetProps> = ({ onOpenAddDeviceModal }
             setRouterProxyMode('proxy');
             showToast('Verified Netlify Managed Proxy Mode (/api/mikrotik)');
           }}
-          className="px-3.5 py-1.5 rounded-lg font-medium text-xs bg-cyan-600 hover:bg-cyan-500 text-slate-950 font-bold shadow cursor-pointer shrink-0"
+          className="px-3.5 py-1.5 rounded-lg text-xs bg-sky-600 hover:bg-sky-500 text-white font-bold shadow-sm cursor-pointer shrink-0 transition"
         >
           Proxy Verified (/api/mikrotik)
         </button>
@@ -220,7 +220,7 @@ export const RouterFleet: React.FC<RouterFleetProps> = ({ onOpenAddDeviceModal }
           </div>
           <button
             onClick={onOpenAddDeviceModal}
-            className="inline-flex items-center gap-2 bg-cyan-600 hover:bg-cyan-500 text-slate-950 font-bold text-xs px-5 py-2.5 rounded-xl transition shadow-lg shadow-cyan-950/40 cursor-pointer"
+            className="inline-flex items-center gap-2 bg-sky-600 hover:bg-sky-500 text-white font-bold text-xs px-5 py-2.5 rounded-xl transition shadow-sm cursor-pointer"
           >
             <Plus className="w-4 h-4" />
             <span>+ Add Router</span>
@@ -349,7 +349,7 @@ export const RouterFleet: React.FC<RouterFleetProps> = ({ onOpenAddDeviceModal }
                 ) : (
                   <button
                     onClick={() => setSelectedRouterId(router.id)}
-                    className="px-3 py-1.5 rounded-lg bg-cyan-600/20 hover:bg-cyan-600/30 text-cyan-300 font-bold text-xs transition border border-cyan-500/40 cursor-pointer"
+                    className="px-3 py-1.5 rounded-lg bg-sky-600 hover:bg-sky-500 text-white font-bold text-xs transition border border-sky-600 dark:bg-sky-500/20 dark:hover:bg-sky-500/30 dark:text-sky-300 dark:border-sky-400/60 cursor-pointer"
                   >
                     Set as Active BNG
                   </button>

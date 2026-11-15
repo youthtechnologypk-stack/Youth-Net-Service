@@ -288,11 +288,11 @@ function ISPAppContent() {
 
         {/* RBAC Role Indicator Banner (Strictly hidden for logged-in CLIENT, AGENT, and MANAGER) */}
         {currentRole !== 'ADMIN' && isOriginalAdmin && currentUser.role === 'ADMIN' && (
-          <div className="bg-slate-900 border-b border-indigo-900/60 text-slate-300 text-xs px-4 py-2 font-mono flex items-center justify-between shrink-0">
+          <div className="bg-white dark:bg-slate-900 border-b border-indigo-200 dark:border-indigo-900/60 text-slate-700 dark:text-slate-300 text-xs px-4 py-2 font-mono flex items-center justify-between shrink-0">
             <div className="flex items-center gap-2">
-              <ShieldAlert className="w-4 h-4 text-cyan-400 shrink-0" />
+              <ShieldAlert className="w-4 h-4 text-sky-600 dark:text-cyan-400 shrink-0" />
               <span>
-                Active RBAC Profile: Logged in as <strong className="text-white">{currentUser.fullName || currentUser.username}</strong> (<span className="text-cyan-400 font-bold">{currentRole}</span>).
+                Active RBAC Profile: Logged in as <strong className="text-slate-900 dark:text-white">{currentUser.fullName || currentUser.username}</strong> (<span className="text-sky-700 dark:text-cyan-400 font-bold">{currentRole}</span>).
               </span>
             </div>
             <div className="flex items-center gap-2">
