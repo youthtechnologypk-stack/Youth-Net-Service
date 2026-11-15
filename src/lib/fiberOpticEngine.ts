@@ -502,16 +502,37 @@ export function normalizeCableCores(
   });
 }
 
-export function generateDefaultSpliceTray(capacity: number): GisSpliceEntry[] {
+export function generateDefaultSpliceTray(
+  capacity: number,
+  existing?: GisSpliceEntry[] | null
+): GisSpliceEntry[] {
   const count = Math.max(2, Math.min(48, Math.floor(capacity || 12)));
+  const existingByCoreIn: Record<number, GisSpliceEntry> = {};
+  if (Array.isArray(existing)) {
+    for (const row of existing) {
+      if (row && typeof row.coreIn === 'number') {
+        existingByCoreIn[row.coreIn] = row;
+      }
+    }
+  }
   const rows: GisSpliceEntry[] = [];
   for (let i = 1; i <= count; i++) {
-    rows.push({
-      coreIn: i,
-      coreOut: i,
-      status: 'Straight Splice',
-      note: '',
-    });
+    const prev = existingByCoreIn[i];
+    rows.push(
+      prev
+        ? {
+            coreIn: i,
+            coreOut: Math.max(1, Math.min(count, Number(prev.coreOut || i))),
+            status: prev.status || 'Straight Splice',
+            note: prev.note || '',
+          }
+        : {
+            coreIn: i,
+            coreOut: i,
+            status: 'Straight Splice',
+            note: '',
+          }
+    );
   }
   return rows;
 }

@@ -6,10 +6,12 @@ import {
   CheckCircle2,
   ClipboardCheck,
   GitBranch,
+  History,
   Layers,
   Navigation,
   Phone,
   Radio,
+  RefreshCw,
   Save,
   Scissors,
   Search,
@@ -120,6 +122,7 @@ interface FiberGisInspectorPanelProps {
   onOpenTrace?: (nodeId: string, output?: SupabaseGisSplitterOutput | null) => void;
   onOpenEditOlt?: (oltId: string) => void;
   onUpdatePonPort?: (portId: string, patch: Partial<SupabaseGisOltPonPort>) => Promise<void>;
+  onOpenUpgradeModal?: (node: SupabaseGisNode) => void;
   onFocusNode?: (node: SupabaseGisNode) => void;
 }
 
@@ -150,6 +153,7 @@ export const FiberGisInspectorPanel: React.FC<FiberGisInspectorPanelProps> = ({
   onOpenTrace,
   onOpenEditOlt,
   onUpdatePonPort,
+  onOpenUpgradeModal,
 }) => {
   const [fdbSubTab, setFdbSubTab] = useState<'ports' | 'signal'>('ports');
   const [confirmDelete, setConfirmDelete] = useState(false);
@@ -1313,6 +1317,54 @@ export const FiberGisInspectorPanel: React.FC<FiberGisInspectorPanelProps> = ({
                   })}
                 </div>
               </div>
+
+              {/* Equipment Swap & Maintenance History Log */}
+              <div className="p-3.5 rounded-xl bg-slate-950 border border-slate-800 space-y-2">
+                <div className="flex items-center justify-between gap-2">
+                  <span className="text-[11px] font-mono uppercase tracking-wider text-amber-300 font-bold flex items-center gap-1.5">
+                    <History className="w-3.5 h-3.5" />
+                    Equipment Swap History Log
+                  </span>
+                  {onOpenUpgradeModal && (
+                    <button
+                      type="button"
+                      onClick={() => onOpenUpgradeModal(node)}
+                      className="px-2 py-0.5 rounded bg-amber-500/20 hover:bg-amber-500/30 border border-amber-500/50 text-amber-300 text-[10px] font-mono font-bold cursor-pointer"
+                    >
+                      + Replace Box
+                    </button>
+                  )}
+                </div>
+                {Array.isArray(node.equipment_history) && node.equipment_history.length > 0 ? (
+                  <div className="space-y-1.5 max-h-52 overflow-y-auto">
+                    {node.equipment_history.map((entry) => (
+                      <div
+                        key={entry.id}
+                        className="p-2.5 rounded-lg bg-slate-900 border border-slate-800 space-y-1 text-[11px]"
+                      >
+                        <div className="text-slate-100 font-medium leading-snug">{entry.summary}</div>
+                        <div className="flex flex-wrap items-center gap-2 text-[10px] font-mono text-slate-400">
+                          <span>By {entry.actor || 'Admin'}</span>
+                          {entry.deducted_inventory_item && (
+                            <span className="text-amber-300">
+                              -1 Stock: {entry.deducted_inventory_item}
+                            </span>
+                          )}
+                          {entry.returned_inventory_item && (
+                            <span className="text-emerald-300">
+                              +1 Returned: {entry.returned_inventory_item}
+                            </span>
+                          )}
+                        </div>
+                      </div>
+                    ))}
+                  </div>
+                ) : (
+                  <div className="text-[11px] text-slate-500 font-mono">
+                    No hardware upgrades or replacements recorded on this node yet.
+                  </div>
+                )}
+              </div>
             </div>
           )}
 
@@ -1934,40 +1986,90 @@ export const FiberGisInspectorPanel: React.FC<FiberGisInspectorPanelProps> = ({
               </div>
             </div>
           </div>
+
+          {/* Swap History Preview for OLT / FOSC_JOINT nodes (Signal tab handles FDB_FAT/DIST_NODE) */}
+          {(node.node_type === 'FOSC_JOINT' || node.node_type === 'OLT') && (
+            <div className="p-3.5 rounded-xl bg-slate-950 border border-slate-800 space-y-2">
+              <div className="flex items-center justify-between gap-2">
+                <span className="text-[11px] font-mono uppercase tracking-wider text-amber-300 font-bold flex items-center gap-1.5">
+                  <History className="w-3.5 h-3.5" />
+                  Equipment Swap History Log
+                </span>
+              </div>
+              {Array.isArray(node.equipment_history) && node.equipment_history.length > 0 ? (
+                <div className="space-y-1.5 max-h-44 overflow-y-auto">
+                  {node.equipment_history.map((entry) => (
+                    <div
+                      key={entry.id}
+                      className="p-2 rounded-lg bg-slate-900 border border-slate-800 space-y-1 text-[11px]"
+                    >
+                      <div className="text-slate-100 font-medium leading-snug">{entry.summary}</div>
+                      <div className="flex flex-wrap items-center gap-2 text-[10px] font-mono text-slate-400">
+                        <span>By {entry.actor || 'Admin'}</span>
+                        {entry.deducted_inventory_item && (
+                          <span className="text-amber-300">-1: {entry.deducted_inventory_item}</span>
+                        )}
+                        {entry.returned_inventory_item && (
+                          <span className="text-emerald-300">+1: {entry.returned_inventory_item}</span>
+                        )}
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              ) : (
+                <div className="text-[11px] text-slate-500 font-mono">
+                  No equipment upgrades recorded yet.
+                </div>
+              )}
+            </div>
+          )}
         </div>
 
-        {/* Sticky Footer Save / Delete Bar */}
-        <div className="p-3 border-t border-slate-800 bg-slate-950 flex items-center gap-2 shrink-0">
-          <button
-            type="button"
-            disabled={isSaving}
-            onClick={handleSaveNodeClick}
-            className="flex-1 min-h-[44px] px-4 py-2 rounded-xl bg-cyan-600 hover:bg-cyan-500 disabled:opacity-50 text-slate-950 font-mono font-bold text-xs flex items-center justify-center gap-1.5 cursor-pointer"
-          >
-            <Save className="w-4 h-4" />
-            <span>{isSaving ? 'Saving...' : 'Save Node Changes'}</span>
-          </button>
-
-          {!confirmDelete ? (
-            <button
-              type="button"
-              onClick={() => setConfirmDelete(true)}
-              className="min-h-[44px] px-3 py-2 rounded-xl bg-slate-900 hover:bg-rose-950 text-rose-400 border border-slate-800 hover:border-rose-800 text-xs font-mono flex items-center justify-center gap-1 cursor-pointer"
-              title="Delete node"
-            >
-              <Trash2 className="w-4 h-4" />
-            </button>
-          ) : (
+        {/* Sticky Footer Upgrade / Save / Delete Bar */}
+        <div className="p-3 border-t border-slate-800 bg-slate-950 flex flex-col gap-2 shrink-0">
+          {onOpenUpgradeModal && (
             <button
               type="button"
               disabled={isSaving}
-              onClick={() => onDeleteNode(node.id)}
-              className="min-h-[44px] px-3 py-2 rounded-xl bg-rose-600 hover:bg-rose-500 text-white font-mono font-bold text-xs flex items-center gap-1 cursor-pointer"
+              onClick={() => onOpenUpgradeModal(node)}
+              className="w-full min-h-[40px] px-3 py-2 rounded-xl bg-amber-500/15 hover:bg-amber-500/25 border border-amber-500/60 text-amber-300 font-mono font-bold text-xs flex items-center justify-center gap-1.5 cursor-pointer transition"
             >
-              <ShieldAlert className="w-3.5 h-3.5" />
-              <span>Confirm</span>
+              <RefreshCw className="w-3.5 h-3.5" />
+              <span>Upgrade / Replace Equipment</span>
             </button>
           )}
+          <div className="flex items-center gap-2">
+            <button
+              type="button"
+              disabled={isSaving}
+              onClick={handleSaveNodeClick}
+              className="flex-1 min-h-[44px] px-4 py-2 rounded-xl bg-cyan-600 hover:bg-cyan-500 disabled:opacity-50 text-slate-950 font-mono font-bold text-xs flex items-center justify-center gap-1.5 cursor-pointer"
+            >
+              <Save className="w-4 h-4" />
+              <span>{isSaving ? 'Saving...' : 'Save Node Changes'}</span>
+            </button>
+
+            {!confirmDelete ? (
+              <button
+                type="button"
+                onClick={() => setConfirmDelete(true)}
+                className="min-h-[44px] px-3 py-2 rounded-xl bg-slate-900 hover:bg-rose-950 text-rose-400 border border-slate-800 hover:border-rose-800 text-xs font-mono flex items-center justify-center gap-1 cursor-pointer"
+                title="Delete node"
+              >
+                <Trash2 className="w-4 h-4" />
+              </button>
+            ) : (
+              <button
+                type="button"
+                disabled={isSaving}
+                onClick={() => onDeleteNode(node.id)}
+                className="min-h-[44px] px-3 py-2 rounded-xl bg-rose-600 hover:bg-rose-500 text-white font-mono font-bold text-xs flex items-center gap-1 cursor-pointer"
+              >
+                <ShieldAlert className="w-3.5 h-3.5" />
+                <span>Confirm</span>
+              </button>
+            )}
+          </div>
         </div>
       </div>
     );

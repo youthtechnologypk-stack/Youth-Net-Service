@@ -54,6 +54,7 @@ import {
   initializeSplitterOutputsForNode,
   loadGisTopology,
   placeOrMoveOltOnMap,
+  replaceGisNodeEquipment,
   splitCableWithFoscJoint,
   subscribeToGisRealtime,
   syncOpticalBudgetsToDb,
@@ -87,6 +88,7 @@ import {
 import { FiberGisInspectorPanel } from './gis/FiberGisInspectorPanel';
 import { FiberTraceabilityDrawer } from './gis/FiberTraceabilityDrawer';
 import { FiberConnectionModal } from './gis/FiberConnectionModal';
+import { FiberEquipmentUpgradeModal } from './gis/FiberEquipmentUpgradeModal';
 import { OltFormDraft, OltManagerModal } from './OltManagerModal';
 
 interface FiberGisMapViewProps {
@@ -155,6 +157,7 @@ export const FiberGisMapView: React.FC<FiberGisMapViewProps> = ({
   const [draftCableCores, setDraftCableCores] = useState<1 | 2 | 4 | 6 | 8 | 12 | 24 | 48>(12);
   const [isConnectionModalOpen, setIsConnectionModalOpen] = useState(false);
   const [isSqlModalOpen, setIsSqlModalOpen] = useState(false);
+  const [upgradeTargetNodeId, setUpgradeTargetNodeId] = useState<string | null>(null);
 
   // Live GPS Tracking
   const [userLocation, setUserLocation] = useState<GisLatLng | null>(null);
@@ -1107,6 +1110,77 @@ export const FiberGisMapView: React.FC<FiberGisMapViewProps> = ({
     }
   };
 
+  const upgradeTargetNode = useMemo(
+    () => (upgradeTargetNodeId ? nodes.find((n) => n.id === upgradeTargetNodeId) || null : null),
+    [nodes, upgradeTargetNodeId]
+  );
+
+  const handleReplaceNodeEquipment = async (params: {
+    newNodeType: GisNodeType;
+    fiberNodeTypeOverride?: 'OLT' | 'FDB' | 'FAT' | 'JOINT_CLOSURE' | 'POLE';
+    newEquipmentLabel: string;
+    newSplitterType: GisSplitterType;
+    newTotalPorts: number;
+    newTrayCapacity: number;
+    newTxPowerDbm?: number;
+    reason: string;
+    deductInventoryItemId?: string | null;
+    returnInventoryItemId?: string | null;
+  }) => {
+    if (!upgradeTargetNode) return;
+    setIsSaving(true);
+    try {
+      const result = await replaceGisNodeEquipment({
+        node: upgradeTargetNode,
+        allNodes: nodes,
+        allCables: cables,
+        ponPortsById,
+        existingPorts: portsByNodeId[upgradeTargetNode.id] || [],
+        existingOutputs: splitterOutputsByNodeId[upgradeTargetNode.id] || [],
+        newNodeType: params.newNodeType,
+        fiberNodeTypeOverride: params.fiberNodeTypeOverride,
+        newEquipmentLabel: params.newEquipmentLabel,
+        newSplitterType: params.newSplitterType,
+        newTotalPorts: params.newTotalPorts,
+        newTrayCapacity: params.newTrayCapacity,
+        newTxPowerDbm: params.newTxPowerDbm,
+        reason: params.reason,
+        actor: actorUsername,
+        deductInventoryItemId: params.deductInventoryItemId,
+        returnInventoryItemId: params.returnInventoryItemId,
+      });
+
+      setNodes((prev) => applyRealtimeNodeDelta(prev, 'UPDATE', result.updatedNode));
+      setPorts((prev) => {
+        const filtered = prev.filter((p) => p.fdb_node_id !== result.updatedNode.id);
+        return [...filtered, ...result.updatedPorts];
+      });
+      setSplitterOutputs((prev) => {
+        const filtered = prev.filter((o) => o.node_id !== result.updatedNode.id);
+        return [...filtered, ...result.updatedOutputs];
+      });
+
+      setUpgradeTargetNodeId(null);
+      const stockNotes = [
+        result.deductedItemName ? `-1 ${result.deductedItemName}` : null,
+        result.returnedItemName ? `+1 returned ${result.returnedItemName}` : null,
+      ]
+        .filter(Boolean)
+        .join(', ');
+      showToast(
+        `Replaced equipment on "${result.updatedNode.name}" -> ${params.newEquipmentLabel}${
+          stockNotes ? ` (${stockNotes})` : ''
+        }. Cascaded optical power recalculated.`
+      );
+      refreshTopology(false);
+    } catch (err: any) {
+      showToast(err?.message || 'Equipment upgrade failed', 'err');
+      throw err;
+    } finally {
+      setIsSaving(false);
+    }
+  };
+
   // Summary Stats (zero-pill clean metrics)
   const summaryStats = useMemo(() => {
     let oltCount = 0;
@@ -1876,6 +1950,7 @@ export const FiberGisMapView: React.FC<FiberGisMapViewProps> = ({
             setIsOltManagerOpen(true);
           }}
           onUpdatePonPort={handleUpdatePonPort}
+          onOpenUpgradeModal={(node) => setUpgradeTargetNodeId(node.id)}
         />
       </div>
 
@@ -2266,6 +2341,23 @@ export const FiberGisMapView: React.FC<FiberGisMapViewProps> = ({
           setSelectedCableId(cableId);
           setSelectedNodeId(null);
         }}
+      />
+
+      {/* Zero-Loss Deployed Equipment Replacement / Upgrade Modal */}
+      <FiberEquipmentUpgradeModal
+        isOpen={Boolean(upgradeTargetNode)}
+        node={upgradeTargetNode}
+        allNodes={nodes}
+        allCables={cables}
+        ponPortsById={ponPortsById}
+        existingPorts={upgradeTargetNode ? portsByNodeId[upgradeTargetNode.id] || [] : []}
+        existingOutputs={
+          upgradeTargetNode ? splitterOutputsByNodeId[upgradeTargetNode.id] || [] : []
+        }
+        actorUsername={actorUsername}
+        isSaving={isSaving}
+        onClose={() => setUpgradeTargetNodeId(null)}
+        onConfirmReplace={handleReplaceNodeEquipment}
       />
     </div>
   );

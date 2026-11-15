@@ -53,6 +53,7 @@ CREATE TABLE IF NOT EXISTS public.gis_nodes (
     tray_capacity INT NOT NULL DEFAULT 12 CHECK (tray_capacity >= 2 AND tray_capacity <= 48),
     loss_per_splice NUMERIC(5, 3) NOT NULL DEFAULT 0.08,
     splice_tray_json JSONB NOT NULL DEFAULT '[]'::jsonb,
+    equipment_history JSONB NOT NULL DEFAULT '[]'::jsonb,
     notes TEXT DEFAULT '',
     updated_by TEXT DEFAULT 'admin',
     created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
@@ -69,6 +70,8 @@ ALTER TABLE IF EXISTS public.gis_nodes
     ADD COLUMN IF NOT EXISTS feed_core_pair TEXT DEFAULT '';
 ALTER TABLE IF EXISTS public.gis_nodes
     ADD COLUMN IF NOT EXISTS calculated_output_dbm NUMERIC(6, 2) NULL;
+ALTER TABLE IF EXISTS public.gis_nodes
+    ADD COLUMN IF NOT EXISTS equipment_history JSONB NOT NULL DEFAULT '[]'::jsonb;
 
 DO $$
 DECLARE
@@ -309,8 +312,12 @@ CREATE TABLE IF NOT EXISTS public.fiber_nodes (
     pon_ports INT NOT NULL DEFAULT 0,
     optical_power_dbm NUMERIC(6, 2) NULL,
     address_note TEXT DEFAULT '',
+    equipment_history JSONB NOT NULL DEFAULT '[]'::jsonb,
     created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
+
+ALTER TABLE IF EXISTS public.fiber_nodes
+    ADD COLUMN IF NOT EXISTS equipment_history JSONB NOT NULL DEFAULT '[]'::jsonb;
 
 CREATE TABLE IF NOT EXISTS public.fiber_routes (
     id UUID PRIMARY KEY DEFAULT gen_random_uuid(),

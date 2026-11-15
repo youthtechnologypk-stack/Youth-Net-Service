@@ -397,6 +397,24 @@ export interface SupabaseGisOltPonPort {
   updated_at?: string;
 }
 
+export interface GisEquipmentHistoryEntry {
+  id: string;
+  timestamp: string;
+  actor: string;
+  previous_type: GisNodeType | string;
+  previous_label: string;
+  previous_ports: number;
+  previous_splitter: string;
+  new_type: GisNodeType | string;
+  new_label: string;
+  new_ports: number;
+  new_splitter: string;
+  reason: string;
+  deducted_inventory_item?: string | null;
+  returned_inventory_item?: string | null;
+  summary: string;
+}
+
 export interface SupabaseGisNode {
   id: string;
   node_type: GisNodeType;
@@ -419,6 +437,7 @@ export interface SupabaseGisNode {
   tray_capacity: number;
   loss_per_splice: number;
   splice_tray_json: GisSpliceEntry[];
+  equipment_history?: GisEquipmentHistoryEntry[];
   notes?: string | null;
   updated_by?: string | null;
   created_at?: string;
@@ -453,6 +472,7 @@ export interface SupabaseFiberNode {
   pon_ports: number;
   optical_power_dbm?: number | null;
   address_note?: string | null;
+  equipment_history?: GisEquipmentHistoryEntry[];
   created_at?: string;
 }
 

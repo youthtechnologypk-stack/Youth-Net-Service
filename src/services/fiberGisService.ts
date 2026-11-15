@@ -1,5 +1,6 @@
 import {
   supabase,
+  GisEquipmentHistoryEntry,
   OltPonMode,
   OltPonPortStatus,
   OltSfpClass,
@@ -24,6 +25,7 @@ import {
   generateTia598Cores,
   getDefaultMaxOnuLimit,
   getFbtLegOutputs,
+  getNodeTypeLabel,
   inferSfpClassFromDbm,
   inferSplitterCategory,
   normalizeCableCores,
@@ -39,6 +41,7 @@ import type {
   SplitterUtilizationType,
 } from './supabaseClient';
 import { isMissingTableOrColumnError } from '../lib/expiryUtils';
+import { applyEquipmentSwapInventory } from './erpInventoryService';
 
 export interface GisSubscriberSummary {
   id: string;
@@ -202,6 +205,7 @@ export function normalizeGisNodeRow(n: any): SupabaseGisNode {
         ? Number(n.calculated_ont_rx_dbm)
         : null,
     splice_tray_json: Array.isArray(n.splice_tray_json) ? n.splice_tray_json : [],
+    equipment_history: Array.isArray(n.equipment_history) ? n.equipment_history : [],
   };
 }
 
@@ -257,12 +261,13 @@ function mapGisNodeTypeToFiberNodeType(
 
 async function syncNodeToFiberNodesTable(
   node: SupabaseGisNode,
-  totalPonPorts = 0
+  totalPonPorts = 0,
+  fiberNodeTypeOverride?: SupabaseFiberNode['node_type']
 ): Promise<void> {
   try {
     const payload: SupabaseFiberNode = {
       id: node.id,
-      node_type: mapGisNodeTypeToFiberNodeType(node.node_type),
+      node_type: fiberNodeTypeOverride || mapGisNodeTypeToFiberNodeType(node.node_type),
       name: node.name,
       lat: Number(node.lat),
       lng: Number(node.lng),
@@ -278,8 +283,14 @@ async function syncNodeToFiberNodesTable(
             node.calculated_input_dbm ??
             null,
       address_note: [node.area_name, node.notes].filter(Boolean).join(' · '),
+      equipment_history: Array.isArray(node.equipment_history) ? node.equipment_history : [],
     };
-    await supabase.from('fiber_nodes').upsert(payload, { onConflict: 'id' });
+    const res = await supabase.from('fiber_nodes').upsert(payload, { onConflict: 'id' });
+    if (res.error && isMissingTableOrColumnError(res.error)) {
+      const legacyPayload = { ...payload };
+      delete legacyPayload.equipment_history;
+      await supabase.from('fiber_nodes').upsert(legacyPayload, { onConflict: 'id' });
+    }
   } catch {
     // Non-blocking dual sync in case fiber_nodes SQL has not been applied yet
   }
@@ -1245,6 +1256,7 @@ export async function updateGisNode(
     delete legacyPayload.feed_core_pair;
     delete legacyPayload.pon_port_id;
     delete legacyPayload.calculated_output_dbm;
+    delete legacyPayload.equipment_history;
     res = await supabase
       .from('gis_nodes')
       .update(legacyPayload)
@@ -1685,6 +1697,7 @@ export async function initializeSplitterOutputsForNode(params: {
   totalPorts?: number;
   inputDbm?: number | null;
   existingOutputs?: SupabaseGisSplitterOutput[];
+  existingFdbPorts?: SupabaseGisFdbPort[];
 }): Promise<SupabaseGisSplitterOutput[]> {
   const spec = SPLITTER_SPECS[params.splitterType] || SPLITTER_SPECS['none'];
   if (spec.type === 'none') {
@@ -1702,6 +1715,11 @@ export async function initializeSplitterOutputsForNode(params: {
     existingByPort[o.port_number] = o;
   }
 
+  const existingFdbByPort: Record<number, SupabaseGisFdbPort> = {};
+  for (const fp of params.existingFdbPorts || []) {
+    existingFdbByPort[fp.port_number] = fp;
+  }
+
   const nodeSplice = resolveHopSpliceLoss(params.node.loss_per_splice);
   const fbtLegs = spec.isAsymmetricFbt
     ? getFbtLegOutputs(params.inputDbm ?? null, spec.type, nodeSplice)
@@ -1715,8 +1733,15 @@ export async function initializeSplitterOutputsForNode(params: {
   const rows: Array<Record<string, any>> = [];
   for (let p = 1; p <= count; p++) {
     const prev = existingByPort[p];
+    const prevFdb = existingFdbByPort[p];
     let legLabel = `Port ${p}`;
-    let defaultUtil: SplitterUtilizationType = prev?.utilization_type || 'FREE_PORT';
+    let defaultUtil: SplitterUtilizationType =
+      prev?.utilization_type ||
+      (prevFdb?.status === 'FAULTY'
+        ? 'FAULTY'
+        : prevFdb?.status === 'ACTIVE'
+        ? 'CLIENT_ONT'
+        : 'FREE_PORT');
     let estRx: number | null = plcRx;
 
     if (spec.isAsymmetricFbt && fbtLegs) {
@@ -1726,20 +1751,36 @@ export async function initializeSplitterOutputsForNode(params: {
       } else {
         legLabel = `Leg 2 · Through (${fbtLegs.thruPercent}%)`;
         estRx = fbtLegs.thruOutputDbm;
-        if (!prev) defaultUtil = 'DOWNSTREAM_AREA_FEED';
+        if (!prev && (!prevFdb || prevFdb.status === 'FREE')) {
+          defaultUtil = 'DOWNSTREAM_AREA_FEED';
+        }
       }
     }
+
+    const subscriberId =
+      defaultUtil === 'CLIENT_ONT'
+        ? prev?.subscriber_id || prevFdb?.subscriber_id || null
+        : null;
+    const subscriberUsername =
+      defaultUtil === 'CLIENT_ONT'
+        ? prev?.subscriber_username || prevFdb?.subscriber_username || ''
+        : '';
+    const clientNameManual =
+      defaultUtil === 'CLIENT_ONT'
+        ? prev?.client_name_manual || prevFdb?.client_label || ''
+        : '';
+    const dropDistance = prev?.drop_distance_m ?? prevFdb?.drop_cable_meters ?? 0;
 
     rows.push({
       node_id: params.node.id,
       port_number: p,
       leg_label: legLabel,
       utilization_type: defaultUtil,
-      subscriber_id: defaultUtil === 'CLIENT_ONT' ? prev?.subscriber_id || null : null,
-      subscriber_username: defaultUtil === 'CLIENT_ONT' ? prev?.subscriber_username || '' : '',
-      client_name_manual: defaultUtil === 'CLIENT_ONT' ? prev?.client_name_manual || '' : '',
+      subscriber_id: subscriberId,
+      subscriber_username: subscriberUsername,
+      client_name_manual: clientNameManual,
       target_area_or_node: prev?.target_area_or_node || '',
-      drop_distance_m: prev?.drop_distance_m ?? 0,
+      drop_distance_m: dropDistance,
       estimated_rx_dbm: estRx,
       updated_at: nowIso,
     });
@@ -1820,4 +1861,311 @@ export async function syncOpticalBudgetsToDb(
   if (updates.length > 0) {
     await Promise.allSettled(updates);
   }
+}
+
+export interface ReplaceGisNodeEquipmentParams {
+  node: SupabaseGisNode;
+  allNodes: SupabaseGisNode[];
+  allCables: SupabaseGisCable[];
+  ponPortsById?: Record<string, SupabaseGisOltPonPort>;
+  existingPorts?: SupabaseGisFdbPort[];
+  existingOutputs?: SupabaseGisSplitterOutput[];
+  newNodeType: GisNodeType;
+  fiberNodeTypeOverride?: SupabaseFiberNode['node_type'];
+  newEquipmentLabel: string;
+  newSplitterType: GisSplitterType;
+  newTotalPorts: number;
+  newTrayCapacity: number;
+  newTxPowerDbm?: number;
+  reason: string;
+  actor: string;
+  deductInventoryItemId?: string | null;
+  returnInventoryItemId?: string | null;
+}
+
+export interface ReplaceGisNodeEquipmentResult {
+  updatedNode: SupabaseGisNode;
+  updatedPorts: SupabaseGisFdbPort[];
+  updatedOutputs: SupabaseGisSplitterOutput[];
+  historyEntry: GisEquipmentHistoryEntry;
+  deductedItemName: string | null;
+  returnedItemName: string | null;
+}
+
+/**
+ * Zero-loss hardware swap / upgrade workflow for any deployed GIS node:
+ * - Preserves node ID, GPS coordinates, connected cables, core markings, and existing subscriber port bindings.
+ * - Expands free slots in `gis_splitter_outputs` & `gis_fdb_ports` (or splice tray capacity).
+ * - Optional hardware inventory stock deduction (-1) and reusable return (+1).
+ * - Recalculates cascaded optical power budgets across the replaced node & all downstream boxes.
+ * - Records an immutable timestamped entry in `equipment_history` on `gis_nodes` and `fiber_nodes`.
+ */
+export async function replaceGisNodeEquipment(
+  params: ReplaceGisNodeEquipmentParams
+): Promise<ReplaceGisNodeEquipmentResult> {
+  const { node } = params;
+  const nowIso = new Date().toISOString();
+
+  // 1. Optional Hardware Inventory adjustment (validates stock >= 1 before mutating GIS node)
+  const { deductedItemName, returnedItemName } = await applyEquipmentSwapInventory({
+    deductItemId: params.deductInventoryItemId,
+    returnItemId: params.returnInventoryItemId,
+  });
+
+  // 2. Compute new node configuration while preserving location, feed cables, core markings & notes
+  const newSplitterCategory: GisSplitterCategory = inferSplitterCategory(params.newSplitterType);
+  const spec = SPLITTER_SPECS[params.newSplitterType] || SPLITTER_SPECS['none'];
+  const clampedPorts =
+    params.newNodeType === 'OLT'
+      ? 0
+      : spec.isAsymmetricFbt
+      ? 2
+      : Math.max(0, Math.min(32, Math.round(Number(params.newTotalPorts || 0))));
+  const clampedTray = Math.max(2, Math.min(48, Math.round(Number(params.newTrayCapacity || node.tray_capacity || 12))));
+  const nextSpliceTray =
+    params.newNodeType === 'FOSC_JOINT' || params.newNodeType === 'DIST_NODE'
+      ? generateDefaultSpliceTray(clampedTray, node.splice_tray_json)
+      : node.splice_tray_json || [];
+
+  const prevLabel = `${
+    node.total_ports > 0 ? `${node.total_ports}-Port ` : ''
+  }${getNodeTypeLabel(node.node_type)}${
+    node.splitter_type && node.splitter_type !== 'none' ? ` (${node.splitter_type})` : ''
+  }`;
+  const cleanReason = (params.reason || '').trim() || 'Field hardware upgrade / replacement';
+  const dateLabel = new Date(nowIso).toLocaleDateString('en-GB', {
+    day: '2-digit',
+    month: 'short',
+    year: 'numeric',
+  });
+  const summaryText = `${dateLabel}: Upgraded from ${prevLabel} to ${params.newEquipmentLabel}${
+    params.newSplitterType !== 'none' ? ` (${params.newSplitterType})` : ''
+  } — ${cleanReason}`;
+
+  const historyEntry: GisEquipmentHistoryEntry = {
+    id:
+      typeof crypto !== 'undefined' && typeof crypto.randomUUID === 'function'
+        ? crypto.randomUUID()
+        : `eq-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
+    timestamp: nowIso,
+    actor: (params.actor || 'Admin').trim(),
+    previous_type: node.node_type,
+    previous_label: prevLabel,
+    previous_ports: Number(node.total_ports || 0),
+    previous_splitter: node.splitter_type || 'none',
+    new_type: params.newNodeType,
+    new_label: params.newEquipmentLabel,
+    new_ports: clampedPorts,
+    new_splitter: params.newSplitterType,
+    reason: cleanReason,
+    deducted_inventory_item: deductedItemName,
+    returned_inventory_item: returnedItemName,
+    summary: summaryText,
+  };
+
+  const prevHistory = Array.isArray(node.equipment_history) ? node.equipment_history : [];
+  const nextHistory = [historyEntry, ...prevHistory];
+
+  // 3. Calculate updated optical power budget with new hardware configuration BEFORE saving
+  const candidateNode: SupabaseGisNode = {
+    ...node,
+    node_type: params.newNodeType,
+    splitter_category: newSplitterCategory,
+    splitter_type: params.newSplitterType,
+    total_ports: clampedPorts,
+    tray_capacity: clampedTray,
+    splice_tray_json: nextSpliceTray,
+    tx_power_dbm:
+      params.newNodeType === 'OLT' && params.newTxPowerDbm !== undefined
+        ? Number(params.newTxPowerDbm)
+        : node.tx_power_dbm,
+    equipment_history: nextHistory,
+  };
+
+  const nextNodesForBudget = params.allNodes.map((n) =>
+    n.id === node.id ? candidateNode : n
+  );
+  const budgets = calculateTopologyOpticalBudgets(
+    nextNodesForBudget,
+    params.allCables,
+    params.ponPortsById || {}
+  );
+  const selfBudget = budgets[node.id];
+
+  // 4. Persist updated node record in gis_nodes (preserving ID, GPS, feeds & core pairs)
+  const updatePayload: Record<string, any> = {
+    node_type: candidateNode.node_type,
+    splitter_category: candidateNode.splitter_category,
+    splitter_type: candidateNode.splitter_type,
+    total_ports: candidateNode.total_ports,
+    tray_capacity: candidateNode.tray_capacity,
+    splice_tray_json: candidateNode.splice_tray_json,
+    tx_power_dbm: candidateNode.tx_power_dbm,
+    calculated_input_dbm: selfBudget?.inputDbm ?? null,
+    calculated_output_dbm: selfBudget?.thruOutputDbm ?? null,
+    calculated_ont_rx_dbm: selfBudget?.ontRxDbm ?? null,
+    equipment_history: nextHistory,
+    updated_by: params.actor || 'admin',
+    updated_at: nowIso,
+  };
+
+  let res = await supabase
+    .from('gis_nodes')
+    .update(updatePayload)
+    .eq('id', node.id)
+    .select('*')
+    .single();
+
+  if (res.error && isMissingTableOrColumnError(res.error)) {
+    const legacyPayload = { ...updatePayload };
+    delete legacyPayload.equipment_history;
+    delete legacyPayload.splitter_category;
+    delete legacyPayload.calculated_output_dbm;
+    res = await supabase
+      .from('gis_nodes')
+      .update(legacyPayload)
+      .eq('id', node.id)
+      .select('*')
+      .single();
+  }
+  if (res.error) throw res.error;
+
+  const updatedNode = normalizeGisNodeRow({
+    ...res.data,
+    equipment_history: Array.isArray(res.data?.equipment_history)
+      ? res.data.equipment_history
+      : nextHistory,
+  });
+
+  // Mirror to fiber_nodes (with equipment_history + updated port count & dBm)
+  await syncNodeToFiberNodesTable(
+    updatedNode,
+    updatedNode.node_type === 'OLT' ? clampedPorts || 8 : 0,
+    params.fiberNodeTypeOverride
+  );
+
+  // 5. Zero-loss port migration for gis_splitter_outputs & gis_fdb_ports
+  let updatedOutputs: SupabaseGisSplitterOutput[] = [];
+  if (
+    (updatedNode.node_type === 'FDB_FAT' ||
+      updatedNode.node_type === 'DIST_NODE' ||
+      updatedNode.node_type === 'FOSC_JOINT') &&
+    updatedNode.splitter_type !== 'none'
+  ) {
+    updatedOutputs = await initializeSplitterOutputsForNode({
+      node: updatedNode,
+      splitterType: updatedNode.splitter_type,
+      totalPorts: clampedPorts,
+      inputDbm: selfBudget?.inputDbm ?? null,
+      existingOutputs: params.existingOutputs || [],
+      existingFdbPorts: params.existingPorts || [],
+    });
+  } else if (updatedNode.splitter_type === 'none') {
+    await supabase.from('gis_splitter_outputs').delete().eq('node_id', updatedNode.id);
+    updatedOutputs = [];
+  }
+
+  let updatedPorts: SupabaseGisFdbPort[] = params.existingPorts ? [...params.existingPorts] : [];
+  if (updatedNode.node_type === 'FDB_FAT' && clampedPorts > 0) {
+    const existingByPort: Record<number, SupabaseGisFdbPort> = {};
+    for (const p of params.existingPorts || []) {
+      existingByPort[p.port_number] = p;
+    }
+    const existingOutputByPort: Record<number, SupabaseGisSplitterOutput> = {};
+    for (const o of updatedOutputs) {
+      existingOutputByPort[o.port_number] = o;
+    }
+
+    const fdbUpsertRows: Array<Record<string, any>> = [];
+    for (let pNum = 1; pNum <= clampedPorts; pNum++) {
+      const prevFdb = existingByPort[pNum];
+      const syncedOut = existingOutputByPort[pNum];
+      const mappedStatus: GisPortStatus = prevFdb
+        ? prevFdb.status
+        : syncedOut?.utilization_type === 'FREE_PORT'
+        ? 'FREE'
+        : syncedOut?.utilization_type === 'FAULTY'
+        ? 'FAULTY'
+        : syncedOut
+        ? 'ACTIVE'
+        : 'FREE';
+      const mappedSubId =
+        mappedStatus === 'FREE'
+          ? null
+          : prevFdb?.subscriber_id || syncedOut?.subscriber_id || null;
+      const mappedSubUsername =
+        mappedStatus === 'FREE'
+          ? ''
+          : prevFdb?.subscriber_username || syncedOut?.subscriber_username || '';
+      const mappedClientLabel =
+        mappedStatus === 'FREE'
+          ? ''
+          : prevFdb?.client_label ||
+            syncedOut?.client_name_manual ||
+            (syncedOut?.target_area_or_node ? `Feed -> ${syncedOut.target_area_or_node}` : '');
+
+      fdbUpsertRows.push({
+        fdb_node_id: updatedNode.id,
+        port_number: pNum,
+        subscriber_id: mappedSubId,
+        subscriber_username: mappedSubUsername,
+        client_label: mappedClientLabel,
+        drop_cable_meters: prevFdb?.drop_cable_meters ?? syncedOut?.drop_distance_m ?? 30,
+        status: mappedStatus,
+        updated_at: nowIso,
+      });
+    }
+
+    await supabase
+      .from('gis_fdb_ports')
+      .delete()
+      .eq('fdb_node_id', updatedNode.id)
+      .gt('port_number', clampedPorts);
+
+    const { data: fdbData, error: fdbErr } = await supabase
+      .from('gis_fdb_ports')
+      .upsert(fdbUpsertRows, { onConflict: 'fdb_node_id,port_number' })
+      .select('*');
+    if (!fdbErr && Array.isArray(fdbData)) {
+      updatedPorts = fdbData
+        .map(normalizeGisPortRow)
+        .sort((a, b) => a.port_number - b.port_number);
+    }
+  } else if (updatedNode.node_type !== 'FDB_FAT') {
+    await supabase.from('gis_fdb_ports').delete().eq('fdb_node_id', updatedNode.id);
+    updatedPorts = [];
+  }
+
+  // 6. Cascade recalculated optical budgets to ALL downstream nodes & their splitter outputs
+  const finalNodes = params.allNodes.map((n) => (n.id === updatedNode.id ? updatedNode : n));
+  await syncOpticalBudgetsToDb(finalNodes, params.allCables, params.ponPortsById || {});
+
+  const downstreamUpdates: Array<Promise<any>> = [];
+  for (const n of finalNodes) {
+    if (n.id === updatedNode.id || n.node_type === 'OLT') continue;
+    const b = budgets[n.id];
+    if (!b || b.ontRxDbm === null) continue;
+    if (numericDiffers(n.calculated_ont_rx_dbm, b.ontRxDbm)) {
+      downstreamUpdates.push(
+        Promise.resolve(
+          supabase
+            .from('gis_splitter_outputs')
+            .update({ estimated_rx_dbm: b.ontRxDbm, updated_at: nowIso })
+            .eq('node_id', n.id)
+        )
+      );
+    }
+  }
+  if (downstreamUpdates.length > 0) {
+    await Promise.allSettled(downstreamUpdates);
+  }
+
+  return {
+    updatedNode,
+    updatedPorts,
+    updatedOutputs,
+    historyEntry,
+    deductedItemName,
+    returnedItemName,
+  };
 }

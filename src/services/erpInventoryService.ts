@@ -397,6 +397,84 @@ export async function deleteInventoryItem(id: string): Promise<void> {
   if (error) throw error;
 }
 
+export async function applyEquipmentSwapInventory(params: {
+  deductItemId?: string | null;
+  returnItemId?: string | null;
+}): Promise<{
+  deductedItemName: string | null;
+  returnedItemName: string | null;
+}> {
+  const deductId = (params.deductItemId || '').trim();
+  const returnId = (params.returnItemId || '').trim();
+  let deductedItemName: string | null = null;
+  let returnedItemName: string | null = null;
+
+  if (!deductId && !returnId) {
+    return { deductedItemName, returnedItemName };
+  }
+
+  // Same item selected for both deduct (-1) and return (+1) -> net zero stock change
+  if (deductId && returnId && deductId === returnId) {
+    const { data: item, error } = await supabase
+      .from('inventory_items')
+      .select('id, item_name, stock_qty')
+      .eq('id', deductId)
+      .single();
+    if (error) throw error;
+    if ((Number(item?.stock_qty) || 0) < 1) {
+      throw new Error(`Insufficient stock for "${item?.item_name || 'selected hardware'}" (0 available).`);
+    }
+    deductedItemName = item?.item_name || null;
+    returnedItemName = item?.item_name || null;
+    return { deductedItemName, returnedItemName };
+  }
+
+  if (deductId) {
+    const { data: deductRow, error: fetchDedErr } = await supabase
+      .from('inventory_items')
+      .select('id, item_name, stock_qty')
+      .eq('id', deductId)
+      .single();
+    if (fetchDedErr) throw fetchDedErr;
+    const currentQty = Number(deductRow?.stock_qty) || 0;
+    if (currentQty < 1) {
+      throw new Error(
+        `Cannot deduct "${deductRow?.item_name || 'item'}": stock quantity is 0.`
+      );
+    }
+    const { error: updDedErr } = await supabase
+      .from('inventory_items')
+      .update({
+        stock_qty: roundMoney(currentQty - 1),
+        updated_at: new Date().toISOString(),
+      })
+      .eq('id', deductId);
+    if (updDedErr) throw updDedErr;
+    deductedItemName = deductRow?.item_name || null;
+  }
+
+  if (returnId) {
+    const { data: returnRow, error: fetchRetErr } = await supabase
+      .from('inventory_items')
+      .select('id, item_name, stock_qty')
+      .eq('id', returnId)
+      .single();
+    if (fetchRetErr) throw fetchRetErr;
+    const currentQty = Number(returnRow?.stock_qty) || 0;
+    const { error: updRetErr } = await supabase
+      .from('inventory_items')
+      .update({
+        stock_qty: roundMoney(currentQty + 1),
+        updated_at: new Date().toISOString(),
+      })
+      .eq('id', returnId);
+    if (updRetErr) throw updRetErr;
+    returnedItemName = returnRow?.item_name || null;
+  }
+
+  return { deductedItemName, returnedItemName };
+}
+
 // ============================================================================
 // 3. VENDORS & VENDOR PAYABLES LEDGER
 // ============================================================================
