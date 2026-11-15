@@ -1054,7 +1054,7 @@ export function calculateTopologyOpticalBudgets(
 
       // Compute outgoing optical power for EVERY core on this cable (enabling multi-core OLT trunks + Pass-Through Jointing + Splitter Leg feeds!)
       const totalCores = Math.max(1, Number(cable.cable_cores || 2));
-      const targetFeedCore = Math.max(1, Number(targetNode.feed_core_number || 1));
+      const requestedFeedCore = Math.max(1, Number(targetNode.feed_core_number || 1));
       const targetArrivalByCore: Record<number, { outDbm: number; passThroughSplice?: EnclosureCoreSpliceEntry; splitterLegFeed?: { splitter: InternalSplitterUnit; leg: InternalSplitterLeg } }> = {};
 
       if (!coreArrivalDbmByNode[neighborId]) coreArrivalDbmByNode[neighborId] = {};
@@ -1101,9 +1101,28 @@ export function calculateTopologyOpticalBudgets(
         };
       }
 
-      const selectedCoreInfo =
-        targetArrivalByCore[targetFeedCore] ||
-        targetArrivalByCore[1] || { outDbm: curNode.node_type === 'OLT' ? baseOltOutDbm : defaultOutgoingDbm };
+      const requestedInfo = targetArrivalByCore[requestedFeedCore];
+      const requestedHasExplicitRoute = Boolean(
+        requestedInfo?.passThroughSplice || requestedInfo?.splitterLegFeed
+      );
+      let effectiveCoreNumber = requestedFeedCore;
+      let selectedCoreInfo = requestedInfo;
+
+      if (!requestedHasExplicitRoute && (!targetNode.feed_core_number || requestedFeedCore === 1)) {
+        for (let outCore = 1; outCore <= totalCores; outCore++) {
+          const candidate = targetArrivalByCore[outCore];
+          if (candidate?.passThroughSplice || candidate?.splitterLegFeed) {
+            effectiveCoreNumber = outCore;
+            selectedCoreInfo = candidate;
+            break;
+          }
+        }
+      }
+
+      if (!selectedCoreInfo) {
+        selectedCoreInfo =
+          targetArrivalByCore[1] || { outDbm: curNode.node_type === 'OLT' ? baseOltOutDbm : defaultOutgoingDbm };
+      }
 
       const effectiveOutgoingDbm = selectedCoreInfo.outDbm;
       const arrivalDbm = effectiveOutgoingDbm - spanFiberLoss;
@@ -1131,10 +1150,10 @@ export function calculateTopologyOpticalBudgets(
         hopSpliceCount = 1;
         hopSpliceLoss = ptLoss;
         branchSteps.push({
-          id: `up-pt-${curNode.id}-${cable.id}-${targetFeedCore}`,
+          id: `up-pt-${curNode.id}-${cable.id}-${effectiveCoreNumber}`,
           kind: 'UPSTREAM_JOINT',
           label: `Pass-Through Joint (${curNode.name})`,
-          detail: `In Core #${pt.incoming_core_number} ➔ Out Core #${pt.outgoing_core_number || targetFeedCore} (-${ptLoss.toFixed(2)} dB Fusion Splice · Splitter Bypassed)`,
+          detail: `In Core #${pt.incoming_core_number} ➔ Out Core #${pt.outgoing_core_number || effectiveCoreNumber} (-${ptLoss.toFixed(2)} dB Fusion Splice · Splitter Bypassed)`,
           deltaDb: round2(-ptLoss),
           powerAfterDbm: round2(effectiveOutgoingDbm),
         });
@@ -1252,7 +1271,7 @@ export function calculateTopologyOpticalBudgets(
           kind: 'FEED_SPLICE',
           label:
             targetInternalEval.evaluatedSplitters.length > 0
-              ? `Feed Cable (Core #${targetFeedCore} · ${getTia598Color(targetFeedCore).name})`
+              ? `Feed Cable (Core #${effectiveCoreNumber} · ${getTia598Color(effectiveCoreNumber).name})`
               : 'Feed Cable & Splice',
           detail:
             targetInternalEval.evaluatedSplitters.length > 0
@@ -1270,7 +1289,7 @@ export function calculateTopologyOpticalBudgets(
           id: `cable-${cable.id}-${neighborId}`,
           kind: 'CABLE',
           label: `Cable to ${targetNode.name}`,
-          detail: `${cable.cable_cores}C · Core #${targetFeedCore} · ${Math.round(spanMeters)}m @ 0.35 dB/km`,
+          detail: `${cable.cable_cores}C · Core #${effectiveCoreNumber} · ${Math.round(spanMeters)}m @ 0.35 dB/km`,
           deltaDb: round2(-spanFiberLoss),
           powerAfterDbm: round2(arrivalDbm),
         },
@@ -1300,7 +1319,7 @@ export function calculateTopologyOpticalBudgets(
           targetInternalEval.evaluatedSplitters.length > 0 ? 0 : round2(targetSpliceDb),
         healthBand: classifyOpticalHealth(ontRx),
         incomingCableId: cable.id,
-        incomingCoreNumber: targetFeedCore,
+        incomingCoreNumber: effectiveCoreNumber,
         parentNodeId: cur.nodeId,
         hopCount: cur.hopCount + 1,
         budgetSteps: targetSteps,
@@ -1320,7 +1339,7 @@ export function calculateTopologyOpticalBudgets(
         spliceLossDb: totalSpliceLoss,
         upstreamThruLossDb: totalThruLoss,
         incomingCableId: cable.id,
-        incomingCoreNumber: targetFeedCore,
+        incomingCoreNumber: effectiveCoreNumber,
         hopCount: cur.hopCount + 1,
         pathNodeIds: [...cur.pathNodeIds, neighborId],
         upstreamSteps: nextUpstreamSteps,

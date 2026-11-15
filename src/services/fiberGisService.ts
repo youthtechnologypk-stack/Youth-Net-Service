@@ -16,6 +16,7 @@ import {
 } from './supabaseClient';
 import {
   DEFAULT_FUSION_SPLICE_LOSS_DB,
+  NodeOpticalBudgetResult,
   SPLITTER_SPECS,
   buildCableSplitPlan,
   cableCoresToType,
@@ -36,12 +37,95 @@ import type {
   GisLatLng,
   GisNodeType,
   GisPortStatus,
+  GisSpliceEntry,
   GisSplitterCategory,
   GisSplitterType,
   SplitterUtilizationType,
 } from './supabaseClient';
 import { isMissingTableOrColumnError } from '../lib/expiryUtils';
 import { applyEquipmentSwapInventory } from './erpInventoryService';
+
+const ENCLOSURE_META_MARKER = '__yn_enclosure_meta';
+
+function withTimeout<T>(
+  promise: PromiseLike<T>,
+  ms = 15000,
+  label = 'Database request timed out'
+): Promise<T> {
+  return new Promise<T>((resolve, reject) => {
+    const timer = setTimeout(() => {
+      reject(new Error(`${label} (>${Math.round(ms / 1000)}s)`));
+    }, ms);
+    Promise.resolve(promise).then(
+      (val) => {
+        clearTimeout(timer);
+        resolve(val);
+      },
+      (err) => {
+        clearTimeout(timer);
+        reject(err);
+      }
+    );
+  });
+}
+
+function isCheckConstraintError(err: any): boolean {
+  const code = String(err?.code || '');
+  const msg = String(err?.message || '').toLowerCase();
+  return code === '23514' || msg.includes('check constraint') || msg.includes('violates check');
+}
+
+interface EnclosureFallbackMeta {
+  box_capacity?: number;
+  internal_splitters?: any[];
+  core_splices?: any[];
+  equipment_history?: any[];
+}
+
+function extractEnclosureMetaFromSpliceTray(rawTray: any): {
+  cleanTray: GisSpliceEntry[];
+  meta: EnclosureFallbackMeta | null;
+} {
+  if (!Array.isArray(rawTray)) {
+    return { cleanTray: [], meta: null };
+  }
+  const cleanTray: GisSpliceEntry[] = [];
+  let meta: EnclosureFallbackMeta | null = null;
+  for (const item of rawTray) {
+    if (item && typeof item === 'object' && item[ENCLOSURE_META_MARKER] === true) {
+      meta = {
+        box_capacity: item.box_capacity !== undefined ? Number(item.box_capacity) : undefined,
+        internal_splitters: Array.isArray(item.internal_splitters) ? item.internal_splitters : undefined,
+        core_splices: Array.isArray(item.core_splices) ? item.core_splices : undefined,
+        equipment_history: Array.isArray(item.equipment_history) ? item.equipment_history : undefined,
+      };
+    } else if (item && typeof item === 'object') {
+      cleanTray.push(item as GisSpliceEntry);
+    }
+  }
+  return { cleanTray, meta };
+}
+
+function mergeEnclosureMetaIntoSpliceTray(
+  rawTray: any,
+  meta: EnclosureFallbackMeta
+): any[] {
+  const { cleanTray, meta: existingMeta } = extractEnclosureMetaFromSpliceTray(rawTray);
+  const mergedMeta: EnclosureFallbackMeta = {
+    ...(existingMeta || {}),
+    ...(meta.box_capacity !== undefined ? { box_capacity: meta.box_capacity } : {}),
+    ...(meta.internal_splitters !== undefined ? { internal_splitters: meta.internal_splitters } : {}),
+    ...(meta.core_splices !== undefined ? { core_splices: meta.core_splices } : {}),
+    ...(meta.equipment_history !== undefined ? { equipment_history: meta.equipment_history } : {}),
+  };
+  return [
+    ...cleanTray,
+    {
+      [ENCLOSURE_META_MARKER]: true,
+      ...mergedMeta,
+    },
+  ];
+}
 
 export interface GisSubscriberSummary {
   id: string;
@@ -182,6 +266,32 @@ export function normalizeGisNodeRow(n: any): SupabaseGisNode {
       ? n.splitter_category
       : inferSplitterCategory(splitterType);
 
+  const { cleanTray, meta } = extractEnclosureMetaFromSpliceTray(n.splice_tray_json);
+  const resolvedSplitters =
+    Array.isArray(n.internal_splitters) && n.internal_splitters.length > 0
+      ? n.internal_splitters
+      : Array.isArray(meta?.internal_splitters)
+      ? meta.internal_splitters
+      : Array.isArray(n.internal_splitters)
+      ? n.internal_splitters
+      : [];
+  const resolvedCoreSplices =
+    Array.isArray(n.core_splices) && n.core_splices.length > 0
+      ? n.core_splices
+      : Array.isArray(meta?.core_splices)
+      ? meta.core_splices
+      : Array.isArray(n.core_splices)
+      ? n.core_splices
+      : [];
+  const resolvedHistory =
+    Array.isArray(n.equipment_history) && n.equipment_history.length > 0
+      ? n.equipment_history
+      : Array.isArray(meta?.equipment_history)
+      ? meta.equipment_history
+      : Array.isArray(n.equipment_history)
+      ? n.equipment_history
+      : [];
+
   return {
     ...n,
     lat: Number(n.lat),
@@ -204,11 +314,11 @@ export function normalizeGisNodeRow(n: any): SupabaseGisNode {
       n.calculated_ont_rx_dbm !== null && n.calculated_ont_rx_dbm !== undefined
         ? Number(n.calculated_ont_rx_dbm)
         : null,
-    splice_tray_json: Array.isArray(n.splice_tray_json) ? n.splice_tray_json : [],
-    box_capacity: Number(n.box_capacity ?? n.total_ports ?? 8),
-    internal_splitters: Array.isArray(n.internal_splitters) ? n.internal_splitters : [],
-    core_splices: Array.isArray(n.core_splices) ? n.core_splices : [],
-    equipment_history: Array.isArray(n.equipment_history) ? n.equipment_history : [],
+    splice_tray_json: cleanTray,
+    box_capacity: Number(meta?.box_capacity ?? n.box_capacity ?? n.total_ports ?? 8),
+    internal_splitters: resolvedSplitters,
+    core_splices: resolvedCoreSplices,
+    equipment_history: resolvedHistory,
   };
 }
 
@@ -265,7 +375,8 @@ function mapGisNodeTypeToFiberNodeType(
 async function syncNodeToFiberNodesTable(
   node: SupabaseGisNode,
   totalPonPorts = 0,
-  fiberNodeTypeOverride?: SupabaseFiberNode['node_type']
+  fiberNodeTypeOverride?: SupabaseFiberNode['node_type'],
+  onSchemaWarning?: (msg: string) => void
 ): Promise<void> {
   try {
     const payload: SupabaseFiberNode = {
@@ -291,17 +402,33 @@ async function syncNodeToFiberNodesTable(
       core_splices: Array.isArray(node.core_splices) ? node.core_splices : [],
       equipment_history: Array.isArray(node.equipment_history) ? node.equipment_history : [],
     };
-    const res = await supabase.from('fiber_nodes').upsert(payload, { onConflict: 'id' });
-    if (res.error && isMissingTableOrColumnError(res.error)) {
-      const legacyPayload = { ...payload };
-      delete legacyPayload.box_capacity;
-      delete legacyPayload.internal_splitters;
-      delete legacyPayload.core_splices;
-      delete legacyPayload.equipment_history;
-      await supabase.from('fiber_nodes').upsert(legacyPayload, { onConflict: 'id' });
+    const res = await withTimeout(
+      supabase.from('fiber_nodes').upsert(payload, { onConflict: 'id' }),
+      8000,
+      'fiber_nodes mirror sync timed out'
+    );
+    if (res.error) {
+      if (isMissingTableOrColumnError(res.error)) {
+        const hasRichMeta =
+          (Array.isArray(node.core_splices) && node.core_splices.length > 0) ||
+          (Array.isArray(node.internal_splitters) && node.internal_splitters.length > 0);
+        if (hasRichMeta && onSchemaWarning) {
+          onSchemaWarning(`fiber_nodes: ${res.error.message}`);
+        }
+        const legacyPayload = { ...payload };
+        delete legacyPayload.box_capacity;
+        delete legacyPayload.internal_splitters;
+        delete legacyPayload.core_splices;
+        delete legacyPayload.equipment_history;
+        await withTimeout(
+          supabase.from('fiber_nodes').upsert(legacyPayload, { onConflict: 'id' }),
+          8000,
+          'fiber_nodes legacy sync timed out'
+        );
+      }
     }
   } catch {
-    // Non-blocking dual sync in case fiber_nodes SQL has not been applied yet
+    // Non-blocking dual sync so node saves never fail or hang if fiber_nodes SQL has not been applied yet
   }
 }
 
@@ -1248,7 +1375,8 @@ export async function createGisNode(params: {
 
 export async function updateGisNode(
   nodeId: string,
-  patch: Partial<SupabaseGisNode>
+  patch: Partial<SupabaseGisNode>,
+  options?: { onSchemaWarning?: (msg: string) => void }
 ): Promise<SupabaseGisNode> {
   const payload: Record<string, any> = {
     ...patch,
@@ -1263,15 +1391,62 @@ export async function updateGisNode(
     payload.box_capacity = Math.max(0, Math.min(48, Number(patch.total_ports) || 0));
   }
 
-  let res = await supabase
-    .from('gis_nodes')
-    .update(payload)
-    .eq('id', nodeId)
-    .select('*')
-    .single();
+  let res = await withTimeout(
+    supabase
+      .from('gis_nodes')
+      .update(payload)
+      .eq('id', nodeId)
+      .select('*')
+      .single(),
+    15000,
+    'Saving GIS node timed out'
+  );
 
-  if (res.error && isMissingTableOrColumnError(res.error)) {
-    const legacyPayload = { ...payload };
+  let usedLegacyFallback = false;
+
+  if (res.error && (isMissingTableOrColumnError(res.error) || isCheckConstraintError(res.error))) {
+    usedLegacyFallback = true;
+    const rawMsg = res.error.message || 'Missing database schema columns';
+    options?.onSchemaWarning?.(`gis_nodes: ${rawMsg}`);
+
+    let existingTray: any = payload.splice_tray_json;
+    if (existingTray === undefined) {
+      try {
+        const curRow = await withTimeout(
+          supabase
+            .from('gis_nodes')
+            .select('splice_tray_json')
+            .eq('id', nodeId)
+            .maybeSingle(),
+          5000,
+          'Reading splice tray fallback'
+        );
+        existingTray = (curRow.data as any)?.splice_tray_json || [];
+      } catch {
+        existingTray = [];
+      }
+    }
+
+    const legacyPayload: Record<string, any> = { ...payload };
+    const hasMetaToPreserve =
+      payload.box_capacity !== undefined ||
+      payload.internal_splitters !== undefined ||
+      payload.core_splices !== undefined ||
+      payload.equipment_history !== undefined;
+
+    if (hasMetaToPreserve) {
+      legacyPayload.splice_tray_json = mergeEnclosureMetaIntoSpliceTray(existingTray, {
+        box_capacity: payload.box_capacity !== undefined ? Number(payload.box_capacity) : undefined,
+        internal_splitters: Array.isArray(payload.internal_splitters)
+          ? payload.internal_splitters
+          : undefined,
+        core_splices: Array.isArray(payload.core_splices) ? payload.core_splices : undefined,
+        equipment_history: Array.isArray(payload.equipment_history)
+          ? payload.equipment_history
+          : undefined,
+      });
+    }
+
     delete legacyPayload.splitter_category;
     delete legacyPayload.feed_core_pair;
     delete legacyPayload.pon_port_id;
@@ -1280,30 +1455,65 @@ export async function updateGisNode(
     delete legacyPayload.internal_splitters;
     delete legacyPayload.core_splices;
     delete legacyPayload.equipment_history;
-    res = await supabase
-      .from('gis_nodes')
-      .update(legacyPayload)
-      .eq('id', nodeId)
-      .select('*')
-      .single();
+
+    if (
+      legacyPayload.total_ports !== undefined &&
+      isCheckConstraintError(res.error)
+    ) {
+      legacyPayload.total_ports = Math.max(0, Math.min(32, Number(legacyPayload.total_ports) || 0));
+    }
+
+    res = await withTimeout(
+      supabase
+        .from('gis_nodes')
+        .update(legacyPayload)
+        .eq('id', nodeId)
+        .select('*')
+        .single(),
+      15000,
+      'Saving GIS node fallback timed out'
+    );
   }
 
   if (res.error) throw res.error;
-  const normalized = normalizeGisNodeRow(res.data);
-  await syncNodeToFiberNodesTable(normalized);
+
+  const mergedData = usedLegacyFallback
+    ? {
+        ...res.data,
+        ...(patch.box_capacity !== undefined ? { box_capacity: patch.box_capacity } : {}),
+        ...(patch.internal_splitters !== undefined
+          ? { internal_splitters: patch.internal_splitters }
+          : {}),
+        ...(patch.core_splices !== undefined ? { core_splices: patch.core_splices } : {}),
+        ...(patch.equipment_history !== undefined
+          ? { equipment_history: patch.equipment_history }
+          : {}),
+      }
+    : res.data;
+
+  const normalized = normalizeGisNodeRow(mergedData);
+  await syncNodeToFiberNodesTable(normalized, 0, undefined, options?.onSchemaWarning);
 
   // Sync lat/lng/name back to gis_olts when an OLT marker moves or edits
   if (normalized.node_type === 'OLT' && normalized.olt_id) {
-    await supabase
-      .from('gis_olts')
-      .update({
-        name: normalized.name,
-        area_name: normalized.area_name || '',
-        lat: normalized.lat,
-        lng: normalized.lng,
-        updated_at: new Date().toISOString(),
-      })
-      .eq('id', normalized.olt_id);
+    try {
+      await withTimeout(
+        supabase
+          .from('gis_olts')
+          .update({
+            name: normalized.name,
+            area_name: normalized.area_name || '',
+            lat: normalized.lat,
+            lng: normalized.lng,
+            updated_at: new Date().toISOString(),
+          })
+          .eq('id', normalized.olt_id),
+        8000,
+        'Syncing OLT location timed out'
+      );
+    } catch {
+      // Non-blocking OLT coordinate mirror
+    }
   }
 
   return normalized;
@@ -1843,7 +2053,7 @@ export async function syncOpticalBudgetsToDb(
   nodes: SupabaseGisNode[],
   cables: SupabaseGisCable[],
   ponPortsById: Record<string, SupabaseGisOltPonPort> = {}
-): Promise<void> {
+): Promise<Record<string, NodeOpticalBudgetResult>> {
   const budgets = calculateTopologyOpticalBudgets(nodes, cables, ponPortsById);
   const updates: Array<Promise<any>> = [];
 
@@ -1858,16 +2068,25 @@ export async function syncOpticalBudgetsToDb(
     if (!changed) continue;
 
     updates.push(
-      Promise.resolve(
-        supabase
+      (async () => {
+        const res = await supabase
           .from('gis_nodes')
           .update({
             calculated_input_dbm: b.inputDbm,
             calculated_output_dbm: b.thruOutputDbm,
             calculated_ont_rx_dbm: b.ontRxDbm,
           })
-          .eq('id', n.id)
-      )
+          .eq('id', n.id);
+        if (res.error && isMissingTableOrColumnError(res.error)) {
+          await supabase
+            .from('gis_nodes')
+            .update({
+              calculated_input_dbm: b.inputDbm,
+              calculated_ont_rx_dbm: b.ontRxDbm,
+            })
+            .eq('id', n.id);
+        }
+      })()
     );
 
     const outPower = b.ontRxDbm ?? b.thruOutputDbm ?? b.inputDbm;
@@ -1882,8 +2101,14 @@ export async function syncOpticalBudgetsToDb(
   }
 
   if (updates.length > 0) {
-    await Promise.allSettled(updates);
+    try {
+      await withTimeout(Promise.allSettled(updates), 12000, 'Optical budget DB sync');
+    } catch {
+      // Non-blocking timeout protection
+    }
   }
+
+  return budgets;
 }
 
 export interface ReplaceGisNodeEquipmentParams {

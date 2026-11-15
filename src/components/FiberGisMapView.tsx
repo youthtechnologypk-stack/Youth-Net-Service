@@ -70,6 +70,7 @@ import {
   SPLITTER_SPECS,
   calculateTopologyOpticalBudgets,
   computePolylineDistanceMeters,
+  getTia598Color,
   inferSfpClassFromDbm,
   inferSplitterCategory,
   traceOpticalPathToNode,
@@ -918,14 +919,138 @@ export const FiberGisMapView: React.FC<FiberGisMapViewProps> = ({
 
   const handleSaveNode = async (nodeId: string, patch: Partial<SupabaseGisNode>) => {
     setIsSaving(true);
+    const schemaWarnings: string[] = [];
+    const collectWarning = (msg: string) => {
+      if (msg && !schemaWarnings.includes(msg)) schemaWarnings.push(msg);
+    };
+
     try {
-      const updated = await updateGisNode(nodeId, { ...patch, updated_by: actorUsername });
-      const nextNodes = applyRealtimeNodeDelta(nodes, 'UPDATE', updated);
-      setNodes(nextNodes);
-      syncOpticalBudgetsToDb(nextNodes, cables, ponPortsById).catch(() => {});
-      showToast('✅ Saved to Supabase DB — Node & cascaded optical power updated.');
+      const saveWorkflow = async () => {
+        const updated = await updateGisNode(
+          nodeId,
+          { ...patch, updated_by: actorUsername },
+          { onSchemaWarning: collectWarning }
+        );
+        let nextNodes = applyRealtimeNodeDelta(nodes, 'UPDATE', updated);
+
+        // Automatically bind connected downstream nodes to the routed core (Pass-Through Joint OR Splitter Leg Feed)
+        const downstreamTargets: Array<{ cableId: string; coreNum: number }> = [];
+        if (Array.isArray(updated.core_splices)) {
+          for (const sp of updated.core_splices) {
+            if (sp.action === 'PASS_THROUGH_JOINT' && sp.outgoing_cable_id) {
+              downstreamTargets.push({
+                cableId: sp.outgoing_cable_id,
+                coreNum: Math.max(1, Number(sp.outgoing_core_number || 1)),
+              });
+            }
+          }
+        }
+        if (Array.isArray(updated.internal_splitters)) {
+          for (const spl of updated.internal_splitters) {
+            for (const leg of spl.legs || []) {
+              if (leg.status === 'OUTGOING_CABLE_FEED' && leg.target_cable_id) {
+                downstreamTargets.push({
+                  cableId: leg.target_cable_id,
+                  coreNum: Math.max(1, Number(leg.target_core_number || 1)),
+                });
+              }
+            }
+          }
+        }
+
+        if (downstreamTargets.length > 0) {
+          const seenNodeUpdates = new Set<string>();
+          for (const target of downstreamTargets) {
+            const outCable = cables.find((c) => c.id === target.cableId);
+            if (!outCable) continue;
+            const neighborId =
+              outCable.source_node_id === updated.id
+                ? outCable.target_node_id
+                : outCable.target_node_id === updated.id
+                ? outCable.source_node_id
+                : null;
+            if (!neighborId || seenNodeUpdates.has(neighborId)) continue;
+            const downstreamNode = nextNodes.find((n) => n.id === neighborId);
+            if (!downstreamNode || downstreamNode.node_type === 'OLT') continue;
+
+            const needsFeedSync =
+              downstreamNode.feed_cable_id !== outCable.id ||
+              Number(downstreamNode.feed_core_number || 1) !== target.coreNum;
+
+            if (needsFeedSync) {
+              seenNodeUpdates.add(neighborId);
+              const pairLabel = `Core #${target.coreNum} (${getTia598Color(target.coreNum).name})`;
+              try {
+                const updatedDownstream = await updateGisNode(
+                  downstreamNode.id,
+                  {
+                    feed_cable_id: outCable.id,
+                    feed_core_number: target.coreNum,
+                    feed_core_pair: pairLabel,
+                    updated_by: actorUsername,
+                  },
+                  { onSchemaWarning: collectWarning }
+                );
+                nextNodes = applyRealtimeNodeDelta(nextNodes, 'UPDATE', updatedDownstream);
+              } catch {
+                nextNodes = nextNodes.map((n) =>
+                  n.id === downstreamNode.id
+                    ? {
+                        ...n,
+                        feed_cable_id: outCable.id,
+                        feed_core_number: target.coreNum,
+                        feed_core_pair: pairLabel,
+                      }
+                    : n
+                );
+              }
+            }
+          }
+        }
+
+        // Recalculate downstream optical budgets immediately & persist to gis_nodes + fiber_nodes
+        const freshBudgets = await syncOpticalBudgetsToDb(nextNodes, cables, ponPortsById);
+        const nextNodesWithBudgets = nextNodes.map((n) => {
+          if (n.node_type === 'OLT') return n;
+          const b = freshBudgets[n.id];
+          if (!b) return n;
+          return {
+            ...n,
+            calculated_input_dbm: b.inputDbm,
+            calculated_output_dbm: b.thruOutputDbm,
+            calculated_ont_rx_dbm: b.ontRxDbm,
+          };
+        });
+        setNodes(nextNodesWithBudgets);
+      };
+
+      await Promise.race([
+        saveWorkflow(),
+        new Promise<never>((_, reject) =>
+          setTimeout(
+            () => reject(new Error('Database save timed out after 20s. Please retry.')),
+            20000
+          )
+        ),
+      ]);
+
+      const hasRichSpliceEdit =
+        (Array.isArray(patch.core_splices) && patch.core_splices.length > 0) ||
+        (Array.isArray(patch.internal_splitters) && patch.internal_splitters.length > 0);
+
+      if (schemaWarnings.length > 0) {
+        showToast(
+          `Saved via fallback JSONB — DB schema notice: ${schemaWarnings[0]} (Run SQL Setup to add native columns)`,
+          'err'
+        );
+      } else if (hasRichSpliceEdit) {
+        showToast('✅ Core Splice & Optical Power Saved to DB');
+      } else {
+        showToast('✅ Saved to Supabase DB — Node & cascaded optical power updated.');
+      }
     } catch (err: any) {
       showToast(err?.message || 'Failed to update node', 'err');
+      throw err;
     } finally {
       setIsSaving(false);
     }

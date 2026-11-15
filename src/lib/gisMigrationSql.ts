@@ -162,7 +162,7 @@ END $$;
 CREATE TABLE IF NOT EXISTS public.gis_fdb_ports (
     id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
     fdb_node_id UUID NOT NULL REFERENCES public.gis_nodes(id) ON DELETE CASCADE,
-    port_number INT NOT NULL CHECK (port_number >= 1 AND port_number <= 32),
+    port_number INT NOT NULL CHECK (port_number >= 1 AND port_number <= 48),
     subscriber_id UUID NULL REFERENCES public.portal_users(id) ON DELETE SET NULL,
     subscriber_username TEXT DEFAULT '',
     client_label TEXT DEFAULT '',
@@ -175,7 +175,7 @@ CREATE TABLE IF NOT EXISTS public.gis_fdb_ports (
 CREATE TABLE IF NOT EXISTS public.gis_splitter_outputs (
     id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
     node_id UUID NOT NULL REFERENCES public.gis_nodes(id) ON DELETE CASCADE,
-    port_number INT NOT NULL CHECK (port_number >= 1 AND port_number <= 32),
+    port_number INT NOT NULL CHECK (port_number >= 1 AND port_number <= 48),
     leg_label TEXT DEFAULT '',
     utilization_type TEXT NOT NULL DEFAULT 'FREE_PORT' CHECK (
         utilization_type IN ('CLIENT_ONT', 'DOWNSTREAM_AREA_FEED', 'CASCADED_SPLITTER', 'FREE_PORT', 'FAULTY')
@@ -189,6 +189,33 @@ CREATE TABLE IF NOT EXISTS public.gis_splitter_outputs (
     updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     UNIQUE (node_id, port_number)
 );
+
+DO $$
+DECLARE
+    c_name TEXT;
+BEGIN
+    FOR c_name IN
+        SELECT conname FROM pg_constraint
+        WHERE conrelid = 'public.gis_fdb_ports'::regclass AND contype = 'c'
+          AND pg_get_constraintdef(oid) LIKE '%port_number%'
+    LOOP
+        EXECUTE format('ALTER TABLE public.gis_fdb_ports DROP CONSTRAINT IF EXISTS %I', c_name);
+    END LOOP;
+    ALTER TABLE public.gis_fdb_ports
+        ADD CONSTRAINT gis_fdb_ports_port_number_check
+        CHECK (port_number >= 1 AND port_number <= 48);
+
+    FOR c_name IN
+        SELECT conname FROM pg_constraint
+        WHERE conrelid = 'public.gis_splitter_outputs'::regclass AND contype = 'c'
+          AND pg_get_constraintdef(oid) LIKE '%port_number%'
+    LOOP
+        EXECUTE format('ALTER TABLE public.gis_splitter_outputs DROP CONSTRAINT IF EXISTS %I', c_name);
+    END LOOP;
+    ALTER TABLE public.gis_splitter_outputs
+        ADD CONSTRAINT gis_splitter_outputs_port_number_check
+        CHECK (port_number >= 1 AND port_number <= 48);
+END $$;
 
 CREATE INDEX IF NOT EXISTS idx_gis_olts_pon_mode ON public.gis_olts (pon_mode);
 CREATE INDEX IF NOT EXISTS idx_gis_olt_pon_ports_olt ON public.gis_olt_pon_ports (olt_id);
@@ -334,13 +361,10 @@ CREATE TABLE IF NOT EXISTS public.fiber_nodes (
 );
 
 ALTER TABLE IF EXISTS public.fiber_nodes
-    ADD COLUMN IF NOT EXISTS box_capacity INT NOT NULL DEFAULT 8;
-ALTER TABLE IF EXISTS public.fiber_nodes
-    ADD COLUMN IF NOT EXISTS internal_splitters JSONB NOT NULL DEFAULT '[]'::jsonb;
-ALTER TABLE IF EXISTS public.fiber_nodes
-    ADD COLUMN IF NOT EXISTS core_splices JSONB NOT NULL DEFAULT '[]'::jsonb;
-ALTER TABLE IF EXISTS public.fiber_nodes
-    ADD COLUMN IF NOT EXISTS equipment_history JSONB NOT NULL DEFAULT '[]'::jsonb;
+    ADD COLUMN IF NOT EXISTS core_splices JSONB DEFAULT '[]'::jsonb,
+    ADD COLUMN IF NOT EXISTS internal_splitters JSONB DEFAULT '[]'::jsonb,
+    ADD COLUMN IF NOT EXISTS box_capacity INTEGER DEFAULT 8,
+    ADD COLUMN IF NOT EXISTS equipment_history JSONB DEFAULT '[]'::jsonb;
 
 CREATE TABLE IF NOT EXISTS public.fiber_routes (
     id UUID PRIMARY KEY DEFAULT gen_random_uuid(),

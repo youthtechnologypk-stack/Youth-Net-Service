@@ -196,6 +196,8 @@ export const FiberGisInspectorPanel: React.FC<FiberGisInspectorPanelProps> = ({
   const [activeLegEditor, setActiveLegEditor] = useState<{ splitterId: string; legNumber: number } | null>(null);
   const [legSubSearch, setLegSubSearch] = useState('');
   const [showAllSpliceCables, setShowAllSpliceCables] = useState(false);
+  const [localSaving, setLocalSaving] = useState(false);
+  const [localSaveError, setLocalSaveError] = useState<string | null>(null);
 
   // Cable editable draft
   const [cableName, setCableName] = useState('');
@@ -226,6 +228,7 @@ export const FiberGisInspectorPanel: React.FC<FiberGisInspectorPanelProps> = ({
     setSubSearch('');
     setLegSubSearch('');
     setShowAllSpliceCables(false);
+    setLocalSaveError(null);
     if (selectedNode) {
       const spType = (selectedNode.splitter_type ||
         (selectedNode.node_type === 'FDB_FAT' ? '1:8' : 'none')) as GisSplitterType;
@@ -434,45 +437,53 @@ export const FiberGisInspectorPanel: React.FC<FiberGisInspectorPanelProps> = ({
   };
 
   const handleSaveNodeClick = async () => {
-    if (!selectedNode) return;
-    const budgetForSave = liveDraftBudget || budgetsByNodeId[selectedNode.id];
-    const evalState = evaluateEnclosureOpticalState({
-      node: {
-        ...selectedNode,
-        internal_splitters: internalSplittersDraft,
-        core_splices: coreSplicesDraft,
-      },
-      arrivalDbmByCoreKey: budgetForSave?.arrivalDbmByCoreKey || {},
-      fallbackInputDbm: budgetForSave?.inputDbm ?? null,
-    });
-    const effectivePorts = Math.max(
-      0,
-      Math.min(
-        48,
-        internalSplittersDraft.length > 0
-          ? Number(nodeBoxCapacity) || 8
-          : Number(nodeTotalPorts) || 0
-      )
-    );
-    await onSaveNode(selectedNode.id, {
-      name: nodeName.trim() || selectedNode.name,
-      area_name: nodeArea.trim(),
-      tx_power_dbm: Number(nodeTxPower),
-      splitter_category: nodeSplitterCat,
-      splitter_type: nodeSplitter,
-      total_ports: effectivePorts,
-      box_capacity: Math.max(4, Math.min(48, Number(nodeBoxCapacity) || effectivePorts || 8)),
-      internal_splitters: evalState.evaluatedSplitters,
-      core_splices: evalState.evaluatedCoreSplices,
-      feed_cable_id: nodeFeedCableId || null,
-      feed_core_number: Number(nodeFeedCore) || 1,
-      feed_core_pair: nodeFeedCorePair.trim(),
-      pon_port_id: nodePonPortId || null,
-      tray_capacity: Math.max(2, Math.min(48, Number(nodeTrayCapacity) || 12)),
-      loss_per_splice: Number(nodeLossPerSplice) || DEFAULT_FUSION_SPLICE_LOSS_DB,
-      splice_tray_json: spliceTrayDraft,
-      notes: nodeNotes,
-    });
+    if (!selectedNode || localSaving || isSaving) return;
+    setLocalSaveError(null);
+    setLocalSaving(true);
+    try {
+      const budgetForSave = liveDraftBudget || budgetsByNodeId[selectedNode.id];
+      const evalState = evaluateEnclosureOpticalState({
+        node: {
+          ...selectedNode,
+          internal_splitters: internalSplittersDraft,
+          core_splices: coreSplicesDraft,
+        },
+        arrivalDbmByCoreKey: budgetForSave?.arrivalDbmByCoreKey || {},
+        fallbackInputDbm: budgetForSave?.inputDbm ?? null,
+      });
+      const effectivePorts = Math.max(
+        0,
+        Math.min(
+          48,
+          internalSplittersDraft.length > 0
+            ? Number(nodeBoxCapacity) || 8
+            : Number(nodeTotalPorts) || 0
+        )
+      );
+      await onSaveNode(selectedNode.id, {
+        name: nodeName.trim() || selectedNode.name,
+        area_name: nodeArea.trim(),
+        tx_power_dbm: Number(nodeTxPower),
+        splitter_category: nodeSplitterCat,
+        splitter_type: nodeSplitter,
+        total_ports: effectivePorts,
+        box_capacity: Math.max(4, Math.min(48, Number(nodeBoxCapacity) || effectivePorts || 8)),
+        internal_splitters: evalState.evaluatedSplitters,
+        core_splices: evalState.evaluatedCoreSplices,
+        feed_cable_id: nodeFeedCableId || null,
+        feed_core_number: Number(nodeFeedCore) || 1,
+        feed_core_pair: nodeFeedCorePair.trim(),
+        pon_port_id: nodePonPortId || null,
+        tray_capacity: Math.max(2, Math.min(48, Number(nodeTrayCapacity) || 12)),
+        loss_per_splice: Number(nodeLossPerSplice) || DEFAULT_FUSION_SPLICE_LOSS_DB,
+        splice_tray_json: spliceTrayDraft,
+        notes: nodeNotes,
+      });
+    } catch (err: any) {
+      setLocalSaveError(err?.message || 'Failed to save node changes to Supabase.');
+    } finally {
+      setLocalSaving(false);
+    }
   };
 
   const handleTrayCapacityChange = (nextCap: number) => {
@@ -2149,7 +2160,9 @@ export const FiberGisInspectorPanel: React.FC<FiberGisInspectorPanelProps> = ({
                           const selectedOutCable = connectedCables.find(
                             (c) => c.id === selectedOutCableId
                           );
-                          const selectedOutCore = savedEntry?.outgoing_core_number || coreNum;
+                          const selectedOutCore =
+                            savedEntry?.outgoing_core_number ||
+                            Math.min(coreNum, Math.max(1, Number(selectedOutCable?.cable_cores || 12)));
                           const spliceLoss =
                             savedEntry?.splice_loss_db ?? DEFAULT_PASS_THROUGH_SPLICE_LOSS_DB;
 
@@ -3342,10 +3355,23 @@ export const FiberGisInspectorPanel: React.FC<FiberGisInspectorPanelProps> = ({
 
         {/* Sticky Footer Upgrade / Save / Delete Bar */}
         <div className="p-3 border-t border-slate-800 bg-slate-950 flex flex-col gap-2 shrink-0">
+          {localSaveError && (
+            <div className="p-2 rounded-lg bg-rose-950/90 border border-rose-700 text-[11px] font-mono text-rose-200 flex items-start justify-between gap-2">
+              <span className="leading-snug break-words">{localSaveError}</span>
+              <button
+                type="button"
+                onClick={() => setLocalSaveError(null)}
+                className="text-rose-300 hover:text-white shrink-0 cursor-pointer"
+                aria-label="Dismiss save error"
+              >
+                <X className="w-3.5 h-3.5" />
+              </button>
+            </div>
+          )}
           {onOpenUpgradeModal && (
             <button
               type="button"
-              disabled={isSaving}
+              disabled={isSaving || localSaving}
               onClick={() => onOpenUpgradeModal(node)}
               className="w-full min-h-[40px] px-3 py-2 rounded-xl bg-amber-500/15 hover:bg-amber-500/25 border border-amber-500/60 text-amber-300 font-mono font-bold text-xs flex items-center justify-center gap-1.5 cursor-pointer transition"
             >
@@ -3356,12 +3382,12 @@ export const FiberGisInspectorPanel: React.FC<FiberGisInspectorPanelProps> = ({
           <div className="flex items-center gap-2">
             <button
               type="button"
-              disabled={isSaving}
+              disabled={isSaving || localSaving}
               onClick={handleSaveNodeClick}
               className="flex-1 min-h-[44px] px-4 py-2 rounded-xl bg-cyan-600 hover:bg-cyan-500 disabled:opacity-50 text-slate-950 font-mono font-bold text-xs flex items-center justify-center gap-1.5 cursor-pointer"
             >
               <Save className="w-4 h-4" />
-              <span>{isSaving ? 'Saving...' : 'Save Node Changes'}</span>
+              <span>{isSaving || localSaving ? 'Saving...' : 'Save Node Changes'}</span>
             </button>
 
             {!confirmDelete ? (
@@ -3376,7 +3402,7 @@ export const FiberGisInspectorPanel: React.FC<FiberGisInspectorPanelProps> = ({
             ) : (
               <button
                 type="button"
-                disabled={isSaving}
+                disabled={isSaving || localSaving}
                 onClick={() => onDeleteNode(node.id)}
                 className="min-h-[44px] px-3 py-2 rounded-xl bg-rose-600 hover:bg-rose-500 text-white font-mono font-bold text-xs flex items-center gap-1 cursor-pointer"
               >
