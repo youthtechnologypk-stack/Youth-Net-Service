@@ -43,7 +43,8 @@ CREATE TABLE IF NOT EXISTS public.gis_nodes (
     tx_power_dbm NUMERIC(6, 2) NOT NULL DEFAULT 5.0,
     splitter_category TEXT NOT NULL DEFAULT 'NONE',
     splitter_type TEXT NOT NULL DEFAULT '1:8',
-    total_ports INT NOT NULL DEFAULT 8 CHECK (total_ports >= 0 AND total_ports <= 32),
+    total_ports INT NOT NULL DEFAULT 8 CHECK (total_ports >= 0 AND total_ports <= 48),
+    box_capacity INT NOT NULL DEFAULT 8 CHECK (box_capacity >= 0 AND box_capacity <= 48),
     feed_cable_id UUID NULL,
     feed_core_number INT NULL,
     feed_core_pair TEXT DEFAULT '',
@@ -53,6 +54,8 @@ CREATE TABLE IF NOT EXISTS public.gis_nodes (
     tray_capacity INT NOT NULL DEFAULT 12 CHECK (tray_capacity >= 2 AND tray_capacity <= 48),
     loss_per_splice NUMERIC(5, 3) NOT NULL DEFAULT 0.08,
     splice_tray_json JSONB NOT NULL DEFAULT '[]'::jsonb,
+    internal_splitters JSONB NOT NULL DEFAULT '[]'::jsonb,
+    core_splices JSONB NOT NULL DEFAULT '[]'::jsonb,
     equipment_history JSONB NOT NULL DEFAULT '[]'::jsonb,
     notes TEXT DEFAULT '',
     updated_by TEXT DEFAULT 'admin',
@@ -71,6 +74,12 @@ ALTER TABLE IF EXISTS public.gis_nodes
 ALTER TABLE IF EXISTS public.gis_nodes
     ADD COLUMN IF NOT EXISTS calculated_output_dbm NUMERIC(6, 2) NULL;
 ALTER TABLE IF EXISTS public.gis_nodes
+    ADD COLUMN IF NOT EXISTS box_capacity INT NOT NULL DEFAULT 8;
+ALTER TABLE IF EXISTS public.gis_nodes
+    ADD COLUMN IF NOT EXISTS internal_splitters JSONB NOT NULL DEFAULT '[]'::jsonb;
+ALTER TABLE IF EXISTS public.gis_nodes
+    ADD COLUMN IF NOT EXISTS core_splices JSONB NOT NULL DEFAULT '[]'::jsonb;
+ALTER TABLE IF EXISTS public.gis_nodes
     ADD COLUMN IF NOT EXISTS equipment_history JSONB NOT NULL DEFAULT '[]'::jsonb;
 
 DO $$
@@ -82,7 +91,8 @@ BEGIN
         WHERE conrelid = 'public.gis_nodes'::regclass AND contype = 'c'
           AND (pg_get_constraintdef(oid) LIKE '%node_type%'
             OR pg_get_constraintdef(oid) LIKE '%splitter_type%'
-            OR pg_get_constraintdef(oid) LIKE '%splitter_category%')
+            OR pg_get_constraintdef(oid) LIKE '%splitter_category%'
+            OR pg_get_constraintdef(oid) LIKE '%total_ports%')
     LOOP
         EXECUTE format('ALTER TABLE public.gis_nodes DROP CONSTRAINT IF EXISTS %I', c_name);
     END LOOP;
@@ -98,6 +108,10 @@ BEGIN
     ALTER TABLE public.gis_nodes
         ADD CONSTRAINT gis_nodes_splitter_type_check
         CHECK (splitter_type IN ('none', '1:2', '1:4', '1:8', '1:16', '1:32', '90:10', '85:15', '80:20', '70:30', '60:40', '50:50'));
+
+    ALTER TABLE public.gis_nodes
+        ADD CONSTRAINT gis_nodes_total_ports_check
+        CHECK (total_ports >= 0 AND total_ports <= 48);
 END $$;
 
 CREATE TABLE IF NOT EXISTS public.gis_cables (
@@ -310,12 +324,21 @@ CREATE TABLE IF NOT EXISTS public.fiber_nodes (
     lat DOUBLE PRECISION NOT NULL,
     lng DOUBLE PRECISION NOT NULL,
     pon_ports INT NOT NULL DEFAULT 0,
+    box_capacity INT NOT NULL DEFAULT 8,
     optical_power_dbm NUMERIC(6, 2) NULL,
     address_note TEXT DEFAULT '',
+    internal_splitters JSONB NOT NULL DEFAULT '[]'::jsonb,
+    core_splices JSONB NOT NULL DEFAULT '[]'::jsonb,
     equipment_history JSONB NOT NULL DEFAULT '[]'::jsonb,
     created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
 
+ALTER TABLE IF EXISTS public.fiber_nodes
+    ADD COLUMN IF NOT EXISTS box_capacity INT NOT NULL DEFAULT 8;
+ALTER TABLE IF EXISTS public.fiber_nodes
+    ADD COLUMN IF NOT EXISTS internal_splitters JSONB NOT NULL DEFAULT '[]'::jsonb;
+ALTER TABLE IF EXISTS public.fiber_nodes
+    ADD COLUMN IF NOT EXISTS core_splices JSONB NOT NULL DEFAULT '[]'::jsonb;
 ALTER TABLE IF EXISTS public.fiber_nodes
     ADD COLUMN IF NOT EXISTS equipment_history JSONB NOT NULL DEFAULT '[]'::jsonb;
 

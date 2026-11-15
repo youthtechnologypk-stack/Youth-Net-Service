@@ -1,4 +1,6 @@
 import type {
+  CoreSpliceAction,
+  EnclosureCoreSpliceEntry,
   GisCableTypeCode,
   GisCoreEntry,
   GisCoreLedgerStatus,
@@ -9,6 +11,8 @@ import type {
   GisSpliceEntry,
   GisSplitterCategory,
   GisSplitterType,
+  InternalSplitterLeg,
+  InternalSplitterUnit,
   OltPonMode,
   OltSfpClass,
   SupabaseGisCable,
@@ -20,6 +24,8 @@ import type {
 
 export const FIBER_ATTENUATION_DB_PER_KM = 0.35;
 export const DEFAULT_FUSION_SPLICE_LOSS_DB = 0.5;
+export const DEFAULT_PASS_THROUGH_SPLICE_LOSS_DB = 0.2;
+export const FDB_ENCLOSURE_CAPACITIES = [4, 8, 12, 16, 24, 32, 48] as const;
 
 export function resolveHopSpliceLoss(rawLoss?: number | null): number {
   if (rawLoss === null || rawLoss === undefined || Number.isNaN(Number(rawLoss))) {
@@ -571,6 +577,15 @@ export interface OpticalBudgetStep {
   powerAfterDbm: number;
 }
 
+export interface EnclosureSummaryStats {
+  boxCapacity: number;
+  splitterCount: number;
+  totalAllocatedPorts: number;
+  usedPorts: number;
+  freePorts: number;
+  passThroughJointCount: number;
+}
+
 export interface NodeOpticalBudgetResult {
   nodeId: string;
   oltId: string | null;
@@ -596,6 +611,10 @@ export interface NodeOpticalBudgetResult {
   parentNodeId: string | null;
   hopCount: number;
   budgetSteps: OpticalBudgetStep[];
+  arrivalDbmByCoreKey?: Record<string, number>;
+  evaluatedSplitters?: InternalSplitterUnit[];
+  evaluatedCoreSplices?: EnclosureCoreSpliceEntry[];
+  enclosureSummary?: EnclosureSummaryStats;
 }
 
 export function classifyOpticalHealth(ontRxDbm: number | null): OpticalHealthBand {
@@ -623,6 +642,183 @@ function round2(n: number): number {
   return Math.round(n * 100) / 100;
 }
 
+export function buildDefaultLegsForSplitter(
+  splitterType: GisSplitterType,
+  existingLegs?: InternalSplitterLeg[] | null
+): InternalSplitterLeg[] {
+  const spec = SPLITTER_SPECS[splitterType] || SPLITTER_SPECS['none'];
+  if (spec.type === 'none') return [];
+  const count = spec.isAsymmetricFbt ? 2 : Math.max(1, spec.defaultPorts || 8);
+  const existingByNum: Record<number, InternalSplitterLeg> = {};
+  if (Array.isArray(existingLegs)) {
+    for (const l of existingLegs) {
+      if (l && typeof l.legNumber === 'number') existingByNum[l.legNumber] = l;
+    }
+  }
+  const legs: InternalSplitterLeg[] = [];
+  for (let i = 1; i <= count; i++) {
+    const prev = existingByNum[i];
+    const defaultLabel = spec.isAsymmetricFbt
+      ? i === 1
+        ? `Leg 1 · Drop (${spec.dropPercent ?? 10}%)`
+        : `Leg 2 · Through (${spec.thruPercent ?? 90}%)`
+      : `Leg ${i}`;
+    legs.push({
+      legNumber: i,
+      legLabel: defaultLabel,
+      status: prev?.status || 'FREE',
+      subscriber_id: prev?.status === 'SUBSCRIBER_DROP' ? prev.subscriber_id || null : null,
+      subscriber_username: prev?.status === 'SUBSCRIBER_DROP' ? prev.subscriber_username || '' : '',
+      client_label: prev?.client_label || '',
+      target_splitter_id: prev?.status === 'INTERNAL_CASCADE' ? prev.target_splitter_id || null : null,
+      target_cable_id: prev?.status === 'OUTGOING_CABLE_FEED' ? prev.target_cable_id || null : null,
+      target_core_number: prev?.status === 'OUTGOING_CABLE_FEED' ? prev.target_core_number || 1 : null,
+      target_node_name: prev?.target_node_name || '',
+      drop_distance_m: prev?.drop_distance_m ?? 30,
+      calculated_output_dbm: prev?.calculated_output_dbm ?? null,
+    });
+  }
+  return legs;
+}
+
+/**
+ * Evaluates all internal splitters (including splitter-to-splitter cascades within the same enclosure)
+ * and all core splices (Pass-Through Jointing + Internal Splitter Feed) inside a single enclosure node.
+ */
+export function evaluateEnclosureOpticalState(params: {
+  node: SupabaseGisNode;
+  arrivalDbmByCoreKey: Record<string, number>;
+  fallbackInputDbm: number | null;
+}): {
+  evaluatedSplitters: InternalSplitterUnit[];
+  evaluatedCoreSplices: EnclosureCoreSpliceEntry[];
+} {
+  const rawSplitters = Array.isArray(params.node.internal_splitters)
+    ? params.node.internal_splitters
+    : [];
+  const rawSplices = Array.isArray(params.node.core_splices)
+    ? params.node.core_splices
+    : [];
+
+  // Map splitter id -> feeding core splice (if any)
+  const coreFeedBySplitterId: Record<string, EnclosureCoreSpliceEntry> = {};
+  for (const sp of rawSplices) {
+    if (sp.action === 'FEED_INTERNAL_SPLITTER' && sp.target_splitter_id) {
+      coreFeedBySplitterId[sp.target_splitter_id] = sp;
+    }
+  }
+
+  // Clone splitters so multi-pass topological resolution inside the enclosure never mutates inputs
+  const working: InternalSplitterUnit[] = rawSplitters.map((s) => ({
+    ...s,
+    legs: buildDefaultLegsForSplitter(s.splitter_type, s.legs),
+  }));
+  const byId: Record<string, InternalSplitterUnit> = {};
+  for (const s of working) byId[s.id] = s;
+
+  // Iterative resolution handles arbitrary internal cascade ordering (e.g. SPL-2 -> SPL-1 or SPL-1 -> SPL-2 -> SPL-3)
+  const passes = Math.max(1, working.length + 1);
+  for (let pass = 0; pass < passes; pass++) {
+    for (const unit of working) {
+      let inputDbm: number | null = null;
+      if (unit.input_source_type === 'INTERNAL_SPLITTER_LEG' && unit.parent_splitter_id) {
+        const parentUnit = byId[unit.parent_splitter_id];
+        if (parentUnit && parentUnit.id !== unit.id) {
+          const parentSpec = SPLITTER_SPECS[parentUnit.splitter_type] || SPLITTER_SPECS['none'];
+          const legNum = Number(unit.parent_splitter_leg || 1);
+          if (parentSpec.isAsymmetricFbt && legNum === 2) {
+            inputDbm =
+              parentUnit.calculated_thru_dbm !== undefined &&
+              parentUnit.calculated_thru_dbm !== null
+                ? Number(parentUnit.calculated_thru_dbm)
+                : null;
+          } else {
+            inputDbm =
+              parentUnit.calculated_output_dbm !== undefined &&
+              parentUnit.calculated_output_dbm !== null
+                ? Number(parentUnit.calculated_output_dbm)
+                : null;
+          }
+        }
+      } else {
+        // Explicit incoming core on unit, else mapped via core_splices, else fallback node inputDbm
+        const directKey =
+          unit.incoming_cable_id && unit.incoming_core_number
+            ? `${unit.incoming_cable_id}:${unit.incoming_core_number}`
+            : null;
+        const linkedSplice = coreFeedBySplitterId[unit.id];
+        const spliceKey =
+          linkedSplice?.incoming_cable_id && linkedSplice?.incoming_core_number
+            ? `${linkedSplice.incoming_cable_id}:${linkedSplice.incoming_core_number}`
+            : null;
+        if (directKey && params.arrivalDbmByCoreKey[directKey] !== undefined) {
+          inputDbm = params.arrivalDbmByCoreKey[directKey];
+        } else if (spliceKey && params.arrivalDbmByCoreKey[spliceKey] !== undefined) {
+          inputDbm = params.arrivalDbmByCoreKey[spliceKey];
+        } else {
+          inputDbm = params.fallbackInputDbm;
+        }
+      }
+
+      const spec = SPLITTER_SPECS[unit.splitter_type] || SPLITTER_SPECS['none'];
+      const hasInput = inputDbm !== null && !Number.isNaN(Number(inputDbm));
+      const cleanIn = hasInput ? round2(Number(inputDbm)) : null;
+      const dropOut = hasInput
+        ? round2(Number(inputDbm) - spec.dropLossDb)
+        : null;
+      const thruOut = hasInput
+        ? round2(Number(inputDbm) - (spec.isAsymmetricFbt ? spec.thruLossDb : spec.dropLossDb))
+        : null;
+
+      unit.calculated_input_dbm = cleanIn;
+      unit.calculated_output_dbm = dropOut;
+      unit.calculated_thru_dbm = thruOut;
+      unit.legs = unit.legs.map((leg) => ({
+        ...leg,
+        calculated_output_dbm:
+          spec.isAsymmetricFbt && leg.legNumber === 2 ? thruOut : dropOut,
+      }));
+    }
+  }
+
+  // Evaluate core splices (Pass-Through Joints and Internal Splitter Feeds)
+  const evaluatedCoreSplices: EnclosureCoreSpliceEntry[] = rawSplices.map((sp) => {
+    const key = `${sp.incoming_cable_id}:${sp.incoming_core_number}`;
+    const inDbm =
+      params.arrivalDbmByCoreKey[key] !== undefined
+        ? round2(params.arrivalDbmByCoreKey[key])
+        : params.fallbackInputDbm !== null
+        ? round2(params.fallbackInputDbm)
+        : null;
+    const loss =
+      sp.splice_loss_db !== undefined && !Number.isNaN(Number(sp.splice_loss_db))
+        ? Number(sp.splice_loss_db)
+        : DEFAULT_PASS_THROUGH_SPLICE_LOSS_DB;
+    let outDbm: number | null = null;
+    if (inDbm !== null) {
+      if (sp.action === 'PASS_THROUGH_JOINT') {
+        outDbm = round2(inDbm - loss);
+      } else if (sp.action === 'FEED_INTERNAL_SPLITTER') {
+        const targetSpl = sp.target_splitter_id ? byId[sp.target_splitter_id] : undefined;
+        outDbm = targetSpl?.calculated_output_dbm ?? round2(inDbm - loss);
+      } else {
+        outDbm = inDbm;
+      }
+    }
+    return {
+      ...sp,
+      splice_loss_db: loss,
+      calculated_in_dbm: inDbm,
+      calculated_out_dbm: outDbm,
+    };
+  });
+
+  return {
+    evaluatedSplitters: working,
+    evaluatedCoreSplices,
+  };
+}
+
 /**
  * Traverses OLT -> Cable -> DIST_NODE / FOSC_JOINT / FDB_FAT graph and computes exact
  * optical signal budget for every node. Avoids native ES6 Map to keep React
@@ -647,6 +843,7 @@ export function calculateTopologyOpticalBudgets(
   }
 
   const results: Record<string, NodeOpticalBudgetResult> = {};
+  const coreArrivalDbmByNode: Record<string, Record<string, number>> = {};
 
   interface TraversalState {
     nodeId: string;
@@ -672,6 +869,7 @@ export function calculateTopologyOpticalBudgets(
   const bestInputByNode: Record<string, number> = {};
 
   for (const n of nodes) {
+    coreArrivalDbmByNode[n.id] = {};
     if (n.node_type === 'OLT') {
       const tx = Number(n.tx_power_dbm ?? 5.0);
       bestInputByNode[n.id] = tx;
@@ -737,52 +935,80 @@ export function calculateTopologyOpticalBudgets(
     const curNode = nodeById[cur.nodeId];
     if (!curNode) continue;
 
-    // Determine exact calculated optical power leaving curNode along a downstream trunk fiber
-    let outgoingTrunkDbm = cur.inputDbm;
-    let addedThruLoss = 0;
-    let addedSpliceCount = 0;
-    let addedSpliceLoss = 0;
-    let curLeaveStep: OpticalBudgetStep | null = null;
+    // Evaluate internal splitters + pass-through core splices inside curNode given current core arrivals
+    const curEnclosureEval =
+      curNode.node_type !== 'OLT'
+        ? evaluateEnclosureOpticalState({
+            node: curNode,
+            arrivalDbmByCoreKey: coreArrivalDbmByNode[curNode.id] || {},
+            fallbackInputDbm: cur.inputDbm,
+          })
+        : { evaluatedSplitters: [], evaluatedCoreSplices: [] };
+
+    // Determine default optical power leaving curNode along a downstream trunk fiber (fallback when no pass-through joint or explicit leg feed exists)
+    let defaultOutgoingDbm = cur.inputDbm;
+    let defaultAddedThruLoss = 0;
+    let defaultAddedSpliceCount = 0;
+    let defaultAddedSpliceLoss = 0;
+    let defaultLeaveStep: OpticalBudgetStep | null = null;
 
     if (curNode.node_type !== 'OLT') {
-      const spec = SPLITTER_SPECS[curNode.splitter_type] || SPLITTER_SPECS['none'];
       const nodeSplice = resolveHopSpliceLoss(curNode.loss_per_splice);
-      addedSpliceCount = 1;
-      addedSpliceLoss = nodeSplice;
-      if (spec.isAsymmetricFbt) {
-        addedThruLoss = spec.thruLossDb;
-        outgoingTrunkDbm -= spec.thruLossDb + nodeSplice;
-        curLeaveStep = {
-          id: `up-fbt-${curNode.id}`,
-          kind: 'UPSTREAM_SPLITTER',
-          label: `Upstream FBT (${curNode.name})`,
-          detail: `${spec.type} Thru (-${spec.thruLossDb.toFixed(1)} dB) & Splice (-${nodeSplice.toFixed(2)} dB)`,
-          deltaDb: round2(-(spec.thruLossDb + nodeSplice)),
-          powerAfterDbm: round2(outgoingTrunkDbm),
-        };
-      } else if (spec.type !== 'none') {
-        // Cascaded PLC Splitter: downstream nodes fed from curNode inherit curNode's splitter output power
-        addedThruLoss = spec.dropLossDb;
-        outgoingTrunkDbm -= spec.dropLossDb + nodeSplice;
-        curLeaveStep = {
-          id: `up-plc-${curNode.id}`,
-          kind: 'UPSTREAM_SPLITTER',
-          label: `Upstream Splitter (${curNode.name})`,
-          detail: `${spec.type} PLC (-${spec.dropLossDb.toFixed(1)} dB) & Splice (-${nodeSplice.toFixed(2)} dB)`,
-          deltaDb: round2(-(spec.dropLossDb + nodeSplice)),
-          powerAfterDbm: round2(outgoingTrunkDbm),
-        };
+      if (curEnclosureEval.evaluatedSplitters.length > 0) {
+        const primarySpl = curEnclosureEval.evaluatedSplitters[0];
+        const primarySpec = SPLITTER_SPECS[primarySpl.splitter_type] || SPLITTER_SPECS['none'];
+        const splOut = primarySpl.calculated_thru_dbm ?? primarySpl.calculated_output_dbm;
+        if (splOut !== null && splOut !== undefined) {
+          defaultAddedThruLoss = primarySpec.isAsymmetricFbt
+            ? primarySpec.thruLossDb
+            : primarySpec.dropLossDb;
+          defaultOutgoingDbm = Number(splOut);
+          defaultLeaveStep = {
+            id: `up-ispl-${curNode.id}-${primarySpl.id}`,
+            kind: 'UPSTREAM_SPLITTER',
+            label: `Upstream Splitter (${curNode.name} · ${primarySpl.label})`,
+            detail: `${primarySpec.type} (-${defaultAddedThruLoss.toFixed(1)} dB)`,
+            deltaDb: round2(-defaultAddedThruLoss),
+            powerAfterDbm: round2(defaultOutgoingDbm),
+          };
+        }
       } else {
-        // Pure straight pass-through splice (e.g., FOSC Joint Closure with no splitter)
-        outgoingTrunkDbm -= nodeSplice;
-        curLeaveStep = {
-          id: `up-joint-${curNode.id}`,
-          kind: 'UPSTREAM_JOINT',
-          label: `Upstream Splice (${curNode.name})`,
-          detail: `Straight Fusion Splice (-${nodeSplice.toFixed(2)} dB)`,
-          deltaDb: round2(-nodeSplice),
-          powerAfterDbm: round2(outgoingTrunkDbm),
-        };
+        const spec = SPLITTER_SPECS[curNode.splitter_type] || SPLITTER_SPECS['none'];
+        defaultAddedSpliceCount = 1;
+        defaultAddedSpliceLoss = nodeSplice;
+        if (spec.isAsymmetricFbt) {
+          defaultAddedThruLoss = spec.thruLossDb;
+          defaultOutgoingDbm -= spec.thruLossDb + nodeSplice;
+          defaultLeaveStep = {
+            id: `up-fbt-${curNode.id}`,
+            kind: 'UPSTREAM_SPLITTER',
+            label: `Upstream FBT (${curNode.name})`,
+            detail: `${spec.type} Thru (-${spec.thruLossDb.toFixed(1)} dB) & Splice (-${nodeSplice.toFixed(2)} dB)`,
+            deltaDb: round2(-(spec.thruLossDb + nodeSplice)),
+            powerAfterDbm: round2(defaultOutgoingDbm),
+          };
+        } else if (spec.type !== 'none') {
+          defaultAddedThruLoss = spec.dropLossDb;
+          defaultOutgoingDbm -= spec.dropLossDb + nodeSplice;
+          defaultLeaveStep = {
+            id: `up-plc-${curNode.id}`,
+            kind: 'UPSTREAM_SPLITTER',
+            label: `Upstream Splitter (${curNode.name})`,
+            detail: `${spec.type} PLC (-${spec.dropLossDb.toFixed(1)} dB) & Splice (-${nodeSplice.toFixed(2)} dB)`,
+            deltaDb: round2(-(spec.dropLossDb + nodeSplice)),
+            powerAfterDbm: round2(defaultOutgoingDbm),
+          };
+        } else {
+          defaultOutgoingDbm -= nodeSplice;
+          defaultLeaveStep = {
+            id: `up-joint-${curNode.id}`,
+            kind: 'UPSTREAM_JOINT',
+            label: `Upstream Splice (${curNode.name})`,
+            detail: `Straight Fusion Splice (-${nodeSplice.toFixed(2)} dB)`,
+            deltaDb: round2(-nodeSplice),
+            powerAfterDbm: round2(defaultOutgoingDbm),
+          };
+        }
       }
     }
 
@@ -802,11 +1028,10 @@ export function calculateTopologyOpticalBudgets(
           : computePolylineDistanceMeters(cable.route_coordinates_json || []);
       const spanFiberLoss = (spanMeters / 1000) * FIBER_ATTENUATION_DB_PER_KM;
 
-      let effectiveOutgoingDbm = outgoingTrunkDbm;
       let branchOltTxDbm = cur.oltTxDbm;
       let branchPonPortId = cur.sourcePonPortId;
       let branchPonLabel = cur.sourcePonLabel;
-      let branchSteps = cur.upstreamSteps.slice();
+      let baseOltOutDbm = defaultOutgoingDbm;
 
       if (curNode.node_type === 'OLT') {
         const directTargetPon =
@@ -819,12 +1044,76 @@ export function calculateTopologyOpticalBudgets(
         if (cablePonId && ponPortsById[cablePonId]) {
           const ponPort = ponPortsById[cablePonId];
           branchOltTxDbm = Number(ponPort.tx_power_dbm ?? branchOltTxDbm);
-          effectiveOutgoingDbm = branchOltTxDbm;
+          baseOltOutDbm = branchOltTxDbm;
           branchPonPortId = ponPort.id;
           branchPonLabel = ponPort.port_label
             ? `PON-${ponPort.port_number} (${ponPort.port_label})`
             : `PON-${ponPort.port_number}`;
         }
+      }
+
+      // Compute outgoing optical power for EVERY core on this cable (enabling multi-core OLT trunks + Pass-Through Jointing + Splitter Leg feeds!)
+      const totalCores = Math.max(1, Number(cable.cable_cores || 2));
+      const targetFeedCore = Math.max(1, Number(targetNode.feed_core_number || 1));
+      const targetArrivalByCore: Record<number, { outDbm: number; passThroughSplice?: EnclosureCoreSpliceEntry; splitterLegFeed?: { splitter: InternalSplitterUnit; leg: InternalSplitterLeg } }> = {};
+
+      if (!coreArrivalDbmByNode[neighborId]) coreArrivalDbmByNode[neighborId] = {};
+
+      for (let outCore = 1; outCore <= totalCores; outCore++) {
+        let outCoreDbm = curNode.node_type === 'OLT' ? baseOltOutDbm : defaultOutgoingDbm;
+        let matchedPt: EnclosureCoreSpliceEntry | undefined;
+        let matchedLegFeed: { splitter: InternalSplitterUnit; leg: InternalSplitterLeg } | undefined;
+
+        if (curNode.node_type !== 'OLT') {
+          // Priority 1: Pass-Through Joint Splice on curNode targeting (cable.id, outCore)
+          matchedPt = curEnclosureEval.evaluatedCoreSplices.find(
+            (sp) =>
+              sp.action === 'PASS_THROUGH_JOINT' &&
+              sp.outgoing_cable_id === cable.id &&
+              Number(sp.outgoing_core_number || 1) === outCore
+          );
+          if (matchedPt && matchedPt.calculated_out_dbm !== null && matchedPt.calculated_out_dbm !== undefined) {
+            outCoreDbm = Number(matchedPt.calculated_out_dbm);
+          } else {
+            // Priority 2: Internal Splitter Leg assigned as OUTGOING_CABLE_FEED to (cable.id, outCore)
+            for (const spl of curEnclosureEval.evaluatedSplitters) {
+              const foundLeg = spl.legs.find(
+                (l) =>
+                  l.status === 'OUTGOING_CABLE_FEED' &&
+                  l.target_cable_id === cable.id &&
+                  Number(l.target_core_number || 1) === outCore
+              );
+              if (foundLeg && foundLeg.calculated_output_dbm !== null && foundLeg.calculated_output_dbm !== undefined) {
+                matchedLegFeed = { splitter: spl, leg: foundLeg };
+                outCoreDbm = Number(foundLeg.calculated_output_dbm);
+                break;
+              }
+            }
+          }
+        }
+
+        const arrivalCoreDbm = outCoreDbm - spanFiberLoss;
+        coreArrivalDbmByNode[neighborId][`${cable.id}:${outCore}`] = round2(arrivalCoreDbm);
+        targetArrivalByCore[outCore] = {
+          outDbm: outCoreDbm,
+          passThroughSplice: matchedPt,
+          splitterLegFeed: matchedLegFeed,
+        };
+      }
+
+      const selectedCoreInfo =
+        targetArrivalByCore[targetFeedCore] ||
+        targetArrivalByCore[1] || { outDbm: curNode.node_type === 'OLT' ? baseOltOutDbm : defaultOutgoingDbm };
+
+      const effectiveOutgoingDbm = selectedCoreInfo.outDbm;
+      const arrivalDbm = effectiveOutgoingDbm - spanFiberLoss;
+
+      let branchSteps = cur.upstreamSteps.slice();
+      let hopThruLoss = defaultAddedThruLoss;
+      let hopSpliceCount = defaultAddedSpliceCount;
+      let hopSpliceLoss = defaultAddedSpliceLoss;
+
+      if (curNode.node_type === 'OLT') {
         branchSteps = [
           {
             id: `olt-${curNode.id}-${cable.id}`,
@@ -835,11 +1124,38 @@ export function calculateTopologyOpticalBudgets(
             powerAfterDbm: round2(branchOltTxDbm),
           },
         ];
-      } else if (curLeaveStep) {
-        branchSteps.push(curLeaveStep);
+      } else if (selectedCoreInfo.passThroughSplice) {
+        const pt = selectedCoreInfo.passThroughSplice;
+        const ptLoss = Number(pt.splice_loss_db ?? DEFAULT_PASS_THROUGH_SPLICE_LOSS_DB);
+        hopThruLoss = 0;
+        hopSpliceCount = 1;
+        hopSpliceLoss = ptLoss;
+        branchSteps.push({
+          id: `up-pt-${curNode.id}-${cable.id}-${targetFeedCore}`,
+          kind: 'UPSTREAM_JOINT',
+          label: `Pass-Through Joint (${curNode.name})`,
+          detail: `In Core #${pt.incoming_core_number} ➔ Out Core #${pt.outgoing_core_number || targetFeedCore} (-${ptLoss.toFixed(2)} dB Fusion Splice · Splitter Bypassed)`,
+          deltaDb: round2(-ptLoss),
+          powerAfterDbm: round2(effectiveOutgoingDbm),
+        });
+      } else if (selectedCoreInfo.splitterLegFeed) {
+        const { splitter, leg } = selectedCoreInfo.splitterLegFeed;
+        const spec = SPLITTER_SPECS[splitter.splitter_type] || SPLITTER_SPECS['none'];
+        const legLoss = spec.isAsymmetricFbt && leg.legNumber === 2 ? spec.thruLossDb : spec.dropLossDb;
+        hopThruLoss = legLoss;
+        hopSpliceCount = 0;
+        hopSpliceLoss = 0;
+        branchSteps.push({
+          id: `up-leg-${curNode.id}-${splitter.id}-${leg.legNumber}`,
+          kind: 'UPSTREAM_SPLITTER',
+          label: `Upstream Splitter (${curNode.name} · ${splitter.label})`,
+          detail: `${leg.legLabel} · ${splitter.splitter_type} (-${legLoss.toFixed(1)} dB)`,
+          deltaDb: round2(-legLoss),
+          powerAfterDbm: round2(effectiveOutgoingDbm),
+        });
+      } else if (defaultLeaveStep) {
+        branchSteps.push(defaultLeaveStep);
       }
-
-      const arrivalDbm = effectiveOutgoingDbm - spanFiberLoss;
 
       const prevBest = bestInputByNode[neighborId];
       const isForcedFeed = targetNode.feed_cable_id === cable.id;
@@ -856,35 +1172,52 @@ export function calculateTopologyOpticalBudgets(
 
       const totalDist = cur.totalDistanceMeters + spanMeters;
       const totalFiberLoss = cur.fiberLossDb + spanFiberLoss;
-      const totalSpliceCount = cur.spliceCount + addedSpliceCount;
-      const totalSpliceLoss = cur.spliceLossDb + addedSpliceLoss;
-      const totalThruLoss = cur.upstreamThruLossDb + addedThruLoss;
+      const totalSpliceCount = cur.spliceCount + hopSpliceCount;
+      const totalSpliceLoss = cur.spliceLossDb + hopSpliceLoss;
+      const totalThruLoss = cur.upstreamThruLossDb + hopThruLoss;
 
-      const splitterSpec = SPLITTER_SPECS[targetNode.splitter_type] || SPLITTER_SPECS['none'];
+      // Evaluate targetNode using multi-splitter if configured, else legacy single splitter
+      const targetInternalEval = evaluateEnclosureOpticalState({
+        node: targetNode,
+        arrivalDbmByCoreKey: coreArrivalDbmByNode[neighborId],
+        fallbackInputDbm: arrivalDbm,
+      });
+
       const targetSpliceDb = resolveHopSpliceLoss(targetNode.loss_per_splice);
-      const hasSplitter = splitterSpec.type !== 'none';
-      const ontRx = hasSplitter
-        ? arrivalDbm - splitterSpec.dropLossDb - targetSpliceDb
-        : arrivalDbm - targetSpliceDb;
-      const thruOut = splitterSpec.isAsymmetricFbt
-        ? arrivalDbm - splitterSpec.thruLossDb - targetSpliceDb
-        : hasSplitter
-        ? arrivalDbm - splitterSpec.dropLossDb - targetSpliceDb
-        : arrivalDbm - targetSpliceDb;
+      let ontRx = arrivalDbm - targetSpliceDb;
+      let thruOut = arrivalDbm - targetSpliceDb;
+      let targetSplitterLoss = 0;
+      let targetStepDetail: OpticalBudgetStep;
 
-      const feedAndSpliceDelta = -(spanFiberLoss + targetSpliceDb);
-      const afterFeedAndSplice = arrivalDbm - targetSpliceDb;
-      const targetSteps: OpticalBudgetStep[] = [
-        ...branchSteps,
-        {
-          id: `feed-${cable.id}-${neighborId}`,
-          kind: 'FEED_SPLICE',
-          label: 'Feed Cable & Splice',
-          detail: `${cable.cable_cores}C ${Math.round(spanMeters)}m (-${spanFiberLoss.toFixed(2)} dB) + Splice (-${targetSpliceDb.toFixed(2)} dB)`,
-          deltaDb: round2(feedAndSpliceDelta),
-          powerAfterDbm: round2(afterFeedAndSplice),
-        },
-        hasSplitter
+      if (targetInternalEval.evaluatedSplitters.length > 0) {
+        const primarySpl = targetInternalEval.evaluatedSplitters[0];
+        const primarySpec = SPLITTER_SPECS[primarySpl.splitter_type] || SPLITTER_SPECS['none'];
+        targetSplitterLoss = primarySpec.dropLossDb;
+        ontRx = primarySpl.calculated_output_dbm ?? round2(arrivalDbm - primarySpec.dropLossDb);
+        thruOut = primarySpl.calculated_thru_dbm ?? ontRx;
+        targetStepDetail = {
+          id: `split-${neighborId}-${primarySpl.id}`,
+          kind: 'CURRENT_SPLITTER',
+          label: `${primarySpl.label} (${primarySpl.splitter_type})`,
+          detail: `${targetInternalEval.evaluatedSplitters.length} internal splitter${
+            targetInternalEval.evaluatedSplitters.length > 1 ? 's' : ''
+          } (-${primarySpec.dropLossDb.toFixed(1)} dB)`,
+          deltaDb: round2(-primarySpec.dropLossDb),
+          powerAfterDbm: round2(ontRx),
+        };
+      } else {
+        const splitterSpec = SPLITTER_SPECS[targetNode.splitter_type] || SPLITTER_SPECS['none'];
+        const hasSplitter = splitterSpec.type !== 'none';
+        targetSplitterLoss = splitterSpec.dropLossDb;
+        ontRx = hasSplitter
+          ? arrivalDbm - splitterSpec.dropLossDb - targetSpliceDb
+          : arrivalDbm - targetSpliceDb;
+        thruOut = splitterSpec.isAsymmetricFbt
+          ? arrivalDbm - splitterSpec.thruLossDb - targetSpliceDb
+          : hasSplitter
+          ? arrivalDbm - splitterSpec.dropLossDb - targetSpliceDb
+          : arrivalDbm - targetSpliceDb;
+        targetStepDetail = hasSplitter
           ? {
               id: `split-${neighborId}`,
               kind: 'CURRENT_SPLITTER',
@@ -900,17 +1233,44 @@ export function calculateTopologyOpticalBudgets(
               detail: 'No internal splitter',
               deltaDb: 0,
               powerAfterDbm: round2(ontRx),
-            },
+            };
+      }
+
+      const feedAndSpliceDelta =
+        targetInternalEval.evaluatedSplitters.length > 0
+          ? -spanFiberLoss
+          : -(spanFiberLoss + targetSpliceDb);
+      const afterFeedAndSplice =
+        targetInternalEval.evaluatedSplitters.length > 0
+          ? arrivalDbm
+          : arrivalDbm - targetSpliceDb;
+
+      const targetSteps: OpticalBudgetStep[] = [
+        ...branchSteps,
+        {
+          id: `feed-${cable.id}-${neighborId}`,
+          kind: 'FEED_SPLICE',
+          label:
+            targetInternalEval.evaluatedSplitters.length > 0
+              ? `Feed Cable (Core #${targetFeedCore} · ${getTia598Color(targetFeedCore).name})`
+              : 'Feed Cable & Splice',
+          detail:
+            targetInternalEval.evaluatedSplitters.length > 0
+              ? `${cable.cable_cores}C ${Math.round(spanMeters)}m (-${spanFiberLoss.toFixed(2)} dB)`
+              : `${cable.cable_cores}C ${Math.round(spanMeters)}m (-${spanFiberLoss.toFixed(2)} dB) + Splice (-${targetSpliceDb.toFixed(2)} dB)`,
+          deltaDb: round2(feedAndSpliceDelta),
+          powerAfterDbm: round2(afterFeedAndSplice),
+        },
+        targetStepDetail,
       ];
 
-      // Steps recorded onto traversal state if neighborId itself feeds a further downstream node
       const nextUpstreamSteps: OpticalBudgetStep[] = [
         ...branchSteps,
         {
           id: `cable-${cable.id}-${neighborId}`,
           kind: 'CABLE',
           label: `Cable to ${targetNode.name}`,
-          detail: `${cable.cable_cores}C · ${Math.round(spanMeters)}m @ 0.35 dB/km`,
+          detail: `${cable.cable_cores}C · Core #${targetFeedCore} · ${Math.round(spanMeters)}m @ 0.35 dB/km`,
           deltaDb: round2(-spanFiberLoss),
           powerAfterDbm: round2(arrivalDbm),
         },
@@ -929,15 +1289,18 @@ export function calculateTopologyOpticalBudgets(
         ontRxDbm: round2(ontRx),
         totalDistanceMeters: Math.round(totalDist),
         fiberLossDb: round2(totalFiberLoss),
-        spliceCount: totalSpliceCount + 1,
-        spliceLossDb: round2(totalSpliceLoss + targetSpliceDb),
+        spliceCount: totalSpliceCount + (targetInternalEval.evaluatedSplitters.length > 0 ? 0 : 1),
+        spliceLossDb: round2(
+          totalSpliceLoss + (targetInternalEval.evaluatedSplitters.length > 0 ? 0 : targetSpliceDb)
+        ),
         upstreamThruLossDb: round2(totalThruLoss),
-        splitterLossDb: round2(splitterSpec.dropLossDb),
+        splitterLossDb: round2(targetSplitterLoss),
         localFiberLossDb: round2(spanFiberLoss),
-        localSpliceLossDb: round2(targetSpliceDb),
+        localSpliceLossDb:
+          targetInternalEval.evaluatedSplitters.length > 0 ? 0 : round2(targetSpliceDb),
         healthBand: classifyOpticalHealth(ontRx),
         incomingCableId: cable.id,
-        incomingCoreNumber: targetNode.feed_core_number ?? 1,
+        incomingCoreNumber: targetFeedCore,
         parentNodeId: cur.nodeId,
         hopCount: cur.hopCount + 1,
         budgetSteps: targetSteps,
@@ -957,7 +1320,7 @@ export function calculateTopologyOpticalBudgets(
         spliceLossDb: totalSpliceLoss,
         upstreamThruLossDb: totalThruLoss,
         incomingCableId: cable.id,
-        incomingCoreNumber: targetNode.feed_core_number ?? 1,
+        incomingCoreNumber: targetFeedCore,
         hopCount: cur.hopCount + 1,
         pathNodeIds: [...cur.pathNodeIds, neighborId],
         upstreamSteps: nextUpstreamSteps,
@@ -966,6 +1329,7 @@ export function calculateTopologyOpticalBudgets(
   }
 
   for (const n of nodes) {
+    const arrivals = coreArrivalDbmByNode[n.id] || {};
     if (!results[n.id]) {
       const spec = SPLITTER_SPECS[n.splitter_type] || SPLITTER_SPECS['none'];
       results[n.id] = {
@@ -995,6 +1359,47 @@ export function calculateTopologyOpticalBudgets(
         budgetSteps: [],
       };
     }
+
+    const r = results[n.id];
+    const evalState = evaluateEnclosureOpticalState({
+      node: n,
+      arrivalDbmByCoreKey: arrivals,
+      fallbackInputDbm: r.inputDbm,
+    });
+    const boxCapacity = Math.max(
+      Number(n.box_capacity || 0),
+      Number(n.total_ports || 0),
+      n.node_type === 'FDB_FAT' ? 8 : 0
+    );
+    let totalAllocated = 0;
+    let usedPorts = 0;
+    if (evalState.evaluatedSplitters.length > 0) {
+      for (const sp of evalState.evaluatedSplitters) {
+        totalAllocated += sp.legs.length;
+        usedPorts += sp.legs.filter((l) => l.status !== 'FREE').length;
+      }
+    } else {
+      totalAllocated = Number(n.total_ports || 0);
+    }
+
+    r.arrivalDbmByCoreKey = arrivals;
+    r.evaluatedSplitters = evalState.evaluatedSplitters;
+    r.evaluatedCoreSplices = evalState.evaluatedCoreSplices;
+    r.enclosureSummary = {
+      boxCapacity: Math.max(boxCapacity, totalAllocated),
+      splitterCount:
+        evalState.evaluatedSplitters.length > 0
+          ? evalState.evaluatedSplitters.length
+          : n.splitter_type && n.splitter_type !== 'none'
+          ? 1
+          : 0,
+      totalAllocatedPorts: totalAllocated,
+      usedPorts,
+      freePorts: Math.max(0, Math.max(boxCapacity, totalAllocated) - usedPorts),
+      passThroughJointCount: evalState.evaluatedCoreSplices.filter(
+        (s) => s.action === 'PASS_THROUGH_JOINT'
+      ).length,
+    };
   }
 
   return results;

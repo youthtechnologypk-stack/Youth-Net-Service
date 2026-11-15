@@ -2,14 +2,17 @@ import React, { useEffect, useMemo, useState } from 'react';
 import {
   Activity,
   AlertTriangle,
+  ArrowRight,
   Cable,
   CheckCircle2,
   ClipboardCheck,
   GitBranch,
   History,
   Layers,
+  Link2,
   Navigation,
   Phone,
+  Plus,
   Radio,
   RefreshCw,
   Save,
@@ -17,6 +20,7 @@ import {
   Search,
   Server,
   ShieldAlert,
+  Sliders,
   Trash2,
   UserPlus,
   Users,
@@ -24,6 +28,8 @@ import {
   X,
 } from 'lucide-react';
 import type {
+  CoreSpliceAction,
+  EnclosureCoreSpliceEntry,
   GisCableTypeCode,
   GisCoreEntry,
   GisCoreLedgerStatus,
@@ -34,6 +40,9 @@ import type {
   GisSpliceStatus,
   GisSplitterCategory,
   GisSplitterType,
+  InternalSplitterInputType,
+  InternalSplitterLegStatus,
+  InternalSplitterUnit,
   OltSfpClass,
   SplitterUtilizationType,
   SupabaseGisCable,
@@ -47,13 +56,17 @@ import type { GisSubscriberSummary } from '../../services/fiberGisService';
 import {
   CABLE_CAPACITY_PRESETS,
   DEFAULT_FUSION_SPLICE_LOSS_DB,
+  DEFAULT_PASS_THROUGH_SPLICE_LOSS_DB,
+  FDB_ENCLOSURE_CAPACITIES,
   NodeOpticalBudgetResult,
   SFP_TX_PRESETS,
   SPLITTER_SPECS,
+  buildDefaultLegsForSplitter,
   cableCoresToType,
   calculateTopologyOpticalBudgets,
   coreStatusToLedgerStatus,
   coreStatusToUsageType,
+  evaluateEnclosureOpticalState,
   generateDefaultSpliceTray,
   getDefaultMaxOnuLimit,
   getFbtLegOutputs,
@@ -123,6 +136,7 @@ interface FiberGisInspectorPanelProps {
   onOpenEditOlt?: (oltId: string) => void;
   onUpdatePonPort?: (portId: string, patch: Partial<SupabaseGisOltPonPort>) => Promise<void>;
   onOpenUpgradeModal?: (node: SupabaseGisNode) => void;
+  onRouteCableFromNode?: (node: SupabaseGisNode) => void;
   onFocusNode?: (node: SupabaseGisNode) => void;
 }
 
@@ -154,8 +168,9 @@ export const FiberGisInspectorPanel: React.FC<FiberGisInspectorPanelProps> = ({
   onOpenEditOlt,
   onUpdatePonPort,
   onOpenUpgradeModal,
+  onRouteCableFromNode,
 }) => {
-  const [fdbSubTab, setFdbSubTab] = useState<'ports' | 'signal'>('ports');
+  const [fdbSubTab, setFdbSubTab] = useState<'ports' | 'splices' | 'signal'>('ports');
   const [confirmDelete, setConfirmDelete] = useState(false);
   const [ponTxDrafts, setPonTxDrafts] = useState<Record<string, number>>({});
   const [editingPonId, setEditingPonId] = useState<string | null>(null);
@@ -167,6 +182,7 @@ export const FiberGisInspectorPanel: React.FC<FiberGisInspectorPanelProps> = ({
   const [nodeSplitter, setNodeSplitter] = useState<GisSplitterType>('1:8');
   const [nodeSplitterCat, setNodeSplitterCat] = useState<GisSplitterCategory>('PLC_EQUAL');
   const [nodeTotalPorts, setNodeTotalPorts] = useState<number>(8);
+  const [nodeBoxCapacity, setNodeBoxCapacity] = useState<number>(8);
   const [nodeFeedCableId, setNodeFeedCableId] = useState<string>('');
   const [nodeFeedCore, setNodeFeedCore] = useState<number>(1);
   const [nodeFeedCorePair, setNodeFeedCorePair] = useState<string>('');
@@ -175,6 +191,11 @@ export const FiberGisInspectorPanel: React.FC<FiberGisInspectorPanelProps> = ({
   const [nodeLossPerSplice, setNodeLossPerSplice] = useState<number>(DEFAULT_FUSION_SPLICE_LOSS_DB);
   const [nodeNotes, setNodeNotes] = useState('');
   const [spliceTrayDraft, setSpliceTrayDraft] = useState<GisSpliceEntry[]>([]);
+  const [internalSplittersDraft, setInternalSplittersDraft] = useState<InternalSplitterUnit[]>([]);
+  const [coreSplicesDraft, setCoreSplicesDraft] = useState<EnclosureCoreSpliceEntry[]>([]);
+  const [activeLegEditor, setActiveLegEditor] = useState<{ splitterId: string; legNumber: number } | null>(null);
+  const [legSubSearch, setLegSubSearch] = useState('');
+  const [showAllSpliceCables, setShowAllSpliceCables] = useState(false);
 
   // Cable editable draft
   const [cableName, setCableName] = useState('');
@@ -201,7 +222,10 @@ export const FiberGisInspectorPanel: React.FC<FiberGisInspectorPanelProps> = ({
   useEffect(() => {
     setConfirmDelete(false);
     setEditingPortNum(null);
+    setActiveLegEditor(null);
     setSubSearch('');
+    setLegSubSearch('');
+    setShowAllSpliceCables(false);
     if (selectedNode) {
       const spType = (selectedNode.splitter_type ||
         (selectedNode.node_type === 'FDB_FAT' ? '1:8' : 'none')) as GisSplitterType;
@@ -212,7 +236,9 @@ export const FiberGisInspectorPanel: React.FC<FiberGisInspectorPanelProps> = ({
       setNodeSplitterCat(
         selectedNode.splitter_category || inferSplitterCategory(spType)
       );
-      setNodeTotalPorts(Number(selectedNode.total_ports ?? 8));
+      const tPorts = Number(selectedNode.total_ports ?? 8);
+      setNodeTotalPorts(tPorts);
+      setNodeBoxCapacity(Math.max(Number(selectedNode.box_capacity ?? tPorts), tPorts));
       setNodeFeedCableId(selectedNode.feed_cable_id || '');
       setNodeFeedCore(Number(selectedNode.feed_core_number ?? 1));
       setNodeFeedCorePair(selectedNode.feed_core_pair || '');
@@ -225,6 +251,17 @@ export const FiberGisInspectorPanel: React.FC<FiberGisInspectorPanelProps> = ({
         Array.isArray(selectedNode.splice_tray_json) && selectedNode.splice_tray_json.length > 0
           ? selectedNode.splice_tray_json
           : generateDefaultSpliceTray(cap)
+      );
+      setInternalSplittersDraft(
+        Array.isArray(selectedNode.internal_splitters)
+          ? selectedNode.internal_splitters.map((s) => ({
+              ...s,
+              legs: buildDefaultLegsForSplitter(s.splitter_type, s.legs),
+            }))
+          : []
+      );
+      setCoreSplicesDraft(
+        Array.isArray(selectedNode.core_splices) ? selectedNode.core_splices : []
       );
     }
   }, [selectedNode]);
@@ -295,16 +332,51 @@ export const FiberGisInspectorPanel: React.FC<FiberGisInspectorPanelProps> = ({
       .slice(0, 40);
   }, [subscribers, subSearch]);
 
+  const filteredLegSubscribers = useMemo(() => {
+    const q = legSubSearch.trim().toLowerCase();
+    if (!q) return subscribers.slice(0, 40);
+    return subscribers
+      .filter(
+        (s) =>
+          s.username.toLowerCase().includes(q) ||
+          s.fullName.toLowerCase().includes(q) ||
+          s.phone.toLowerCase().includes(q) ||
+          s.area.toLowerCase().includes(q)
+      )
+      .slice(0, 40);
+  }, [subscribers, legSubSearch]);
+
   const hasUnsavedOpticalEdits = useMemo(() => {
     if (!selectedNode) return false;
+    const savedSplitters = Array.isArray(selectedNode.internal_splitters)
+      ? selectedNode.internal_splitters
+      : [];
+    const savedSplices = Array.isArray(selectedNode.core_splices)
+      ? selectedNode.core_splices
+      : [];
     return (
       (selectedNode.feed_cable_id || '') !== nodeFeedCableId ||
+      Number(selectedNode.feed_core_number ?? 1) !== Number(nodeFeedCore) ||
       (selectedNode.splitter_type || 'none') !== nodeSplitter ||
       (selectedNode.pon_port_id || '') !== nodePonPortId ||
+      Number(selectedNode.box_capacity ?? selectedNode.total_ports ?? 8) !== Number(nodeBoxCapacity) ||
+      JSON.stringify(savedSplitters) !== JSON.stringify(internalSplittersDraft) ||
+      JSON.stringify(savedSplices) !== JSON.stringify(coreSplicesDraft) ||
       Math.abs(resolveHopSpliceLoss(selectedNode.loss_per_splice) - Number(nodeLossPerSplice || DEFAULT_FUSION_SPLICE_LOSS_DB)) > 0.001 ||
       (selectedNode.node_type === 'OLT' && Math.abs(Number(selectedNode.tx_power_dbm ?? 5.0) - Number(nodeTxPower)) > 0.01)
     );
-  }, [selectedNode, nodeFeedCableId, nodeSplitter, nodePonPortId, nodeLossPerSplice, nodeTxPower]);
+  }, [
+    selectedNode,
+    nodeFeedCableId,
+    nodeFeedCore,
+    nodeSplitter,
+    nodePonPortId,
+    nodeBoxCapacity,
+    internalSplittersDraft,
+    coreSplicesDraft,
+    nodeLossPerSplice,
+    nodeTxPower,
+  ]);
 
   const liveDraftBudget = useMemo(() => {
     if (!selectedNode || !hasUnsavedOpticalEdits) return null;
@@ -317,6 +389,10 @@ export const FiberGisInspectorPanel: React.FC<FiberGisInspectorPanelProps> = ({
             pon_port_id: nodePonPortId || null,
             splitter_type: nodeSplitter,
             splitter_category: nodeSplitterCat,
+            total_ports: Math.max(Number(nodeTotalPorts) || 0, Number(nodeBoxCapacity) || 0),
+            box_capacity: Number(nodeBoxCapacity) || 8,
+            internal_splitters: internalSplittersDraft,
+            core_splices: coreSplicesDraft,
             loss_per_splice: Number(nodeLossPerSplice) || DEFAULT_FUSION_SPLICE_LOSS_DB,
             tx_power_dbm: Number(nodeTxPower),
           }
@@ -335,6 +411,10 @@ export const FiberGisInspectorPanel: React.FC<FiberGisInspectorPanelProps> = ({
     nodePonPortId,
     nodeSplitter,
     nodeSplitterCat,
+    nodeTotalPorts,
+    nodeBoxCapacity,
+    internalSplittersDraft,
+    coreSplicesDraft,
     nodeLossPerSplice,
     nodeTxPower,
   ]);
@@ -349,18 +429,41 @@ export const FiberGisInspectorPanel: React.FC<FiberGisInspectorPanelProps> = ({
     const spec = SPLITTER_SPECS[nextType];
     if (spec) {
       setNodeTotalPorts(spec.defaultPorts);
+      setNodeBoxCapacity((prev) => Math.max(prev, spec.defaultPorts));
     }
   };
 
   const handleSaveNodeClick = async () => {
     if (!selectedNode) return;
+    const budgetForSave = liveDraftBudget || budgetsByNodeId[selectedNode.id];
+    const evalState = evaluateEnclosureOpticalState({
+      node: {
+        ...selectedNode,
+        internal_splitters: internalSplittersDraft,
+        core_splices: coreSplicesDraft,
+      },
+      arrivalDbmByCoreKey: budgetForSave?.arrivalDbmByCoreKey || {},
+      fallbackInputDbm: budgetForSave?.inputDbm ?? null,
+    });
+    const effectivePorts = Math.max(
+      0,
+      Math.min(
+        48,
+        internalSplittersDraft.length > 0
+          ? Number(nodeBoxCapacity) || 8
+          : Number(nodeTotalPorts) || 0
+      )
+    );
     await onSaveNode(selectedNode.id, {
       name: nodeName.trim() || selectedNode.name,
       area_name: nodeArea.trim(),
       tx_power_dbm: Number(nodeTxPower),
       splitter_category: nodeSplitterCat,
       splitter_type: nodeSplitter,
-      total_ports: Math.max(0, Math.min(32, Number(nodeTotalPorts) || 0)),
+      total_ports: effectivePorts,
+      box_capacity: Math.max(4, Math.min(48, Number(nodeBoxCapacity) || effectivePorts || 8)),
+      internal_splitters: evalState.evaluatedSplitters,
+      core_splices: evalState.evaluatedCoreSplices,
       feed_cable_id: nodeFeedCableId || null,
       feed_core_number: Number(nodeFeedCore) || 1,
       feed_core_pair: nodeFeedCorePair.trim(),
@@ -403,23 +506,48 @@ export const FiberGisInspectorPanel: React.FC<FiberGisInspectorPanelProps> = ({
     const outputsByNumber: Record<number, SupabaseGisSplitterOutput> = {};
     for (const o of nodeOutputs) outputsByNumber[o.port_number] = o;
 
+    const hasMultiSplitters = internalSplittersDraft.length > 0;
+    const liveEnclosureEval = evaluateEnclosureOpticalState({
+      node: {
+        ...node,
+        box_capacity: nodeBoxCapacity,
+        internal_splitters: internalSplittersDraft,
+        core_splices: coreSplicesDraft,
+      },
+      arrivalDbmByCoreKey: budget?.arrivalDbmByCoreKey || {},
+      fallbackInputDbm: budget?.inputDbm ?? null,
+    });
+    const evaluatedSplitters = liveEnclosureEval.evaluatedSplitters;
+    const evaluatedCoreSplices = liveEnclosureEval.evaluatedCoreSplices;
+
     const currentSplitterSpec = SPLITTER_SPECS[nodeSplitter] || SPLITTER_SPECS['none'];
-    const totalPorts =
-      currentSplitterSpec.type !== 'none'
-        ? currentSplitterSpec.isAsymmetricFbt
-          ? 2
-          : Math.max(1, Number(node.total_ports ?? currentSplitterSpec.defaultPorts ?? 8))
-        : Math.max(0, Number(node.total_ports ?? 0));
+    const totalAllocatedLegs = evaluatedSplitters.reduce((sum, sp) => sum + sp.legs.length, 0);
+    const totalPorts = hasMultiSplitters
+      ? Math.max(nodeBoxCapacity, totalAllocatedLegs)
+      : currentSplitterSpec.type !== 'none'
+      ? currentSplitterSpec.isAsymmetricFbt
+        ? 2
+        : Math.max(1, Number(nodeBoxCapacity || node.total_ports || currentSplitterSpec.defaultPorts || 8))
+      : Math.max(0, Number(nodeBoxCapacity || node.total_ports || 0));
 
     let usedCount = 0;
-    for (let i = 1; i <= totalPorts; i++) {
-      const out = outputsByNumber[i];
-      const fdbP = portsByNumber[i];
-      if (out ? out.utilization_type !== 'FREE_PORT' : fdbP && fdbP.status !== 'FREE') {
-        usedCount++;
+    if (hasMultiSplitters) {
+      for (const sp of evaluatedSplitters) {
+        usedCount += sp.legs.filter((l) => l.status !== 'FREE').length;
+      }
+    } else {
+      for (let i = 1; i <= totalPorts; i++) {
+        const out = outputsByNumber[i];
+        const fdbP = portsByNumber[i];
+        if (out ? out.utilization_type !== 'FREE_PORT' : fdbP && fdbP.status !== 'FREE') {
+          usedCount++;
+        }
       }
     }
     const freePorts = Math.max(0, totalPorts - usedCount);
+    const passThroughCount = evaluatedCoreSplices.filter(
+      (sp) => sp.action === 'PASS_THROUGH_JOINT'
+    ).length;
 
     const incomingCoreNum = budget?.incomingCoreNumber || node.feed_core_number || 1;
     const incomingCoreSpec = getTia598Color(incomingCoreNum);
@@ -427,6 +555,88 @@ export const FiberGisInspectorPanel: React.FC<FiberGisInspectorPanelProps> = ({
     const fbtLegs = currentSplitterSpec.isAsymmetricFbt
       ? getFbtLegOutputs(budget?.inputDbm ?? null, nodeSplitter, nodeLossPerSplice)
       : null;
+
+    const incomingFeedCableId =
+      nodeFeedCableId || budget?.incomingCableId || node.feed_cable_id || '';
+    const incomingCablesForBox = connectedCables.filter((c) => {
+      if (incomingFeedCableId && c.id === incomingFeedCableId) return true;
+      const otherId = c.source_node_id === node.id ? c.target_node_id : c.source_node_id;
+      const otherNode = nodesById[otherId];
+      if (otherNode?.node_type === 'OLT') return true;
+      if (budget?.parentNodeId && otherId === budget.parentNodeId) return true;
+      return c.target_node_id === node.id && !evaluatedCoreSplices.some((s) => s.outgoing_cable_id === c.id);
+    });
+    const normalizedIncomingCables =
+      incomingCablesForBox.length > 0 ? incomingCablesForBox : connectedCables.slice(0, 1);
+    const outgoingCablesForBox = connectedCables.filter(
+      (c) => c.id !== incomingFeedCableId && !normalizedIncomingCables.some((inc) => inc.id === c.id)
+    );
+
+    const addInternalSplitterUnit = (seedFromLegacy = false) => {
+      const nextNum = internalSplittersDraft.length + 1;
+      const defaultId = `SPL-${nextNum}-${Math.random().toString(36).slice(2, 5)}`;
+      const chosenType: GisSplitterType = seedFromLegacy
+        ? nodeSplitter !== 'none'
+          ? nodeSplitter
+          : '1:8'
+        : nextNum === 1
+        ? nodeSplitter !== 'none'
+          ? nodeSplitter
+          : '1:8'
+        : '1:8';
+      const defaultCable = incomingFeedCableId || normalizedIncomingCables[0]?.id || null;
+      const defaultCore = Number(nodeFeedCore || 1);
+      let seededLegs = buildDefaultLegsForSplitter(chosenType, null);
+      if (seedFromLegacy) {
+        seededLegs = seededLegs.map((leg) => {
+          const out = outputsByNumber[leg.legNumber];
+          const fp = portsByNumber[leg.legNumber];
+          if (out) {
+            return {
+              ...leg,
+              status:
+                out.utilization_type === 'CLIENT_ONT'
+                  ? 'SUBSCRIBER_DROP'
+                  : out.utilization_type === 'FAULTY'
+                  ? 'FAULTY'
+                  : out.utilization_type === 'DOWNSTREAM_AREA_FEED' ||
+                    out.utilization_type === 'CASCADED_SPLITTER'
+                  ? 'OUTGOING_CABLE_FEED'
+                  : 'FREE',
+              subscriber_id: out.subscriber_id || null,
+              subscriber_username: out.subscriber_username || '',
+              client_label: out.client_name_manual || '',
+              target_node_name: out.target_area_or_node || '',
+              drop_distance_m: out.drop_distance_m ?? 30,
+            };
+          }
+          if (fp && fp.status !== 'FREE') {
+            return {
+              ...leg,
+              status: fp.status === 'FAULTY' ? 'FAULTY' : 'SUBSCRIBER_DROP',
+              subscriber_id: fp.subscriber_id || null,
+              subscriber_username: fp.subscriber_username || '',
+              client_label: fp.client_label || '',
+              drop_distance_m: fp.drop_cable_meters ?? 30,
+            };
+          }
+          return leg;
+        });
+      }
+      const newUnit: InternalSplitterUnit = {
+        id: defaultId,
+        label: `SPL-${nextNum}`,
+        splitter_type: chosenType,
+        input_source_type: 'INCOMING_CORE',
+        incoming_cable_id: defaultCable,
+        incoming_core_number: defaultCore,
+        parent_splitter_id: null,
+        parent_splitter_leg: null,
+        legs: seededLegs,
+      };
+      setInternalSplittersDraft((prev) => [...prev, newUnit]);
+      setNodeBoxCapacity((prev) => Math.max(prev, totalAllocatedLegs + seededLegs.length, 16));
+    };
 
     const allPonPortOptions: Array<{ id: string; label: string }> = [];
     for (const o of olts) {
@@ -504,84 +714,834 @@ export const FiberGisInspectorPanel: React.FC<FiberGisInspectorPanelProps> = ({
           </div>
         </div>
 
-        {/* Sub-tabs for FDB_FAT & DIST_NODE */}
-        {(node.node_type === 'FDB_FAT' || node.node_type === 'DIST_NODE') && (
-          <div className="px-4 pt-2.5 pb-2 border-b border-slate-800 bg-slate-900/80 grid grid-cols-2 gap-2 shrink-0">
+        {/* Sub-tabs for FDB_FAT, DIST_NODE, & FOSC_JOINT */}
+        {(node.node_type === 'FDB_FAT' ||
+          node.node_type === 'DIST_NODE' ||
+          node.node_type === 'FOSC_JOINT') && (
+          <div className="px-3 pt-2 pb-2 border-b border-slate-800 bg-slate-900/80 grid grid-cols-3 gap-1.5 shrink-0">
             <button
               type="button"
               onClick={() => setFdbSubTab('ports')}
-              className={`min-h-[40px] px-3 py-1.5 rounded-lg text-xs font-mono font-bold transition cursor-pointer flex items-center justify-center gap-1.5 ${
+              className={`min-h-[38px] px-2 py-1.5 rounded-lg text-[11px] font-mono font-bold transition cursor-pointer flex items-center justify-center gap-1 ${
                 fdbSubTab === 'ports'
                   ? 'bg-cyan-600 text-slate-950 shadow'
                   : 'bg-slate-950 text-slate-300 border border-slate-800 hover:border-slate-700'
               }`}
             >
-              <Users className="w-3.5 h-3.5" />
-              <span>
-                {totalPorts > 0 ? `Outputs (${freePorts}/${totalPorts} Free)` : 'Splitter & Legs'}
+              <Users className="w-3.5 h-3.5 shrink-0" />
+              <span className="truncate">
+                {hasMultiSplitters
+                  ? `Splitters (${evaluatedSplitters.length})`
+                  : totalPorts > 0
+                  ? `Ports (${freePorts}/${totalPorts})`
+                  : 'Splitters'}
+              </span>
+            </button>
+            <button
+              type="button"
+              onClick={() => setFdbSubTab('splices')}
+              className={`min-h-[38px] px-2 py-1.5 rounded-lg text-[11px] font-mono font-bold transition cursor-pointer flex items-center justify-center gap-1 ${
+                fdbSubTab === 'splices'
+                  ? 'bg-cyan-600 text-slate-950 shadow'
+                  : 'bg-slate-950 text-slate-300 border border-slate-800 hover:border-slate-700'
+              }`}
+            >
+              <Link2 className="w-3.5 h-3.5 shrink-0" />
+              <span className="truncate">
+                Core Splices{passThroughCount > 0 ? ` (${passThroughCount})` : ''}
               </span>
             </button>
             <button
               type="button"
               onClick={() => setFdbSubTab('signal')}
-              className={`min-h-[40px] px-3 py-1.5 rounded-lg text-xs font-mono font-bold transition cursor-pointer flex items-center justify-center gap-1.5 ${
+              className={`min-h-[38px] px-2 py-1.5 rounded-lg text-[11px] font-mono font-bold transition cursor-pointer flex items-center justify-center gap-1 ${
                 fdbSubTab === 'signal'
                   ? 'bg-cyan-600 text-slate-950 shadow'
                   : 'bg-slate-950 text-slate-300 border border-slate-800 hover:border-slate-700'
               }`}
             >
-              <Activity className="w-3.5 h-3.5" />
-              <span>Signal &amp; Triage</span>
+              <Activity className="w-3.5 h-3.5 shrink-0" />
+              <span className="truncate">Signal &amp; Log</span>
             </button>
           </div>
         )}
 
         {/* Scrollable Body */}
         <div className="flex-1 overflow-y-auto p-4 space-y-4 text-xs">
-          {/* FDB / DIST / FOSC Optical Summary Strip when applicable */}
-          {(node.node_type === 'FDB_FAT' || node.node_type === 'DIST_NODE') && fdbSubTab === 'ports' && (
+          {/* TAB 1: Multi-Splitter Enclosure & Outputs */}
+          {(node.node_type === 'FDB_FAT' ||
+            node.node_type === 'DIST_NODE' ||
+            node.node_type === 'FOSC_JOINT') &&
+            fdbSubTab === 'ports' && (
             <div className="space-y-3">
-              {/* Quick Optical Summary Strip */}
-              <div className="p-3 rounded-xl bg-slate-950 border border-slate-800 flex items-center justify-between gap-2 font-mono">
-                <div>
-                  <span className="text-[10px] text-slate-400 uppercase block">
-                    {node.splitter_type === 'none'
-                      ? 'Pass-Through / No Splitter'
-                      : `${node.splitter_type} ${
-                          SPLITTER_SPECS[node.splitter_type]?.isAsymmetricFbt
-                            ? 'FBT Ratio'
-                            : 'PLC Splitter'
-                        }`}
-                  </span>
-                  <div className="text-xs font-bold text-white tabular-nums mt-0.5">
-                    {budget?.oltName ? `${budget.oltName} · ` : ''}
-                    <span className={healthStyle.textClass}>
-                      {budget?.ontRxDbm !== null && budget?.ontRxDbm !== undefined
-                        ? `${budget.ontRxDbm.toFixed(1)} dBm`
-                        : 'Unlinked'}
+              {/* Box Capacity Selector (4 - 48 Ports) & Optical Summary */}
+              <div className="p-3 rounded-xl bg-slate-950 border border-slate-800 space-y-2.5 font-mono">
+                <div className="flex items-center justify-between gap-2">
+                  <div>
+                    <span className="text-[10px] text-slate-400 uppercase block">
+                      Enclosure Capacity &amp; Splitters
+                    </span>
+                    <div className="text-xs font-bold text-white tabular-nums mt-0.5">
+                      {budget?.oltName ? `${budget.oltName} · ` : ''}
+                      <span className={healthStyle.textClass}>
+                        {budget?.ontRxDbm !== null && budget?.ontRxDbm !== undefined
+                          ? `${budget.ontRxDbm.toFixed(1)} dBm`
+                          : 'Unlinked'}
+                      </span>
+                    </div>
+                  </div>
+                  <div className="text-right">
+                    <span className="text-[10px] text-slate-400 uppercase block">
+                      Ports Used / Cap
+                    </span>
+                    <span
+                      className={`text-sm font-bold tabular-nums ${
+                        totalPorts === 0
+                          ? 'text-slate-400'
+                          : freePorts === 0
+                          ? 'text-rose-400'
+                          : freePorts <= 2
+                          ? 'text-amber-400'
+                          : 'text-emerald-400'
+                      }`}
+                    >
+                      {usedCount} / {totalPorts} ({freePorts} Free)
                     </span>
                   </div>
                 </div>
-                <div className="text-right">
-                  <span className="text-[10px] text-slate-400 uppercase block">Free Ports</span>
-                  <span
-                    className={`text-sm font-bold tabular-nums ${
-                      totalPorts === 0
-                        ? 'text-slate-400'
-                        : freePorts === 0
-                        ? 'text-rose-400'
-                        : freePorts <= 2
-                        ? 'text-amber-400'
-                        : 'text-emerald-400'
-                    }`}
-                  >
-                    {freePorts} / {totalPorts}
+
+                <div>
+                  <span className="text-[10px] text-slate-400 block mb-1">
+                    Box Port Capacity (Up to 48 Ports)
                   </span>
+                  <div className="grid grid-cols-7 gap-1">
+                    {FDB_ENCLOSURE_CAPACITIES.map((cap) => (
+                      <button
+                        key={cap}
+                        type="button"
+                        onClick={() => {
+                          setNodeBoxCapacity(cap);
+                          setNodeTotalPorts(cap);
+                        }}
+                        className={`py-1.5 rounded-lg border text-[11px] font-bold transition cursor-pointer ${
+                          nodeBoxCapacity === cap
+                            ? 'bg-cyan-600 text-slate-950 border-cyan-300 shadow'
+                            : 'bg-slate-900 text-slate-300 border-slate-700 hover:border-slate-500'
+                        }`}
+                      >
+                        {cap}P
+                      </button>
+                    ))}
+                  </div>
                 </div>
+
+                <div className="flex flex-wrap items-center gap-2 pt-1">
+                  <button
+                    type="button"
+                    onClick={() => addInternalSplitterUnit(internalSplittersDraft.length === 0 && nodeSplitter !== 'none')}
+                    className="flex-1 min-h-[36px] px-3 py-1.5 rounded-lg bg-emerald-600 hover:bg-emerald-500 text-slate-950 font-bold text-[11px] flex items-center justify-center gap-1.5 cursor-pointer shadow-sm"
+                  >
+                    <Plus className="w-3.5 h-3.5" />
+                    <span>
+                      {internalSplittersDraft.length === 0 && nodeSplitter !== 'none'
+                        ? 'Convert & Add Multi-Splitter Inside FDB'
+                        : 'Add Splitter Inside This FDB'}
+                    </span>
+                  </button>
+                  {onRouteCableFromNode && (
+                    <button
+                      type="button"
+                      onClick={() => onRouteCableFromNode(node)}
+                      className="min-h-[36px] px-2.5 py-1.5 rounded-lg bg-slate-800 hover:bg-slate-700 text-cyan-300 border border-slate-700 font-bold text-[11px] flex items-center gap-1 cursor-pointer"
+                      title="Draw outgoing fiber cable from this box"
+                    >
+                      <Cable className="w-3.5 h-3.5" />
+                      <span>+ Out Cable</span>
+                    </button>
+                  )}
+                </div>
+
+                {hasMultiSplitters && totalAllocatedLegs > nodeBoxCapacity && (
+                  <div className="p-2 rounded-lg bg-amber-950/60 border border-amber-600/70 text-[11px] text-amber-200 flex items-center justify-between gap-2">
+                    <span>
+                      Total splitter legs ({totalAllocatedLegs}) exceed {nodeBoxCapacity}P box capacity.
+                    </span>
+                    <button
+                      type="button"
+                      onClick={() => {
+                        const nextFit = FDB_ENCLOSURE_CAPACITIES.find((c) => c >= totalAllocatedLegs) || 48;
+                        setNodeBoxCapacity(nextFit);
+                        setNodeTotalPorts(nextFit);
+                      }}
+                      className="px-2 py-0.5 rounded bg-amber-500 text-slate-950 font-bold text-[10px] shrink-0 cursor-pointer"
+                    >
+                      Expand to {FDB_ENCLOSURE_CAPACITIES.find((c) => c >= totalAllocatedLegs) || 48}P
+                    </button>
+                  </div>
+                )}
               </div>
 
-              {/* Asymmetric FBT Leg Signal Preview */}
-              {fbtLegs && (
+              {/* MULTI-SPLITTER UNITS LIST (When 1 or more splitters are added inside this FDB) */}
+              {hasMultiSplitters && (
+                <div className="space-y-3">
+                  {evaluatedSplitters.map((unit, unitIdx) => {
+                    const unitUsed = unit.legs.filter((l) => l.status !== 'FREE').length;
+                    const unitInDbm = unit.calculated_input_dbm;
+                    const unitOutDbm = unit.calculated_output_dbm;
+                    const unitHealth =
+                      unitOutDbm !== null && unitOutDbm !== undefined
+                        ? unitOutDbm >= -22
+                          ? 'text-emerald-400'
+                          : unitOutDbm >= -25
+                          ? 'text-amber-400'
+                          : 'text-rose-400'
+                        : 'text-slate-400';
+
+                    const siblingSplitters = evaluatedSplitters.filter((s) => s.id !== unit.id);
+                    const selectedIncomingCable =
+                      connectedCables.find((c) => c.id === unit.incoming_cable_id) ||
+                      connectedCables.find((c) => c.id === incomingFeedCableId) ||
+                      connectedCables[0];
+                    const maxCoresOnSelected = selectedIncomingCable
+                      ? Number(selectedIncomingCable.cable_cores || 12)
+                      : 12;
+
+                    return (
+                      <div
+                        key={unit.id}
+                        className="rounded-xl border border-cyan-800/60 bg-slate-950/95 p-3 space-y-2.5"
+                      >
+                        {/* Splitter Header Controls */}
+                        <div className="flex flex-wrap items-center justify-between gap-2 pb-2 border-b border-slate-800">
+                          <div className="flex items-center gap-2 min-w-0">
+                            <span className="px-2 py-0.5 rounded bg-cyan-950 border border-cyan-700/70 text-cyan-300 font-mono font-bold text-[11px]">
+                              #{unitIdx + 1}
+                            </span>
+                            <input
+                              type="text"
+                              value={unit.label}
+                              onChange={(e) => {
+                                const label = e.target.value;
+                                setInternalSplittersDraft((prev) =>
+                                  prev.map((s) => (s.id === unit.id ? { ...s, label } : s))
+                                );
+                              }}
+                              className="w-24 bg-slate-900 border border-slate-700 rounded px-2 py-1 text-xs font-mono font-bold text-white"
+                            />
+                            <select
+                              value={unit.splitter_type}
+                              onChange={(e) => {
+                                const nextSp = e.target.value as GisSplitterType;
+                                setInternalSplittersDraft((prev) =>
+                                  prev.map((s) =>
+                                    s.id === unit.id
+                                      ? {
+                                          ...s,
+                                          splitter_type: nextSp,
+                                          legs: buildDefaultLegsForSplitter(nextSp, s.legs),
+                                        }
+                                      : s
+                                  )
+                                );
+                              }}
+                              className="bg-slate-900 border border-slate-700 rounded px-2 py-1 text-xs font-mono text-white"
+                            >
+                              {(Object.keys(SPLITTER_SPECS) as GisSplitterType[])
+                                .filter((k) => k !== 'none')
+                                .map((k) => (
+                                  <option key={k} value={k}>
+                                    {k} ({SPLITTER_SPECS[k].isAsymmetricFbt ? 'FBT' : `-${SPLITTER_SPECS[k].dropLossDb}dB`})
+                                  </option>
+                                ))}
+                            </select>
+                          </div>
+
+                          <div className="flex items-center gap-2 font-mono text-[11px]">
+                            <span className="text-slate-400">
+                              {unitUsed}/{unit.legs.length} Used
+                            </span>
+                            <span className={`font-bold tabular-nums ${unitHealth}`}>
+                              {unitInDbm !== null && unitInDbm !== undefined
+                                ? `${unitInDbm.toFixed(1)} → `
+                                : ''}
+                              {unitOutDbm !== null && unitOutDbm !== undefined
+                                ? `${unitOutDbm.toFixed(1)} dBm`
+                                : 'Unlinked'}
+                            </span>
+                            <button
+                              type="button"
+                              onClick={() => {
+                                setInternalSplittersDraft((prev) =>
+                                  prev.filter((s) => s.id !== unit.id)
+                                );
+                              }}
+                              className="p-1 rounded bg-slate-900 hover:bg-rose-950 text-rose-400 border border-slate-800 cursor-pointer"
+                              title="Remove this internal splitter"
+                            >
+                              <Trash2 className="w-3.5 h-3.5" />
+                            </button>
+                          </div>
+                        </div>
+
+                        {/* Splitter Signal Input Source (Incoming Core OR Internal Cascade) */}
+                        <div className="p-2.5 rounded-lg bg-slate-900/90 border border-slate-800 space-y-2 font-mono text-[11px]">
+                          <div className="flex items-center justify-between gap-2">
+                            <span className="text-[10px] uppercase text-cyan-300 font-bold flex items-center gap-1">
+                              <Sliders className="w-3 h-3" />
+                              Splitter Input Source
+                            </span>
+                            <div className="flex items-center gap-1">
+                              <button
+                                type="button"
+                                onClick={() =>
+                                  setInternalSplittersDraft((prev) =>
+                                    prev.map((s) =>
+                                      s.id === unit.id
+                                        ? {
+                                            ...s,
+                                            input_source_type: 'INCOMING_CORE' as InternalSplitterInputType,
+                                            incoming_cable_id:
+                                              s.incoming_cable_id ||
+                                              incomingFeedCableId ||
+                                              connectedCables[0]?.id ||
+                                              null,
+                                            incoming_core_number: s.incoming_core_number || 1,
+                                          }
+                                        : s
+                                    )
+                                  )
+                                }
+                                className={`px-2 py-0.5 rounded text-[10px] font-bold cursor-pointer ${
+                                  unit.input_source_type !== 'INTERNAL_SPLITTER_LEG'
+                                    ? 'bg-cyan-600 text-slate-950'
+                                    : 'bg-slate-950 text-slate-300 border border-slate-700'
+                                }`}
+                              >
+                                Incoming Core
+                              </button>
+                              <button
+                                type="button"
+                                disabled={siblingSplitters.length === 0}
+                                onClick={() =>
+                                  setInternalSplittersDraft((prev) =>
+                                    prev.map((s) =>
+                                      s.id === unit.id
+                                        ? {
+                                            ...s,
+                                            input_source_type: 'INTERNAL_SPLITTER_LEG' as InternalSplitterInputType,
+                                            parent_splitter_id:
+                                              s.parent_splitter_id || siblingSplitters[0]?.id || null,
+                                            parent_splitter_leg: s.parent_splitter_leg || 1,
+                                          }
+                                        : s
+                                    )
+                                  )
+                                }
+                                className={`px-2 py-0.5 rounded text-[10px] font-bold cursor-pointer disabled:opacity-40 ${
+                                  unit.input_source_type === 'INTERNAL_SPLITTER_LEG'
+                                    ? 'bg-indigo-500 text-white'
+                                    : 'bg-slate-950 text-slate-300 border border-slate-700'
+                                }`}
+                              >
+                                Cascade From Splitter
+                              </button>
+                            </div>
+                          </div>
+
+                          {unit.input_source_type === 'INTERNAL_SPLITTER_LEG' ? (
+                            <div className="grid grid-cols-2 gap-2">
+                              <div>
+                                <label className="block text-[9px] text-slate-400 mb-0.5">
+                                  Parent Splitter (Same Box)
+                                </label>
+                                <select
+                                  value={unit.parent_splitter_id || ''}
+                                  onChange={(e) => {
+                                    const pId = e.target.value;
+                                    setInternalSplittersDraft((prev) =>
+                                      prev.map((s) =>
+                                        s.id === unit.id
+                                          ? { ...s, parent_splitter_id: pId || null }
+                                          : s
+                                      )
+                                    );
+                                  }}
+                                  className="w-full bg-slate-950 border border-slate-700 rounded px-2 py-1.5 text-[11px] text-white"
+                                >
+                                  <option value="">Select Splitter...</option>
+                                  {siblingSplitters.map((sib) => (
+                                    <option key={sib.id} value={sib.id}>
+                                      {sib.label} ({sib.splitter_type} · Out{' '}
+                                      {sib.calculated_output_dbm !== null &&
+                                      sib.calculated_output_dbm !== undefined
+                                        ? `${sib.calculated_output_dbm.toFixed(1)}dBm`
+                                        : '—'}
+                                      )
+                                    </option>
+                                  ))}
+                                </select>
+                              </div>
+                              <div>
+                                <label className="block text-[9px] text-slate-400 mb-0.5">
+                                  Parent Splitter Leg #
+                                </label>
+                                <select
+                                  value={unit.parent_splitter_leg || 1}
+                                  onChange={(e) => {
+                                    const legN = Number(e.target.value);
+                                    setInternalSplittersDraft((prev) =>
+                                      prev.map((s) =>
+                                        s.id === unit.id ? { ...s, parent_splitter_leg: legN } : s
+                                      )
+                                    );
+                                  }}
+                                  className="w-full bg-slate-950 border border-slate-700 rounded px-2 py-1.5 text-[11px] text-white"
+                                >
+                                  {(
+                                    siblingSplitters.find((sib) => sib.id === unit.parent_splitter_id)
+                                      ?.legs || Array.from({ length: 8 }, (_, idx) => ({ legNumber: idx + 1, legLabel: `Leg ${idx + 1}` }))
+                                  ).map((lg) => (
+                                    <option key={lg.legNumber} value={lg.legNumber}>
+                                      {lg.legLabel}
+                                    </option>
+                                  ))}
+                                </select>
+                              </div>
+                            </div>
+                          ) : (
+                            <div className="grid grid-cols-2 gap-2">
+                              <div>
+                                <label className="block text-[9px] text-slate-400 mb-0.5">
+                                  Incoming Cable
+                                </label>
+                                <select
+                                  value={unit.incoming_cable_id || ''}
+                                  onChange={(e) => {
+                                    const cId = e.target.value;
+                                    setInternalSplittersDraft((prev) =>
+                                      prev.map((s) =>
+                                        s.id === unit.id
+                                          ? { ...s, incoming_cable_id: cId || null }
+                                          : s
+                                      )
+                                    );
+                                  }}
+                                  className="w-full bg-slate-950 border border-slate-700 rounded px-2 py-1.5 text-[11px] text-white"
+                                >
+                                  <option value="">Auto Box Feed</option>
+                                  {connectedCables.map((c) => {
+                                    const oId =
+                                      c.source_node_id === node.id
+                                        ? c.target_node_id
+                                        : c.source_node_id;
+                                    return (
+                                      <option key={c.id} value={c.id}>
+                                        From {nodesById[oId]?.name || 'Node'} ({c.cable_cores}C)
+                                      </option>
+                                    );
+                                  })}
+                                </select>
+                              </div>
+                              <div>
+                                <label className="block text-[9px] text-slate-400 mb-0.5">
+                                  Feed Core #
+                                </label>
+                                <select
+                                  value={unit.incoming_core_number || 1}
+                                  onChange={(e) => {
+                                    const cNum = Number(e.target.value);
+                                    setInternalSplittersDraft((prev) =>
+                                      prev.map((s) =>
+                                        s.id === unit.id
+                                          ? { ...s, incoming_core_number: cNum }
+                                          : s
+                                      )
+                                    );
+                                  }}
+                                  className="w-full bg-slate-950 border border-slate-700 rounded px-2 py-1.5 text-[11px] text-white"
+                                >
+                                  {Array.from({ length: maxCoresOnSelected }, (_, idx) => idx + 1).map(
+                                    (cNum) => {
+                                      const arrivalVal = selectedIncomingCable
+                                        ? budget?.arrivalDbmByCoreKey?.[
+                                            `${selectedIncomingCable.id}:${cNum}`
+                                          ]
+                                        : undefined;
+                                      return (
+                                        <option key={cNum} value={cNum}>
+                                          Core #{cNum} ({getTia598Color(cNum).name})
+                                          {arrivalVal !== undefined
+                                            ? ` · ${arrivalVal.toFixed(1)}dBm`
+                                            : ''}
+                                        </option>
+                                      );
+                                    }
+                                  )}
+                                </select>
+                              </div>
+                            </div>
+                          )}
+                        </div>
+
+                        {/* Individual Output Legs inside this splitter */}
+                        <div className="space-y-1.5">
+                          {unit.legs.map((leg) => {
+                            const isLegEditing =
+                              activeLegEditor?.splitterId === unit.id &&
+                              activeLegEditor?.legNumber === leg.legNumber;
+                            const legOutDbm = leg.calculated_output_dbm;
+                            const linkedSub =
+                              (leg.subscriber_id && subscribersById[leg.subscriber_id]) ||
+                              (leg.subscriber_username &&
+                                subscribersByUsername[leg.subscriber_username.toLowerCase()]) ||
+                              null;
+                            const targetSplitter = leg.target_splitter_id
+                              ? evaluatedSplitters.find((s) => s.id === leg.target_splitter_id)
+                              : undefined;
+                            const targetCable = leg.target_cable_id
+                              ? cables.find((c) => c.id === leg.target_cable_id)
+                              : undefined;
+
+                            return (
+                              <div
+                                key={leg.legNumber}
+                                className={`rounded-lg border p-2 transition ${
+                                  leg.status === 'FAULTY'
+                                    ? 'bg-rose-950/30 border-rose-800/70'
+                                    : leg.status === 'INTERNAL_CASCADE'
+                                    ? 'bg-indigo-950/40 border-indigo-700/70'
+                                    : leg.status === 'OUTGOING_CABLE_FEED'
+                                    ? 'bg-amber-950/30 border-amber-700/70'
+                                    : leg.status === 'SUBSCRIBER_DROP'
+                                    ? 'bg-slate-900 border-emerald-800/60'
+                                    : 'bg-slate-900/50 border-slate-800 border-dashed'
+                                }`}
+                              >
+                                <div className="flex items-center justify-between gap-2 font-mono text-[11px]">
+                                  <div className="min-w-0">
+                                    <div className="flex items-center gap-1.5 flex-wrap">
+                                      <span className="font-bold text-white">{leg.legLabel}</span>
+                                      {legOutDbm !== null && legOutDbm !== undefined && (
+                                        <span className="text-[10px] text-cyan-300 font-bold tabular-nums">
+                                          ({legOutDbm.toFixed(1)} dBm)
+                                        </span>
+                                      )}
+                                      <span
+                                        className={`text-[10px] font-bold ${
+                                          leg.status === 'FREE'
+                                            ? 'text-emerald-400'
+                                            : leg.status === 'FAULTY'
+                                            ? 'text-rose-400'
+                                            : leg.status === 'INTERNAL_CASCADE'
+                                            ? 'text-indigo-300'
+                                            : leg.status === 'OUTGOING_CABLE_FEED'
+                                            ? 'text-amber-300'
+                                            : 'text-cyan-300'
+                                        }`}
+                                      >
+                                        · {leg.status.replace(/_/g, ' ')}
+                                      </span>
+                                    </div>
+                                    <div className="text-[10px] text-slate-300 truncate mt-0.5">
+                                      {leg.status === 'SUBSCRIBER_DROP'
+                                        ? linkedSub
+                                          ? `${linkedSub.fullName} (@${linkedSub.username}) · Drop ${leg.drop_distance_m || 30}m`
+                                          : leg.client_label || leg.subscriber_username || 'Subscriber ONT'
+                                        : leg.status === 'INTERNAL_CASCADE'
+                                        ? `Feeds ${targetSplitter?.label || 'Internal Splitter'}`
+                                        : leg.status === 'OUTGOING_CABLE_FEED'
+                                        ? `Feeds ${targetCable?.name || 'Outgoing Cable'} Core #${leg.target_core_number || 1}`
+                                        : leg.status === 'FAULTY'
+                                        ? 'Damaged / High loss leg'
+                                        : 'Available spare leg'}
+                                    </div>
+                                  </div>
+
+                                  <button
+                                    type="button"
+                                    onClick={() => {
+                                      setLegSubSearch('');
+                                      setActiveLegEditor(
+                                        isLegEditing
+                                          ? null
+                                          : { splitterId: unit.id, legNumber: leg.legNumber }
+                                      );
+                                    }}
+                                    className="px-2 py-1 rounded bg-slate-800 hover:bg-slate-700 text-cyan-300 border border-slate-700 text-[10px] font-bold shrink-0 cursor-pointer"
+                                  >
+                                    {isLegEditing ? 'Close' : leg.status === 'FREE' ? 'Assign' : 'Edit'}
+                                  </button>
+                                </div>
+
+                                {isLegEditing && (
+                                  <div className="mt-2 pt-2 border-t border-slate-800 space-y-2 text-[11px]">
+                                    <select
+                                      value={leg.status}
+                                      onChange={(e) => {
+                                        const nextSt = e.target.value as InternalSplitterLegStatus;
+                                        setInternalSplittersDraft((prev) =>
+                                          prev.map((s) =>
+                                            s.id === unit.id
+                                              ? {
+                                                  ...s,
+                                                  legs: s.legs.map((l) =>
+                                                    l.legNumber === leg.legNumber
+                                                      ? { ...l, status: nextSt }
+                                                      : l
+                                                  ),
+                                                }
+                                              : s
+                                          )
+                                        );
+                                      }}
+                                      className="w-full bg-slate-950 border border-slate-700 rounded px-2 py-1.5 text-white font-mono"
+                                    >
+                                      <option value="FREE">Free / Spare Leg</option>
+                                      <option value="SUBSCRIBER_DROP">Subscriber ONT Drop</option>
+                                      <option value="INTERNAL_CASCADE">
+                                        Cascade Into Another Splitter (Same FDB)
+                                      </option>
+                                      <option value="OUTGOING_CABLE_FEED">
+                                        Feed Outgoing Cable Core
+                                      </option>
+                                      <option value="FAULTY">Faulty / Damaged</option>
+                                    </select>
+
+                                    {leg.status === 'SUBSCRIBER_DROP' && (
+                                      <div className="space-y-1.5">
+                                        <div className="relative">
+                                          <Search className="w-3 h-3 text-slate-500 absolute left-2 top-2" />
+                                          <input
+                                            type="text"
+                                            value={legSubSearch}
+                                            onChange={(e) => setLegSubSearch(e.target.value)}
+                                            placeholder="Search subscriber name / username..."
+                                            className="w-full bg-slate-950 border border-slate-700 rounded pl-7 pr-2 py-1 text-white"
+                                          />
+                                        </div>
+                                        <div className="max-h-28 overflow-y-auto rounded border border-slate-800 bg-slate-950 divide-y divide-slate-800">
+                                          {filteredLegSubscribers.map((sub) => (
+                                            <button
+                                              key={sub.id}
+                                              type="button"
+                                              onClick={() => {
+                                                setInternalSplittersDraft((prev) =>
+                                                  prev.map((s) =>
+                                                    s.id === unit.id
+                                                      ? {
+                                                          ...s,
+                                                          legs: s.legs.map((l) =>
+                                                            l.legNumber === leg.legNumber
+                                                              ? {
+                                                                  ...l,
+                                                                  subscriber_id: sub.id,
+                                                                  subscriber_username: sub.username,
+                                                                  client_label: `${sub.fullName} (@${sub.username})`,
+                                                                }
+                                                              : l
+                                                          ),
+                                                        }
+                                                      : s
+                                                  )
+                                                );
+                                              }}
+                                              className={`w-full text-left px-2 py-1 flex items-center justify-between text-[10px] cursor-pointer ${
+                                                leg.subscriber_id === sub.id
+                                                  ? 'bg-cyan-950 text-cyan-200'
+                                                  : 'hover:bg-slate-800 text-slate-200'
+                                              }`}
+                                            >
+                                              <span className="truncate">
+                                                {sub.fullName} (@{sub.username})
+                                              </span>
+                                              <span
+                                                className={`w-2 h-2 rounded-full shrink-0 ${
+                                                  sub.isOnline ? 'bg-emerald-400' : 'bg-rose-500'
+                                                }`}
+                                              />
+                                            </button>
+                                          ))}
+                                        </div>
+                                        <div className="grid grid-cols-2 gap-1.5">
+                                          <input
+                                            type="text"
+                                            value={leg.client_label || ''}
+                                            onChange={(e) => {
+                                              const val = e.target.value;
+                                              setInternalSplittersDraft((prev) =>
+                                                prev.map((s) =>
+                                                  s.id === unit.id
+                                                    ? {
+                                                        ...s,
+                                                        legs: s.legs.map((l) =>
+                                                          l.legNumber === leg.legNumber
+                                                            ? { ...l, client_label: val }
+                                                            : l
+                                                        ),
+                                                      }
+                                                    : s
+                                                )
+                                              );
+                                            }}
+                                            placeholder="Manual label / House #"
+                                            className="bg-slate-950 border border-slate-700 rounded px-2 py-1 text-white"
+                                          />
+                                          <input
+                                            type="number"
+                                            min={0}
+                                            max={3000}
+                                            value={leg.drop_distance_m ?? 30}
+                                            onChange={(e) => {
+                                              const dist = Number(e.target.value);
+                                              setInternalSplittersDraft((prev) =>
+                                                prev.map((s) =>
+                                                  s.id === unit.id
+                                                    ? {
+                                                        ...s,
+                                                        legs: s.legs.map((l) =>
+                                                          l.legNumber === leg.legNumber
+                                                            ? { ...l, drop_distance_m: dist }
+                                                            : l
+                                                        ),
+                                                      }
+                                                    : s
+                                                )
+                                              );
+                                            }}
+                                            placeholder="Drop (m)"
+                                            className="bg-slate-950 border border-slate-700 rounded px-2 py-1 text-white font-mono"
+                                          />
+                                        </div>
+                                      </div>
+                                    )}
+
+                                    {leg.status === 'INTERNAL_CASCADE' && (
+                                      <div>
+                                        <label className="block text-[9px] text-indigo-300 mb-0.5">
+                                          Target Internal Splitter in This FDB
+                                        </label>
+                                        <select
+                                          value={leg.target_splitter_id || ''}
+                                          onChange={(e) => {
+                                            const tSplId = e.target.value || null;
+                                            setInternalSplittersDraft((prev) =>
+                                              prev.map((s) => {
+                                                if (s.id === unit.id) {
+                                                  return {
+                                                    ...s,
+                                                    legs: s.legs.map((l) =>
+                                                      l.legNumber === leg.legNumber
+                                                        ? { ...l, target_splitter_id: tSplId }
+                                                        : l
+                                                    ),
+                                                  };
+                                                }
+                                                if (tSplId && s.id === tSplId) {
+                                                  return {
+                                                    ...s,
+                                                    input_source_type: 'INTERNAL_SPLITTER_LEG',
+                                                    parent_splitter_id: unit.id,
+                                                    parent_splitter_leg: leg.legNumber,
+                                                  };
+                                                }
+                                                return s;
+                                              })
+                                            );
+                                          }}
+                                          className="w-full bg-slate-950 border border-indigo-700 rounded px-2 py-1.5 text-white font-mono"
+                                        >
+                                          <option value="">Select Splitter Inside This Box...</option>
+                                          {siblingSplitters.map((sib) => (
+                                            <option key={sib.id} value={sib.id}>
+                                              {sib.label} ({sib.splitter_type})
+                                            </option>
+                                          ))}
+                                        </select>
+                                      </div>
+                                    )}
+
+                                    {leg.status === 'OUTGOING_CABLE_FEED' && (
+                                      <div className="grid grid-cols-2 gap-1.5 font-mono">
+                                        <select
+                                          value={leg.target_cable_id || ''}
+                                          onChange={(e) => {
+                                            const cId = e.target.value || null;
+                                            setInternalSplittersDraft((prev) =>
+                                              prev.map((s) =>
+                                                s.id === unit.id
+                                                  ? {
+                                                      ...s,
+                                                      legs: s.legs.map((l) =>
+                                                        l.legNumber === leg.legNumber
+                                                          ? { ...l, target_cable_id: cId }
+                                                          : l
+                                                      ),
+                                                    }
+                                                  : s
+                                              )
+                                            );
+                                          }}
+                                          className="bg-slate-950 border border-slate-700 rounded px-2 py-1.5 text-white"
+                                        >
+                                          <option value="">Outgoing Cable...</option>
+                                          {connectedCables.map((c) => {
+                                            const oId =
+                                              c.source_node_id === node.id
+                                                ? c.target_node_id
+                                                : c.source_node_id;
+                                            return (
+                                              <option key={c.id} value={c.id}>
+                                                To {nodesById[oId]?.name || 'Node'} ({c.cable_cores}C)
+                                              </option>
+                                            );
+                                          })}
+                                        </select>
+                                        <select
+                                          value={leg.target_core_number || 1}
+                                          onChange={(e) => {
+                                            const cN = Number(e.target.value);
+                                            setInternalSplittersDraft((prev) =>
+                                              prev.map((s) =>
+                                                s.id === unit.id
+                                                  ? {
+                                                      ...s,
+                                                      legs: s.legs.map((l) =>
+                                                        l.legNumber === leg.legNumber
+                                                          ? { ...l, target_core_number: cN }
+                                                          : l
+                                                      ),
+                                                    }
+                                                  : s
+                                              )
+                                            );
+                                          }}
+                                          className="bg-slate-950 border border-slate-700 rounded px-2 py-1.5 text-white"
+                                        >
+                                          {Array.from(
+                                            { length: Number(targetCable?.cable_cores || 12) },
+                                            (_, idx) => idx + 1
+                                          ).map((cN) => (
+                                            <option key={cN} value={cN}>
+                                              Core #{cN} ({getTia598Color(cN).name})
+                                            </option>
+                                          ))}
+                                        </select>
+                                      </div>
+                                    )}
+                                  </div>
+                                )}
+                              </div>
+                            );
+                          })}
+                        </div>
+                      </div>
+                    );
+                  })}
+                </div>
+              )}
+
+              {/* Asymmetric FBT Leg Signal Preview (Single-Splitter Fallback Mode) */}
+              {!hasMultiSplitters && fbtLegs && (
                 <div className="p-3 rounded-xl bg-indigo-950/40 border border-indigo-700/60 space-y-1.5 font-mono">
                   <div className="flex items-center justify-between text-[11px] font-bold text-indigo-300">
                     <span>FBT Asymmetric Ratio Outputs ({nodeSplitter})</span>
@@ -624,12 +1584,12 @@ export const FiberGisInspectorPanel: React.FC<FiberGisInspectorPanelProps> = ({
                 </div>
               )}
 
-              {/* Port Cards */}
-              {totalPorts === 0 ? (
+              {/* Legacy Single-Splitter Port Cards (Shown when multi-splitter array is empty) */}
+              {!hasMultiSplitters && totalPorts === 0 ? (
                 <div className="p-4 rounded-xl bg-slate-950 border border-slate-800 text-slate-400 text-center">
-                  No splitter ports configured on this box. Select a PLC or FBT splitter in Hardware Properties below.
+                  No splitter ports configured yet. Click <strong>&ldquo;Add Splitter Inside This FDB&rdquo;</strong> above or select a splitter ratio in Hardware Properties.
                 </div>
-              ) : (
+              ) : !hasMultiSplitters && (
                 <div className="space-y-2">
                   {Array.from({ length: totalPorts }, (_, i) => i + 1).map((portNum) => {
                     const out = outputsByNumber[portNum];
@@ -1093,8 +2053,321 @@ export const FiberGisInspectorPanel: React.FC<FiberGisInspectorPanelProps> = ({
             </div>
           )}
 
-          {/* FDB / DIST Signal Tab: Optical Budget + Field Agent Fast Triage Card */}
-          {(node.node_type === 'FDB_FAT' || node.node_type === 'DIST_NODE') && fdbSubTab === 'signal' && (
+          {/* TAB 2: Core Splices & Pass-Through Jointing */}
+          {(node.node_type === 'FDB_FAT' ||
+            node.node_type === 'DIST_NODE' ||
+            node.node_type === 'FOSC_JOINT') &&
+            fdbSubTab === 'splices' && (
+            <div className="space-y-3">
+              {/* Top Action Header + One-Click Outgoing Cable Route Button */}
+              <div className="p-3 rounded-xl bg-slate-950 border border-slate-800 space-y-2.5">
+                <div className="flex items-start justify-between gap-2">
+                  <div>
+                    <span className="text-[11px] font-mono uppercase tracking-wider text-cyan-300 font-bold flex items-center gap-1.5">
+                      <Link2 className="w-3.5 h-3.5" />
+                      Core Splices &amp; Pass-Through Tray
+                    </span>
+                    <p className="text-[11px] text-slate-400 mt-1 leading-snug">
+                      Route incoming cores into local splitters OR fusion-splice pass-through cores straight onto outgoing cables (-0.2 dB splice loss, bypassing splitter loss).
+                    </p>
+                  </div>
+                </div>
+
+                <div className="flex flex-wrap items-center gap-2">
+                  {onRouteCableFromNode && (
+                    <button
+                      type="button"
+                      onClick={() => onRouteCableFromNode(node)}
+                      className="flex-1 min-h-[38px] px-3 py-1.5 rounded-lg bg-cyan-600 hover:bg-cyan-500 text-slate-950 font-mono font-bold text-xs flex items-center justify-center gap-1.5 cursor-pointer shadow"
+                    >
+                      <Plus className="w-3.5 h-3.5" />
+                      <span>Route Outgoing Cable From This Box</span>
+                    </button>
+                  )}
+                  {connectedCables.length > 1 && (
+                    <button
+                      type="button"
+                      onClick={() => setShowAllSpliceCables((v) => !v)}
+                      className="min-h-[38px] px-2.5 py-1.5 rounded-lg bg-slate-900 hover:bg-slate-800 text-slate-300 border border-slate-700 font-mono text-[10px] font-bold cursor-pointer"
+                    >
+                      {showAllSpliceCables ? 'Incoming Only' : `All Cables (${connectedCables.length})`}
+                    </button>
+                  )}
+                </div>
+              </div>
+
+              {connectedCables.length === 0 ? (
+                <div className="p-4 rounded-xl bg-slate-950 border border-slate-800 text-slate-400 text-center space-y-2">
+                  <p>No fiber cables connected to this box yet.</p>
+                </div>
+              ) : (
+                (showAllSpliceCables ? connectedCables : normalizedIncomingCables).map((incCable) => {
+                  const otherNodeId =
+                    incCable.source_node_id === node.id
+                      ? incCable.target_node_id
+                      : incCable.source_node_id;
+                  const otherNodeName = nodesById[otherNodeId]?.name || 'Upstream Node';
+                  const coreCount = Math.max(1, Number(incCable.cable_cores || 12));
+                  const candidateOutCables = connectedCables.filter((c) => c.id !== incCable.id);
+
+                  return (
+                    <div
+                      key={incCable.id}
+                      className="rounded-xl border border-slate-800 bg-slate-950/95 p-3 space-y-2.5"
+                    >
+                      <div className="flex items-center justify-between gap-2 pb-1.5 border-b border-slate-800 font-mono">
+                        <div className="min-w-0">
+                          <span className="text-[10px] uppercase text-emerald-400 font-bold block">
+                            Incoming Cable ({coreCount}C · {incCable.distance_meters}m)
+                          </span>
+                          <span className="text-xs font-bold text-white truncate block">
+                            From {otherNodeName} {incCable.name ? `(${incCable.name})` : ''}
+                          </span>
+                        </div>
+                        <span className="text-[10px] text-slate-400 shrink-0">
+                          {candidateOutCables.length} Outgoing Cable{candidateOutCables.length === 1 ? '' : 's'}
+                        </span>
+                      </div>
+
+                      <div className="space-y-2 max-h-[380px] overflow-y-auto pr-0.5">
+                        {Array.from({ length: coreCount }, (_, idx) => idx + 1).map((coreNum) => {
+                          const coreColor = getTia598Color(coreNum);
+                          const arrivalKey = `${incCable.id}:${coreNum}`;
+                          const arrivalDbm = budget?.arrivalDbmByCoreKey?.[arrivalKey];
+                          const savedEntry = evaluatedCoreSplices.find(
+                            (sp) =>
+                              sp.incoming_cable_id === incCable.id &&
+                              sp.incoming_core_number === coreNum
+                          );
+                          const currentAction: CoreSpliceAction =
+                            savedEntry?.action ||
+                            (coreNum === Number(nodeFeedCore || 1) && incCable.id === incomingFeedCableId
+                              ? 'FEED_INTERNAL_SPLITTER'
+                              : 'SPARE_DARK');
+                          const selectedOutCableId =
+                            savedEntry?.outgoing_cable_id || outgoingCablesForBox[0]?.id || candidateOutCables[0]?.id || '';
+                          const selectedOutCable = connectedCables.find(
+                            (c) => c.id === selectedOutCableId
+                          );
+                          const selectedOutCore = savedEntry?.outgoing_core_number || coreNum;
+                          const spliceLoss =
+                            savedEntry?.splice_loss_db ?? DEFAULT_PASS_THROUGH_SPLICE_LOSS_DB;
+
+                          const updateCoreSplice = (patch: Partial<EnclosureCoreSpliceEntry>) => {
+                            setCoreSplicesDraft((prev) => {
+                              const existsIdx = prev.findIndex(
+                                (p) =>
+                                  p.incoming_cable_id === incCable.id &&
+                                  p.incoming_core_number === coreNum
+                              );
+                              const base: EnclosureCoreSpliceEntry =
+                                existsIdx >= 0
+                                  ? prev[existsIdx]
+                                  : {
+                                      id: `${incCable.id}-${coreNum}`,
+                                      incoming_cable_id: incCable.id,
+                                      incoming_core_number: coreNum,
+                                      action: currentAction,
+                                      target_splitter_id: evaluatedSplitters[0]?.id || null,
+                                      outgoing_cable_id: selectedOutCableId || null,
+                                      outgoing_core_number: selectedOutCore,
+                                      splice_loss_db: DEFAULT_PASS_THROUGH_SPLICE_LOSS_DB,
+                                    };
+                              const nextEntry: EnclosureCoreSpliceEntry = { ...base, ...patch };
+                              if (existsIdx >= 0) {
+                                return prev.map((item, i) => (i === existsIdx ? nextEntry : item));
+                              }
+                              return [...prev, nextEntry];
+                            });
+                          };
+
+                          return (
+                            <div
+                              key={arrivalKey}
+                              className={`p-2.5 rounded-lg border space-y-2 font-mono text-[11px] ${
+                                currentAction === 'PASS_THROUGH_JOINT'
+                                  ? 'bg-indigo-950/35 border-indigo-700/70'
+                                  : currentAction === 'FEED_INTERNAL_SPLITTER'
+                                  ? 'bg-emerald-950/25 border-emerald-800/60'
+                                  : 'bg-slate-900/70 border-slate-800'
+                              }`}
+                            >
+                              <div className="flex items-center justify-between gap-2">
+                                <div className="flex items-center gap-2 min-w-0">
+                                  <span
+                                    className="w-3.5 h-3.5 rounded border border-white/40 shrink-0"
+                                    style={{ backgroundColor: coreColor.hex }}
+                                  />
+                                  <span className="font-bold text-white">
+                                    Core #{coreNum} ({coreColor.name})
+                                  </span>
+                                </div>
+                                <span className="text-[10px] font-bold tabular-nums text-cyan-300 shrink-0">
+                                  {arrivalDbm !== undefined
+                                    ? `In: ${arrivalDbm >= 0 ? '+' : ''}${arrivalDbm.toFixed(2)} dBm`
+                                    : 'In: —'}
+                                </span>
+                              </div>
+
+                              <select
+                                value={currentAction}
+                                onChange={(e) => {
+                                  const act = e.target.value as CoreSpliceAction;
+                                  updateCoreSplice({
+                                    action: act,
+                                    target_splitter_id:
+                                      act === 'FEED_INTERNAL_SPLITTER'
+                                        ? savedEntry?.target_splitter_id ||
+                                          evaluatedSplitters[0]?.id ||
+                                          null
+                                        : null,
+                                    outgoing_cable_id:
+                                      act === 'PASS_THROUGH_JOINT'
+                                        ? selectedOutCableId || null
+                                        : null,
+                                    outgoing_core_number:
+                                      act === 'PASS_THROUGH_JOINT' ? selectedOutCore : null,
+                                  });
+                                }}
+                                className="w-full bg-slate-950 border border-slate-700 rounded px-2 py-1.5 text-[11px] text-white"
+                              >
+                                <option value="FEED_INTERNAL_SPLITTER">
+                                  Route Into Internal Splitter (Drop Locally)
+                                </option>
+                                <option value="PASS_THROUGH_JOINT">
+                                  Fusion-Splice Pass-Through to Outgoing Cable (-0.2 dB)
+                                </option>
+                                <option value="SPARE_DARK">Leave Dark / Spare Inside Tray</option>
+                              </select>
+
+                              {currentAction === 'FEED_INTERNAL_SPLITTER' && (
+                                <div>
+                                  {evaluatedSplitters.length > 0 ? (
+                                    <select
+                                      value={savedEntry?.target_splitter_id || evaluatedSplitters[0]?.id || ''}
+                                      onChange={(e) => {
+                                        const tSplId = e.target.value || null;
+                                        updateCoreSplice({ target_splitter_id: tSplId });
+                                        if (tSplId) {
+                                          setInternalSplittersDraft((prev) =>
+                                            prev.map((s) =>
+                                              s.id === tSplId
+                                                ? {
+                                                    ...s,
+                                                    input_source_type: 'INCOMING_CORE',
+                                                    incoming_cable_id: incCable.id,
+                                                    incoming_core_number: coreNum,
+                                                  }
+                                                : s
+                                            )
+                                          );
+                                        }
+                                      }}
+                                      className="w-full bg-slate-950 border border-emerald-700/70 rounded px-2 py-1 text-[11px] text-emerald-200"
+                                    >
+                                      {evaluatedSplitters.map((sp) => (
+                                        <option key={sp.id} value={sp.id}>
+                                          Feeds {sp.label} ({sp.splitter_type})
+                                        </option>
+                                      ))}
+                                    </select>
+                                  ) : (
+                                    <div className="text-[10px] text-emerald-300">
+                                      Feeds box primary splitter ({nodeSplitter})
+                                    </div>
+                                  )}
+                                </div>
+                              )}
+
+                              {currentAction === 'PASS_THROUGH_JOINT' && (
+                                <div className="space-y-1.5">
+                                  {candidateOutCables.length === 0 ? (
+                                    <div className="p-2 rounded bg-amber-950/50 border border-amber-700/60 text-[10px] text-amber-200">
+                                      No outgoing cable connected yet — click{' '}
+                                      <strong>&ldquo;Route Outgoing Cable From This Box&rdquo;</strong> above first.
+                                    </div>
+                                  ) : (
+                                    <>
+                                      <div className="grid grid-cols-1 sm:grid-cols-3 gap-1.5">
+                                        <select
+                                          value={selectedOutCableId}
+                                          onChange={(e) =>
+                                            updateCoreSplice({
+                                              outgoing_cable_id: e.target.value || null,
+                                            })
+                                          }
+                                          className="sm:col-span-2 bg-slate-950 border border-indigo-600/80 rounded px-2 py-1 text-[11px] text-white"
+                                        >
+                                          {candidateOutCables.map((oc) => {
+                                            const oTargetId =
+                                              oc.source_node_id === node.id
+                                                ? oc.target_node_id
+                                                : oc.source_node_id;
+                                            return (
+                                              <option key={oc.id} value={oc.id}>
+                                                Out → {nodesById[oTargetId]?.name || 'Node'} ({oc.cable_cores}C · {oc.distance_meters}m)
+                                              </option>
+                                            );
+                                          })}
+                                        </select>
+                                        <select
+                                          value={selectedOutCore}
+                                          onChange={(e) =>
+                                            updateCoreSplice({
+                                              outgoing_core_number: Number(e.target.value),
+                                            })
+                                          }
+                                          className="bg-slate-950 border border-indigo-600/80 rounded px-2 py-1 text-[11px] text-white"
+                                        >
+                                          {Array.from(
+                                            {
+                                              length: Math.max(
+                                                1,
+                                                Number(selectedOutCable?.cable_cores || 12)
+                                              ),
+                                            },
+                                            (_, cIdx) => cIdx + 1
+                                          ).map((ocNum) => (
+                                            <option key={ocNum} value={ocNum}>
+                                              Out #{ocNum} ({getTia598Color(ocNum).name})
+                                            </option>
+                                          ))}
+                                        </select>
+                                      </div>
+
+                                      <div className="flex items-center justify-between gap-2 text-[10px] px-1">
+                                        <span className="text-indigo-200 flex items-center gap-1">
+                                          <ArrowRight className="w-3 h-3 text-indigo-400" />
+                                          <span>
+                                            Splitter Bypassed (-{spliceLoss.toFixed(2)} dB Splice)
+                                          </span>
+                                        </span>
+                                        <span className="font-bold text-emerald-300 tabular-nums">
+                                          {arrivalDbm !== undefined
+                                            ? `Out: ${(arrivalDbm - spliceLoss).toFixed(2)} dBm`
+                                            : ''}
+                                        </span>
+                                      </div>
+                                    </>
+                                  )}
+                                </div>
+                              )}
+                            </div>
+                          );
+                        })}
+                      </div>
+                    </div>
+                  );
+                })
+              )}
+            </div>
+          )}
+
+          {/* FDB / DIST / FOSC Signal Tab: Optical Budget + Field Agent Fast Triage Card */}
+          {(node.node_type === 'FDB_FAT' ||
+            node.node_type === 'DIST_NODE' ||
+            node.node_type === 'FOSC_JOINT') &&
+            fdbSubTab === 'signal' && (
             <div className="space-y-4">
               {/* Optical Signal Budget Breakdown */}
               <div className={`p-3.5 rounded-xl border ${healthStyle.bgClass} ${healthStyle.borderClass} space-y-3`}>
@@ -1160,6 +2433,44 @@ export const FiberGisInspectorPanel: React.FC<FiberGisInspectorPanelProps> = ({
                       <span className={healthStyle.textClass}>
                         {budget.ontRxDbm !== null ? `${budget.ontRxDbm.toFixed(2)} dBm` : '—'}
                       </span>
+                    </div>
+                  </div>
+                )}
+
+                {hasMultiSplitters && (
+                  <div className="p-2.5 rounded-lg bg-slate-950/85 border border-cyan-800/50 space-y-1.5 font-mono">
+                    <span className="text-[10px] uppercase tracking-wider text-cyan-300 font-bold block">
+                      Internal Splitters Cascade Breakdown ({evaluatedSplitters.length} Units · {nodeBoxCapacity}P Box)
+                    </span>
+                    <div className="space-y-1">
+                      {evaluatedSplitters.map((sp) => (
+                        <div
+                          key={sp.id}
+                          className="flex items-center justify-between gap-2 text-[11px] py-1 px-2 rounded bg-slate-900 border border-slate-800"
+                        >
+                          <div className="min-w-0 truncate">
+                            <span className="text-white font-bold">{sp.label}</span>{' '}
+                            <span className="text-slate-400">({sp.splitter_type})</span>
+                            {sp.input_source_type === 'INTERNAL_SPLITTER_LEG' && sp.parent_splitter_id && (
+                              <span className="text-indigo-300 ml-1">
+                                ← {evaluatedSplitters.find((p) => p.id === sp.parent_splitter_id)?.label || 'Parent'} Leg #{sp.parent_splitter_leg || 1}
+                              </span>
+                            )}
+                          </div>
+                          <div className="shrink-0 tabular-nums">
+                            <span className="text-slate-400 mr-1.5">
+                              {sp.calculated_input_dbm !== null && sp.calculated_input_dbm !== undefined
+                                ? `${sp.calculated_input_dbm.toFixed(1)} →`
+                                : ''}
+                            </span>
+                            <span className="font-bold text-emerald-300">
+                              {sp.calculated_output_dbm !== null && sp.calculated_output_dbm !== undefined
+                                ? `${sp.calculated_output_dbm.toFixed(2)} dBm`
+                                : 'Unlinked'}
+                            </span>
+                          </div>
+                        </div>
+                      ))}
                     </div>
                   </div>
                 )}
@@ -1850,14 +3161,18 @@ export const FiberGisInspectorPanel: React.FC<FiberGisInspectorPanelProps> = ({
                     </div>
                     <div>
                       <label className="block text-[10px] font-mono text-slate-400 mb-1">
-                        Output Ports / Legs
+                        Box Port Capacity (4–48P)
                       </label>
                       <input
                         type="number"
                         min={0}
-                        max={32}
-                        value={nodeTotalPorts}
-                        onChange={(e) => setNodeTotalPorts(Number(e.target.value))}
+                        max={48}
+                        value={nodeBoxCapacity}
+                        onChange={(e) => {
+                          const v = Math.max(0, Math.min(48, Number(e.target.value) || 0));
+                          setNodeBoxCapacity(v);
+                          setNodeTotalPorts(v);
+                        }}
                         className="w-full bg-slate-900 border border-slate-700 rounded-lg px-2.5 py-2 text-xs text-white tabular-nums"
                       />
                     </div>

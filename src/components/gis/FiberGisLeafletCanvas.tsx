@@ -338,22 +338,29 @@ export const FiberGisLeafletCanvas: React.FC<FiberGisLeafletCanvasProps> = ({
       const isSelected = node.id === selectedNodeId || isConnectStart || isConnectTarget;
       const nodePorts = portsByNodeId[node.id] || [];
       const nodeOutputs = splitterOutputsByNodeId[node.id] || [];
+      const budget = budgetsByNodeId[node.id];
+      const summary = budget?.enclosureSummary;
       const splitterSpec = SPLITTER_SPECS[node.splitter_type] || SPLITTER_SPECS['none'];
-      const totalPorts =
-        splitterSpec.type !== 'none'
-          ? splitterSpec.isAsymmetricFbt
-            ? 2
-            : Math.max(Number(node.total_ports || 0), splitterSpec.defaultPorts)
-          : Number(node.total_ports || 0);
+      const hasMultiSplitters = Boolean(summary && (node.internal_splitters?.length || 0) > 0);
+      const totalPorts = hasMultiSplitters && summary
+        ? summary.boxCapacity
+        : splitterSpec.type !== 'none'
+        ? splitterSpec.isAsymmetricFbt
+          ? 2
+          : Math.max(Number(node.box_capacity || 0), Number(node.total_ports || 0), splitterSpec.defaultPorts)
+        : Math.max(Number(node.box_capacity || 0), Number(node.total_ports || 0));
 
       let usedPortsCount = 0;
-      if (nodeOutputs.length > 0) {
+      if (hasMultiSplitters && summary) {
+        usedPortsCount = summary.usedPorts;
+      } else if (nodeOutputs.length > 0) {
         usedPortsCount = nodeOutputs.filter((o) => o.utilization_type !== 'FREE_PORT').length;
       } else {
         usedPortsCount = nodePorts.filter((p) => p.status !== 'FREE').length;
       }
       const freePorts = Math.max(0, totalPorts - usedPortsCount);
-      const budget = budgetsByNodeId[node.id];
+      const splitterCount = summary?.splitterCount ?? (splitterSpec.type !== 'none' ? 1 : 0);
+      const ptJointCount = summary?.passThroughJointCount ?? 0;
 
       let html = '';
       let tooltipText = `${node.name}${node.area_name ? ` (${node.area_name})` : ''}`;
@@ -383,11 +390,16 @@ export const FiberGisLeafletCanvas: React.FC<FiberGisLeafletCanvasProps> = ({
           <span style="opacity:.95">${peakTx >= 0 ? '+' : ''}${peakTx.toFixed(1)}dBm</span>
         </div>`;
       } else if (node.node_type === 'DIST_NODE') {
-        const ratioBadge = splitterSpec.type !== 'none' ? splitterSpec.type : `${node.tray_capacity}C`;
+        const ratioBadge =
+          splitterCount > 1
+            ? `${splitterCount} Spl`
+            : splitterSpec.type !== 'none'
+            ? splitterSpec.type
+            : `${node.tray_capacity}C`;
         const distOutputDbm =
           splitterSpec.isAsymmetricFbt
             ? budget?.thruOutputDbm
-            : splitterSpec.type !== 'none'
+            : splitterSpec.type !== 'none' || splitterCount > 0
             ? budget?.ontRxDbm
             : budget?.thruOutputDbm ?? budget?.inputDbm;
         const healthColor = budget && budget.healthBand !== 'UNLINKED' ? getHealthBadgeColors(budget.healthBand).hex : '#a5b4fc';
@@ -397,7 +409,7 @@ export const FiberGisLeafletCanvas: React.FC<FiberGisLeafletCanvasProps> = ({
             : '';
         tooltipText = `${node.name} · Dist Node (${ratioBadge})${
           totalPorts > 0 ? ` · ${usedPortsCount}/${totalPorts} Used · ${freePorts} Free` : ''
-        }${
+        }${ptJointCount > 0 ? ` · ${ptJointCount} Pass-Thru` : ''}${
           budget?.inputDbm !== null && budget?.inputDbm !== undefined && distOutputDbm !== null && distOutputDbm !== undefined
             ? ` · In ${budget.inputDbm.toFixed(1)} → Out ${distOutputDbm.toFixed(1)} dBm`
             : ''
@@ -412,9 +424,14 @@ export const FiberGisLeafletCanvas: React.FC<FiberGisLeafletCanvasProps> = ({
           }
         </div>`;
       } else if (node.node_type === 'FOSC_JOINT') {
-        const splitTag = splitterSpec.type !== 'none' ? ` · ${splitterSpec.type}` : '';
+        const splitTag =
+          splitterCount > 1
+            ? ` · ${splitterCount} Splitters`
+            : splitterSpec.type !== 'none'
+            ? ` · ${splitterSpec.type}`
+            : '';
         const foscOutDbm =
-          splitterSpec.type !== 'none' && !splitterSpec.isAsymmetricFbt
+          (splitterSpec.type !== 'none' || splitterCount > 0) && !splitterSpec.isAsymmetricFbt
             ? budget?.ontRxDbm
             : budget?.thruOutputDbm ?? budget?.inputDbm;
         const dbTxt =
@@ -422,6 +439,8 @@ export const FiberGisLeafletCanvas: React.FC<FiberGisLeafletCanvasProps> = ({
             ? ` ${foscOutDbm.toFixed(1)}dBm`
             : '';
         tooltipText = `${node.name} · FOSC Joint (${node.tray_capacity}C${splitTag})${
+          ptJointCount > 0 ? ` · ${ptJointCount} Pass-Thru` : ''
+        }${
           budget?.inputDbm !== null && budget?.inputDbm !== undefined
             ? ` · In ${budget.inputDbm.toFixed(1)}${
                 foscOutDbm !== null && foscOutDbm !== undefined ? ` → Out ${foscOutDbm.toFixed(1)}` : ''
@@ -433,7 +452,7 @@ export const FiberGisLeafletCanvas: React.FC<FiberGisLeafletCanvasProps> = ({
         };background:${isSelected ? '#a855f7' : '#7e22ce'};color:#fff;font-family:monospace;font-size:10px;font-weight:700;white-space:nowrap;box-shadow:0 4px 12px rgba(0,0,0,0.45);transform:translate(-50%,-50%);cursor:${
           toolMode === 'pan' ? 'grab' : 'pointer'
         };">
-          <span>FOSC</span><span>${node.tray_capacity}C${splitterSpec.type !== 'none' ? `·${splitterSpec.type}` : ''}</span>${
+          <span>FOSC</span><span>${node.tray_capacity}C${splitterCount > 1 ? `·${splitterCount}Spl` : splitterSpec.type !== 'none' ? `·${splitterSpec.type}` : ''}</span>${
             dbTxt ? `<span style="background:rgba(0,0,0,0.28);padding:1px 4px;border-radius:4px">${dbTxt}</span>` : ''
           }
         </div>`;
@@ -453,7 +472,12 @@ export const FiberGisLeafletCanvas: React.FC<FiberGisLeafletCanvasProps> = ({
           budget?.ontRxDbm !== null && budget?.ontRxDbm !== undefined
             ? `${budget.ontRxDbm.toFixed(1)}dBm`
             : '';
-        tooltipText = `${node.name} · ${node.splitter_type} · ${usedPortsCount}/${totalPorts} Used · ${freePorts} Free${
+        const splBadge = splitterCount > 1 ? ` · ${splitterCount} Spl` : '';
+        tooltipText = `${node.name} · ${
+          splitterCount > 1 ? `${splitterCount} Internal Splitters` : node.splitter_type
+        } · ${usedPortsCount}/${totalPorts} Used (${freePorts} Free)${
+          ptJointCount > 0 ? ` · ${ptJointCount} Pass-Thru` : ''
+        }${
           budget?.inputDbm !== null && budget?.inputDbm !== undefined
             ? ` · In ${budget.inputDbm.toFixed(1)} dBm`
             : ''
@@ -471,7 +495,7 @@ export const FiberGisLeafletCanvas: React.FC<FiberGisLeafletCanvasProps> = ({
         };background:${bg};color:${fg};font-family:monospace;font-size:10px;font-weight:700;white-space:nowrap;box-shadow:0 4px 12px rgba(0,0,0,0.45);transform:translate(-50%,-50%);cursor:${
           toolMode === 'pan' ? 'grab' : 'pointer'
         };">
-          <span>FDB</span><span style="background:rgba(0,0,0,0.22);padding:1px 4px;border-radius:4px">${freePorts}/${totalPorts}</span>${
+          <span>FDB</span><span style="background:rgba(0,0,0,0.22);padding:1px 4px;border-radius:4px">${usedPortsCount}/${totalPorts}${splBadge}</span>${
             dbTxt
               ? `<span style="background:rgba(15,23,42,0.82);color:${signalHex};padding:1px 4px;border-radius:4px">${dbTxt}</span>`
               : ''

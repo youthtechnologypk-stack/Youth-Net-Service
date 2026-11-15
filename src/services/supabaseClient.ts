@@ -415,6 +415,63 @@ export interface GisEquipmentHistoryEntry {
   summary: string;
 }
 
+export type InternalSplitterInputType = 'INCOMING_CORE' | 'INTERNAL_SPLITTER_LEG';
+export type InternalSplitterLegStatus =
+  | 'FREE'
+  | 'SUBSCRIBER_DROP'
+  | 'INTERNAL_CASCADE'
+  | 'OUTGOING_CABLE_FEED'
+  | 'FAULTY';
+
+export interface InternalSplitterLeg {
+  legNumber: number;
+  legLabel: string;
+  status: InternalSplitterLegStatus;
+  subscriber_id?: string | null;
+  subscriber_username?: string | null;
+  client_label?: string | null;
+  target_splitter_id?: string | null;
+  target_cable_id?: string | null;
+  target_core_number?: number | null;
+  target_node_name?: string | null;
+  drop_distance_m?: number;
+  calculated_output_dbm?: number | null;
+}
+
+export interface InternalSplitterUnit {
+  id: string;
+  label: string;
+  splitter_type: GisSplitterType;
+  input_source_type: InternalSplitterInputType;
+  incoming_cable_id?: string | null;
+  incoming_core_number?: number | null;
+  parent_splitter_id?: string | null;
+  parent_splitter_leg?: number | null;
+  calculated_input_dbm?: number | null;
+  calculated_output_dbm?: number | null;
+  calculated_thru_dbm?: number | null;
+  legs: InternalSplitterLeg[];
+}
+
+export type CoreSpliceAction =
+  | 'FEED_INTERNAL_SPLITTER'
+  | 'PASS_THROUGH_JOINT'
+  | 'SPARE_DARK';
+
+export interface EnclosureCoreSpliceEntry {
+  id: string;
+  incoming_cable_id: string;
+  incoming_core_number: number;
+  action: CoreSpliceAction;
+  target_splitter_id?: string | null;
+  outgoing_cable_id?: string | null;
+  outgoing_core_number?: number | null;
+  splice_loss_db?: number;
+  note?: string;
+  calculated_in_dbm?: number | null;
+  calculated_out_dbm?: number | null;
+}
+
 export interface SupabaseGisNode {
   id: string;
   node_type: GisNodeType;
@@ -428,6 +485,7 @@ export interface SupabaseGisNode {
   splitter_category?: GisSplitterCategory;
   splitter_type: GisSplitterType;
   total_ports: number;
+  box_capacity?: number;
   feed_cable_id?: string | null;
   feed_core_number?: number | null;
   feed_core_pair?: string | null;
@@ -437,6 +495,8 @@ export interface SupabaseGisNode {
   tray_capacity: number;
   loss_per_splice: number;
   splice_tray_json: GisSpliceEntry[];
+  internal_splitters?: InternalSplitterUnit[];
+  core_splices?: EnclosureCoreSpliceEntry[];
   equipment_history?: GisEquipmentHistoryEntry[];
   notes?: string | null;
   updated_by?: string | null;
@@ -470,8 +530,11 @@ export interface SupabaseFiberNode {
   lat: number;
   lng: number;
   pon_ports: number;
+  box_capacity?: number;
   optical_power_dbm?: number | null;
   address_note?: string | null;
+  internal_splitters?: InternalSplitterUnit[];
+  core_splices?: EnclosureCoreSpliceEntry[];
   equipment_history?: GisEquipmentHistoryEntry[];
   created_at?: string;
 }

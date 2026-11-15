@@ -205,6 +205,9 @@ export function normalizeGisNodeRow(n: any): SupabaseGisNode {
         ? Number(n.calculated_ont_rx_dbm)
         : null,
     splice_tray_json: Array.isArray(n.splice_tray_json) ? n.splice_tray_json : [],
+    box_capacity: Number(n.box_capacity ?? n.total_ports ?? 8),
+    internal_splitters: Array.isArray(n.internal_splitters) ? n.internal_splitters : [],
+    core_splices: Array.isArray(n.core_splices) ? n.core_splices : [],
     equipment_history: Array.isArray(n.equipment_history) ? n.equipment_history : [],
   };
 }
@@ -274,7 +277,7 @@ async function syncNodeToFiberNodesTable(
       pon_ports:
         node.node_type === 'OLT'
           ? Math.max(1, Number(totalPonPorts || 8))
-          : Number(node.total_ports || 0),
+          : Math.max(Number(node.box_capacity || 0), Number(node.total_ports || 0)),
       optical_power_dbm:
         node.node_type === 'OLT'
           ? Number(node.tx_power_dbm ?? 5.0)
@@ -283,11 +286,17 @@ async function syncNodeToFiberNodesTable(
             node.calculated_input_dbm ??
             null,
       address_note: [node.area_name, node.notes].filter(Boolean).join(' · '),
+      box_capacity: Math.max(Number(node.box_capacity || 0), Number(node.total_ports || 0)),
+      internal_splitters: Array.isArray(node.internal_splitters) ? node.internal_splitters : [],
+      core_splices: Array.isArray(node.core_splices) ? node.core_splices : [],
       equipment_history: Array.isArray(node.equipment_history) ? node.equipment_history : [],
     };
     const res = await supabase.from('fiber_nodes').upsert(payload, { onConflict: 'id' });
     if (res.error && isMissingTableOrColumnError(res.error)) {
       const legacyPayload = { ...payload };
+      delete legacyPayload.box_capacity;
+      delete legacyPayload.internal_splitters;
+      delete legacyPayload.core_splices;
       delete legacyPayload.equipment_history;
       await supabase.from('fiber_nodes').upsert(legacyPayload, { onConflict: 'id' });
     }
@@ -1205,12 +1214,15 @@ export async function createGisNode(params: {
     splitter_category: splitterCategory,
     splitter_type: splitterType,
     total_ports: totalPorts,
+    box_capacity: totalPorts,
     tray_capacity: trayCapacity,
     loss_per_splice: DEFAULT_FUSION_SPLICE_LOSS_DB,
     splice_tray_json:
       params.nodeType === 'FOSC_JOINT' || params.nodeType === 'DIST_NODE'
         ? generateDefaultSpliceTray(trayCapacity)
         : [],
+    internal_splitters: [],
+    core_splices: [],
     feed_core_pair: (params.feedCorePair || '').trim(),
     pon_port_id: params.ponPortId || null,
     updated_by: params.updatedBy || 'admin',
@@ -1223,6 +1235,9 @@ export async function createGisNode(params: {
     delete legacyPayload.splitter_category;
     delete legacyPayload.feed_core_pair;
     delete legacyPayload.pon_port_id;
+    delete legacyPayload.box_capacity;
+    delete legacyPayload.internal_splitters;
+    delete legacyPayload.core_splices;
     res = await supabase.from('gis_nodes').insert(legacyPayload).select('*').single();
   }
   if (res.error) throw res.error;
@@ -1242,6 +1257,11 @@ export async function updateGisNode(
   if (patch.splitter_type && !patch.splitter_category) {
     payload.splitter_category = inferSplitterCategory(patch.splitter_type);
   }
+  if (patch.box_capacity !== undefined && patch.total_ports === undefined) {
+    payload.total_ports = Math.max(0, Math.min(48, Number(patch.box_capacity) || 0));
+  } else if (patch.total_ports !== undefined && patch.box_capacity === undefined) {
+    payload.box_capacity = Math.max(0, Math.min(48, Number(patch.total_ports) || 0));
+  }
 
   let res = await supabase
     .from('gis_nodes')
@@ -1256,6 +1276,9 @@ export async function updateGisNode(
     delete legacyPayload.feed_core_pair;
     delete legacyPayload.pon_port_id;
     delete legacyPayload.calculated_output_dbm;
+    delete legacyPayload.box_capacity;
+    delete legacyPayload.internal_splitters;
+    delete legacyPayload.core_splices;
     delete legacyPayload.equipment_history;
     res = await supabase
       .from('gis_nodes')
@@ -1708,7 +1731,7 @@ export async function initializeSplitterOutputsForNode(params: {
   const nowIso = new Date().toISOString();
   const count = spec.isAsymmetricFbt
     ? 2
-    : Math.max(1, Math.min(32, params.totalPorts || spec.defaultPorts || 8));
+    : Math.max(1, Math.min(48, params.totalPorts || spec.defaultPorts || 8));
 
   const existingByPort: Record<number, SupabaseGisSplitterOutput> = {};
   for (const o of params.existingOutputs || []) {
@@ -1920,7 +1943,7 @@ export async function replaceGisNodeEquipment(
       ? 0
       : spec.isAsymmetricFbt
       ? 2
-      : Math.max(0, Math.min(32, Math.round(Number(params.newTotalPorts || 0))));
+      : Math.max(0, Math.min(48, Math.round(Number(params.newTotalPorts || 0))));
   const clampedTray = Math.max(2, Math.min(48, Math.round(Number(params.newTrayCapacity || node.tray_capacity || 12))));
   const nextSpliceTray =
     params.newNodeType === 'FOSC_JOINT' || params.newNodeType === 'DIST_NODE'
@@ -1967,12 +1990,14 @@ export async function replaceGisNodeEquipment(
   const nextHistory = [historyEntry, ...prevHistory];
 
   // 3. Calculate updated optical power budget with new hardware configuration BEFORE saving
+  const nextBoxCapacity = Math.max(Number(node.box_capacity || 0), clampedPorts);
   const candidateNode: SupabaseGisNode = {
     ...node,
     node_type: params.newNodeType,
     splitter_category: newSplitterCategory,
     splitter_type: params.newSplitterType,
     total_ports: clampedPorts,
+    box_capacity: nextBoxCapacity,
     tray_capacity: clampedTray,
     splice_tray_json: nextSpliceTray,
     tx_power_dbm:
@@ -1998,6 +2023,7 @@ export async function replaceGisNodeEquipment(
     splitter_category: candidateNode.splitter_category,
     splitter_type: candidateNode.splitter_type,
     total_ports: candidateNode.total_ports,
+    box_capacity: candidateNode.box_capacity,
     tray_capacity: candidateNode.tray_capacity,
     splice_tray_json: candidateNode.splice_tray_json,
     tx_power_dbm: candidateNode.tx_power_dbm,
@@ -2018,6 +2044,7 @@ export async function replaceGisNodeEquipment(
 
   if (res.error && isMissingTableOrColumnError(res.error)) {
     const legacyPayload = { ...updatePayload };
+    delete legacyPayload.box_capacity;
     delete legacyPayload.equipment_history;
     delete legacyPayload.splitter_category;
     delete legacyPayload.calculated_output_dbm;

@@ -181,7 +181,7 @@ export const FiberEquipmentUpgradeModal: React.FC<FiberEquipmentUpgradeModalProp
       const curPorts = Number(node.total_ports || 4);
       const nextUpgradeSplitter: GisSplitterType =
         curPorts <= 4 ? '1:8' : curPorts <= 8 ? '1:16' : node.splitter_type || '1:16';
-      const nextUpgradePorts = curPorts <= 4 ? 8 : curPorts <= 8 ? 16 : Math.min(32, curPorts);
+      const nextUpgradePorts = curPorts <= 4 ? 8 : curPorts <= 8 ? 16 : Math.min(48, curPorts);
       setFamily('FDB_BOX');
       setSplitterType(nextUpgradeSplitter);
       setTotalPorts(nextUpgradePorts);
@@ -578,7 +578,7 @@ export const FiberEquipmentUpgradeModal: React.FC<FiberEquipmentUpgradeModalProp
                       onChange={(e) => setTotalPorts(Number(e.target.value))}
                       className="w-full bg-slate-950 border border-slate-700 rounded-xl px-2.5 py-2.5 text-sm text-white font-mono"
                     >
-                      {[0, 2, 4, 8, 12, 16, 24, 32].map((p) => (
+                      {[0, 2, 4, 8, 12, 16, 24, 32, 48].map((p) => (
                         <option key={p} value={p}>
                           {p === 0 ? '0 Ports (Pass-Through)' : `${p}-Port Output`}
                         </option>

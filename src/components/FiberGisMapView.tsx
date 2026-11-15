@@ -1951,6 +1951,15 @@ export const FiberGisMapView: React.FC<FiberGisMapViewProps> = ({
           }}
           onUpdatePonPort={handleUpdatePonPort}
           onOpenUpgradeModal={(node) => setUpgradeTargetNodeId(node.id)}
+          onRouteCableFromNode={(node) => {
+            setToolMode('connect_cable');
+            setConnectSourceNodeId(node.id);
+            setConnectTargetNodeId(null);
+            setDraftWaypoints([{ lat: node.lat, lng: node.lng }]);
+            setSelectedNodeId(null);
+            setSelectedCableId(null);
+            showToast(`A-Start set to "${node.name}". Click the next FDB / Joint Box on map to route outgoing cable.`);
+          }}
         />
       </div>
 
