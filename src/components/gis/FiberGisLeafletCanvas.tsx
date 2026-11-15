@@ -47,6 +47,10 @@ interface FiberGisLeafletCanvasProps {
   draftWaypoints: GisLatLng[];
   userLocation: GisLatLng | null;
   flyToTarget: { lat: number; lng: number; zoom?: number; ts: number } | null;
+  fitBoundsTarget?: { bounds: [number, number][]; ts: number } | null;
+  isFilterActive?: boolean;
+  highlightedNodeIds?: Record<string, boolean>;
+  highlightedCableIds?: Record<string, boolean>;
   onMapClick: (coords: GisLatLng) => void;
   onNodeClick: (node: SupabaseGisNode) => void;
   onNodeDragEnd?: (node: SupabaseGisNode, coords: GisLatLng) => void;
@@ -73,6 +77,10 @@ export const FiberGisLeafletCanvas: React.FC<FiberGisLeafletCanvasProps> = ({
   draftWaypoints,
   userLocation,
   flyToTarget,
+  fitBoundsTarget = null,
+  isFilterActive = false,
+  highlightedNodeIds = {},
+  highlightedCableIds = {},
   onMapClick,
   onNodeClick,
   onNodeDragEnd,
@@ -85,6 +93,7 @@ export const FiberGisLeafletCanvas: React.FC<FiberGisLeafletCanvasProps> = ({
   const labelsLayerRef = useRef<L.TileLayer | null>(null);
   const featureLayerRef = useRef<L.LayerGroup | null>(null);
   const lastFlyTsRef = useRef<number>(0);
+  const lastFitBoundsTsRef = useRef<number>(0);
 
   const onMapClickRef = useRef(onMapClick);
   const onNodeClickRef = useRef(onNodeClick);
@@ -189,6 +198,29 @@ export const FiberGisLeafletCanvas: React.FC<FiberGisLeafletCanvasProps> = ({
     });
   }, [flyToTarget]);
 
+  // Smoothly zoom to highlighted OLT/PON/Area filter bounds
+  useEffect(() => {
+    const map = mapRef.current;
+    if (
+      !map ||
+      !fitBoundsTarget ||
+      fitBoundsTarget.ts === lastFitBoundsTsRef.current ||
+      fitBoundsTarget.bounds.length === 0
+    ) {
+      return;
+    }
+    lastFitBoundsTsRef.current = fitBoundsTarget.ts;
+    if (fitBoundsTarget.bounds.length === 1) {
+      map.setView(fitBoundsTarget.bounds[0], 17, { animate: true });
+    } else {
+      map.fitBounds(L.latLngBounds(fitBoundsTarget.bounds), {
+        padding: [52, 52],
+        maxZoom: 18,
+        animate: true,
+      });
+    }
+  }, [fitBoundsTarget]);
+
   // Render nodes, cables, waypoints & user GPS dot
   useEffect(() => {
     const group = featureLayerRef.current;
@@ -216,6 +248,8 @@ export const FiberGisLeafletCanvas: React.FC<FiberGisLeafletCanvasProps> = ({
       if (path.length < 2) continue;
 
       const isSelected = cable.id === selectedCableId;
+      const isHighlighted = !isFilterActive || Boolean(highlightedCableIds[cable.id]);
+      const isDimmed = isFilterActive && !isHighlighted;
       const dstBudget = budgetsByNodeId[cable.target_node_id];
       const color = isSelected
         ? '#facc15'
@@ -223,14 +257,22 @@ export const FiberGisLeafletCanvas: React.FC<FiberGisLeafletCanvasProps> = ({
         ? getHealthBadgeColors(dstBudget.healthBand).hex
         : '#38bdf8';
 
-      const poly = L.polyline(
-        path.map((p) => [p.lat, p.lng] as [number, number]),
-        {
-          color,
-          weight: isSelected ? 6 : 4,
-          opacity: isSelected ? 1 : 0.88,
-        }
-      ).addTo(group);
+      const latLngs = path.map((p) => [p.lat, p.lng] as [number, number]);
+
+      if (isFilterActive && isHighlighted) {
+        L.polyline(latLngs, {
+          color: '#38bdf8',
+          weight: 11,
+          opacity: 0.35,
+          interactive: false,
+        }).addTo(group);
+      }
+
+      const poly = L.polyline(latLngs, {
+        color,
+        weight: isSelected ? 6 : isFilterActive && isHighlighted ? 6 : isDimmed ? 3 : 4,
+        opacity: isDimmed ? 0.18 : isSelected || (isFilterActive && isHighlighted) ? 1 : 0.88,
+      }).addTo(group);
 
       const feedPon = cable.source_pon_port_id ? ponPortsById[cable.source_pon_port_id] : undefined;
       const coreSum = summarizeCableCores(
@@ -376,9 +418,20 @@ export const FiberGisLeafletCanvas: React.FC<FiberGisLeafletCanvasProps> = ({
         </div>`;
       }
 
+      const isHighlightedNode = !isFilterActive || Boolean(highlightedNodeIds[node.id]);
+      const isDimmedNode = isFilterActive && !isHighlightedNode;
+      const nodeOpacity = isDimmedNode ? 0.18 : 1;
+      const highlightRing =
+        isFilterActive && isHighlightedNode
+          ? 'box-shadow:0 0 0 3px rgba(56,189,248,0.65),0 4px 16px rgba(0,0,0,0.65);'
+          : '';
+      const wrappedHtml = `<div style="opacity:${nodeOpacity};${
+        highlightRing ? `filter:drop-shadow(0 0 6px rgba(56,189,248,0.55));` : ''
+      }">${html}</div>`;
+
       const icon = L.divIcon({
         className: 'youthnet-gis-marker',
-        html,
+        html: wrappedHtml,
         iconSize: [0, 0],
         iconAnchor: [0, 0],
       });
@@ -387,6 +440,7 @@ export const FiberGisLeafletCanvas: React.FC<FiberGisLeafletCanvasProps> = ({
       const marker = L.marker([node.lat, node.lng], {
         icon,
         draggable: canDragNode,
+        zIndexOffset: isSelected ? 700 : isFilterActive && isHighlightedNode ? 500 : 0,
       }).addTo(group);
 
       marker.bindTooltip(tooltipText, { direction: 'top', offset: [0, -14], opacity: 0.94 });
@@ -432,6 +486,9 @@ export const FiberGisLeafletCanvas: React.FC<FiberGisLeafletCanvasProps> = ({
     connectSourceNodeId,
     draftWaypoints,
     userLocation,
+    isFilterActive,
+    highlightedNodeIds,
+    highlightedCableIds,
   ]);
 
   return <div ref={containerRef} className="w-full h-full z-0" />;

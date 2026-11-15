@@ -91,6 +91,7 @@ export interface MikrotikRouter {
   activePppoeCount: number;
   walledGardenPool: string; // e.g. "172.16.100.0/24"
   proxyMode?: 'proxy' | 'direct'; // 'proxy' (Netlify Managed Proxy Mode) or 'direct' (Direct IP Mode)
+  isDefault?: boolean;
 }
 
 export interface ActiveSession {

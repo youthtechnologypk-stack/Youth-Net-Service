@@ -135,47 +135,44 @@ export const Header: React.FC<HeaderProps> = ({
   if (isClient) {
     return (
       <header className="bg-white/95 dark:bg-slate-950 border-b border-slate-200 dark:border-slate-800 text-slate-900 dark:text-slate-100 sticky top-0 z-40 backdrop-blur-md shadow-sm dark:shadow-lg select-none transition-colors duration-200">
-        <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-3 flex items-center justify-between gap-4">
+        <div className="max-w-7xl mx-auto px-3 sm:px-6 lg:px-8 pt-[max(0.75rem,env(safe-area-inset-top))] pb-2.5 flex flex-wrap items-center justify-between gap-2.5 min-w-0">
           {/* Company Logo: Youth Net */}
-          <div className="flex items-center gap-3">
-            <div className="flex items-center justify-center w-9 h-9 rounded-xl bg-gradient-to-tr from-cyan-600 to-emerald-600 text-white shadow-lg shadow-cyan-500/20">
-              <Network className="w-5 h-5 animate-pulse" />
+          <div className="flex items-center gap-2.5 min-w-0">
+            <div className="flex items-center justify-center w-8 h-8 sm:w-9 sm:h-9 rounded-xl bg-gradient-to-tr from-cyan-600 to-emerald-600 text-white shadow-lg shadow-cyan-500/20 shrink-0">
+              <Network className="w-4 h-4 sm:w-5 sm:h-5 animate-pulse" />
             </div>
-            <div>
-              <div className="flex items-center gap-2">
-                <span className="font-black tracking-wider text-base text-slate-900 dark:text-slate-100 uppercase">
+            <div className="min-w-0">
+              <div className="flex items-center gap-1.5 flex-wrap">
+                <span className="font-black tracking-wider text-sm sm:text-base leading-tight text-slate-900 dark:text-slate-100 uppercase">
                   Youth Net
                 </span>
-                <span className="text-[10px] px-2 py-0.5 rounded-full bg-cyan-50 dark:bg-cyan-950 text-cyan-700 dark:text-cyan-300 border border-cyan-200 dark:border-cyan-800 font-mono font-bold">
+                <span className="text-[10px] px-2 py-0.5 rounded-full bg-cyan-50 dark:bg-cyan-950 text-cyan-700 dark:text-cyan-300 border border-cyan-200 dark:border-cyan-800 font-mono font-bold shrink-0">
                   Subscriber Portal
                 </span>
               </div>
-              <p className="text-[11px] text-slate-500 dark:text-slate-400 font-sans">
+              <p className="text-[11px] text-slate-500 dark:text-slate-400 font-sans truncate">
                 Self-Service Dashboard &amp; Billing Management
               </p>
             </div>
           </div>
 
-          {/* Right Section: Theme Toggle, Client Account Name Badge, Install App Button, Logout */}
-          <div className="flex items-center gap-2.5 sm:gap-3">
-            {/* Global Theme Toggle */}
+          {/* Right Section: Theme Toggle, Client Account Name Badge, Logout */}
+          <div className="flex flex-wrap items-center gap-2 sm:gap-3 min-w-0">
             <ThemeToggle />
 
-            {/* Client Account Name Badge */}
-            <div className="flex items-center gap-2 bg-slate-100 dark:bg-slate-900 border border-slate-200 dark:border-slate-800 px-3 py-1.5 rounded-xl font-mono text-xs">
+            <div className="flex items-center gap-1.5 bg-slate-100 dark:bg-slate-900 border border-slate-200 dark:border-slate-800 px-2.5 py-1.5 rounded-xl font-mono text-xs min-w-0 max-w-full">
               <User className="w-3.5 h-3.5 text-cyan-600 dark:text-cyan-400 shrink-0" />
               <span className="text-slate-500 dark:text-slate-400 text-[10px] hidden sm:inline">Subscriber:</span>
-              <span className="text-slate-900 dark:text-white font-bold font-sans">
+              <span className="text-slate-900 dark:text-white font-bold font-sans truncate">
                 {activeUser?.fullName || activeUser?.username || 'Client'}
               </span>
             </div>
 
-            {/* Logout Button */}
             {onLogout && (
               <button
                 type="button"
                 onClick={onLogout}
-                className="flex items-center gap-1.5 bg-slate-100 dark:bg-slate-900 hover:bg-rose-50 dark:hover:bg-rose-950/80 text-slate-700 dark:text-slate-300 hover:text-rose-600 dark:hover:text-rose-200 border border-slate-200 dark:border-slate-800 hover:border-rose-300 dark:hover:border-rose-800/80 px-3 py-1.5 rounded-xl text-xs font-semibold transition cursor-pointer shadow-sm"
+                className="flex items-center gap-1.5 bg-slate-100 dark:bg-slate-900 hover:bg-rose-50 dark:hover:bg-rose-950/80 text-slate-700 dark:text-slate-300 hover:text-rose-600 dark:hover:text-rose-200 border border-slate-200 dark:border-slate-800 hover:border-rose-300 dark:hover:border-rose-800/80 px-2.5 py-1.5 rounded-xl text-xs font-semibold transition cursor-pointer shadow-sm shrink-0"
                 title="Sign Out of Session"
               >
                 <LogOut className="w-3.5 h-3.5 text-rose-500 dark:text-rose-400" />
@@ -195,34 +192,33 @@ export const Header: React.FC<HeaderProps> = ({
   if (isAgent) {
     return (
       <header className="bg-white/95 dark:bg-slate-950 border-b border-slate-200 dark:border-slate-800 text-slate-900 dark:text-slate-100 sticky top-0 z-40 backdrop-blur-md shadow-sm dark:shadow-lg select-none transition-colors duration-200">
-        <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-3 flex items-center justify-between gap-4">
-          <div className="flex items-center gap-3">
-            <div className="flex items-center justify-center w-9 h-9 rounded-xl bg-gradient-to-tr from-emerald-600 to-cyan-600 text-white shadow-lg shadow-emerald-500/20">
-              <Network className="w-5 h-5" />
+        <div className="max-w-7xl mx-auto px-3 sm:px-6 lg:px-8 pt-[max(0.75rem,env(safe-area-inset-top))] pb-2.5 flex flex-wrap items-center justify-between gap-2.5 min-w-0">
+          <div className="flex items-center gap-2.5 min-w-0">
+            <div className="flex items-center justify-center w-8 h-8 sm:w-9 sm:h-9 rounded-xl bg-gradient-to-tr from-emerald-600 to-cyan-600 text-white shadow-lg shadow-emerald-500/20 shrink-0">
+              <Network className="w-4 h-4 sm:w-5 sm:h-5" />
             </div>
-            <div>
-              <div className="flex items-center gap-2">
-                <span className="font-black tracking-wider text-base text-slate-900 dark:text-slate-100 uppercase">
+            <div className="min-w-0">
+              <div className="flex items-center gap-1.5 flex-wrap">
+                <span className="font-black tracking-wider text-sm sm:text-base leading-tight text-slate-900 dark:text-slate-100 uppercase">
                   Youth Net
                 </span>
-                <span className="text-[10px] px-2 py-0.5 rounded-full bg-emerald-50 dark:bg-emerald-950 text-emerald-700 dark:text-emerald-300 border border-emerald-200 dark:border-emerald-800 font-mono font-bold">
+                <span className="text-[10px] px-2 py-0.5 rounded-full bg-emerald-50 dark:bg-emerald-950 text-emerald-700 dark:text-emerald-300 border border-emerald-200 dark:border-emerald-800 font-mono font-bold shrink-0">
                   Field Agent Portal
                 </span>
               </div>
-              <p className="text-[11px] text-slate-500 dark:text-slate-400 font-sans">
+              <p className="text-[11px] text-slate-500 dark:text-slate-400 font-sans truncate">
                 Cash Recovery, Invoice Collection &amp; Support Dispatch
               </p>
             </div>
           </div>
 
-          <div className="flex items-center gap-2.5 sm:gap-3">
-            {/* Global Theme Toggle */}
+          <div className="flex flex-wrap items-center gap-2 sm:gap-3 min-w-0">
             <ThemeToggle />
 
-            <div className="flex items-center gap-2 bg-slate-100 dark:bg-slate-900 border border-slate-200 dark:border-slate-800 px-3 py-1.5 rounded-xl font-mono text-xs">
+            <div className="flex items-center gap-1.5 bg-slate-100 dark:bg-slate-900 border border-slate-200 dark:border-slate-800 px-2.5 py-1.5 rounded-xl font-mono text-xs min-w-0 max-w-full">
               <User className="w-3.5 h-3.5 text-emerald-600 dark:text-emerald-400 shrink-0" />
               <span className="text-slate-500 dark:text-slate-400 text-[10px] hidden sm:inline">Agent:</span>
-              <span className="text-slate-900 dark:text-white font-bold font-sans">
+              <span className="text-slate-900 dark:text-white font-bold font-sans truncate">
                 {activeUser?.fullName || activeUser?.username || 'Field Agent'}
               </span>
             </div>
@@ -231,7 +227,7 @@ export const Header: React.FC<HeaderProps> = ({
               <button
                 type="button"
                 onClick={onLogout}
-                className="flex items-center gap-1.5 bg-slate-100 dark:bg-slate-900 hover:bg-rose-50 dark:hover:bg-rose-950/80 text-slate-700 dark:text-slate-300 hover:text-rose-600 dark:hover:text-rose-200 border border-slate-200 dark:border-slate-800 hover:border-rose-300 dark:hover:border-rose-800/80 px-3 py-1.5 rounded-xl text-xs font-semibold transition cursor-pointer shadow-sm"
+                className="flex items-center gap-1.5 bg-slate-100 dark:bg-slate-900 hover:bg-rose-50 dark:hover:bg-rose-950/80 text-slate-700 dark:text-slate-300 hover:text-rose-600 dark:hover:text-rose-200 border border-slate-200 dark:border-slate-800 hover:border-rose-300 dark:hover:border-rose-800/80 px-2.5 py-1.5 rounded-xl text-xs font-semibold transition cursor-pointer shadow-sm shrink-0"
                 title="Sign Out of Session"
               >
                 <LogOut className="w-3.5 h-3.5 text-rose-500 dark:text-rose-400" />
@@ -245,14 +241,15 @@ export const Header: React.FC<HeaderProps> = ({
   }
 
   return (
-    <header className="bg-white/95 dark:bg-slate-950 border-b border-slate-200 dark:border-slate-800 text-slate-900 dark:text-slate-100 sticky top-0 z-40 backdrop-blur-md shadow-sm dark:shadow-md transition-colors duration-200">
+    <header className="bg-white/95 dark:bg-slate-950 border-b border-slate-200 dark:border-slate-800 text-slate-900 dark:text-slate-100 sticky top-0 z-40 backdrop-blur-md shadow-sm dark:shadow-md transition-colors duration-200 max-w-full overflow-x-hidden">
       {/* Top Banner / Router Status */}
-      <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-2.5 flex flex-wrap items-center justify-between gap-3 border-b border-slate-200/80 dark:border-slate-800/60">
-        <div className="flex items-center gap-3">
+      <div className="max-w-7xl mx-auto px-3 sm:px-6 lg:px-8 pt-[max(0.75rem,env(safe-area-inset-top))] pb-2.5 flex flex-wrap items-center justify-between gap-2.5 sm:gap-3 border-b border-slate-200/80 dark:border-slate-800/60 min-w-0">
+        {/* Row 1 on Mobile: Menu + YOUTH NET Brand */}
+        <div className="flex items-center gap-2 sm:gap-3 w-full md:w-auto min-w-0">
           {onToggleSidebar && (
             <button
               onClick={onToggleSidebar}
-              className={`flex items-center gap-1.5 px-3 py-1.5 rounded-xl border text-xs font-mono font-bold transition shadow-sm cursor-pointer ${
+              className={`flex items-center gap-1.5 px-2.5 sm:px-3 py-1.5 rounded-xl border text-xs font-mono font-bold transition shadow-sm cursor-pointer shrink-0 ${
                 isSidebarOpen
                   ? 'bg-cyan-50 dark:bg-cyan-950 text-cyan-700 dark:text-cyan-300 border-cyan-300 dark:border-cyan-700 ring-1 ring-cyan-500/50'
                   : 'bg-slate-100 hover:bg-slate-200 dark:bg-slate-900 dark:hover:bg-slate-800 text-slate-700 hover:text-slate-900 dark:text-slate-200 dark:hover:text-white border-slate-200 dark:border-slate-700'
@@ -270,24 +267,26 @@ export const Header: React.FC<HeaderProps> = ({
             </button>
           )}
 
-          <div className="flex items-center justify-center w-9 h-9 rounded-lg bg-gradient-to-tr from-cyan-600 to-blue-600 text-white shadow-lg shadow-cyan-500/20">
-            <Network className="w-5 h-5 animate-pulse" />
+          <div className="flex items-center justify-center w-8 h-8 sm:w-9 sm:h-9 rounded-lg bg-gradient-to-tr from-cyan-600 to-blue-600 text-white shadow-lg shadow-cyan-500/20 shrink-0">
+            <Network className="w-4 h-4 sm:w-5 sm:h-5 animate-pulse" />
           </div>
-          <div>
-            <div className="flex items-center gap-2">
-              <span className="font-black tracking-wider text-base text-slate-900 dark:text-slate-100 uppercase">
-                Youth Net <span className="text-cyan-600 dark:text-cyan-400 font-mono">Service</span>
+          <div className="min-w-0 flex-1">
+            <div className="flex items-center gap-1.5 sm:gap-2 flex-wrap">
+              <span className="font-black tracking-wider text-sm sm:text-base leading-tight text-slate-900 dark:text-slate-100 uppercase truncate">
+                YOUTH NET <span className="text-cyan-600 dark:text-cyan-400 font-mono">SERVICE</span>
               </span>
-              <span className="text-xs px-2 py-0.5 rounded-full bg-cyan-50 dark:bg-cyan-950 text-cyan-700 dark:text-cyan-400 border border-cyan-200 dark:border-cyan-700/50 font-mono">
-                RouterOS v7.16
+              <span className="text-[10px] sm:text-xs px-1.5 sm:px-2 py-0.5 rounded-full bg-cyan-50 dark:bg-cyan-950 text-cyan-700 dark:text-cyan-400 border border-cyan-200 dark:border-cyan-700/50 font-mono shrink-0 leading-tight">
+                v7.16
               </span>
             </div>
-            <p className="text-xs text-slate-500 dark:text-slate-400">Carrier-Grade ISP Operations & MikroTik Automation</p>
+            <p className="text-[11px] sm:text-xs text-slate-500 dark:text-slate-400 truncate leading-tight">
+              Carrier-Grade ISP Operations &amp; MikroTik Automation
+            </p>
           </div>
         </div>
 
         {/* Global Search Bar (Name, IP, Invoice # across app) */}
-        <div className="order-last md:order-none w-full md:w-auto flex-1 max-w-lg mx-auto md:mx-4">
+        <div className="order-last md:order-none w-full md:w-auto flex-1 max-w-lg mx-auto md:mx-4 min-w-0">
           <GlobalSearchBar
             onNavigateTab={setActiveTab}
             onOpenPaymentModal={onOpenPaymentModal}
@@ -296,14 +295,15 @@ export const Header: React.FC<HeaderProps> = ({
           />
         </div>
 
-        {/* Live Router Telemetry Indicator & Actions */}
-        <div className="flex items-center flex-wrap gap-2.5 sm:gap-4 text-xs font-mono">
-          <div className="flex items-center gap-2 bg-slate-100 dark:bg-slate-900 border border-slate-200 dark:border-slate-800 px-3 py-1.5 rounded-md">
-            <Server className="w-3.5 h-3.5 text-cyan-600 dark:text-cyan-400" />
+        {/* Live Router Selector Row (Full-Width on <768px) + Telemetry & Wrapped Actions */}
+        <div className="w-full md:w-auto flex flex-col md:flex-row md:items-center flex-wrap gap-2 sm:gap-3 text-xs font-mono min-w-0 max-w-full">
+          {/* Dedicated Router Selector Row on Mobile */}
+          <div className="w-full md:w-auto max-w-full flex items-center gap-2 bg-slate-100 dark:bg-slate-900 border border-slate-200 dark:border-slate-800 px-2.5 py-1.5 rounded-lg min-w-0">
+            <Server className="w-3.5 h-3.5 text-cyan-600 dark:text-cyan-400 shrink-0" />
             <select
               value={selectedRouterId}
               onChange={(e) => setSelectedRouterId(e.target.value)}
-              className="bg-transparent text-slate-800 dark:text-slate-200 text-xs focus:outline-none cursor-pointer"
+              className="w-full md:w-auto min-w-0 flex-1 max-w-full truncate bg-transparent text-slate-800 dark:text-slate-200 text-xs focus:outline-none cursor-pointer"
             >
               {(!routers || routers.length === 0) ? (
                 <option value="" disabled className="bg-white dark:bg-slate-900 text-slate-400">
@@ -318,12 +318,17 @@ export const Header: React.FC<HeaderProps> = ({
               )}
             </select>
             {currentRouter && (
-              <span className={`inline-block w-2 h-2 rounded-full ${currentRouter.status === 'online' ? 'bg-emerald-500 animate-ping' : 'bg-rose-500'}`} />
+              <span
+                className={`inline-block w-2 h-2 rounded-full shrink-0 ${
+                  currentRouter.status === 'online' ? 'bg-emerald-500 animate-ping' : 'bg-rose-500'
+                }`}
+                title={currentRouter.status === 'online' ? 'Router Online' : 'Router Offline'}
+              />
             )}
             {onOpenAddRouterModal && (
               <button
                 onClick={onOpenAddRouterModal}
-                className="p-1 rounded bg-slate-200 hover:bg-slate-300 dark:bg-slate-800 dark:hover:bg-slate-700 text-cyan-600 dark:text-cyan-400 hover:text-cyan-700 dark:hover:text-cyan-300 border border-slate-300 dark:border-slate-700 transition"
+                className="p-1 rounded bg-slate-200 hover:bg-slate-300 dark:bg-slate-800 dark:hover:bg-slate-700 text-cyan-600 dark:text-cyan-400 hover:text-cyan-700 dark:hover:text-cyan-300 border border-slate-300 dark:border-slate-700 transition shrink-0"
                 title="Add New MikroTik Router"
               >
                 <PlusCircle className="w-3.5 h-3.5" />
@@ -363,13 +368,12 @@ export const Header: React.FC<HeaderProps> = ({
             </span>
           )}
 
-          {/* Quick Action Buttons, User Session, Theme Toggle & Logout */}
-          <div className="flex items-center gap-2">
-            {/* Global Theme Toggle */}
+          {/* Wrapped Session, + Provision & Logout Actions Row (Fits cleanly inside 360px) */}
+          <div className="w-full md:w-auto flex flex-wrap items-center gap-1.5 sm:gap-2 min-w-0 max-w-full">
             <ThemeToggle />
 
-            <div className="flex items-center gap-1.5 bg-slate-100 dark:bg-slate-900 border border-slate-200 dark:border-slate-800 px-2.5 py-1.5 rounded-md">
-              <Shield className="w-3.5 h-3.5 text-cyan-600 dark:text-cyan-400" />
+            <div className="flex items-center gap-1 bg-slate-100 dark:bg-slate-900 border border-slate-200 dark:border-slate-800 px-2 py-1.5 rounded-md shrink-0">
+              <Shield className="w-3.5 h-3.5 text-cyan-600 dark:text-cyan-400 shrink-0" />
               <span className="text-slate-500 dark:text-slate-400 text-[10px]">Session:</span>
               <span className={`text-[10px] px-1.5 py-0.5 rounded font-mono font-bold ${
                 currentRole === 'ADMIN'
@@ -393,16 +397,17 @@ export const Header: React.FC<HeaderProps> = ({
               <>
                 <button
                   onClick={() => onOpenProvisionModal()}
-                  className="hidden sm:flex items-center gap-1.5 bg-cyan-600 hover:bg-cyan-500 text-slate-950 font-semibold px-2.5 py-1.5 rounded text-xs transition shadow-sm"
+                  className="flex items-center gap-1 bg-cyan-600 hover:bg-cyan-500 text-slate-950 font-semibold px-2.5 py-1.5 rounded text-xs transition shadow-sm shrink-0 cursor-pointer"
                   title="Provision PPPoE Customer"
                 >
-                  <PlusCircle className="w-3.5 h-3.5" />
-                  <span>+ Provision PPPoE</span>
+                  <PlusCircle className="w-3.5 h-3.5 shrink-0" />
+                  <span>+ Provision</span>
+                  <span className="hidden sm:inline">PPPoE</span>
                 </button>
 
                 <button
                   onClick={() => onOpenOutageModal()}
-                  className="hidden sm:flex items-center gap-1.5 bg-rose-600/90 hover:bg-rose-500 text-white font-medium px-2.5 py-1.5 rounded text-xs transition"
+                  className="hidden sm:flex items-center gap-1.5 bg-rose-600/90 hover:bg-rose-500 text-white font-medium px-2.5 py-1.5 rounded text-xs transition shrink-0 cursor-pointer"
                   title="Broadcast Emergency Outage Alert"
                 >
                   <Megaphone className="w-3.5 h-3.5" />
@@ -417,10 +422,10 @@ export const Header: React.FC<HeaderProps> = ({
             {onLogout && (
               <button
                 onClick={onLogout}
-                className="flex items-center gap-1.5 bg-slate-100 hover:bg-rose-50 hover:text-rose-700 dark:bg-slate-800 dark:hover:bg-rose-900/60 dark:hover:text-rose-200 text-slate-700 dark:text-slate-300 font-medium px-2.5 py-1.5 rounded text-xs transition border border-slate-200 dark:border-slate-700 cursor-pointer shadow-sm"
+                className="flex items-center gap-1 bg-slate-100 hover:bg-rose-50 hover:text-rose-700 dark:bg-slate-800 dark:hover:bg-rose-900/60 dark:hover:text-rose-200 text-slate-700 dark:text-slate-300 font-medium px-2.5 py-1.5 rounded text-xs transition border border-slate-200 dark:border-slate-700 cursor-pointer shadow-sm shrink-0"
                 title="Sign Out of Session"
               >
-                <LogOut className="w-3.5 h-3.5 text-rose-500 dark:text-rose-400" />
+                <LogOut className="w-3.5 h-3.5 text-rose-500 dark:text-rose-400 shrink-0" />
                 <span>Logout</span>
               </button>
             )}

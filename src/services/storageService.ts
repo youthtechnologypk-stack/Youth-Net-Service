@@ -228,7 +228,7 @@ const INITIAL_AUDIT_LOGS: AuditLogEntry[] = [
     target: 'client',
     severity: 'SUCCESS',
     ipAddress: '202.142.186.150',
-    details: 'Provisioned 20M_Ultra PPPoE secret on BRAS-CCR2004-CORE-NOC. RouterOS scheduler auto-expiry registered.',
+    details: 'Provisioned 20M_Ultra PPPoE secret on SADDAR (202.142.186.150). RouterOS scheduler auto-expiry registered.',
     metadata: { profile: '20M_Ultra', validityDays: 30, invoiceAmount: 2500 },
   },
   {
@@ -263,10 +263,10 @@ const INITIAL_AUDIT_LOGS: AuditLogEntry[] = [
     actorRole: 'ADMIN',
     actionType: 'ROUTER_CONFIG_UPDATE',
     actionTitle: 'RouterOS REST API Sync',
-    target: 'BRAS-CCR2004-CORE-NOC',
+    target: 'SADDAR',
     severity: 'INFO',
     ipAddress: '202.142.186.150',
-    details: 'Synchronized live bandwidth profiles (5M_Home, 10M_Standard, 20M_Ultra, EXPIRED-POOL) from CCR2004.',
+    details: 'Synchronized live bandwidth profiles (5M_Home, 10M_Standard, 20M_Ultra, EXPIRED-POOL) from SADDAR.',
   },
   {
     id: 'audit-106',

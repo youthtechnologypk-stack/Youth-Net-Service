@@ -13,8 +13,12 @@ import {
   Layers,
   CheckCircle2,
   Network,
+  Copy,
+  Database,
+  Star,
 } from 'lucide-react';
 import { useISP } from '../context/ISPContext';
+import { MIKROTIK_ROUTERS_MIGRATION_SQL } from '../services/routerSyncService';
 import { MikrotikRouter } from '../types/isp';
 import { EditRouterModal } from './EditRouterModal';
 import { DeleteConfirmDialog } from './DeleteConfirmDialog';
@@ -31,12 +35,15 @@ export const RouterFleet: React.FC<RouterFleetProps> = ({ onOpenAddDeviceModal }
     activeSessions,
     customers,
     deleteMikrotikRouter,
+    setDefaultMikrotikRouter,
+    routerSyncSchemaMissing,
     refreshRouterHealth,
     routerProxyMode,
     setRouterProxyMode,
   } = useISP();
 
   const [testingRouterId, setTestingRouterId] = useState<string | null>(null);
+  const [copiedRouterSql, setCopiedRouterSql] = useState(false);
 
   // Edit Modal State
   const [routerToEdit, setRouterToEdit] = useState<MikrotikRouter | null>(null);
@@ -173,6 +180,32 @@ export const RouterFleet: React.FC<RouterFleetProps> = ({ onOpenAddDeviceModal }
         </button>
       </div>
 
+      {routerSyncSchemaMissing && (
+        <div className="bg-amber-950/70 border border-amber-700/70 rounded-xl p-4 flex flex-col sm:flex-row sm:items-center justify-between gap-3 text-xs">
+          <div className="space-y-0.5 text-amber-200">
+            <div className="font-bold font-mono text-amber-300 flex items-center gap-1.5">
+              <Database className="w-4 h-4" />
+              <span>Multi-Device Supabase Router Sync Table Needed</span>
+            </div>
+            <p className="text-[11px] text-amber-200/80">
+              Run the SQL script in Supabase SQL Editor so saved routers (e.g., SADDAR) sync automatically across Desktop and Mobile.
+            </p>
+          </div>
+          <button
+            type="button"
+            onClick={() => {
+              navigator.clipboard?.writeText(MIKROTIK_ROUTERS_MIGRATION_SQL);
+              setCopiedRouterSql(true);
+              setTimeout(() => setCopiedRouterSql(false), 3000);
+            }}
+            className="px-3.5 py-2 rounded-lg bg-amber-500 hover:bg-amber-400 text-slate-950 font-mono font-bold text-xs flex items-center gap-1.5 cursor-pointer shrink-0"
+          >
+            <Copy className="w-3.5 h-3.5" />
+            <span>{copiedRouterSql ? 'SQL Copied!' : 'Copy Router SQL'}</span>
+          </button>
+        </div>
+      )}
+
       {/* Empty State when no routers registered */}
       {(!routers || routers.length === 0) ? (
         <div className="bg-slate-900 border border-slate-800 rounded-2xl p-10 text-center space-y-4 shadow-xl">
@@ -224,11 +257,17 @@ export const RouterFleet: React.FC<RouterFleetProps> = ({ onOpenAddDeviceModal }
                       <Server className="w-5 h-5" />
                     </div>
                     <div>
-                      <div className="flex items-center gap-2">
+                      <div className="flex items-center flex-wrap gap-2">
                         <h4 className="font-bold text-white text-sm font-mono">{router.name}</h4>
                         {isSelected && (
                           <span className="text-[10px] px-2 py-0.5 rounded bg-cyan-950 text-cyan-300 border border-cyan-700/60 font-bold font-mono">
                             ACTIVE BNG
+                          </span>
+                        )}
+                        {router.isDefault && (
+                          <span className="text-[10px] px-2 py-0.5 rounded bg-amber-950/90 text-amber-300 border border-amber-700/60 font-bold font-mono inline-flex items-center gap-1">
+                            <Star className="w-2.5 h-2.5" />
+                            DEFAULT
                           </span>
                         )}
                       </div>
@@ -317,6 +356,21 @@ export const RouterFleet: React.FC<RouterFleetProps> = ({ onOpenAddDeviceModal }
                 )}
 
                 <div className="flex items-center gap-1.5">
+                  {!router.isDefault && (
+                    <button
+                      type="button"
+                      onClick={async () => {
+                        await setDefaultMikrotikRouter(router.id);
+                        showToast(`"${router.name}" set as Default multi-device router.`);
+                      }}
+                      className="px-2 py-1 text-slate-300 hover:text-amber-300 hover:bg-amber-950/40 rounded-lg transition border border-slate-700 hover:border-amber-700 cursor-pointer flex items-center gap-1 text-[11px] font-mono"
+                      title="Set as Default Router across Desktop & Mobile"
+                    >
+                      <Star className="w-3 h-3 text-amber-400" />
+                      <span className="hidden sm:inline">Default</span>
+                    </button>
+                  )}
+
                   {/* EDIT ROUTER BUTTON */}
                   <button
                     onClick={() => handleEditRouter(router)}

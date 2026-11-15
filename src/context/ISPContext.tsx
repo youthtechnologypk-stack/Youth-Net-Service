@@ -81,6 +81,15 @@ import { storageService } from '../services/storageService';
 import { saveUnifiedPortalUser, USERS_STORAGE_KEY } from '../lib/userRepository';
 import { supabase } from '../services/supabaseClient';
 import { sessionSyncEngine, parseRouterOsUptimeSeconds } from '../services/sessionSyncEngine';
+import {
+  deleteSupabaseRouter,
+  fetchSupabaseRouters,
+  normalizeRouterPort,
+  pickPreferredRouterId,
+  setDefaultSupabaseRouter,
+  subscribeToSupabaseRouters,
+  upsertSupabaseRouter,
+} from '../services/routerSyncService';
 
 interface BandwidthDataPoint {
   time: string;
@@ -148,6 +157,8 @@ interface ISPContextType {
     updates: Partial<MikrotikRouter> & { password?: string }
   ) => Promise<{ success: boolean; router?: MikrotikRouter; message?: string }>;
   deleteMikrotikRouter: (routerId: string) => Promise<void>;
+  setDefaultMikrotikRouter: (routerId: string) => Promise<void>;
+  routerSyncSchemaMissing: boolean;
   testRouterConnection: (params: {
     host: string;
     port: number;
@@ -300,20 +311,20 @@ const STORAGE_KEY_DELETED_SECRETS = 'deleted_secret_usernames';
 const STORAGE_KEY_DELETED_PACKAGES = 'deleted_profile_ids';
 
 function sanitizeRouterPorts(r: MikrotikRouter): MikrotikRouter {
-  const isDefaultMikrotik =
-    r.ip === '202.142.186.150' || r.ipAddress === '202.142.186.150';
-  let port = r.port || r.apiPort;
-  let useSsl = r.useSsl ?? (port === 443);
-
-  if (isDefaultMikrotik && (!port || port === 443 || port === 8728 || port === 8729)) {
-    port = 81;
-    useSsl = false;
-  } else if (!port || port === 8728 || port === 8729) {
-    port = useSsl ? 443 : 80;
-  }
+  const host = (r.ipAddress || r.ip || '').trim();
+  const { port, useSsl } = normalizeRouterPort(host, r.port ?? r.apiPort, r.useSsl);
+  const cleanName =
+    r.name && r.name !== 'BRAS-CCR2004-CORE-NOC'
+      ? r.name
+      : host === '202.142.186.150'
+      ? 'SADDAR'
+      : r.name || host || 'MikroTik-BNG';
 
   return {
     ...r,
+    name: cleanName,
+    ipAddress: host,
+    ip: host,
     port,
     apiPort: port,
     useSsl,
@@ -868,82 +879,127 @@ export const ISPProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
     };
   }, []);
 
+  const [routerSyncSchemaMissing, setRouterSyncSchemaMissing] = useState<boolean>(false);
+
   const [selectedRouterId, setSelectedRouterId] = useState<string>(() => {
     try {
       const stored = localStorage.getItem('netpulse_selected_router_id');
       if (stored) return stored;
     } catch {}
     const initialList = getInitialRouters();
-    return initialList[0]?.id || '';
+    return pickPreferredRouterId(initialList);
   });
 
-  // Fetch saved routers and packages from PostgreSQL / backend API on mount
+  // Fetch saved routers from Supabase FIRST (cross-device Desktop + Mobile sync), then fallback to /api/routers
   useEffect(() => {
-    fetch('/api/routers')
-      .then((res) => safeResponseJson<any>(res, { success: false, routers: null }))
-      .then((data) => {
-        if (data.success && Array.isArray(data.routers)) {
+    let isMounted = true;
+
+    const loadRoutersFromSupabaseFirst = async () => {
+      try {
+        const supaRes = await fetchSupabaseRouters();
+        if (!isMounted) return;
+        setRouterSyncSchemaMissing(supaRes.tableMissing);
+
+        if (!supaRes.tableMissing && supaRes.routers.length > 0) {
+          const sanitized = supaRes.routers.map(sanitizeRouterPorts);
+          setRouters(sanitized);
+          try {
+            localStorage.setItem(STORAGE_KEY_ROUTERS, JSON.stringify(sanitized));
+            localStorage.setItem(STORAGE_KEY_ROUTERS_INIT, 'true');
+            localStorage.setItem(STORAGE_KEY_DELETED_ROUTERS, JSON.stringify([]));
+          } catch {}
+
+          let storedId: string | null = null;
+          try {
+            storedId = localStorage.getItem('netpulse_selected_router_id');
+          } catch {}
+          const chosenId = pickPreferredRouterId(sanitized, storedId);
+          setSelectedRouterId(chosenId);
+          try {
+            if (chosenId) localStorage.setItem('netpulse_selected_router_id', chosenId);
+          } catch {}
+
+          if (chosenId) {
+            setTimeout(() => {
+              syncSelectedRouterNow(chosenId).catch(() => {});
+            }, 50);
+          }
+          return;
+        }
+      } catch (err) {
+        console.warn('Supabase router fetch warning:', err);
+      }
+
+      // Fallback to backend /api/routers if Supabase has no rows yet or table is not yet created
+      try {
+        const res = await fetch('/api/routers');
+        const data = await safeResponseJson<any>(res, { success: false, routers: null });
+        if (!isMounted) return;
+
+        if (data.success && Array.isArray(data.routers) && data.routers.length > 0) {
           const deletedRaw = typeof window !== 'undefined' ? localStorage.getItem(STORAGE_KEY_DELETED_ROUTERS) || '[]' : '[]';
           let deletedIds: string[] = [];
           try { deletedIds = JSON.parse(deletedRaw); } catch {}
 
-          const sanitized = data.routers.filter(
-            (r: MikrotikRouter) =>
-              !deletedIds.includes(r.id) &&
-              !deletedIds.includes(r.name) &&
-              !deletedIds.includes(r.ipAddress)
-          );
+          const sanitized = data.routers
+            .filter(
+              (r: MikrotikRouter) =>
+                !deletedIds.includes(r.id) &&
+                !deletedIds.includes(r.name) &&
+                !deletedIds.includes(r.ipAddress)
+            )
+            .map(sanitizeRouterPorts);
 
-          const isInit = typeof window !== 'undefined' && localStorage.getItem(STORAGE_KEY_ROUTERS_INIT) !== null;
-          const localRaw = typeof window !== 'undefined' ? localStorage.getItem(STORAGE_KEY_ROUTERS) : null;
-
-          if (!isInit) {
+          if (sanitized.length > 0) {
             setRouters(sanitized);
             try {
               localStorage.setItem(STORAGE_KEY_ROUTERS, JSON.stringify(sanitized));
               localStorage.setItem(STORAGE_KEY_ROUTERS_INIT, 'true');
             } catch {}
-          } else if (localRaw !== null) {
-            try {
-              const localList = JSON.parse(localRaw);
-              if (Array.isArray(localList)) {
-                if (localList.length === 0) {
-                  setRouters([]);
-                  setSelectedRouterId('');
-                  return;
-                }
-                const activeLocal = localList.filter(
-                  (r: MikrotikRouter) =>
-                    !deletedIds.includes(r.id) &&
-                    !deletedIds.includes(r.name) &&
-                    !deletedIds.includes(r.ipAddress)
-                );
-                setRouters(activeLocal);
-                localStorage.setItem(STORAGE_KEY_ROUTERS, JSON.stringify(activeLocal));
-              }
-            } catch {}
-          }
 
-          setRouters((curr) => {
-            if (curr.length > 0) {
-              try {
-                const stored = localStorage.getItem('netpulse_selected_router_id');
-                if (stored && curr.some((r) => r.id === stored)) {
-                  setSelectedRouterId(stored);
-                } else {
-                  setSelectedRouterId(curr[0].id);
-                }
-              } catch {}
-            } else {
-              setSelectedRouterId('');
+            let storedId: string | null = null;
+            try {
+              storedId = localStorage.getItem('netpulse_selected_router_id');
+            } catch {}
+            const chosenId = pickPreferredRouterId(sanitized, storedId);
+            setSelectedRouterId(chosenId);
+
+            // Seed Supabase mikrotik_routers so mobile & other browsers pick it up automatically
+            for (let i = 0; i < sanitized.length; i++) {
+              upsertSupabaseRouter(sanitized[i], {
+                setAsDefault: sanitized[i].id === chosenId || i === 0,
+              }).catch(() => {});
             }
-            return curr;
-          });
+          }
+        } else {
+          // If localStorage has configured routers (e.g. desktop before Supabase table was seeded), push them to Supabase
+          const currentLocal = routersRef.current || [];
+          if (currentLocal.length > 0) {
+            for (let i = 0; i < currentLocal.length; i++) {
+              upsertSupabaseRouter(currentLocal[i], {
+                setAsDefault: Boolean(currentLocal[i].isDefault) || i === 0,
+              }).catch(() => {});
+            }
+          }
         }
-      })
-      .catch((err) => {
+      } catch (err) {
         console.warn('Could not fetch routers from /api/routers:', err);
-      });
+      }
+    };
+
+    loadRoutersFromSupabaseFirst();
+
+    const unsubscribeRouters = subscribeToSupabaseRouters(() => {
+      loadRoutersFromSupabaseFirst();
+    });
+
+    return () => {
+      isMounted = false;
+      unsubscribeRouters();
+    };
+  }, []);
+
+  useEffect(() => {
 
     fetch('/api/packages')
       .then((res) => safeResponseJson<any>(res, { success: false, packages: null }))
@@ -2375,21 +2431,38 @@ export const ISPProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
     setRouterInterfaces([]);
     setActiveSessions([]);
 
+    const shouldBeDefault =
+      Boolean(routerData.isDefault) || (routersRef.current || []).length === 0;
+    const finalizedRouter = sanitizeRouterPorts({
+      ...savedRouter,
+      password: savedRouter.password ?? routerData.password ?? '',
+      isDefault: shouldBeDefault,
+    });
+
+    // Immediately upsert to Supabase mikrotik_routers for cross-device persistence
+    upsertSupabaseRouter(finalizedRouter, { setAsDefault: shouldBeDefault }).catch((err) => {
+      console.warn('Supabase router upsert warning:', err);
+    });
+
     setRouters((prev) => {
-      const updated = [...prev.filter((r) => r.id !== savedRouter.id), savedRouter];
+      const baseList = shouldBeDefault
+        ? prev.map((r) => ({ ...r, isDefault: false }))
+        : prev;
+      const updated = [...baseList.filter((r) => r.id !== finalizedRouter.id), finalizedRouter];
       try {
         localStorage.setItem(STORAGE_KEY_ROUTERS, JSON.stringify(updated));
+        localStorage.setItem(STORAGE_KEY_ROUTERS_INIT, 'true');
       } catch {}
       return updated;
     });
-    setSelectedRouterId(savedRouter.id);
+    setSelectedRouterId(finalizedRouter.id);
     try {
-      localStorage.setItem('netpulse_selected_router_id', savedRouter.id);
+      localStorage.setItem('netpulse_selected_router_id', finalizedRouter.id);
     } catch {}
 
     // Immediately trigger live synchronization with the newly added physical device
     setTimeout(() => {
-      syncSelectedRouterNow();
+      syncSelectedRouterNow(finalizedRouter.id);
     }, 100);
 
     // Notification Log
@@ -2400,38 +2473,47 @@ export const ISPProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
         recipientName: 'NOC Lead Engineer',
         type: 'ticket_update',
         templateName: 'isp_new_router_added',
-        messageBody: `🌐 *NEW MIKROTIK BNG ROUTER SAVED & CONNECTED*:\nRouter: *${savedRouter.name}*\nModel: ${savedRouter.model}\nIP: ${savedRouter.ipAddress}:${savedRouter.apiPort}\nStatus: ${savedRouter.status.toUpperCase()} (Database Persisted)\nDeployed at: ${savedRouter.location}`,
+        messageBody: `🌐 *NEW MIKROTIK BNG ROUTER SAVED & CONNECTED*:\nRouter: *${finalizedRouter.name}*\nModel: ${finalizedRouter.model}\nIP: ${finalizedRouter.ipAddress}:${finalizedRouter.apiPort}\nStatus: ${finalizedRouter.status.toUpperCase()} (Supabase Persisted)\nDeployed at: ${finalizedRouter.location}`,
         status: 'delivered',
         timestamp: new Date().toISOString(),
       },
       ...prev,
     ]);
 
-    return savedRouter;
+    return finalizedRouter;
+  };
+
+  const setDefaultMikrotikRouter = async (routerId: string): Promise<void> => {
+    setRouters((prev) => {
+      const updated = prev.map((r) => ({ ...r, isDefault: r.id === routerId }));
+      try {
+        localStorage.setItem(STORAGE_KEY_ROUTERS, JSON.stringify(updated));
+      } catch {}
+      return updated;
+    });
+    setSelectedRouterId(routerId);
+    try {
+      localStorage.setItem('netpulse_selected_router_id', routerId);
+    } catch {}
+    await setDefaultSupabaseRouter(routerId);
+    syncSelectedRouterNow(routerId).catch(() => {});
   };
 
   const deleteMikrotikRouter = async (routerId: string): Promise<void> => {
-    let apiSuccess = false;
-    let apiMessage = '';
-
-    // 1. Await backend deletion
+    // 1. Delete immediately from Supabase & backend APIs
     try {
-      const res1 = await safeMikrotikFetch(`/api/mikrotik/routers/${encodeURIComponent(routerId)}`, {
-        method: 'DELETE',
-      });
-      const data1 = await safeResponseJson<any>(res1, { success: false });
-      if (data1.success) {
-        apiSuccess = true;
-        apiMessage = data1.message || '';
-      }
-      const res2 = await fetch(`/api/routers/${encodeURIComponent(routerId)}`, {
-        method: 'DELETE',
-        headers: { 'Content-Type': 'application/json' },
-      });
-      const data2 = await safeResponseJson<any>(res2, { success: false });
-      if (data2.success) apiSuccess = true;
+      await Promise.allSettled([
+        deleteSupabaseRouter(routerId),
+        safeMikrotikFetch(`/api/mikrotik/routers/${encodeURIComponent(routerId)}`, {
+          method: 'DELETE',
+        }),
+        fetch(`/api/routers/${encodeURIComponent(routerId)}`, {
+          method: 'DELETE',
+          headers: { 'Content-Type': 'application/json' },
+        }),
+      ]);
     } catch (err) {
-      console.warn('API router deletion failed (or running in mock/client mode):', err);
+      console.warn('Router deletion warning:', err);
     }
 
     // 2. Record tombstone in deleted_router_ids
@@ -2454,12 +2536,11 @@ export const ISPProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
       try {
         localStorage.setItem(STORAGE_KEY_ROUTERS, JSON.stringify(remaining));
         localStorage.setItem(STORAGE_KEY_ROUTERS_INIT, 'true');
-        localStorage.setItem('registered_routers', JSON.stringify(remaining));
       } catch {}
 
       const isCurrentSelected = selectedRouterId === routerId || !remaining.some((r) => r?.id === selectedRouterId);
       if (isCurrentSelected) {
-        const nextId = remaining.length > 0 ? remaining[0].id : '';
+        const nextId = pickPreferredRouterId(remaining);
         setSelectedRouterId(nextId);
         try {
           if (nextId) {
@@ -2484,7 +2565,7 @@ export const ISPProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
     routerId: string,
     updates: Partial<MikrotikRouter> & { password?: string }
   ): Promise<{ success: boolean; router?: MikrotikRouter; message?: string }> => {
-    let updatedRouter = updates;
+    let updatedRouter: Partial<MikrotikRouter> & { password?: string } = updates;
     try {
       const res = await safeMikrotikFetch(`/api/mikrotik/routers/${encodeURIComponent(routerId)}`, {
         method: 'PUT',
@@ -2493,15 +2574,56 @@ export const ISPProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
       const data = await safeResponseJson<any>(res, { success: false });
 
       if (data.success && data.router) {
-        updatedRouter = data.router;
+        updatedRouter = { ...data.router, ...updates };
       }
     } catch (err: any) {
       console.warn('Network error updating router via API:', err);
     }
 
+    const existing = (routersRef.current || []).find((r) => r.id === routerId);
+    const mergedRouter = sanitizeRouterPorts({
+      ...(existing || {
+        id: routerId,
+        name: updates.name || 'SADDAR',
+        model: 'MikroTik CCR2004-16G-2S+',
+        ipAddress: updates.ipAddress || updates.ip || '202.142.186.150',
+        apiPort: updates.apiPort || updates.port || 81,
+        username: updates.username || 'admin',
+        useSsl: Boolean(updates.useSsl),
+        version: 'RouterOS v7.16.2',
+        location: 'Saddar Core NOC',
+        cpuLoad: 0,
+        memoryUsageMb: 0,
+        totalMemoryMb: 4096,
+        uptime: '0s',
+        status: 'unreachable',
+        wanInterface: 'WAN3',
+        currentWanRxMbps: 0,
+        currentWanTxMbps: 0,
+        activePppoeCount: 0,
+        walledGardenPool: '16.16.16.0/24',
+      }),
+      ...updatedRouter,
+      password:
+        updates.password && updates.password.trim()
+          ? updates.password.trim()
+          : existing?.password || '',
+    });
+
+    // Upsert merged router immediately to Supabase mikrotik_routers
+    await upsertSupabaseRouter(mergedRouter, {
+      setAsDefault: updates.isDefault !== undefined ? Boolean(updates.isDefault) : mergedRouter.isDefault,
+    }).catch((err) => {
+      console.warn('Supabase router update warning:', err);
+    });
+
     // Update state and localStorage synchronously
     setRouters((prev) => {
-      const updated = prev.map((r) => (r.id === routerId ? { ...r, ...updatedRouter } : r));
+      const updated = prev.map((r) => {
+        if (r.id === routerId) return mergedRouter;
+        if (updates.isDefault) return { ...r, isDefault: false };
+        return r;
+      });
       try {
         localStorage.setItem(STORAGE_KEY_ROUTERS, JSON.stringify(updated));
       } catch {}
@@ -2510,8 +2632,8 @@ export const ISPProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
 
     return {
       success: true,
-      router: updatedRouter as any,
-      message: `Router ${updates.name || routerId} updated successfully`,
+      router: mergedRouter,
+      message: `Router ${mergedRouter.name || routerId} updated successfully`,
     };
   };
 
@@ -4824,6 +4946,8 @@ export const ISPProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
         addMikrotikRouter,
         updateMikrotikRouter,
         deleteMikrotikRouter,
+        setDefaultMikrotikRouter,
+        routerSyncSchemaMissing,
         testRouterConnection,
         refreshRouterHealth,
         addPackage,

@@ -60,20 +60,33 @@ export const INITIAL_PACKAGES: InternetPackage[] = [
   },
 ];
 
+const DEFAULT_MIKROTIK_HOST =
+  (typeof import.meta !== 'undefined' && (import.meta as any).env?.VITE_MIKROTIK_HOST) ||
+  '202.142.186.150';
+const DEFAULT_MIKROTIK_PORT =
+  Number((typeof import.meta !== 'undefined' && (import.meta as any).env?.VITE_MIKROTIK_PORT) || 81) ||
+  81;
+const DEFAULT_MIKROTIK_USER =
+  (typeof import.meta !== 'undefined' && (import.meta as any).env?.VITE_MIKROTIK_USER) ||
+  'admin';
+const DEFAULT_MIKROTIK_PASS =
+  (typeof import.meta !== 'undefined' && (import.meta as any).env?.VITE_MIKROTIK_PASSWORD) ||
+  '';
+
 export const INITIAL_ROUTERS: MikrotikRouter[] = [
   {
-    id: 'rt-1',
-    name: 'BRAS-CCR2004-CORE-NOC',
+    id: 'rt-saddar',
+    name: 'SADDAR',
     model: 'MikroTik CCR2004-16G-2S+',
-    ipAddress: '202.142.186.150',
-    ip: '202.142.186.150',
-    apiPort: 81,
-    port: 81,
-    username: 'admin',
-    password: '',
-    useSsl: false,
+    ipAddress: DEFAULT_MIKROTIK_HOST,
+    ip: DEFAULT_MIKROTIK_HOST,
+    apiPort: DEFAULT_MIKROTIK_PORT,
+    port: DEFAULT_MIKROTIK_PORT,
+    username: DEFAULT_MIKROTIK_USER,
+    password: DEFAULT_MIKROTIK_PASS,
+    useSsl: DEFAULT_MIKROTIK_PORT === 443,
     version: 'RouterOS v7.16.2',
-    location: 'Central NOC Data Center - Rack 04',
+    location: 'Saddar Core NOC',
     cpuLoad: 0,
     memoryUsageMb: 0,
     totalMemoryMb: 4096,
@@ -83,8 +96,9 @@ export const INITIAL_ROUTERS: MikrotikRouter[] = [
     currentWanRxMbps: 0,
     currentWanTxMbps: 0,
     activePppoeCount: 0,
-    walledGardenPool: '172.16.100.0/24',
+    walledGardenPool: '16.16.16.0/24',
     proxyMode: 'proxy',
+    isDefault: true,
   },
 ];
 

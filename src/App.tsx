@@ -236,7 +236,7 @@ function ISPAppContent() {
   const isOriginalAdmin = isOriginalAdminSession();
 
   return (
-    <div className="flex h-screen w-screen overflow-hidden bg-slate-50 text-slate-900 dark:bg-[#0B111E] dark:text-slate-100 font-sans selection:bg-cyan-500 selection:text-white transition-colors duration-200">
+    <div className="flex h-screen w-full max-w-full overflow-hidden overflow-x-hidden bg-slate-50 text-slate-900 dark:bg-[#0B111E] dark:text-slate-100 font-sans selection:bg-cyan-500 selection:text-white transition-colors duration-200">
       {/* 1. Off-Canvas Collapsible Sidebar (Strictly hidden for Client subscribers and Field Agents) */}
       {!isClient && !isAgent && (
         <Sidebar
