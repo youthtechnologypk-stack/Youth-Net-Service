@@ -338,6 +338,9 @@ export interface GisSpliceEntry {
   note?: string;
 }
 
+export type GisCoreLedgerStatus = 'ACTIVE' | 'SPARE' | 'RESERVED' | 'FAULTY';
+export type GisCableTypeCode = 'DROP' | '2C' | '4C' | '6C' | '8C' | '12C' | '24C' | '48C';
+
 export interface GisCoreEntry {
   coreNumber: number;
   tubeNumber: number;
@@ -346,12 +349,16 @@ export interface GisCoreEntry {
   coreColorName: string;
   coreColorHex: string;
   status: GisCoreStatus;
+  core_status?: GisCoreLedgerStatus;
   usage_type?: GisCoreUsageType;
   origin_olt_id?: string | null;
   origin_pon_port_id?: string | null;
   origin_olt_label?: string;
+  source_signal?: string;
   assigned_splitter_node_id?: string | null;
   forwarded_to_area?: string;
+  destination_target?: string;
+  optical_power_dbm?: string;
   remarks?: string;
   destinationNote?: string;
   assignedNodeId?: string | null;
@@ -425,7 +432,8 @@ export interface SupabaseGisCable {
   target_node_id: string;
   source_olt_id?: string | null;
   source_pon_port_id?: string | null;
-  cable_cores: 2 | 4 | 6 | 8 | 12 | 24 | 48;
+  cable_type?: GisCableTypeCode | string;
+  cable_cores: 1 | 2 | 4 | 6 | 8 | 12 | 24 | 48;
   distance_meters: number;
   route_coordinates_json: GisLatLng[];
   cores_tia598_json: GisCoreEntry[];
@@ -433,6 +441,34 @@ export interface SupabaseGisCable {
   notes?: string | null;
   updated_by?: string | null;
   created_at?: string;
+  updated_at?: string;
+}
+
+export interface SupabaseFiberNode {
+  id: string;
+  node_type: 'OLT' | 'FDB' | 'FAT' | 'JOINT_CLOSURE' | 'POLE';
+  name: string;
+  lat: number;
+  lng: number;
+  pon_ports: number;
+  optical_power_dbm?: number | null;
+  address_note?: string | null;
+  created_at?: string;
+}
+
+export interface SupabaseFiberRoute {
+  id: string;
+  cable_name: string;
+  cable_type: GisCableTypeCode | string;
+  core_count: number;
+  length_meters: number;
+  start_node_id: string;
+  start_node_name: string;
+  end_node_id: string;
+  end_node_name: string;
+  waypoints: GisLatLng[];
+  core_allocations: GisCoreEntry[];
+  notes?: string | null;
   updated_at?: string;
 }
 

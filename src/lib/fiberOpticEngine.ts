@@ -1,5 +1,7 @@
 import type {
+  GisCableTypeCode,
   GisCoreEntry,
+  GisCoreLedgerStatus,
   GisCoreStatus,
   GisCoreUsageType,
   GisLatLng,
@@ -243,6 +245,36 @@ export function getFbtLegOutputs(
   };
 }
 
+export interface CableCapacityPreset {
+  id: string;
+  label: string;
+  cores: 1 | 2 | 4 | 6 | 8 | 12 | 24 | 48;
+  cableType: GisCableTypeCode;
+}
+
+export const CABLE_CAPACITY_PRESETS: CableCapacityPreset[] = [
+  { id: 'DROP_1C', label: 'Drop Wire 1C', cores: 1, cableType: 'DROP' },
+  { id: 'DROP_2C', label: 'Drop Wire 2C', cores: 2, cableType: 'DROP' },
+  { id: '2C', label: '2 Core', cores: 2, cableType: '2C' },
+  { id: '4C', label: '4 Core', cores: 4, cableType: '4C' },
+  { id: '6C', label: '6 Core', cores: 6, cableType: '6C' },
+  { id: '8C', label: '8 Core', cores: 8, cableType: '8C' },
+  { id: '12C', label: '12 Core', cores: 12, cableType: '12C' },
+  { id: '24C', label: '24 Core', cores: 24, cableType: '24C' },
+  { id: '48C', label: '48 Core', cores: 48, cableType: '48C' },
+];
+
+export function cableCoresToType(cores: number, explicitType?: string): GisCableTypeCode {
+  if (explicitType === 'DROP' || cores === 1) return 'DROP';
+  if (cores === 2) return '2C';
+  if (cores === 4) return '4C';
+  if (cores === 6) return '6C';
+  if (cores === 8) return '8C';
+  if (cores === 24) return '24C';
+  if (cores === 48) return '48C';
+  return '12C';
+}
+
 export function coreStatusToUsageType(status: GisCoreStatus): GisCoreUsageType {
   switch (status) {
     case 'Feed / Splitter':
@@ -269,12 +301,57 @@ export function usageTypeToCoreStatus(usage: GisCoreUsageType): GisCoreStatus {
   }
 }
 
+export function coreStatusToLedgerStatus(
+  status: GisCoreStatus,
+  explicit?: GisCoreLedgerStatus
+): GisCoreLedgerStatus {
+  if (
+    explicit === 'ACTIVE' ||
+    explicit === 'SPARE' ||
+    explicit === 'RESERVED' ||
+    explicit === 'FAULTY'
+  ) {
+    return explicit;
+  }
+  switch (status) {
+    case 'Feed / Splitter':
+    case 'Through / Pass':
+      return 'ACTIVE';
+    case 'Dead / High Loss':
+      return 'FAULTY';
+    default:
+      return 'SPARE';
+  }
+}
+
+export function ledgerStatusToCoreStatus(
+  ledger: GisCoreLedgerStatus,
+  destinationTarget?: string
+): GisCoreStatus {
+  switch (ledger) {
+    case 'ACTIVE':
+      return (destinationTarget || '').toLowerCase().includes('pass')
+        ? 'Through / Pass'
+        : 'Feed / Splitter';
+    case 'RESERVED':
+      return 'Through / Pass';
+    case 'FAULTY':
+      return 'Dead / High Loss';
+    default:
+      return 'Free / Dark';
+  }
+}
+
 export interface CableCoreSummary {
   total: number;
   splitterCount: number;
   passThroughCount: number;
   freeCount: number;
   deadCount: number;
+  litCount: number;
+  reservedCount: number;
+  spareCount: number;
+  faultyCount: number;
 }
 
 export function summarizeCableCores(
@@ -288,18 +365,33 @@ export function summarizeCableCores(
       passThroughCount: 0,
       freeCount: fallbackTotal,
       deadCount: 0,
+      litCount: 0,
+      reservedCount: 0,
+      spareCount: fallbackTotal,
+      faultyCount: 0,
     };
   }
   let splitterCount = 0;
   let passThroughCount = 0;
   let freeCount = 0;
   let deadCount = 0;
+  let litCount = 0;
+  let reservedCount = 0;
+  let spareCount = 0;
+  let faultyCount = 0;
+
   for (const c of cores) {
     const usage = c.usage_type || coreStatusToUsageType(c.status);
     if (usage === 'SPLITTER_FEED') splitterCount++;
     else if (usage === 'PASS_THROUGH_AREA') passThroughCount++;
     else if (usage === 'DEAD_FAULT') deadCount++;
     else freeCount++;
+
+    const ledger = coreStatusToLedgerStatus(c.status, c.core_status);
+    if (ledger === 'ACTIVE') litCount++;
+    else if (ledger === 'RESERVED') reservedCount++;
+    else if (ledger === 'FAULTY') faultyCount++;
+    else spareCount++;
   }
   return {
     total: cores.length,
@@ -307,6 +399,10 @@ export function summarizeCableCores(
     passThroughCount,
     freeCount,
     deadCount,
+    litCount,
+    reservedCount,
+    spareCount,
+    faultyCount,
   };
 }
 
@@ -317,7 +413,7 @@ export function getTia598Color(oneBasedCoreNumber: number): Tia598ColorSpec {
 }
 
 export function generateTia598Cores(cableCores: number): GisCoreEntry[] {
-  const total = Math.max(2, Math.min(48, Math.floor(cableCores || 12)));
+  const total = Math.max(1, Math.min(48, Math.floor(cableCores || 12)));
   const cores: GisCoreEntry[] = [];
   for (let i = 1; i <= total; i++) {
     const tubeNumber = Math.ceil(i / 12);
@@ -331,12 +427,16 @@ export function generateTia598Cores(cableCores: number): GisCoreEntry[] {
       coreColorName: coreColor.name,
       coreColorHex: coreColor.hex,
       status: 'Free / Dark',
+      core_status: 'SPARE',
       usage_type: 'FREE_SPARE',
       origin_olt_id: null,
       origin_pon_port_id: null,
       origin_olt_label: '',
+      source_signal: '',
       assigned_splitter_node_id: null,
       forwarded_to_area: '',
+      destination_target: '',
+      optical_power_dbm: '',
       remarks: '',
       destinationNote: '',
     });
@@ -363,17 +463,28 @@ export function normalizeCableCores(
       ? usageTypeToCoreStatus(prev.usage_type)
       : (prev.status as GisCoreStatus) || b.status;
     const usageType = prev.usage_type || coreStatusToUsageType(status);
+    const ledgerStatus = coreStatusToLedgerStatus(status, prev.core_status);
+    const sourceSignal = prev.source_signal || prev.origin_olt_label || '';
+    const destinationTarget =
+      prev.destination_target || prev.forwarded_to_area || prev.destinationNote || '';
     return {
       ...b,
       status,
+      core_status: ledgerStatus,
       usage_type: usageType,
       origin_olt_id: prev.origin_olt_id ?? null,
       origin_pon_port_id: prev.origin_pon_port_id ?? null,
-      origin_olt_label: prev.origin_olt_label || '',
+      origin_olt_label: sourceSignal,
+      source_signal: sourceSignal,
       assigned_splitter_node_id: prev.assigned_splitter_node_id ?? prev.assignedNodeId ?? null,
-      forwarded_to_area: prev.forwarded_to_area || prev.destinationNote || '',
+      forwarded_to_area: destinationTarget,
+      destination_target: destinationTarget,
+      optical_power_dbm:
+        prev.optical_power_dbm !== undefined && prev.optical_power_dbm !== null
+          ? String(prev.optical_power_dbm)
+          : '',
       remarks: prev.remarks || '',
-      destinationNote: prev.destinationNote || prev.forwarded_to_area || '',
+      destinationNote: destinationTarget,
       assignedNodeId: prev.assignedNodeId ?? prev.assigned_splitter_node_id ?? null,
     };
   });

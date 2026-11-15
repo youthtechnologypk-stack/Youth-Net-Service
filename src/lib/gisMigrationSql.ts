@@ -104,7 +104,8 @@ CREATE TABLE IF NOT EXISTS public.gis_cables (
     target_node_id UUID NOT NULL REFERENCES public.gis_nodes(id) ON DELETE CASCADE,
     source_olt_id UUID NULL REFERENCES public.gis_olts(id) ON DELETE SET NULL,
     source_pon_port_id UUID NULL REFERENCES public.gis_olt_pon_ports(id) ON DELETE SET NULL,
-    cable_cores INT NOT NULL DEFAULT 12 CHECK (cable_cores IN (2, 4, 6, 8, 12, 24, 48)),
+    cable_type TEXT DEFAULT '12C',
+    cable_cores INT NOT NULL DEFAULT 12 CHECK (cable_cores IN (1, 2, 4, 6, 8, 12, 24, 48)),
     distance_meters INT NOT NULL DEFAULT 0 CHECK (distance_meters >= 0),
     route_coordinates_json JSONB NOT NULL DEFAULT '[]'::jsonb,
     cores_tia598_json JSONB NOT NULL DEFAULT '[]'::jsonb,
@@ -121,6 +122,25 @@ ALTER TABLE IF EXISTS public.gis_cables
     ADD COLUMN IF NOT EXISTS source_pon_port_id UUID NULL REFERENCES public.gis_olt_pon_ports(id) ON DELETE SET NULL;
 ALTER TABLE IF EXISTS public.gis_cables
     ADD COLUMN IF NOT EXISTS cores_allocation_json JSONB NOT NULL DEFAULT '[]'::jsonb;
+ALTER TABLE IF EXISTS public.gis_cables
+    ADD COLUMN IF NOT EXISTS cable_type TEXT DEFAULT '12C';
+
+DO $$
+DECLARE
+    c_name TEXT;
+BEGIN
+    FOR c_name IN
+        SELECT conname FROM pg_constraint
+        WHERE conrelid = 'public.gis_cables'::regclass AND contype = 'c'
+          AND pg_get_constraintdef(oid) LIKE '%cable_cores%'
+    LOOP
+        EXECUTE format('ALTER TABLE public.gis_cables DROP CONSTRAINT IF EXISTS %I', c_name);
+    END LOOP;
+
+    ALTER TABLE public.gis_cables
+        ADD CONSTRAINT gis_cables_cable_cores_check
+        CHECK (cable_cores IN (1, 2, 4, 6, 8, 12, 24, 48));
+END $$;
 
 CREATE TABLE IF NOT EXISTS public.gis_fdb_ports (
     id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
@@ -275,6 +295,78 @@ BEGIN
     IF EXISTS (SELECT 1 FROM pg_publication WHERE pubname = 'supabase_realtime') THEN
         IF NOT EXISTS (SELECT 1 FROM pg_publication_tables WHERE pubname = 'supabase_realtime' AND schemaname = 'public' AND tablename = 'mikrotik_routers') THEN
             ALTER PUBLICATION supabase_realtime ADD TABLE public.mikrotik_routers;
+        END IF;
+    END IF;
+END $$;
+
+-- Dedicated FTTH Outside-Plant Fiber Nodes & Core/Pair Routing Ledger
+CREATE TABLE IF NOT EXISTS public.fiber_nodes (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    node_type TEXT NOT NULL CHECK (node_type IN ('OLT', 'FDB', 'FAT', 'JOINT_CLOSURE', 'POLE')),
+    name TEXT NOT NULL,
+    lat DOUBLE PRECISION NOT NULL,
+    lng DOUBLE PRECISION NOT NULL,
+    pon_ports INT NOT NULL DEFAULT 0,
+    optical_power_dbm NUMERIC(6, 2) NULL,
+    address_note TEXT DEFAULT '',
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+CREATE TABLE IF NOT EXISTS public.fiber_routes (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    cable_name TEXT NOT NULL DEFAULT '',
+    cable_type TEXT NOT NULL DEFAULT '12C' CHECK (cable_type IN ('2C', '4C', '6C', '8C', '12C', '24C', '48C', 'DROP')),
+    core_count INT NOT NULL DEFAULT 12,
+    length_meters NUMERIC(10, 2) NOT NULL DEFAULT 0,
+    start_node_id UUID NULL,
+    start_node_name TEXT DEFAULT '',
+    end_node_id UUID NULL,
+    end_node_name TEXT DEFAULT '',
+    waypoints JSONB NOT NULL DEFAULT '[]'::jsonb,
+    core_allocations JSONB NOT NULL DEFAULT '[]'::jsonb,
+    notes TEXT DEFAULT '',
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+ALTER TABLE IF EXISTS public.fiber_routes
+    ADD COLUMN IF NOT EXISTS core_allocations JSONB NOT NULL DEFAULT '[]'::jsonb;
+ALTER TABLE IF EXISTS public.fiber_routes
+    ADD COLUMN IF NOT EXISTS waypoints JSONB NOT NULL DEFAULT '[]'::jsonb;
+ALTER TABLE IF EXISTS public.fiber_routes
+    ADD COLUMN IF NOT EXISTS notes TEXT DEFAULT '';
+ALTER TABLE IF EXISTS public.fiber_routes
+    ADD COLUMN IF NOT EXISTS updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW();
+
+CREATE INDEX IF NOT EXISTS idx_fiber_nodes_type ON public.fiber_nodes (node_type);
+CREATE INDEX IF NOT EXISTS idx_fiber_routes_start_end ON public.fiber_routes (start_node_id, end_node_id);
+
+ALTER TABLE public.fiber_nodes ENABLE ROW LEVEL SECURITY;
+ALTER TABLE public.fiber_routes ENABLE ROW LEVEL SECURITY;
+
+GRANT SELECT, INSERT, UPDATE, DELETE ON public.fiber_nodes TO anon, authenticated;
+GRANT SELECT, INSERT, UPDATE, DELETE ON public.fiber_routes TO anon, authenticated;
+
+DO $$
+BEGIN
+    IF NOT EXISTS (SELECT 1 FROM pg_policies WHERE schemaname='public' AND tablename='fiber_nodes' AND policyname='fiber_nodes_full_access') THEN
+        CREATE POLICY fiber_nodes_full_access ON public.fiber_nodes FOR ALL TO anon, authenticated USING (true) WITH CHECK (true);
+    END IF;
+    IF NOT EXISTS (SELECT 1 FROM pg_policies WHERE schemaname='public' AND tablename='fiber_routes' AND policyname='fiber_routes_full_access') THEN
+        CREATE POLICY fiber_routes_full_access ON public.fiber_routes FOR ALL TO anon, authenticated USING (true) WITH CHECK (true);
+    END IF;
+END $$;
+
+ALTER TABLE public.fiber_nodes REPLICA IDENTITY FULL;
+ALTER TABLE public.fiber_routes REPLICA IDENTITY FULL;
+
+DO $$
+BEGIN
+    IF EXISTS (SELECT 1 FROM pg_publication WHERE pubname = 'supabase_realtime') THEN
+        IF NOT EXISTS (SELECT 1 FROM pg_publication_tables WHERE pubname = 'supabase_realtime' AND schemaname = 'public' AND tablename = 'fiber_nodes') THEN
+            ALTER PUBLICATION supabase_realtime ADD TABLE public.fiber_nodes;
+        END IF;
+        IF NOT EXISTS (SELECT 1 FROM pg_publication_tables WHERE pubname = 'supabase_realtime' AND schemaname = 'public' AND tablename = 'fiber_routes') THEN
+            ALTER PUBLICATION supabase_realtime ADD TABLE public.fiber_routes;
         END IF;
     END IF;
 END $$;

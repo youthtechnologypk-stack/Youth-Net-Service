@@ -44,6 +44,7 @@ interface FiberGisLeafletCanvasProps {
   selectedNodeId: string | null;
   selectedCableId: string | null;
   connectSourceNodeId: string | null;
+  connectTargetNodeId?: string | null;
   draftWaypoints: GisLatLng[];
   userLocation: GisLatLng | null;
   flyToTarget: { lat: number; lng: number; zoom?: number; ts: number } | null;
@@ -74,6 +75,7 @@ export const FiberGisLeafletCanvas: React.FC<FiberGisLeafletCanvasProps> = ({
   selectedNodeId,
   selectedCableId,
   connectSourceNodeId,
+  connectTargetNodeId = null,
   draftWaypoints,
   userLocation,
   flyToTarget,
@@ -270,8 +272,8 @@ export const FiberGisLeafletCanvas: React.FC<FiberGisLeafletCanvasProps> = ({
 
       const poly = L.polyline(latLngs, {
         color,
-        weight: isSelected ? 6 : isFilterActive && isHighlighted ? 6 : isDimmed ? 3 : 4,
-        opacity: isDimmed ? 0.18 : isSelected || (isFilterActive && isHighlighted) ? 1 : 0.88,
+        weight: isSelected ? 6 : isFilterActive && isHighlighted ? 6 : isDimmed ? 3 : 5,
+        opacity: isDimmed ? 0.18 : isSelected || (isFilterActive && isHighlighted) ? 1 : 0.9,
       }).addTo(group);
 
       const feedPon = cable.source_pon_port_id ? ponPortsById[cable.source_pon_port_id] : undefined;
@@ -279,12 +281,13 @@ export const FiberGisLeafletCanvas: React.FC<FiberGisLeafletCanvasProps> = ({
         cable.cores_allocation_json?.length ? cable.cores_allocation_json : cable.cores_tia598_json,
         cable.cable_cores
       );
-      const tipText = `${feedPon ? `PON-${feedPon.port_number} · ` : ''}${coreSum.total}C Total (${
-        coreSum.splitterCount
-      } Split | ${coreSum.passThroughCount} Area | ${coreSum.freeCount} Free) · ${
+      const cableLabel =
+        (cable.name || '').trim() ||
+        (src && dst ? `${src.name} → ${dst.name}` : `${coreSum.total}C Trunk`);
+      const tipText = `${feedPon ? `PON-${feedPon.port_number} · ` : ''}${cableLabel} • ${
         cable.distance_meters
-      }m`;
-      poly.bindTooltip(tipText, { sticky: true, direction: 'top', opacity: 0.94 });
+      }m • ${coreSum.litCount}/${coreSum.total} Lit (${coreSum.spareCount} Spare)`;
+      poly.bindTooltip(tipText, { sticky: true, direction: 'top', opacity: 0.96 });
 
       poly.on('click', (e: L.LeafletMouseEvent) => {
         L.DomEvent.stopPropagation(e);
@@ -292,14 +295,28 @@ export const FiberGisLeafletCanvas: React.FC<FiberGisLeafletCanvasProps> = ({
       });
     }
 
-    // 2. Render draft fiber route waypoints
-    if (draftWaypoints.length >= 2) {
+    // 2. Render draft fiber route waypoints + optional End Node preview
+    const previewPoints: GisLatLng[] = [...draftWaypoints];
+    const connectSourceNode = connectSourceNodeId ? nodesById[connectSourceNodeId] : undefined;
+    const connectTargetNode = connectTargetNodeId ? nodesById[connectTargetNodeId] : undefined;
+    if (previewPoints.length === 0 && connectSourceNode) {
+      previewPoints.push({ lat: connectSourceNode.lat, lng: connectSourceNode.lng });
+    }
+    if (connectTargetNode) {
+      const last = previewPoints[previewPoints.length - 1];
+      if (!last || last.lat !== connectTargetNode.lat || last.lng !== connectTargetNode.lng) {
+        previewPoints.push({ lat: connectTargetNode.lat, lng: connectTargetNode.lng });
+      }
+    }
+
+    if (previewPoints.length >= 2) {
       L.polyline(
-        draftWaypoints.map((p) => [p.lat, p.lng] as [number, number]),
+        previewPoints.map((p) => [p.lat, p.lng] as [number, number]),
         {
-          color: '#22d3ee',
-          weight: 4,
+          color: connectTargetNode ? '#f59e0b' : '#22d3ee',
+          weight: 5,
           dashArray: '8 6',
+          interactive: false,
         }
       ).addTo(group);
     }
@@ -310,12 +327,15 @@ export const FiberGisLeafletCanvas: React.FC<FiberGisLeafletCanvasProps> = ({
         weight: 2,
         fillColor: '#22d3ee',
         fillOpacity: 1,
+        interactive: false,
       }).addTo(group);
     }
 
     // 3. Render GIS nodes
     for (const node of nodes) {
-      const isSelected = node.id === selectedNodeId || node.id === connectSourceNodeId;
+      const isConnectStart = node.id === connectSourceNodeId;
+      const isConnectTarget = node.id === connectTargetNodeId;
+      const isSelected = node.id === selectedNodeId || isConnectStart || isConnectTarget;
       const nodePorts = portsByNodeId[node.id] || [];
       const nodeOutputs = splitterOutputsByNodeId[node.id] || [];
       const splitterSpec = SPLITTER_SPECS[node.splitter_type] || SPLITTER_SPECS['none'];
@@ -421,13 +441,19 @@ export const FiberGisLeafletCanvas: React.FC<FiberGisLeafletCanvasProps> = ({
       const isHighlightedNode = !isFilterActive || Boolean(highlightedNodeIds[node.id]);
       const isDimmedNode = isFilterActive && !isHighlightedNode;
       const nodeOpacity = isDimmedNode ? 0.18 : 1;
-      const highlightRing =
-        isFilterActive && isHighlightedNode
-          ? 'box-shadow:0 0 0 3px rgba(56,189,248,0.65),0 4px 16px rgba(0,0,0,0.65);'
-          : '';
-      const wrappedHtml = `<div style="opacity:${nodeOpacity};${
-        highlightRing ? `filter:drop-shadow(0 0 6px rgba(56,189,248,0.55));` : ''
-      }">${html}</div>`;
+      const startEndTag = isConnectStart
+        ? `<div style="position:absolute;top:-22px;left:0;transform:translate(-50%,-100%);background:#10b981;color:#022c22;font-family:monospace;font-size:9px;font-weight:800;padding:1px 5px;border-radius:4px;white-space:nowrap;box-shadow:0 2px 8px rgba(16,185,129,0.75);pointer-events:none;">A-START</div>`
+        : isConnectTarget
+        ? `<div style="position:absolute;top:-22px;left:0;transform:translate(-50%,-100%);background:#f59e0b;color:#0f172a;font-family:monospace;font-size:9px;font-weight:800;padding:1px 5px;border-radius:4px;white-space:nowrap;box-shadow:0 2px 8px rgba(245,158,11,0.75);pointer-events:none;">B-END</div>`
+        : '';
+      const connectGlow = isConnectStart
+        ? 'filter:drop-shadow(0 0 10px rgba(16,185,129,0.95));'
+        : isConnectTarget
+        ? 'filter:drop-shadow(0 0 10px rgba(245,158,11,0.95));'
+        : isFilterActive && isHighlightedNode
+        ? 'filter:drop-shadow(0 0 6px rgba(56,189,248,0.65));'
+        : '';
+      const wrappedHtml = `<div style="position:relative;opacity:${nodeOpacity};pointer-events:auto;${connectGlow}">${startEndTag}${html}</div>`;
 
       const icon = L.divIcon({
         className: 'youthnet-gis-marker',
@@ -437,13 +463,31 @@ export const FiberGisLeafletCanvas: React.FC<FiberGisLeafletCanvasProps> = ({
       });
 
       const canDragNode = toolMode === 'pan' && Boolean(onNodeDragEndRef.current);
+      const zIndexOffset =
+        isConnectStart || isConnectTarget
+          ? 1200
+          : toolMode === 'connect_cable'
+          ? 1000
+          : isSelected
+          ? 700
+          : isFilterActive && isHighlightedNode
+          ? 500
+          : 0;
+
       const marker = L.marker([node.lat, node.lng], {
         icon,
         draggable: canDragNode,
-        zIndexOffset: isSelected ? 700 : isFilterActive && isHighlightedNode ? 500 : 0,
+        zIndexOffset,
+        bubblingMouseEvents: false,
       }).addTo(group);
 
       marker.bindTooltip(tooltipText, { direction: 'top', offset: [0, -14], opacity: 0.94 });
+
+      if (toolMode === 'connect_cable') {
+        marker.on('mousedown', (e: L.LeafletMouseEvent) => {
+          L.DomEvent.stopPropagation(e);
+        });
+      }
 
       marker.on('click', (e: L.LeafletMouseEvent) => {
         L.DomEvent.stopPropagation(e);
@@ -484,6 +528,7 @@ export const FiberGisLeafletCanvas: React.FC<FiberGisLeafletCanvasProps> = ({
     selectedNodeId,
     selectedCableId,
     connectSourceNodeId,
+    connectTargetNodeId,
     draftWaypoints,
     userLocation,
     isFilterActive,

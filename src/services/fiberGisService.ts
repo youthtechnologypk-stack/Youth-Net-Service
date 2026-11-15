@@ -3,6 +3,8 @@ import {
   OltPonMode,
   OltPonPortStatus,
   OltSfpClass,
+  SupabaseFiberNode,
+  SupabaseFiberRoute,
   SupabaseGisCable,
   SupabaseGisFdbPort,
   SupabaseGisNode,
@@ -13,6 +15,7 @@ import {
 } from './supabaseClient';
 import {
   buildCableSplitPlan,
+  cableCoresToType,
   calculateTopologyOpticalBudgets,
   computePolylineDistanceMeters,
   generateDefaultSpliceTray,
@@ -25,6 +28,7 @@ import {
   SPLITTER_SPECS,
 } from '../lib/fiberOpticEngine';
 import type {
+  GisCableTypeCode,
   GisLatLng,
   GisNodeType,
   GisPortStatus,
@@ -199,21 +203,170 @@ export function normalizeGisNodeRow(n: any): SupabaseGisNode {
   };
 }
 
+const VALID_CORE_COUNTS = new Set([1, 2, 4, 6, 8, 12, 24, 48]);
+
 export function normalizeGisCableRow(c: any): SupabaseGisCable {
-  const cores = Number(c.cable_cores ?? 12) as SupabaseGisCable['cable_cores'];
+  const rawCount = Number(c.cable_cores ?? c.core_count ?? 12);
+  const cores = (VALID_CORE_COUNTS.has(rawCount)
+    ? rawCount
+    : 12) as SupabaseGisCable['cable_cores'];
   const rawCores =
     Array.isArray(c.cores_allocation_json) && c.cores_allocation_json.length > 0
       ? c.cores_allocation_json
+      : Array.isArray(c.core_allocations) && c.core_allocations.length > 0
+      ? c.core_allocations
       : c.cores_tia598_json;
   const normalizedCores = normalizeCableCores(cores, rawCores);
+  const cableType = cableCoresToType(cores, c.cable_type);
+  const rawRoute = Array.isArray(c.route_coordinates_json)
+    ? c.route_coordinates_json
+    : Array.isArray(c.waypoints)
+    ? c.waypoints
+    : [];
+
   return {
     ...c,
+    name: c.name ?? c.cable_name ?? '',
+    source_node_id: c.source_node_id ?? c.start_node_id,
+    target_node_id: c.target_node_id ?? c.end_node_id,
+    cable_type: cableType,
     cable_cores: cores,
-    distance_meters: Number(c.distance_meters ?? 0),
-    route_coordinates_json: Array.isArray(c.route_coordinates_json) ? c.route_coordinates_json : [],
+    distance_meters: Number(c.distance_meters ?? c.length_meters ?? 0),
+    route_coordinates_json: rawRoute,
     cores_tia598_json: normalizedCores,
     cores_allocation_json: normalizedCores,
   };
+}
+
+function mapGisNodeTypeToFiberNodeType(
+  nodeType: GisNodeType
+): SupabaseFiberNode['node_type'] {
+  switch (nodeType) {
+    case 'OLT':
+      return 'OLT';
+    case 'DIST_NODE':
+      return 'FDB';
+    case 'FOSC_JOINT':
+      return 'JOINT_CLOSURE';
+    default:
+      return 'FAT';
+  }
+}
+
+async function syncNodeToFiberNodesTable(
+  node: SupabaseGisNode,
+  totalPonPorts = 0
+): Promise<void> {
+  try {
+    const payload: SupabaseFiberNode = {
+      id: node.id,
+      node_type: mapGisNodeTypeToFiberNodeType(node.node_type),
+      name: node.name,
+      lat: Number(node.lat),
+      lng: Number(node.lng),
+      pon_ports:
+        node.node_type === 'OLT'
+          ? Math.max(1, Number(totalPonPorts || 8))
+          : Number(node.total_ports || 0),
+      optical_power_dbm:
+        node.node_type === 'OLT'
+          ? Number(node.tx_power_dbm ?? 5.0)
+          : node.calculated_input_dbm ?? null,
+      address_note: [node.area_name, node.notes].filter(Boolean).join(' · '),
+    };
+    await supabase.from('fiber_nodes').upsert(payload, { onConflict: 'id' });
+  } catch {
+    // Non-blocking dual sync in case fiber_nodes SQL has not been applied yet
+  }
+}
+
+async function deleteFromFiberNodesTable(nodeId: string): Promise<void> {
+  try {
+    await supabase.from('fiber_nodes').delete().eq('id', nodeId);
+  } catch {
+    // ignore if table missing
+  }
+}
+
+async function resolveNodeNamesForCable(
+  cable: SupabaseGisCable,
+  startNameOverride?: string,
+  endNameOverride?: string
+): Promise<{ startName: string; endName: string }> {
+  let startName = (startNameOverride || '').trim();
+  let endName = (endNameOverride || '').trim();
+  if (startName && endName) return { startName, endName };
+
+  try {
+    const ids = [cable.source_node_id, cable.target_node_id].filter(Boolean);
+    if (ids.length > 0) {
+      const { data } = await supabase
+        .from('gis_nodes')
+        .select('id, name')
+        .in('id', ids);
+      if (Array.isArray(data)) {
+        for (const row of data as Array<{ id: string; name: string }>) {
+          if (row.id === cable.source_node_id && !startName) startName = row.name;
+          if (row.id === cable.target_node_id && !endName) endName = row.name;
+        }
+      }
+    }
+  } catch {
+    // ignore lookup failure
+  }
+
+  return {
+    startName: startName || 'Start Node',
+    endName: endName || 'End Node',
+  };
+}
+
+async function syncCableToFiberRoutesTable(
+  cable: SupabaseGisCable,
+  startNameOverride?: string,
+  endNameOverride?: string
+): Promise<void> {
+  try {
+    const { startName, endName } = await resolveNodeNamesForCable(
+      cable,
+      startNameOverride,
+      endNameOverride
+    );
+    const cores =
+      cable.cores_allocation_json && cable.cores_allocation_json.length > 0
+        ? cable.cores_allocation_json
+        : cable.cores_tia598_json;
+
+    const payload: SupabaseFiberRoute = {
+      id: cable.id,
+      cable_name:
+        (cable.name || '').trim() || `${startName} → ${endName}`,
+      cable_type: cableCoresToType(cable.cable_cores, cable.cable_type),
+      core_count: Number(cable.cable_cores || 12),
+      length_meters: Math.max(0, Number(cable.distance_meters || 0)),
+      start_node_id: cable.source_node_id,
+      start_node_name: startName,
+      end_node_id: cable.target_node_id,
+      end_node_name: endName,
+      waypoints: Array.isArray(cable.route_coordinates_json)
+        ? cable.route_coordinates_json
+        : [],
+      core_allocations: Array.isArray(cores) ? cores : [],
+      notes: cable.notes || '',
+      updated_at: cable.updated_at || new Date().toISOString(),
+    };
+    await supabase.from('fiber_routes').upsert(payload, { onConflict: 'id' });
+  } catch {
+    // Non-blocking dual sync in case fiber_routes SQL has not been applied yet
+  }
+}
+
+async function deleteFromFiberRoutesTable(cableId: string): Promise<void> {
+  try {
+    await supabase.from('fiber_routes').delete().eq('id', cableId);
+  } catch {
+    // ignore if table missing
+  }
 }
 
 export function normalizeGisPortRow(p: any): SupabaseGisFdbPort {
@@ -528,21 +681,31 @@ export async function loadGisOltsOnly(): Promise<{
 export async function loadGisTopology(
   fallbackActiveUsernames: string[] = []
 ): Promise<LoadedGisTopology> {
-  const [oltsRes, ponPortsRes, nodesRes, cablesRes, portsRes, outputsRes, subsRes, onlineMap] =
-    await Promise.all([
-      supabase.from('gis_olts').select('*').order('created_at', { ascending: true }),
-      supabase.from('gis_olt_pon_ports').select('*').order('port_number', { ascending: true }),
-      supabase.from('gis_nodes').select('*').order('created_at', { ascending: true }),
-      supabase.from('gis_cables').select('*').order('created_at', { ascending: true }),
-      supabase.from('gis_fdb_ports').select('*').order('port_number', { ascending: true }),
-      supabase.from('gis_splitter_outputs').select('*').order('port_number', { ascending: true }),
-      supabase
-        .from('portal_users')
-        .select('id, username, full_name, phone, area, address, package_speed, account_status')
-        .eq('role', 'CLIENT')
-        .order('full_name', { ascending: true }),
-      fetchOnlineSubscribersMap(fallbackActiveUsernames),
-    ]);
+  const [
+    oltsRes,
+    ponPortsRes,
+    nodesRes,
+    cablesRes,
+    fiberRoutesRes,
+    portsRes,
+    outputsRes,
+    subsRes,
+    onlineMap,
+  ] = await Promise.all([
+    supabase.from('gis_olts').select('*').order('created_at', { ascending: true }),
+    supabase.from('gis_olt_pon_ports').select('*').order('port_number', { ascending: true }),
+    supabase.from('gis_nodes').select('*').order('created_at', { ascending: true }),
+    supabase.from('gis_cables').select('*').order('created_at', { ascending: true }),
+    supabase.from('fiber_routes').select('*').order('updated_at', { ascending: true }),
+    supabase.from('gis_fdb_ports').select('*').order('port_number', { ascending: true }),
+    supabase.from('gis_splitter_outputs').select('*').order('port_number', { ascending: true }),
+    supabase
+      .from('portal_users')
+      .select('id, username, full_name, phone, area, address, package_speed, account_status')
+      .eq('role', 'CLIENT')
+      .order('full_name', { ascending: true }),
+    fetchOnlineSubscribersMap(fallbackActiveUsernames),
+  ]);
 
   const baseMissing =
     (nodesRes.error && isMissingTableOrColumnError(nodesRes.error)) ||
@@ -578,6 +741,47 @@ export async function loadGisTopology(
     : ((ponPortsRes.data as any[]) || []).map(normalizeGisOltPonPortRow);
   const rawNodes: SupabaseGisNode[] = ((nodesRes.data as any[]) || []).map(normalizeGisNodeRow);
   const rawCables: SupabaseGisCable[] = ((cablesRes.data as any[]) || []).map(normalizeGisCableRow);
+
+  // Merge any additional route metadata / core allocations stored in fiber_routes
+  if (!fiberRoutesRes.error && Array.isArray(fiberRoutesRes.data)) {
+    const routeById: Record<string, any> = {};
+    for (const r of fiberRoutesRes.data as any[]) {
+      if (r?.id) routeById[r.id] = r;
+    }
+    for (let i = 0; i < rawCables.length; i++) {
+      const c = rawCables[i];
+      const fr = routeById[c.id];
+      if (!fr) continue;
+      const frTs = fr.updated_at ? new Date(fr.updated_at).getTime() : 0;
+      const cTs = c.updated_at ? new Date(c.updated_at).getTime() : 0;
+      if (frTs > cTs) {
+        rawCables[i] = normalizeGisCableRow({
+          ...c,
+          name: fr.cable_name || c.name,
+          cable_type: fr.cable_type || c.cable_type,
+          cable_cores: fr.core_count || c.cable_cores,
+          distance_meters: fr.length_meters ?? c.distance_meters,
+          route_coordinates_json:
+            Array.isArray(fr.waypoints) && fr.waypoints.length >= 2
+              ? fr.waypoints
+              : c.route_coordinates_json,
+          cores_allocation_json:
+            Array.isArray(fr.core_allocations) && fr.core_allocations.length > 0
+              ? fr.core_allocations
+              : c.cores_allocation_json,
+          notes: fr.notes ?? c.notes,
+        });
+      }
+      delete routeById[c.id];
+    }
+    // Include any standalone fiber_routes rows if nodes exist
+    for (const orphanRoute of Object.values(routeById)) {
+      if (orphanRoute?.start_node_id && orphanRoute?.end_node_id) {
+        rawCables.push(normalizeGisCableRow(orphanRoute));
+      }
+    }
+  }
+
   const rawPorts: SupabaseGisFdbPort[] = ((portsRes.data as any[]) || []).map(normalizeGisPortRow);
   const rawOutputs: SupabaseGisSplitterOutput[] = outputsRes.error
     ? []
@@ -774,6 +978,9 @@ export async function saveOltWithPonPorts(params: {
       if (nodeInsErr) throw nodeInsErr;
       mapNode = normalizeGisNodeRow(createdNode);
     }
+    if (mapNode) {
+      await syncNodeToFiberNodesTable(mapNode, olt.total_pon_ports);
+    }
   }
 
   return { olt, ponPorts, mapNode };
@@ -875,13 +1082,25 @@ export async function placeOrMoveOltOnMap(params: {
     savedNode = ins;
   }
 
+  const normalizedNode = normalizeGisNodeRow(savedNode);
+  await syncNodeToFiberNodesTable(normalizedNode, params.olt.total_pon_ports);
+
   return {
     olt: normalizeGisOltRow(updatedOlt),
-    mapNode: normalizeGisNodeRow(savedNode),
+    mapNode: normalizedNode,
   };
 }
 
 export async function deleteOltById(oltId: string): Promise<void> {
+  const { data: linkedNodes } = await supabase
+    .from('gis_nodes')
+    .select('id')
+    .eq('olt_id', oltId);
+  if (Array.isArray(linkedNodes)) {
+    for (const ln of linkedNodes as Array<{ id: string }>) {
+      await deleteFromFiberNodesTable(ln.id);
+    }
+  }
   // Remove linked GIS nodes explicitly as well as cascading via FK
   await supabase.from('gis_nodes').delete().eq('olt_id', oltId);
   const { error } = await supabase.from('gis_olts').delete().eq('id', oltId);
@@ -991,7 +1210,9 @@ export async function createGisNode(params: {
     res = await supabase.from('gis_nodes').insert(legacyPayload).select('*').single();
   }
   if (res.error) throw res.error;
-  return { node: normalizeGisNodeRow(res.data) };
+  const createdNode = normalizeGisNodeRow(res.data);
+  await syncNodeToFiberNodesTable(createdNode, params.totalPonPorts || 0);
+  return { node: createdNode };
 }
 
 export async function updateGisNode(
@@ -1029,6 +1250,7 @@ export async function updateGisNode(
 
   if (res.error) throw res.error;
   const normalized = normalizeGisNodeRow(res.data);
+  await syncNodeToFiberNodesTable(normalized);
 
   // Sync lat/lng/name back to gis_olts when an OLT marker moves or edits
   if (normalized.node_type === 'OLT' && normalized.olt_id) {
@@ -1050,31 +1272,49 @@ export async function updateGisNode(
 export async function deleteGisNode(nodeId: string): Promise<void> {
   const { error } = await supabase.from('gis_nodes').delete().eq('id', nodeId);
   if (error) throw error;
+  await deleteFromFiberNodesTable(nodeId);
 }
 
 export async function createGisCable(params: {
   name?: string;
   sourceNodeId: string;
   targetNodeId: string;
+  startNodeName?: string;
+  endNodeName?: string;
   sourceOltId?: string | null;
   sourcePonPortId?: string | null;
-  cableCores: 2 | 4 | 6 | 8 | 12 | 24 | 48;
+  cableType?: GisCableTypeCode;
+  cableCores: 1 | 2 | 4 | 6 | 8 | 12 | 24 | 48;
+  distanceMeters?: number;
   routeCoordinates: GisLatLng[];
   initialCores?: ReturnType<typeof generateTia598Cores>;
+  notes?: string;
   updatedBy?: string;
 }): Promise<SupabaseGisCable> {
-  const distanceMeters = Math.max(1, computePolylineDistanceMeters(params.routeCoordinates));
-  const coresJson = params.initialCores || generateTia598Cores(params.cableCores);
+  const computedMeters = Math.max(1, computePolylineDistanceMeters(params.routeCoordinates));
+  const distanceMeters =
+    params.distanceMeters !== undefined &&
+    Number.isFinite(Number(params.distanceMeters)) &&
+    Number(params.distanceMeters) > 0
+      ? Math.round(Number(params.distanceMeters))
+      : computedMeters;
+  const coresJson = normalizeCableCores(
+    params.cableCores,
+    params.initialCores || generateTia598Cores(params.cableCores)
+  );
+  const resolvedCableType = cableCoresToType(params.cableCores, params.cableType);
 
   const insertPayload: Record<string, any> = {
     name: (params.name || '').trim(),
     source_node_id: params.sourceNodeId,
     target_node_id: params.targetNodeId,
+    cable_type: resolvedCableType,
     cable_cores: params.cableCores,
     distance_meters: distanceMeters,
     route_coordinates_json: params.routeCoordinates,
     cores_tia598_json: coresJson,
     cores_allocation_json: coresJson,
+    notes: (params.notes || '').trim(),
     updated_by: params.updatedBy || 'admin',
     updated_at: new Date().toISOString(),
   };
@@ -1086,20 +1326,43 @@ export async function createGisCable(params: {
   if (res.error && isMissingTableOrColumnError(res.error)) {
     const legacy = { ...insertPayload };
     delete legacy.cores_allocation_json;
+    delete legacy.cable_type;
+    if (legacy.cable_cores === 1) {
+      legacy.cable_cores = 2;
+    }
     res = await supabase.from('gis_cables').insert(legacy).select('*').single();
   }
   if (res.error) throw res.error;
-  return normalizeGisCableRow(res.data);
+
+  const savedCable = normalizeGisCableRow({
+    ...res.data,
+    cable_cores: params.cableCores,
+    cable_type: resolvedCableType,
+    cores_tia598_json: coresJson,
+    cores_allocation_json: coresJson,
+  });
+
+  await syncCableToFiberRoutesTable(
+    savedCable,
+    params.startNodeName,
+    params.endNodeName
+  );
+
+  return savedCable;
 }
 
 export async function updateGisCable(
   cableId: string,
-  patch: Partial<SupabaseGisCable>
+  patch: Partial<SupabaseGisCable>,
+  nodeNames?: { startNodeName?: string; endNodeName?: string }
 ): Promise<SupabaseGisCable> {
   const payload: Record<string, any> = {
     ...patch,
     updated_at: new Date().toISOString(),
   };
+  if (patch.cable_cores !== undefined) {
+    payload.cable_type = cableCoresToType(patch.cable_cores, patch.cable_type);
+  }
   const coresPayload = patch.cores_allocation_json || patch.cores_tia598_json;
   if (coresPayload) {
     payload.cores_tia598_json = coresPayload;
@@ -1115,6 +1378,10 @@ export async function updateGisCable(
   if (res.error && isMissingTableOrColumnError(res.error)) {
     const legacy = { ...payload };
     delete legacy.cores_allocation_json;
+    delete legacy.cable_type;
+    if (legacy.cable_cores === 1) {
+      legacy.cable_cores = 2;
+    }
     res = await supabase
       .from('gis_cables')
       .update(legacy)
@@ -1123,12 +1390,26 @@ export async function updateGisCable(
       .single();
   }
   if (res.error) throw res.error;
-  return normalizeGisCableRow(res.data);
+
+  const updatedCable = normalizeGisCableRow({
+    ...res.data,
+    ...(patch.cable_cores !== undefined ? { cable_cores: patch.cable_cores } : {}),
+    ...(patch.cable_type ? { cable_type: patch.cable_type } : {}),
+  });
+
+  await syncCableToFiberRoutesTable(
+    updatedCable,
+    nodeNames?.startNodeName,
+    nodeNames?.endNodeName
+  );
+
+  return updatedCable;
 }
 
 export async function deleteGisCable(cableId: string): Promise<void> {
   const { error } = await supabase.from('gis_cables').delete().eq('id', cableId);
   if (error) throw error;
+  await deleteFromFiberRoutesTable(cableId);
 }
 
 /**
@@ -1182,13 +1463,16 @@ export async function splitCableWithFoscJoint(params: {
     .single();
   if (jointErr) throw jointErr;
   const jointNode = normalizeGisNodeRow(jointRow);
+  await syncNodeToFiberNodesTable(jointNode);
 
   const baseName = params.cable.name || `${params.sourceNode?.name || 'Node'} → ${params.targetNode?.name || 'Node'}`;
+  const cableType = cableCoresToType(params.cable.cable_cores, params.cable.cable_type);
 
   const spanAInsert: Record<string, any> = {
     name: `${baseName} (Span A)`,
     source_node_id: params.cable.source_node_id,
     target_node_id: jointNode.id,
+    cable_type: cableType,
     cable_cores: params.cable.cable_cores,
     distance_meters: plan.spanADistanceMeters,
     route_coordinates_json: plan.spanARoute,
@@ -1205,6 +1489,7 @@ export async function splitCableWithFoscJoint(params: {
     name: `${baseName} (Span B)`,
     source_node_id: jointNode.id,
     target_node_id: params.cable.target_node_id,
+    cable_type: cableType,
     cable_cores: params.cable.cable_cores,
     distance_meters: plan.spanBDistanceMeters,
     route_coordinates_json: plan.spanBRoute,
@@ -1228,6 +1513,10 @@ export async function splitCableWithFoscJoint(params: {
   ) {
     delete spanAInsert.cores_allocation_json;
     delete spanBInsert.cores_allocation_json;
+    delete spanAInsert.cable_type;
+    delete spanBInsert.cable_type;
+    if (spanAInsert.cable_cores === 1) spanAInsert.cable_cores = 2;
+    if (spanBInsert.cable_cores === 1) spanBInsert.cable_cores = 2;
     [spanARes, spanBRes] = await Promise.all([
       supabase.from('gis_cables').insert(spanAInsert).select('*').single(),
       supabase.from('gis_cables').insert(spanBInsert).select('*').single(),
@@ -1248,11 +1537,19 @@ export async function splitCableWithFoscJoint(params: {
   }
 
   await supabase.from('gis_cables').delete().eq('id', params.cable.id);
+  await deleteFromFiberRoutesTable(params.cable.id);
+
+  const spanA = normalizeGisCableRow(spanARes.data);
+  const spanB = normalizeGisCableRow(spanBRes.data);
+  await Promise.all([
+    syncCableToFiberRoutesTable(spanA, params.sourceNode?.name, jointNode.name),
+    syncCableToFiberRoutesTable(spanB, jointNode.name, params.targetNode?.name),
+  ]);
 
   return {
     jointNode,
-    spanA: normalizeGisCableRow(spanARes.data),
-    spanB: normalizeGisCableRow(spanBRes.data),
+    spanA,
+    spanB,
   };
 }
 

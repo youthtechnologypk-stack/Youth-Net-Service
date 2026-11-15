@@ -23,6 +23,8 @@ import {
 import { useISP } from '../context/ISPContext';
 import type { UserAccount } from '../types/auth';
 import type {
+  GisCableTypeCode,
+  GisCoreEntry,
   GisLatLng,
   GisNodeType,
   GisPortStatus,
@@ -62,6 +64,7 @@ import {
   upsertSplitterOutput,
 } from '../services/fiberGisService';
 import {
+  CABLE_CAPACITY_PRESETS,
   SFP_TX_PRESETS,
   SPLITTER_SPECS,
   calculateTopologyOpticalBudgets,
@@ -83,6 +86,7 @@ import {
 } from './gis/FiberGisLeafletCanvas';
 import { FiberGisInspectorPanel } from './gis/FiberGisInspectorPanel';
 import { FiberTraceabilityDrawer } from './gis/FiberTraceabilityDrawer';
+import { FiberConnectionModal } from './gis/FiberConnectionModal';
 import { OltFormDraft, OltManagerModal } from './OltManagerModal';
 
 interface FiberGisMapViewProps {
@@ -144,18 +148,13 @@ export const FiberGisMapView: React.FC<FiberGisMapViewProps> = ({
   const [pendingPlaceOltFromRegistry, setPendingPlaceOltFromRegistry] =
     useState<SupabaseGisOlt | null>(null);
 
-  // Multi-waypoint cable drawing state + OLT PON Port feeder selection modal
+  // Multi-waypoint cable drawing state + Dual-Selection Connection Modal
   const [connectSourceNodeId, setConnectSourceNodeId] = useState<string | null>(null);
+  const [connectTargetNodeId, setConnectTargetNodeId] = useState<string | null>(null);
   const [draftWaypoints, setDraftWaypoints] = useState<GisLatLng[]>([]);
-  const [draftCableCores, setDraftCableCores] = useState<2 | 4 | 6 | 8 | 12 | 24 | 48>(12);
-  const [pendingCablePonSelect, setPendingCablePonSelect] = useState<{
-    sourceNode: SupabaseGisNode;
-    targetNode: SupabaseGisNode;
-    routeCoordinates: GisLatLng[];
-    olt: SupabaseGisOlt;
-    oltPorts: SupabaseGisOltPonPort[];
-    selectedPonPortId: string;
-  } | null>(null);
+  const [draftCableCores, setDraftCableCores] = useState<1 | 2 | 4 | 6 | 8 | 12 | 24 | 48>(12);
+  const [isConnectionModalOpen, setIsConnectionModalOpen] = useState(false);
+  const [isSqlModalOpen, setIsSqlModalOpen] = useState(false);
 
   // Live GPS Tracking
   const [userLocation, setUserLocation] = useState<GisLatLng | null>(null);
@@ -684,11 +683,17 @@ export const FiberGisMapView: React.FC<FiberGisMapViewProps> = ({
 
   const finalizeCreateCable = useCallback(
     async (params: {
+      name?: string;
       sourceNode: SupabaseGisNode;
       targetNode: SupabaseGisNode;
       routeCoordinates: GisLatLng[];
       sourceOltId?: string | null;
       sourcePonPortId?: string | null;
+      cableType?: GisCableTypeCode;
+      cableCores?: 1 | 2 | 4 | 6 | 8 | 12 | 24 | 48;
+      distanceMeters?: number;
+      cores?: GisCoreEntry[];
+      notes?: string;
     }) => {
       setIsSaving(true);
       try {
@@ -697,23 +702,33 @@ export const FiberGisMapView: React.FC<FiberGisMapViewProps> = ({
             ? ` [PON-${ponPortsById[params.sourcePonPortId].port_number}]`
             : '';
         const created = await createGisCable({
-          name: `${params.sourceNode.name}${ponLabel} → ${params.targetNode.name}`,
+          name:
+            params.name?.trim() ||
+            `${params.sourceNode.name}${ponLabel} → ${params.targetNode.name}`,
           sourceNodeId: params.sourceNode.id,
           targetNodeId: params.targetNode.id,
+          startNodeName: params.sourceNode.name,
+          endNodeName: params.targetNode.name,
           sourceOltId: params.sourceOltId || null,
           sourcePonPortId: params.sourcePonPortId || null,
-          cableCores: draftCableCores,
+          cableType: params.cableType,
+          cableCores: params.cableCores || draftCableCores,
+          distanceMeters: params.distanceMeters,
           routeCoordinates: params.routeCoordinates,
+          initialCores: params.cores,
+          notes: params.notes,
           updatedBy: actorUsername,
         });
         setCables((prev) => applyRealtimeCableDelta(prev, 'INSERT', created));
         setConnectSourceNodeId(null);
+        setConnectTargetNodeId(null);
         setDraftWaypoints([]);
+        setIsConnectionModalOpen(false);
         setToolMode('pan');
         setSelectedCableId(created.id);
         setSelectedNodeId(null);
         showToast(
-          `Saved ${created.cable_cores}-core span${ponLabel} (${created.distance_meters}m) to Supabase.`
+          `✅ Saved to Supabase DB — ${created.cable_cores}-core span${ponLabel} (${created.distance_meters}m).`
         );
       } catch (err: any) {
         showToast(err?.message || 'Failed to save fiber cable route', 'err');
@@ -730,47 +745,26 @@ export const FiberGisMapView: React.FC<FiberGisMapViewProps> = ({
       if (toolMode === 'connect_cable') {
         if (!connectSourceNodeId) {
           setConnectSourceNodeId(node.id);
+          setConnectTargetNodeId(null);
           setDraftWaypoints([{ lat: node.lat, lng: node.lng }]);
           setSelectedNodeId(null);
           setSelectedCableId(null);
+          showToast(`A-Start selected: ${node.name}. Now click End Node (B-End) or pick below.`);
           return;
         }
         if (connectSourceNodeId === node.id) {
-          showToast('Select a different destination node to finish the fiber route.', 'err');
+          showToast('Select a different End Node (B-End) to complete the fiber route.', 'err');
           return;
         }
 
-        const routeCoordinates = [...draftWaypoints, { lat: node.lat, lng: node.lng }];
-        const sourceNode = nodes.find((n) => n.id === connectSourceNodeId);
-        if (!sourceNode) return;
-
-        // If starting from a Multi-OLT hub that has PON ports, prompt user which PON Port feeds this fiber
-        if (sourceNode.node_type === 'OLT' && sourceNode.olt_id && oltsById[sourceNode.olt_id]) {
-          const olt = oltsById[sourceNode.olt_id];
-          const oltPorts = (ponPortsByOltId[olt.id] || [])
-            .slice()
-            .sort((a, b) => a.port_number - b.port_number);
-          if (oltPorts.length > 0) {
-            setPendingCablePonSelect({
-              sourceNode,
-              targetNode: node,
-              routeCoordinates,
-              olt,
-              oltPorts,
-              selectedPonPortId: oltPorts[0].id,
-            });
-            return;
-          }
-        }
-
-        const upstreamBudget = budgetsByNodeId[sourceNode.id];
-        await finalizeCreateCable({
-          sourceNode,
-          targetNode: node,
-          routeCoordinates,
-          sourceOltId: sourceNode.olt_id || upstreamBudget?.oltId || null,
-          sourcePonPortId: sourceNode.pon_port_id || upstreamBudget?.sourcePonPortId || null,
+        setConnectTargetNodeId(node.id);
+        setDraftWaypoints((prev) => {
+          const base = prev.length > 0 ? prev : [{ lat: node.lat, lng: node.lng }];
+          const last = base[base.length - 1];
+          if (last && last.lat === node.lat && last.lng === node.lng) return base;
+          return [...base, { lat: node.lat, lng: node.lng }];
         });
+        setIsConnectionModalOpen(true);
         return;
       }
 
@@ -778,17 +772,7 @@ export const FiberGisMapView: React.FC<FiberGisMapViewProps> = ({
       setSelectedCableId(null);
       setCableClickPoint(null);
     },
-    [
-      toolMode,
-      connectSourceNodeId,
-      draftWaypoints,
-      nodes,
-      oltsById,
-      ponPortsByOltId,
-      budgetsByNodeId,
-      finalizeCreateCable,
-      showToast,
-    ]
+    [toolMode, connectSourceNodeId, showToast]
   );
 
   const handleNodeDragEnd = useCallback(
@@ -928,7 +912,7 @@ export const FiberGisMapView: React.FC<FiberGisMapViewProps> = ({
     try {
       const updated = await updateGisNode(nodeId, { ...patch, updated_by: actorUsername });
       setNodes((prev) => applyRealtimeNodeDelta(prev, 'UPDATE', updated));
-      showToast('Node & optical parameters saved to Supabase.');
+      showToast('✅ Saved to Supabase DB — Node & optical parameters updated.');
     } catch (err: any) {
       showToast(err?.message || 'Failed to update node', 'err');
     } finally {
@@ -946,7 +930,7 @@ export const FiberGisMapView: React.FC<FiberGisMapViewProps> = ({
       );
       setPorts((prev) => prev.filter((p) => p.fdb_node_id !== nodeId));
       setSelectedNodeId(null);
-      showToast('Node deleted from GIS topology.');
+      showToast('Node deleted from Supabase GIS topology.');
     } catch (err: any) {
       showToast(err?.message || 'Failed to delete node', 'err');
     } finally {
@@ -957,9 +941,20 @@ export const FiberGisMapView: React.FC<FiberGisMapViewProps> = ({
   const handleSaveCable = async (cableId: string, patch: Partial<SupabaseGisCable>) => {
     setIsSaving(true);
     try {
-      const updated = await updateGisCable(cableId, { ...patch, updated_by: actorUsername });
+      const existing = cables.find((c) => c.id === cableId);
+      const startNodeName = existing
+        ? nodes.find((n) => n.id === existing.source_node_id)?.name
+        : undefined;
+      const endNodeName = existing
+        ? nodes.find((n) => n.id === existing.target_node_id)?.name
+        : undefined;
+      const updated = await updateGisCable(
+        cableId,
+        { ...patch, updated_by: actorUsername },
+        { startNodeName, endNodeName }
+      );
       setCables((prev) => applyRealtimeCableDelta(prev, 'UPDATE', updated));
-      showToast('TIA-598 core mapping committed to Supabase.');
+      showToast('✅ Saved to Supabase DB — Fiber core routing ledger updated.');
     } catch (err: any) {
       showToast(err?.message || 'Failed to save cable cores', 'err');
     } finally {
@@ -973,7 +968,7 @@ export const FiberGisMapView: React.FC<FiberGisMapViewProps> = ({
       await deleteGisCable(cableId);
       setCables((prev) => applyRealtimeCableDelta(prev, 'DELETE', undefined, { id: cableId }));
       setSelectedCableId(null);
-      showToast('Fiber cable span deleted.');
+      showToast('Fiber cable span deleted from Supabase.');
     } catch (err: any) {
       showToast(err?.message || 'Failed to delete cable', 'err');
     } finally {
@@ -1004,7 +999,7 @@ export const FiberGisMapView: React.FC<FiberGisMapViewProps> = ({
       setSelectedNodeId(res.jointNode.id);
       setCableClickPoint(null);
       showToast(
-        `Inserted ${res.jointNode.name} (${res.spanA.distance_meters}m + ${res.spanB.distance_meters}m) with all core colors preserved.`
+        `✅ Saved to Supabase DB — Inserted ${res.jointNode.name} (${res.spanA.distance_meters}m + ${res.spanB.distance_meters}m).`
       );
     } catch (err: any) {
       showToast(err?.message || 'Failed to split cable at joint closure', 'err');
@@ -1026,7 +1021,7 @@ export const FiberGisMapView: React.FC<FiberGisMapViewProps> = ({
     try {
       const savedPort = await upsertFdbPortAssignment(params);
       setPorts((prev) => applyRealtimePortDelta(prev, 'INSERT', savedPort));
-      showToast(`Port ${params.portNumber} assignment saved to Supabase.`);
+      showToast(`✅ Saved to Supabase DB — Port ${params.portNumber} assignment updated.`);
     } catch (err: any) {
       showToast(err?.message || 'Failed to update port assignment', 'err');
     } finally {
@@ -1274,6 +1269,7 @@ export const FiberGisMapView: React.FC<FiberGisMapViewProps> = ({
             onClick={() => {
               setToolMode('pan');
               setConnectSourceNodeId(null);
+              setConnectTargetNodeId(null);
               setDraftWaypoints([]);
             }}
             className={`min-h-[40px] px-2.5 py-1.5 rounded-lg border text-xs font-mono font-semibold flex items-center gap-1.5 whitespace-nowrap cursor-pointer transition ${
@@ -1306,6 +1302,7 @@ export const FiberGisMapView: React.FC<FiberGisMapViewProps> = ({
             onClick={() => {
               setToolMode('place_olt');
               setConnectSourceNodeId(null);
+              setConnectTargetNodeId(null);
               setDraftWaypoints([]);
             }}
             className={`min-h-[40px] px-2.5 py-1.5 rounded-lg border text-xs font-mono font-semibold flex items-center gap-1 whitespace-nowrap cursor-pointer transition ${
@@ -1323,6 +1320,7 @@ export const FiberGisMapView: React.FC<FiberGisMapViewProps> = ({
             onClick={() => {
               setToolMode('place_dist');
               setConnectSourceNodeId(null);
+              setConnectTargetNodeId(null);
               setDraftWaypoints([]);
             }}
             className={`min-h-[40px] px-2.5 py-1.5 rounded-lg border text-xs font-mono font-semibold flex items-center gap-1 whitespace-nowrap cursor-pointer transition ${
@@ -1340,6 +1338,7 @@ export const FiberGisMapView: React.FC<FiberGisMapViewProps> = ({
             onClick={() => {
               setToolMode('place_fdb');
               setConnectSourceNodeId(null);
+              setConnectTargetNodeId(null);
               setDraftWaypoints([]);
             }}
             className={`min-h-[40px] px-2.5 py-1.5 rounded-lg border text-xs font-mono font-semibold flex items-center gap-1 whitespace-nowrap cursor-pointer transition ${
@@ -1357,6 +1356,7 @@ export const FiberGisMapView: React.FC<FiberGisMapViewProps> = ({
             onClick={() => {
               setToolMode('place_fosc');
               setConnectSourceNodeId(null);
+              setConnectTargetNodeId(null);
               setDraftWaypoints([]);
             }}
             className={`min-h-[40px] px-2.5 py-1.5 rounded-lg border text-xs font-mono font-semibold flex items-center gap-1 whitespace-nowrap cursor-pointer transition ${
@@ -1374,6 +1374,7 @@ export const FiberGisMapView: React.FC<FiberGisMapViewProps> = ({
             onClick={() => {
               setToolMode('connect_cable');
               setConnectSourceNodeId(null);
+              setConnectTargetNodeId(null);
               setDraftWaypoints([]);
             }}
             className={`min-h-[40px] px-2.5 py-1.5 rounded-lg border text-xs font-mono font-semibold flex items-center gap-1.5 whitespace-nowrap cursor-pointer transition ${
@@ -1417,6 +1418,16 @@ export const FiberGisMapView: React.FC<FiberGisMapViewProps> = ({
               </button>
             ))}
           </div>
+
+          <button
+            type="button"
+            onClick={() => setIsSqlModalOpen(true)}
+            className="min-h-[40px] px-2.5 py-1.5 rounded-lg bg-slate-950 border border-amber-700/70 hover:border-amber-500 text-amber-300 font-mono font-semibold text-xs flex items-center gap-1.5 whitespace-nowrap cursor-pointer"
+            title="View & Copy Supabase GIS SQL Schema"
+          >
+            <Database className="w-3.5 h-3.5" />
+            <span className="hidden sm:inline">GIS SQL</span>
+          </button>
 
           <button
             type="button"
@@ -1563,55 +1574,139 @@ export const FiberGisMapView: React.FC<FiberGisMapViewProps> = ({
               </button>
             </>
           ) : toolMode === 'connect_cable' ? (
-            <>
-              <div className="flex items-center gap-2">
-                <Cable className="w-4 h-4 text-cyan-400 shrink-0" />
-                {!connectSourceNodeId ? (
-                  <span>Step 1: Tap the starting OLT, FOSC, or FDB node on the map.</span>
-                ) : (
-                  <span>
-                    Step 2: Click street corners/poles to trace route ({draftWaypoints.length - 1}{' '}
-                    waypoints · {draftDistanceMeters}m), then tap destination node.
-                  </span>
-                )}
-              </div>
-              <div className="flex items-center gap-2">
-                <select
-                  value={draftCableCores}
-                  onChange={(e) =>
-                    setDraftCableCores(Number(e.target.value) as 2 | 4 | 6 | 8 | 12 | 24 | 48)
-                  }
-                  className="bg-slate-950 border border-cyan-700 rounded px-2 py-1 text-xs text-white"
-                >
-                  {[2, 4, 6, 8, 12, 24, 48].map((c) => (
-                    <option key={c} value={c}>
-                      {c} Cores
-                    </option>
-                  ))}
-                </select>
-                {draftWaypoints.length > 1 && (
+            <div className="w-full flex flex-col gap-2">
+              <div className="flex flex-wrap items-center justify-between gap-2">
+                <div className="flex items-center gap-2">
+                  <Cable className="w-4 h-4 text-cyan-400 shrink-0" />
+                  {!connectSourceNodeId ? (
+                    <span className="font-bold text-emerald-300">
+                      Step 1: Click Start Node on map OR choose A-End below
+                    </span>
+                  ) : !connectTargetNodeId ? (
+                    <span className="font-bold text-amber-300">
+                      Step 2: Click street bends ({Math.max(0, draftWaypoints.length - 1)} pts ·{' '}
+                      {draftDistanceMeters}m), then click End Node (B-End) OR choose below
+                    </span>
+                  ) : (
+                    <span className="font-bold text-cyan-300">
+                      A &rarr; B Selected! Open Connection Form to mark cores &amp; save
+                    </span>
+                  )}
+                </div>
+
+                <div className="flex items-center flex-wrap gap-1.5">
+                  <select
+                    aria-label="Default Cable Core Capacity"
+                    value={draftCableCores}
+                    onChange={(e) =>
+                      setDraftCableCores(
+                        Number(e.target.value) as 1 | 2 | 4 | 6 | 8 | 12 | 24 | 48
+                      )
+                    }
+                    className="bg-slate-950 border border-cyan-700 rounded-lg px-2 py-1 text-xs text-white"
+                  >
+                    {CABLE_CAPACITY_PRESETS.filter((p) => p.id !== 'DROP_2C').map((p) => (
+                      <option key={p.id} value={p.cores}>
+                        {p.label} ({p.cores}C)
+                      </option>
+                    ))}
+                  </select>
+
+                  {draftWaypoints.length > 1 && (
+                    <button
+                      type="button"
+                      onClick={() => setDraftWaypoints((prev) => prev.slice(0, -1))}
+                      className="px-2.5 py-1 rounded-lg bg-slate-900 border border-slate-700 text-slate-200 flex items-center gap-1 cursor-pointer"
+                    >
+                      <Undo2 className="w-3 h-3" />
+                      <span>Undo Pt</span>
+                    </button>
+                  )}
+
                   <button
                     type="button"
-                    onClick={() => setDraftWaypoints((prev) => prev.slice(0, -1))}
-                    className="px-2.5 py-1 rounded bg-slate-900 border border-slate-700 text-slate-200 flex items-center gap-1 cursor-pointer"
+                    onClick={() => setIsConnectionModalOpen(true)}
+                    className="px-3 py-1 rounded-lg bg-cyan-500 hover:bg-cyan-400 text-slate-950 font-bold flex items-center gap-1 cursor-pointer shadow"
                   >
-                    <Undo2 className="w-3 h-3" />
-                    <span>Undo Pt</span>
+                    <Cable className="w-3 h-3" />
+                    <span>Open Connection Form</span>
                   </button>
-                )}
-                <button
-                  type="button"
-                  onClick={() => {
-                    setToolMode('pan');
-                    setConnectSourceNodeId(null);
-                    setDraftWaypoints([]);
-                  }}
-                  className="px-2.5 py-1 rounded bg-rose-900/70 border border-rose-700 text-rose-100 cursor-pointer"
-                >
-                  Cancel
-                </button>
+
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setToolMode('pan');
+                      setConnectSourceNodeId(null);
+                      setConnectTargetNodeId(null);
+                      setDraftWaypoints([]);
+                    }}
+                    className="px-2.5 py-1 rounded-lg bg-rose-900/70 border border-rose-700 text-rose-100 cursor-pointer"
+                  >
+                    Cancel
+                  </button>
+                </div>
               </div>
-            </>
+
+              {/* Fallback Start / End Node Dropdown Pickers (handles overlapping map markers) */}
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-2 pt-1 border-t border-cyan-800/50">
+                <div className="flex items-center gap-1.5">
+                  <span className="text-[10px] font-bold text-emerald-300 shrink-0 uppercase">
+                    A-Start:
+                  </span>
+                  <select
+                    aria-label="Fallback Start Node"
+                    value={connectSourceNodeId || ''}
+                    onChange={(e) => {
+                      const nextId = e.target.value || null;
+                      setConnectSourceNodeId(nextId);
+                      const matched = nextId ? nodes.find((n) => n.id === nextId) : undefined;
+                      if (matched) {
+                        setDraftWaypoints([{ lat: matched.lat, lng: matched.lng }]);
+                      } else {
+                        setDraftWaypoints([]);
+                      }
+                    }}
+                    className="w-full bg-slate-950 border border-emerald-700/70 rounded-lg px-2 py-1 text-xs text-white"
+                  >
+                    <option value="">-- Select Start Node (OLT / Joint / FDB) --</option>
+                    {nodes.map((n) => (
+                      <option key={n.id} value={n.id}>
+                        [{n.node_type}] {n.name}
+                        {n.area_name ? ` (${n.area_name})` : ''}
+                      </option>
+                    ))}
+                  </select>
+                </div>
+
+                <div className="flex items-center gap-1.5">
+                  <span className="text-[10px] font-bold text-amber-300 shrink-0 uppercase">
+                    B-End:
+                  </span>
+                  <select
+                    aria-label="Fallback End Node"
+                    value={connectTargetNodeId || ''}
+                    onChange={(e) => {
+                      const nextId = e.target.value || null;
+                      setConnectTargetNodeId(nextId);
+                      if (nextId && connectSourceNodeId && nextId !== connectSourceNodeId) {
+                        setIsConnectionModalOpen(true);
+                      }
+                    }}
+                    className="w-full bg-slate-950 border border-amber-700/70 rounded-lg px-2 py-1 text-xs text-white"
+                  >
+                    <option value="">-- Select End Node (FDB / FAT / Joint) --</option>
+                    {nodes
+                      .filter((n) => n.id !== connectSourceNodeId)
+                      .map((n) => (
+                        <option key={n.id} value={n.id}>
+                          [{n.node_type}] {n.name}
+                          {n.area_name ? ` (${n.area_name})` : ''}
+                        </option>
+                      ))}
+                  </select>
+                </div>
+              </div>
+            </div>
           ) : (
             <>
               <div className="flex items-center gap-2">
@@ -1690,6 +1785,7 @@ export const FiberGisMapView: React.FC<FiberGisMapViewProps> = ({
             selectedNodeId={selectedNodeId}
             selectedCableId={selectedCableId}
             connectSourceNodeId={connectSourceNodeId}
+            connectTargetNodeId={connectTargetNodeId}
             draftWaypoints={draftWaypoints}
             userLocation={userLocation}
             flyToTarget={flyToTarget}
@@ -2005,98 +2101,6 @@ export const FiberGisMapView: React.FC<FiberGisMapViewProps> = ({
         </div>
       )}
 
-      {/* PON Port Feeder Selector Modal when connecting fiber starting from an OLT */}
-      {pendingCablePonSelect && (
-        <div className="fixed inset-0 z-[9999] flex items-center justify-center bg-black/75 backdrop-blur-sm p-3 overflow-y-auto">
-          <div className="w-[95vw] sm:w-full max-w-lg max-h-[90vh] overflow-y-auto mx-auto my-auto rounded-2xl box-border bg-slate-900 border border-slate-700 p-4 sm:p-5 shadow-2xl space-y-4">
-            <div className="flex items-start justify-between gap-2 pb-2 border-b border-slate-800">
-              <div>
-                <h3 className="text-sm font-bold text-white flex items-center gap-2">
-                  <Server className="w-4 h-4 text-sky-400" />
-                  <span>Select OLT Source PON Port</span>
-                </h3>
-                <p className="text-[11px] font-mono text-slate-400 mt-0.5">
-                  {pendingCablePonSelect.olt.name} ({pendingCablePonSelect.olt.pon_mode}) →{' '}
-                  {pendingCablePonSelect.targetNode.name}
-                </p>
-              </div>
-              <button
-                type="button"
-                onClick={() => setPendingCablePonSelect(null)}
-                className="text-slate-400 hover:text-white cursor-pointer"
-              >
-                <X className="w-4 h-4" />
-              </button>
-            </div>
-
-            <div className="max-h-72 overflow-y-auto space-y-2 pr-1">
-              {pendingCablePonSelect.oltPorts.map((pp) => {
-                const picked = pendingCablePonSelect.selectedPonPortId === pp.id;
-                const existingFeeder = cables.find((c) => c.source_pon_port_id === pp.id);
-                return (
-                  <button
-                    key={pp.id}
-                    type="button"
-                    onClick={() =>
-                      setPendingCablePonSelect((prev) =>
-                        prev ? { ...prev, selectedPonPortId: pp.id } : null
-                      )
-                    }
-                    className={`w-full text-left p-3 rounded-xl border font-mono transition cursor-pointer ${
-                      picked
-                        ? 'bg-sky-600 text-white border-sky-600 dark:bg-sky-500/20 dark:border-sky-400 dark:text-sky-200'
-                        : 'bg-slate-50 border-slate-200 text-slate-700 hover:border-slate-400 dark:bg-slate-950 dark:border-slate-800 dark:text-slate-300 dark:hover:border-slate-600'
-                    }`}
-                  >
-                    <div className="flex items-center justify-between gap-2 text-xs">
-                      <span className="font-bold">
-                        PON {pp.port_number} · {pp.port_label || `PON-${pp.port_number}`}
-                      </span>
-                      <span className="text-sky-300 font-bold tabular-nums">
-                        +{Number(pp.tx_power_dbm).toFixed(1)} dBm ({pp.sfp_class})
-                      </span>
-                    </div>
-                    {existingFeeder && (
-                      <div className="text-[10px] text-amber-300 mt-1">
-                        Already feeding: {existingFeeder.name || `${existingFeeder.cable_cores}C span`}
-                      </div>
-                    )}
-                  </button>
-                );
-              })}
-            </div>
-
-            <div className="flex items-center gap-2 pt-1">
-              <button
-                type="button"
-                onClick={() => setPendingCablePonSelect(null)}
-                className="flex-1 min-h-[42px] rounded-xl bg-slate-800 hover:bg-slate-700 text-slate-200 font-mono text-xs cursor-pointer"
-              >
-                Cancel
-              </button>
-              <button
-                type="button"
-                disabled={isSaving}
-                onClick={async () => {
-                  const job = pendingCablePonSelect;
-                  setPendingCablePonSelect(null);
-                  await finalizeCreateCable({
-                    sourceNode: job.sourceNode,
-                    targetNode: job.targetNode,
-                    routeCoordinates: job.routeCoordinates,
-                    sourceOltId: job.olt.id,
-                    sourcePonPortId: job.selectedPonPortId,
-                  });
-                }}
-                className="flex-1 min-h-[42px] rounded-xl bg-sky-600 hover:bg-sky-500 text-white font-mono font-bold text-xs cursor-pointer shadow-sm"
-              >
-                Bind PON Port &amp; Save Cable
-              </button>
-            </div>
-          </div>
-        </div>
-      )}
-
       {/* Full Multi-OLT Manager Modal */}
       <OltManagerModal
         isOpen={isOltManagerOpen}
@@ -2140,6 +2144,96 @@ export const FiberGisMapView: React.FC<FiberGisMapViewProps> = ({
           refreshTopology(false);
         }}
       />
+
+      {/* Dual-Picker Fiber Cable Connection & Core Marking Modal */}
+      <FiberConnectionModal
+        isOpen={isConnectionModalOpen}
+        nodes={nodes}
+        olts={olts}
+        oltsById={oltsById}
+        ponPortsByOltId={ponPortsByOltId}
+        ponPortsById={ponPortsById}
+        initialStartNodeId={connectSourceNodeId}
+        initialEndNodeId={connectTargetNodeId}
+        initialWaypoints={draftWaypoints}
+        initialCableCores={draftCableCores}
+        isSaving={isSaving}
+        onClose={() => setIsConnectionModalOpen(false)}
+        onSaveConnection={async (payload) => {
+          await finalizeCreateCable({
+            name: payload.name,
+            sourceNode: payload.sourceNode,
+            targetNode: payload.targetNode,
+            routeCoordinates: payload.routeCoordinates,
+            sourceOltId: payload.sourceOltId,
+            sourcePonPortId: payload.sourcePonPortId,
+            cableType: payload.cableType,
+            cableCores: payload.cableCores,
+            distanceMeters: payload.distanceMeters,
+            cores: payload.cores,
+            notes: payload.notes,
+          });
+        }}
+      />
+
+      {/* Persistent Supabase GIS SQL Setup Modal */}
+      {isSqlModalOpen && (
+        <div className="fixed inset-0 z-[9999] flex items-center justify-center bg-black/75 backdrop-blur-sm p-3 overflow-y-auto">
+          <div className="w-[95vw] sm:w-full max-w-3xl max-h-[90vh] overflow-y-auto mx-auto my-auto rounded-2xl box-border bg-slate-900 border border-slate-700 p-4 sm:p-5 shadow-2xl space-y-3">
+            <div className="flex items-center justify-between gap-2 pb-2 border-b border-slate-800">
+              <div className="flex items-center gap-2">
+                <Database className="w-4 h-4 text-amber-400" />
+                <h3 className="text-sm font-bold text-white">
+                  Supabase FTTH GIS &amp; Fiber Core Ledger SQL Schema
+                </h3>
+              </div>
+              <button
+                type="button"
+                onClick={() => setIsSqlModalOpen(false)}
+                className="text-slate-400 hover:text-white cursor-pointer"
+                aria-label="Close SQL modal"
+              >
+                <X className="w-4 h-4" />
+              </button>
+            </div>
+
+            <p className="text-xs text-slate-300">
+              Copy and run this SQL in your Supabase SQL Editor to ensure{' '}
+              <code className="font-mono text-cyan-300">gis_olts</code>,{' '}
+              <code className="font-mono text-cyan-300">gis_nodes</code>,{' '}
+              <code className="font-mono text-cyan-300">gis_cables</code>,{' '}
+              <code className="font-mono text-cyan-300">fiber_nodes</code>, and{' '}
+              <code className="font-mono text-cyan-300">fiber_routes</code> tables &amp; RLS policies are initialized.
+            </p>
+
+            <pre className="p-3 rounded-xl bg-slate-950 border border-slate-800 text-[11px] font-mono text-emerald-300 overflow-x-auto max-h-[52vh]">
+              {FIBER_GIS_MIGRATION_SQL}
+            </pre>
+
+            <div className="flex items-center justify-end gap-2 pt-1">
+              <button
+                type="button"
+                onClick={() => {
+                  navigator.clipboard?.writeText(FIBER_GIS_MIGRATION_SQL);
+                  setCopiedSql(true);
+                  setTimeout(() => setCopiedSql(false), 3000);
+                }}
+                className="min-h-[40px] px-4 py-2 rounded-xl bg-amber-500 hover:bg-amber-400 text-slate-950 font-mono font-bold text-xs flex items-center gap-1.5 cursor-pointer"
+              >
+                <Copy className="w-3.5 h-3.5" />
+                <span>{copiedSql ? 'Copied GIS SQL!' : 'Copy Full GIS SQL'}</span>
+              </button>
+              <button
+                type="button"
+                onClick={() => setIsSqlModalOpen(false)}
+                className="min-h-[40px] px-4 py-2 rounded-xl bg-slate-800 hover:bg-slate-700 text-slate-200 font-mono text-xs cursor-pointer"
+              >
+                Close
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
 
       {/* End-to-End Optical Traceability Path Drawer */}
       <FiberTraceabilityDrawer

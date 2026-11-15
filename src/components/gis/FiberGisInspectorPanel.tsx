@@ -22,8 +22,9 @@ import {
   X,
 } from 'lucide-react';
 import type {
+  GisCableTypeCode,
   GisCoreEntry,
-  GisCoreStatus,
+  GisCoreLedgerStatus,
   GisLatLng,
   GisNodeType,
   GisPortStatus,
@@ -42,10 +43,12 @@ import type {
 } from '../../services/supabaseClient';
 import type { GisSubscriberSummary } from '../../services/fiberGisService';
 import {
+  CABLE_CAPACITY_PRESETS,
   NodeOpticalBudgetResult,
-  SFP_CLASS_SPECS,
   SFP_TX_PRESETS,
   SPLITTER_SPECS,
+  cableCoresToType,
+  coreStatusToLedgerStatus,
   coreStatusToUsageType,
   generateDefaultSpliceTray,
   getDefaultMaxOnuLimit,
@@ -55,6 +58,7 @@ import {
   getTia598Color,
   inferSfpClassFromDbm,
   inferSplitterCategory,
+  ledgerStatusToCoreStatus,
   normalizeCableCores,
   summarizeCableCores,
 } from '../../lib/fiberOpticEngine';
@@ -166,6 +170,9 @@ export const FiberGisInspectorPanel: React.FC<FiberGisInspectorPanelProps> = ({
 
   // Cable editable draft
   const [cableName, setCableName] = useState('');
+  const [cablePresetId, setCablePresetId] = useState<string>('12C');
+  const [cableDistanceMeters, setCableDistanceMeters] = useState<number>(0);
+  const [cableNotes, setCableNotes] = useState('');
   const [cableSourceOltId, setCableSourceOltId] = useState<string>('');
   const [cableSourcePonPortId, setCableSourcePonPortId] = useState<string>('');
   const [cableCoresDraft, setCableCoresDraft] = useState<GisCoreEntry[]>([]);
@@ -218,13 +225,26 @@ export const FiberGisInspectorPanel: React.FC<FiberGisInspectorPanelProps> = ({
     setConfirmDelete(false);
     if (selectedCable) {
       setCableName(selectedCable.name || '');
+      setCableDistanceMeters(Number(selectedCable.distance_meters || 0));
+      setCableNotes(selectedCable.notes || '');
+      const resolvedType = cableCoresToType(
+        selectedCable.cable_cores,
+        selectedCable.cable_type
+      );
+      const matchedPreset =
+        CABLE_CAPACITY_PRESETS.find(
+          (p) => p.cores === selectedCable.cable_cores && p.cableType === resolvedType
+        ) ||
+        CABLE_CAPACITY_PRESETS.find((p) => p.cores === selectedCable.cable_cores) ||
+        CABLE_CAPACITY_PRESETS[6];
+      setCablePresetId(matchedPreset.id);
       setCableSourceOltId(selectedCable.source_olt_id || '');
       setCableSourcePonPortId(selectedCable.source_pon_port_id || '');
       const rawCores =
         selectedCable.cores_allocation_json && selectedCable.cores_allocation_json.length > 0
           ? selectedCable.cores_allocation_json
           : selectedCable.cores_tia598_json;
-      setCableCoresDraft(normalizeCableCores(selectedCable.cable_cores, rawCores));
+      setCableCoresDraft(normalizeCableCores(matchedPreset.cores, rawCores));
     }
   }, [selectedCable]);
 
@@ -1826,10 +1846,15 @@ export const FiberGisInspectorPanel: React.FC<FiberGisInspectorPanelProps> = ({
   const renderCableInspector = (cable: SupabaseGisCable) => {
     const src = nodesById[cable.source_node_id];
     const dst = nodesById[cable.target_node_id];
-    const fiberLossDb = (Number(cable.distance_meters || 0) / 1000) * 0.35;
+    const activePreset =
+      CABLE_CAPACITY_PRESETS.find((p) => p.id === cablePresetId) ||
+      CABLE_CAPACITY_PRESETS.find((p) => p.cores === cable.cable_cores) ||
+      CABLE_CAPACITY_PRESETS[6];
+    const effectiveMeters = Math.max(0, Number(cableDistanceMeters || 0));
+    const fiberLossDb = (effectiveMeters / 1000) * 0.35;
     const feedPonPort = cableSourcePonPortId ? ponPortsById[cableSourcePonPortId] : undefined;
     const feedOlt = cableSourceOltId ? oltsById[cableSourceOltId] : undefined;
-    const coreSummary = summarizeCableCores(cableCoresDraft, cable.cable_cores);
+    const coreSummary = summarizeCableCores(cableCoresDraft, activePreset.cores);
     const selectedOltPons = cableSourceOltId
       ? (ponPortsByOltId[cableSourceOltId] || [])
           .slice()
@@ -1842,6 +1867,32 @@ export const FiberGisInspectorPanel: React.FC<FiberGisInspectorPanelProps> = ({
       ? feedOlt.name
       : src?.name || '';
 
+    const sourceSuggestions: string[] = [];
+    for (const o of olts) {
+      const pps = (ponPortsByOltId[o.id] || []).slice().sort((a, b) => a.port_number - b.port_number);
+      for (const pp of pps) {
+        sourceSuggestions.push(`${o.name} · PON-${pp.port_number} (${pp.port_label || 'Main'})`);
+      }
+    }
+    for (const n of nodes) {
+      if (n.node_type === 'FOSC_JOINT' || n.node_type === 'DIST_NODE') {
+        sourceSuggestions.push(`${n.name} · Core #1`);
+      }
+    }
+
+    const getLedgerSelectClass = (ledger: GisCoreLedgerStatus) => {
+      switch (ledger) {
+        case 'ACTIVE':
+          return 'bg-emerald-950/90 text-emerald-300 border-emerald-700';
+        case 'RESERVED':
+          return 'bg-amber-950/90 text-amber-300 border-amber-700';
+        case 'FAULTY':
+          return 'bg-rose-950/90 text-rose-300 border-rose-700';
+        default:
+          return 'bg-slate-900 text-slate-300 border-slate-700';
+      }
+    };
+
     return (
       <div className="flex flex-col h-full overflow-hidden">
         {/* Header */}
@@ -1849,15 +1900,19 @@ export const FiberGisInspectorPanel: React.FC<FiberGisInspectorPanelProps> = ({
           <div className="min-w-0">
             <div className="flex items-center gap-2 text-[11px] font-mono text-cyan-400">
               <Cable className="w-3.5 h-3.5 shrink-0" />
-              <span className="uppercase font-bold">{cable.cable_cores}-Core Fiber Span</span>
+              <span className="uppercase font-bold">{activePreset.label}</span>
               <span>·</span>
-              <span className="tabular-nums text-white">{cable.distance_meters}m</span>
+              <span className="tabular-nums text-white">{effectiveMeters}m</span>
+              <span>·</span>
+              <span className="tabular-nums text-emerald-300">
+                {coreSummary.litCount}/{coreSummary.total} Lit
+              </span>
             </div>
             <h3 className="text-sm font-bold text-white truncate mt-0.5">
-              {cable.name || `${src?.name || 'Node'} → ${dst?.name || 'Node'}`}
+              {cableName || cable.name || `${src?.name || 'Node'} → ${dst?.name || 'Node'}`}
             </h3>
             <p className="text-[11px] text-slate-400 font-mono mt-0.5 tabular-nums">
-              Attenuation: -{fiberLossDb.toFixed(2)} dB @ 0.35 dB/km
+              {src?.name || 'Start'} &rarr; {dst?.name || 'End'} · -{fiberLossDb.toFixed(2)} dB @ 0.35 dB/km
             </p>
             {feedPonPort && (
               <p className="text-[11px] text-sky-300 font-mono mt-0.5 truncate">
@@ -1880,25 +1935,27 @@ export const FiberGisInspectorPanel: React.FC<FiberGisInspectorPanelProps> = ({
           {/* Core Summary Counters Bar */}
           <div className="grid grid-cols-4 gap-1.5 p-2.5 rounded-xl bg-slate-950 border border-slate-800 font-mono text-center">
             <div>
-              <span className="text-[9px] text-slate-400 uppercase block">Total</span>
-              <span className="text-xs font-bold text-white tabular-nums">{coreSummary.total}C</span>
-            </div>
-            <div>
-              <span className="text-[9px] text-emerald-400 uppercase block">Splitter</span>
+              <span className="text-[9px] text-emerald-400 uppercase block">Active / Lit</span>
               <span className="text-xs font-bold text-emerald-300 tabular-nums">
-                {coreSummary.splitterCount}
+                {coreSummary.litCount}
               </span>
             </div>
             <div>
-              <span className="text-[9px] text-indigo-400 uppercase block">Area Pass</span>
-              <span className="text-xs font-bold text-indigo-300 tabular-nums">
-                {coreSummary.passThroughCount}
+              <span className="text-[9px] text-amber-400 uppercase block">Reserved</span>
+              <span className="text-xs font-bold text-amber-300 tabular-nums">
+                {coreSummary.reservedCount}
               </span>
             </div>
             <div>
-              <span className="text-[9px] text-slate-400 uppercase block">Free Dark</span>
+              <span className="text-[9px] text-slate-400 uppercase block">Spare / Dark</span>
               <span className="text-xs font-bold text-cyan-300 tabular-nums">
-                {coreSummary.freeCount}
+                {coreSummary.spareCount}
+              </span>
+            </div>
+            <div>
+              <span className="text-[9px] text-rose-400 uppercase block">Faulty / Cut</span>
+              <span className="text-xs font-bold text-rose-300 tabular-nums">
+                {coreSummary.faultyCount}
               </span>
             </div>
           </div>
@@ -1918,7 +1975,7 @@ export const FiberGisInspectorPanel: React.FC<FiberGisInspectorPanelProps> = ({
             </div>
             <p className="text-[11px] text-slate-300 leading-relaxed">
               Insert a FOSC Joint Closure directly on this span. Both resulting spans preserve all{' '}
-              {cable.cable_cores} TIA-598 core mappings and notes.
+              {activePreset.cores} TIA-598 core mappings and notes.
             </p>
             <button
               type="button"
@@ -1927,14 +1984,14 @@ export const FiberGisInspectorPanel: React.FC<FiberGisInspectorPanelProps> = ({
               className="w-full min-h-[42px] px-3 py-2 rounded-xl bg-purple-600 hover:bg-purple-500 disabled:opacity-50 text-white font-mono font-bold text-xs flex items-center justify-center gap-2 shadow-lg cursor-pointer transition"
             >
               <Scissors className="w-4 h-4" />
-              <span>✂️ Split Cable Here (Insert FOSC Joint Box)</span>
+              <span>Split Cable Here (Insert FOSC Joint Box)</span>
             </button>
           </div>
 
-          {/* Span Name & Origin OLT/PON Binding */}
+          {/* Span Name, Capacity, Length & Origin OLT/PON Binding */}
           <div className="p-3 rounded-xl bg-slate-950 border border-slate-800 space-y-2.5">
             <div>
-              <label className="block text-[10px] font-mono text-slate-400 mb-1">Span Name</label>
+              <label className="block text-[10px] font-mono text-slate-400 mb-1">Span Name / Tag</label>
               <input
                 type="text"
                 value={cableName}
@@ -1942,6 +1999,41 @@ export const FiberGisInspectorPanel: React.FC<FiberGisInspectorPanelProps> = ({
                 placeholder={`${src?.name || 'Start'} → ${dst?.name || 'End'}`}
                 className="w-full bg-slate-900 border border-slate-700 rounded-lg px-3 py-1.5 text-xs text-white focus:outline-none focus:border-cyan-500"
               />
+            </div>
+
+            <div className="grid grid-cols-2 gap-2 font-mono">
+              <div>
+                <label className="block text-[10px] text-slate-400 mb-1">Cable Capacity</label>
+                <select
+                  value={cablePresetId}
+                  onChange={(e) => {
+                    const nextId = e.target.value;
+                    setCablePresetId(nextId);
+                    const preset = CABLE_CAPACITY_PRESETS.find((p) => p.id === nextId);
+                    if (preset) {
+                      setCableCoresDraft((prev) => normalizeCableCores(preset.cores, prev));
+                    }
+                  }}
+                  className="w-full bg-slate-900 border border-slate-700 rounded-lg px-2 py-1.5 text-[11px] font-bold text-cyan-300"
+                >
+                  {CABLE_CAPACITY_PRESETS.map((p) => (
+                    <option key={p.id} value={p.id}>
+                      {p.label} ({p.cores}C)
+                    </option>
+                  ))}
+                </select>
+              </div>
+              <div>
+                <label className="block text-[10px] text-slate-400 mb-1">Total Meters</label>
+                <input
+                  type="number"
+                  min={1}
+                  max={50000}
+                  value={cableDistanceMeters}
+                  onChange={(e) => setCableDistanceMeters(Number(e.target.value))}
+                  className="w-full bg-slate-900 border border-slate-700 rounded-lg px-2.5 py-1.5 text-[11px] text-white tabular-nums"
+                />
+              </div>
             </div>
 
             <div className="grid grid-cols-2 gap-2 font-mono">
@@ -1982,21 +2074,34 @@ export const FiberGisInspectorPanel: React.FC<FiberGisInspectorPanelProps> = ({
               </div>
             </div>
 
+            <div>
+              <label className="block text-[10px] font-mono text-slate-400 mb-1">Route Notes</label>
+              <input
+                type="text"
+                value={cableNotes}
+                onChange={(e) => setCableNotes(e.target.value)}
+                placeholder="Pole #, aerial duct, street notes..."
+                className="w-full bg-slate-900 border border-slate-700 rounded-lg px-3 py-1.5 text-xs text-white placeholder-slate-500"
+              />
+            </div>
+
             {defaultOriginLabel && (
               <button
                 type="button"
                 onClick={() =>
                   setCableCoresDraft((prev) =>
-                    prev.map((c) =>
-                      c.status !== 'Free / Dark' && !c.origin_olt_label
+                    prev.map((c) => {
+                      const ledger = coreStatusToLedgerStatus(c.status, c.core_status);
+                      return ledger !== 'SPARE' && !c.origin_olt_label && !c.source_signal
                         ? {
                             ...c,
                             origin_olt_id: cableSourceOltId || null,
                             origin_pon_port_id: cableSourcePonPortId || null,
                             origin_olt_label: defaultOriginLabel,
+                            source_signal: defaultOriginLabel,
                           }
-                        : c
-                    )
+                        : c;
+                    })
                   )
                 }
                 className="w-full py-1.5 rounded-lg bg-slate-900 hover:bg-slate-800 border border-slate-700 text-[10px] font-mono text-sky-300 cursor-pointer"
@@ -2010,12 +2115,18 @@ export const FiberGisInspectorPanel: React.FC<FiberGisInspectorPanelProps> = ({
           <div className="space-y-2">
             <div className="flex items-center justify-between font-mono">
               <span className="text-[11px] uppercase tracking-wider text-slate-300 font-bold">
-                Core &amp; Pair Allocation ({cable.cable_cores}C)
+                Core &amp; Pair Signal Routing ({cableCoresDraft.length}C)
               </span>
-              <span className="text-[10px] text-slate-400">
-                {coreSummary.freeCount} Dark Free
+              <span className="text-[10px] text-emerald-400">
+                {coreSummary.litCount} Lit · {coreSummary.spareCount} Spare
               </span>
             </div>
+
+            <datalist id="gis-core-source-list">
+              {sourceSuggestions.map((s) => (
+                <option key={s} value={s} />
+              ))}
+            </datalist>
 
             <datalist id="gis-core-dest-list">
               {nodes.map((n) => (
@@ -2027,108 +2138,151 @@ export const FiberGisInspectorPanel: React.FC<FiberGisInspectorPanelProps> = ({
             </datalist>
 
             <div className="rounded-xl border border-slate-800 divide-y divide-slate-800/80 bg-slate-950 overflow-hidden">
-              {cableCoresDraft.map((core, idx) => (
-                <div key={core.coreNumber} className="p-2.5 space-y-1.5">
-                  <div className="flex items-center justify-between gap-2 font-mono text-[11px]">
-                    <div className="flex items-center gap-2">
-                      <span
-                        className="w-3.5 h-3.5 rounded-sm border border-white/40 shrink-0"
-                        style={{ backgroundColor: core.coreColorHex }}
-                        title={`Core ${core.coreColorName}`}
-                      />
-                      <span className="font-bold text-white tabular-nums">
-                        #{core.coreNumber} {core.coreColorName}
-                      </span>
+              {cableCoresDraft.map((core, idx) => {
+                const ledgerStatus = coreStatusToLedgerStatus(core.status, core.core_status);
+                return (
+                  <div key={core.coreNumber} className="p-2.5 space-y-1.5">
+                    <div className="flex items-center justify-between gap-2 font-mono text-[11px]">
+                      <div className="flex items-center gap-2">
+                        <span
+                          className="w-3.5 h-3.5 rounded-sm border border-white/40 shrink-0"
+                          style={{ backgroundColor: core.coreColorHex }}
+                          title={`Core ${core.coreColorName}`}
+                        />
+                        <span className="font-bold text-white tabular-nums">
+                          #{core.coreNumber} {core.coreColorName}
+                        </span>
+                      </div>
+                      <div className="flex items-center gap-1.5 text-[10px] text-slate-400">
+                        <span
+                          className="w-2.5 h-2.5 rounded-full border border-white/30"
+                          style={{ backgroundColor: core.tubeColorHex }}
+                        />
+                        <span>
+                          Tube #{core.tubeNumber} ({core.tubeColorName})
+                        </span>
+                      </div>
                     </div>
-                    <div className="flex items-center gap-1.5 text-[10px] text-slate-400">
-                      <span
-                        className="w-2.5 h-2.5 rounded-full border border-white/30"
-                        style={{ backgroundColor: core.tubeColorHex }}
+
+                    <div className="grid grid-cols-2 gap-1.5">
+                      <select
+                        value={ledgerStatus}
+                        onChange={(e) => {
+                          const nextLedger = e.target.value as GisCoreLedgerStatus;
+                          const nextLegacyStatus = ledgerStatusToCoreStatus(
+                            nextLedger,
+                            core.destination_target || core.forwarded_to_area
+                          );
+                          setCableCoresDraft((prev) =>
+                            prev.map((item, i) =>
+                              i === idx
+                                ? {
+                                    ...item,
+                                    core_status: nextLedger,
+                                    status: nextLegacyStatus,
+                                    usage_type: coreStatusToUsageType(nextLegacyStatus),
+                                    source_signal:
+                                      nextLedger !== 'SPARE' &&
+                                      !item.source_signal &&
+                                      !item.origin_olt_label
+                                        ? defaultOriginLabel
+                                        : item.source_signal,
+                                    origin_olt_label:
+                                      nextLedger !== 'SPARE' && !item.origin_olt_label
+                                        ? defaultOriginLabel
+                                        : item.origin_olt_label,
+                                  }
+                                : item
+                            )
+                          );
+                        }}
+                        className={`border rounded-lg px-2 py-1.5 text-[11px] font-mono font-bold ${getLedgerSelectClass(
+                          ledgerStatus
+                        )}`}
+                      >
+                        <option value="ACTIVE">ACTIVE / LIT</option>
+                        <option value="SPARE">SPARE / DARK</option>
+                        <option value="RESERVED">RESERVED</option>
+                        <option value="FAULTY">FAULTY / CUT</option>
+                      </select>
+
+                      <input
+                        type="text"
+                        list="gis-core-dest-list"
+                        value={
+                          core.destination_target ??
+                          core.forwarded_to_area ??
+                          core.destinationNote ??
+                          ''
+                        }
+                        onChange={(e) => {
+                          const val = e.target.value;
+                          setCableCoresDraft((prev) =>
+                            prev.map((item, i) =>
+                              i === idx
+                                ? {
+                                    ...item,
+                                    destination_target: val,
+                                    forwarded_to_area: val,
+                                    destinationNote: val,
+                                  }
+                                : item
+                            )
+                          );
+                        }}
+                        placeholder="To FAT / FDB / Splitter..."
+                        className="bg-slate-900 border border-slate-700 rounded-lg px-2 py-1.5 text-[11px] text-white placeholder-slate-500"
                       />
-                      <span>
-                        Tube {core.tubeNumber} ({core.tubeColorName})
-                      </span>
+                    </div>
+
+                    <div className="grid grid-cols-12 gap-1.5">
+                      <input
+                        type="text"
+                        list="gis-core-source-list"
+                        value={core.source_signal ?? core.origin_olt_label ?? ''}
+                        onChange={(e) => {
+                          const val = e.target.value;
+                          setCableCoresDraft((prev) =>
+                            prev.map((item, i) =>
+                              i === idx
+                                ? { ...item, source_signal: val, origin_olt_label: val }
+                                : item
+                            )
+                          );
+                        }}
+                        placeholder="From NOC / OLT & PON..."
+                        className="col-span-5 bg-slate-900/80 border border-slate-800 rounded-lg px-2 py-1 text-[10px] font-mono text-sky-200 placeholder-slate-600"
+                      />
+                      <input
+                        type="text"
+                        value={core.optical_power_dbm || ''}
+                        onChange={(e) => {
+                          const optical_power_dbm = e.target.value;
+                          setCableCoresDraft((prev) =>
+                            prev.map((item, i) =>
+                              i === idx ? { ...item, optical_power_dbm } : item
+                            )
+                          );
+                        }}
+                        placeholder="Power dBm"
+                        className="col-span-3 bg-slate-900/80 border border-slate-800 rounded-lg px-2 py-1 text-[10px] font-mono text-cyan-300 tabular-nums placeholder-slate-600"
+                      />
+                      <input
+                        type="text"
+                        value={core.remarks || ''}
+                        onChange={(e) => {
+                          const remarks = e.target.value;
+                          setCableCoresDraft((prev) =>
+                            prev.map((item, i) => (i === idx ? { ...item, remarks } : item))
+                          );
+                        }}
+                        placeholder="Notes..."
+                        className="col-span-4 bg-slate-900/80 border border-slate-800 rounded-lg px-2 py-1 text-[10px] text-slate-200 placeholder-slate-600"
+                      />
                     </div>
                   </div>
-
-                  <div className="grid grid-cols-2 gap-1.5">
-                    <select
-                      value={core.status}
-                      onChange={(e) => {
-                        const status = e.target.value as GisCoreStatus;
-                        const usage_type = coreStatusToUsageType(status);
-                        setCableCoresDraft((prev) =>
-                          prev.map((item, i) =>
-                            i === idx
-                              ? {
-                                  ...item,
-                                  status,
-                                  usage_type,
-                                  origin_olt_label:
-                                    status !== 'Free / Dark' && !item.origin_olt_label
-                                      ? defaultOriginLabel
-                                      : item.origin_olt_label,
-                                }
-                              : item
-                          )
-                        );
-                      }}
-                      className="bg-slate-900 border border-slate-700 rounded-lg px-2 py-1.5 text-[11px] text-slate-200"
-                    >
-                      <option value="Feed / Splitter">Splitter Feed</option>
-                      <option value="Through / Pass">Pass-Through to Area</option>
-                      <option value="Free / Dark">Free / Dark Core</option>
-                      <option value="Dead / High Loss">Dead / High Loss</option>
-                    </select>
-                    <input
-                      type="text"
-                      list="gis-core-dest-list"
-                      value={core.forwarded_to_area || core.destinationNote || ''}
-                      onChange={(e) => {
-                        const val = e.target.value;
-                        setCableCoresDraft((prev) =>
-                          prev.map((item, i) =>
-                            i === idx
-                              ? { ...item, forwarded_to_area: val, destinationNote: val }
-                              : item
-                          )
-                        );
-                      }}
-                      placeholder="Target FAT / Next area..."
-                      className="bg-slate-900 border border-slate-700 rounded-lg px-2 py-1.5 text-[11px] text-white placeholder-slate-500"
-                    />
-                  </div>
-
-                  <div className="grid grid-cols-2 gap-1.5">
-                    <input
-                      type="text"
-                      value={core.origin_olt_label || ''}
-                      onChange={(e) => {
-                        const origin_olt_label = e.target.value;
-                        setCableCoresDraft((prev) =>
-                          prev.map((item, i) =>
-                            i === idx ? { ...item, origin_olt_label } : item
-                          )
-                        );
-                      }}
-                      placeholder="Origin OLT / PON..."
-                      className="bg-slate-900/80 border border-slate-800 rounded-lg px-2 py-1 text-[10px] font-mono text-sky-200 placeholder-slate-600"
-                    />
-                    <input
-                      type="text"
-                      value={core.remarks || ''}
-                      onChange={(e) => {
-                        const remarks = e.target.value;
-                        setCableCoresDraft((prev) =>
-                          prev.map((item, i) => (i === idx ? { ...item, remarks } : item))
-                        );
-                      }}
-                      placeholder="Splice / core remarks..."
-                      className="bg-slate-900/80 border border-slate-800 rounded-lg px-2 py-1 text-[10px] text-slate-200 placeholder-slate-600"
-                    />
-                  </div>
-                </div>
-              ))}
+                );
+              })}
             </div>
           </div>
         </div>
@@ -2141,10 +2295,14 @@ export const FiberGisInspectorPanel: React.FC<FiberGisInspectorPanelProps> = ({
             onClick={() =>
               onSaveCable(cable.id, {
                 name: cableName.trim(),
+                cable_type: activePreset.cableType as GisCableTypeCode,
+                cable_cores: activePreset.cores,
+                distance_meters: Math.max(1, Math.round(Number(cableDistanceMeters) || 1)),
+                notes: cableNotes.trim(),
                 source_olt_id: cableSourceOltId || null,
                 source_pon_port_id: cableSourcePonPortId || null,
-                cores_tia598_json: cableCoresDraft,
-                cores_allocation_json: cableCoresDraft,
+                cores_tia598_json: normalizeCableCores(activePreset.cores, cableCoresDraft),
+                cores_allocation_json: normalizeCableCores(activePreset.cores, cableCoresDraft),
               })
             }
             className="flex-1 min-h-[44px] px-4 py-2 rounded-xl bg-cyan-600 hover:bg-cyan-500 disabled:opacity-50 text-slate-950 font-mono font-bold text-xs flex items-center justify-center gap-1.5 cursor-pointer"
@@ -2187,7 +2345,7 @@ export const FiberGisInspectorPanel: React.FC<FiberGisInspectorPanelProps> = ({
   return (
     <>
       {/* Desktop Right-Side Drawer */}
-      <aside className="hidden lg:flex lg:flex-col w-[420px] xl:w-[440px] h-full bg-slate-900 border-l border-slate-800 shrink-0 shadow-2xl z-20">
+      <aside className="hidden lg:flex lg:flex-col w-[460px] xl:w-[500px] h-full bg-slate-900 border-l border-slate-800 shrink-0 shadow-2xl z-20">
         {body}
       </aside>
 
