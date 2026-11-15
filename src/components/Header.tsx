@@ -243,7 +243,7 @@ export const Header: React.FC<HeaderProps> = ({
   return (
     <header className="bg-white/95 dark:bg-slate-950 border-b border-slate-200 dark:border-slate-800 text-slate-900 dark:text-slate-100 sticky top-0 z-40 backdrop-blur-md shadow-sm dark:shadow-md transition-colors duration-200 max-w-full overflow-x-hidden">
       {/* Top Banner / Router Status */}
-      <div className="max-w-7xl mx-auto px-3 sm:px-6 lg:px-8 pt-[max(0.75rem,env(safe-area-inset-top))] pb-2.5 flex flex-wrap items-center justify-between gap-2.5 sm:gap-3 border-b border-slate-200/80 dark:border-slate-800/60 min-w-0">
+      <div className="max-w-7xl mx-auto px-3 sm:px-6 lg:px-8 pt-[max(0.5rem,env(safe-area-inset-top))] pb-2 flex flex-wrap items-center justify-between gap-2 sm:gap-3 border-b border-slate-200/80 dark:border-slate-800/60 min-w-0">
         {/* Row 1 on Mobile: Menu + YOUTH NET Brand */}
         <div className="flex items-center gap-2 sm:gap-3 w-full md:w-auto min-w-0">
           {onToggleSidebar && (
@@ -279,7 +279,7 @@ export const Header: React.FC<HeaderProps> = ({
                 v7.16
               </span>
             </div>
-            <p className="text-[11px] sm:text-xs text-slate-500 dark:text-slate-400 truncate leading-tight">
+            <p className="hidden sm:block text-[11px] sm:text-xs text-slate-500 dark:text-slate-400 truncate leading-tight">
               Carrier-Grade ISP Operations &amp; MikroTik Automation
             </p>
           </div>
@@ -434,45 +434,45 @@ export const Header: React.FC<HeaderProps> = ({
       </div>
 
       {/* Main Navigation Tabs Filtered by Role */}
-      <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8">
-        <nav className="flex space-x-1 sm:space-x-2 overflow-x-auto py-2 scrollbar-none">
+      <div className="max-w-7xl mx-auto px-0 sm:px-6 lg:px-8">
+        <nav className="flex items-center overflow-x-auto gap-2 px-3 sm:px-0 py-2 snap-x snap-mandatory no-scrollbar">
           {/* ADMIN TABS */}
           {currentRole === 'ADMIN' && (
             <>
               <button
                 onClick={() => setActiveTab('noc')}
-                className={`flex items-center gap-2 px-3 py-2 text-xs sm:text-sm font-medium rounded-lg transition whitespace-nowrap ${
+                className={`shrink-0 whitespace-nowrap snap-start flex items-center gap-2 px-3 py-2 text-xs sm:text-sm font-medium rounded-xl transition cursor-pointer ${
                   activeTab === 'noc'
                     ? 'bg-cyan-50 dark:bg-slate-800 text-cyan-700 dark:text-cyan-400 border border-cyan-200 dark:border-cyan-500/30 shadow-sm font-semibold'
                     : 'text-slate-600 dark:text-slate-400 hover:text-slate-900 dark:hover:text-slate-200 hover:bg-slate-100 dark:hover:bg-slate-900'
                 }`}
               >
-                <Activity className="w-4 h-4" />
-                NOC Command Center
+                <Activity className="w-4 h-4 shrink-0" />
+                <span>NOC Command Center</span>
               </button>
 
               <button
                 onClick={() => setActiveTab('capacity')}
-                className={`flex items-center gap-2 px-3 py-2 text-xs sm:text-sm font-medium rounded-lg transition whitespace-nowrap ${getTabClassName('capacity')}`}
+                className={`shrink-0 whitespace-nowrap snap-start flex items-center gap-2 px-3 py-2 text-xs sm:text-sm font-medium rounded-xl transition cursor-pointer ${getTabClassName('capacity')}`}
               >
-                <Gauge className="w-4 h-4 text-cyan-600 dark:text-cyan-400" />
-                Capacity &amp; Pools
+                <Gauge className="w-4 h-4 shrink-0 text-cyan-600 dark:text-cyan-400" />
+                <span>Capacity &amp; Pools</span>
               </button>
 
               <button
                 onClick={() => setActiveTab('operations')}
-                className={`flex items-center gap-2 px-3 py-2 text-xs sm:text-sm font-medium rounded-lg transition whitespace-nowrap ${getTabClassName('operations')}`}
+                className={`shrink-0 whitespace-nowrap snap-start flex items-center gap-2 px-3 py-2 text-xs sm:text-sm font-medium rounded-xl transition cursor-pointer ${getTabClassName('operations')}`}
               >
-                <Network className="w-4 h-4" />
-                Operations &amp; Dispatch
+                <Network className="w-4 h-4 shrink-0" />
+                <span>Operations &amp; Dispatch</span>
               </button>
 
               <button
                 onClick={() => setActiveTab('mikrotik')}
-                className={`flex items-center gap-2 px-3 py-2 text-xs sm:text-sm font-medium rounded-lg transition whitespace-nowrap ${getTabClassName('mikrotik')}`}
+                className={`shrink-0 whitespace-nowrap snap-start flex items-center gap-2 px-3 py-2 text-xs sm:text-sm font-medium rounded-xl transition cursor-pointer ${getTabClassName('mikrotik')}`}
               >
-                <Radio className="w-4 h-4" />
-                MikroTik RouterOS v7
+                <Radio className="w-4 h-4 shrink-0" />
+                <span>MikroTik RouterOS v7</span>
                 <span className="text-[10px] px-1.5 py-0.5 rounded bg-cyan-100 dark:bg-cyan-900/60 text-cyan-800 dark:text-cyan-300 font-mono font-bold">
                   Live
                 </span>
@@ -480,10 +480,10 @@ export const Header: React.FC<HeaderProps> = ({
 
               <button
                 onClick={() => setActiveTab('olt')}
-                className={`flex items-center gap-2 px-3 py-2 text-xs sm:text-sm font-medium rounded-lg transition whitespace-nowrap ${getTabClassName('olt')}`}
+                className={`shrink-0 whitespace-nowrap snap-start flex items-center gap-2 px-3 py-2 text-xs sm:text-sm font-medium rounded-xl transition cursor-pointer ${getTabClassName('olt')}`}
               >
-                <Layers className="w-4 h-4 text-cyan-600 dark:text-cyan-400" />
-                VSOL OLT
+                <Layers className="w-4 h-4 shrink-0 text-cyan-600 dark:text-cyan-400" />
+                <span>VSOL OLT</span>
                 <span className="text-[10px] px-1.5 py-0.5 rounded bg-emerald-100 dark:bg-emerald-900/60 text-emerald-800 dark:text-emerald-300 font-mono font-bold">
                   GPON
                 </span>
@@ -491,34 +491,34 @@ export const Header: React.FC<HeaderProps> = ({
 
               <button
                 onClick={() => setActiveTab('fiber_gis')}
-                className={`flex items-center gap-2 px-3 py-2 text-xs sm:text-sm font-medium rounded-lg transition whitespace-nowrap ${getTabClassName('fiber_gis')}`}
+                className={`shrink-0 whitespace-nowrap snap-start flex items-center gap-2 px-3 py-2 text-xs sm:text-sm font-medium rounded-xl transition cursor-pointer ${getTabClassName('fiber_gis')}`}
               >
-                <MapPin className="w-4 h-4 text-sky-500 dark:text-sky-400" />
-                Fiber GIS &amp; Map
+                <MapPin className="w-4 h-4 shrink-0 text-sky-500 dark:text-sky-400" />
+                <span>Fiber GIS &amp; Map</span>
               </button>
 
               <button
                 onClick={() => setActiveTab('billing')}
-                className={`flex items-center gap-2 px-3 py-2 text-xs sm:text-sm font-medium rounded-lg transition whitespace-nowrap ${getTabClassName('billing')}`}
+                className={`shrink-0 whitespace-nowrap snap-start flex items-center gap-2 px-3 py-2 text-xs sm:text-sm font-medium rounded-xl transition cursor-pointer ${getTabClassName('billing')}`}
               >
-                <CreditCard className="w-4 h-4" />
-                Billing &amp; MRR
+                <CreditCard className="w-4 h-4 shrink-0" />
+                <span>Billing &amp; MRR</span>
               </button>
 
               <button
                 onClick={() => setActiveTab('profit_expenses')}
-                className={`flex items-center gap-2 px-3 py-2 text-xs sm:text-sm font-medium rounded-lg transition whitespace-nowrap shrink-0 ${getTabClassName('profit_expenses')}`}
+                className={`shrink-0 whitespace-nowrap snap-start flex items-center gap-2 px-3 py-2 text-xs sm:text-sm font-medium rounded-xl transition cursor-pointer ${getTabClassName('profit_expenses')}`}
               >
-                <Wallet className="w-4 h-4 text-emerald-500 dark:text-emerald-400" />
-                Profit &amp; Expenses
+                <Wallet className="w-4 h-4 shrink-0 text-emerald-500 dark:text-emerald-400" />
+                <span>Profit &amp; Expenses</span>
               </button>
 
               <button
                 onClick={() => setActiveTab('complaints')}
-                className={`flex items-center gap-2 px-3 py-2 text-xs sm:text-sm font-medium rounded-lg transition whitespace-nowrap ${getTabClassName('complaints')}`}
+                className={`shrink-0 whitespace-nowrap snap-start flex items-center gap-2 px-3 py-2 text-xs sm:text-sm font-medium rounded-xl transition cursor-pointer ${getTabClassName('complaints')}`}
               >
-                <AlertTriangle className="w-4 h-4" />
-                Complaints &amp; SLA
+                <AlertTriangle className="w-4 h-4 shrink-0" />
+                <span>Complaints &amp; SLA</span>
                 {pendingSlaCount > 0 && (
                   <span className="text-[10px] px-1.5 py-0.2 rounded-full bg-rose-100 dark:bg-rose-900/80 text-rose-800 dark:text-rose-300 border border-rose-300 dark:border-rose-700/50 font-mono font-bold">
                     {pendingSlaCount}
@@ -528,50 +528,50 @@ export const Header: React.FC<HeaderProps> = ({
 
               <button
                 onClick={() => setActiveTab('users')}
-                className={`flex items-center gap-2 px-3 py-2 text-xs sm:text-sm font-medium rounded-lg transition whitespace-nowrap ${getTabClassName('users')}`}
+                className={`shrink-0 whitespace-nowrap snap-start flex items-center gap-2 px-3 py-2 text-xs sm:text-sm font-medium rounded-xl transition cursor-pointer ${getTabClassName('users')}`}
               >
-                <Shield className="w-4 h-4 text-cyan-600 dark:text-cyan-400" />
-                User &amp; Access Management
+                <Shield className="w-4 h-4 shrink-0 text-cyan-600 dark:text-cyan-400" />
+                <span>User &amp; Access Management</span>
               </button>
 
               <button
                 onClick={() => setActiveTab('permissions')}
-                className={`flex items-center gap-2 px-3 py-2 text-xs sm:text-sm font-medium rounded-lg transition whitespace-nowrap ${getTabClassName('permissions')}`}
+                className={`shrink-0 whitespace-nowrap snap-start flex items-center gap-2 px-3 py-2 text-xs sm:text-sm font-medium rounded-xl transition cursor-pointer ${getTabClassName('permissions')}`}
               >
-                <ShieldCheck className="w-4 h-4 text-emerald-600 dark:text-emerald-400" />
-                Feature Matrix
+                <ShieldCheck className="w-4 h-4 shrink-0 text-emerald-600 dark:text-emerald-400" />
+                <span>Feature Matrix</span>
               </button>
 
               <button
                 onClick={() => setActiveTab('logs')}
-                className={`flex items-center gap-2 px-3 py-2 text-xs sm:text-sm font-medium rounded-lg transition whitespace-nowrap ${getTabClassName('logs')}`}
+                className={`shrink-0 whitespace-nowrap snap-start flex items-center gap-2 px-3 py-2 text-xs sm:text-sm font-medium rounded-xl transition cursor-pointer ${getTabClassName('logs')}`}
               >
-                <ShieldAlert className="w-4 h-4 text-amber-600 dark:text-amber-400" />
-                Activity Logs
+                <ShieldAlert className="w-4 h-4 shrink-0 text-amber-600 dark:text-amber-400" />
+                <span>Activity Logs</span>
               </button>
 
               <button
                 onClick={() => setActiveTab('mobile')}
-                className={`flex items-center gap-2 px-3 py-2 text-xs sm:text-sm font-medium rounded-lg transition whitespace-nowrap ${getTabClassName('mobile')}`}
+                className={`shrink-0 whitespace-nowrap snap-start flex items-center gap-2 px-3 py-2 text-xs sm:text-sm font-medium rounded-xl transition cursor-pointer ${getTabClassName('mobile')}`}
               >
-                <Smartphone className="w-4 h-4" />
-                Mobile Apps
+                <Smartphone className="w-4 h-4 shrink-0" />
+                <span>Mobile Apps</span>
               </button>
 
               <button
                 onClick={() => setActiveTab('architecture')}
-                className={`flex items-center gap-2 px-3 py-2 text-xs sm:text-sm font-medium rounded-lg transition whitespace-nowrap ${getTabClassName('architecture')}`}
+                className={`shrink-0 whitespace-nowrap snap-start flex items-center gap-2 px-3 py-2 text-xs sm:text-sm font-medium rounded-xl transition cursor-pointer ${getTabClassName('architecture')}`}
               >
-                <Code2 className="w-4 h-4" />
-                Architecture
+                <Code2 className="w-4 h-4 shrink-0" />
+                <span>Architecture</span>
               </button>
 
               <button
                 onClick={() => setActiveTab('settings')}
-                className={`flex items-center gap-2 px-3 py-2 text-xs sm:text-sm font-medium rounded-lg transition whitespace-nowrap ${getTabClassName('settings')}`}
+                className={`shrink-0 whitespace-nowrap snap-start flex items-center gap-2 px-3 py-2 text-xs sm:text-sm font-medium rounded-xl transition cursor-pointer ${getTabClassName('settings')}`}
               >
-                <Settings className="w-4 h-4 text-cyan-600 dark:text-cyan-400" />
-                Settings
+                <Settings className="w-4 h-4 shrink-0 text-cyan-600 dark:text-cyan-400" />
+                <span>Settings</span>
               </button>
             </>
           )}
@@ -581,34 +581,34 @@ export const Header: React.FC<HeaderProps> = ({
             <>
               <button
                 onClick={() => setActiveTab('operations')}
-                className={`flex items-center gap-2 px-3 py-2 text-xs sm:text-sm font-medium rounded-lg transition whitespace-nowrap ${getTabClassName('operations', 'indigo')}`}
+                className={`shrink-0 whitespace-nowrap snap-start flex items-center gap-2 px-3 py-2 text-xs sm:text-sm font-medium rounded-xl transition cursor-pointer ${getTabClassName('operations', 'indigo')}`}
               >
-                <Activity className="w-4 h-4" />
-                Operations &amp; Dispatch
+                <Activity className="w-4 h-4 shrink-0" />
+                <span>Operations &amp; Dispatch</span>
               </button>
 
               <button
                 onClick={() => setActiveTab('noc')}
-                className={`flex items-center gap-2 px-3 py-2 text-xs sm:text-sm font-medium rounded-lg transition whitespace-nowrap ${getTabClassName('noc', 'indigo')}`}
+                className={`shrink-0 whitespace-nowrap snap-start flex items-center gap-2 px-3 py-2 text-xs sm:text-sm font-medium rounded-xl transition cursor-pointer ${getTabClassName('noc', 'indigo')}`}
               >
-                <Network className="w-4 h-4" />
-                NOC Overview
+                <Network className="w-4 h-4 shrink-0" />
+                <span>NOC Overview</span>
               </button>
 
               <button
                 onClick={() => setActiveTab('capacity')}
-                className={`flex items-center gap-2 px-3 py-2 text-xs sm:text-sm font-medium rounded-lg transition whitespace-nowrap ${getTabClassName('capacity', 'indigo')}`}
+                className={`shrink-0 whitespace-nowrap snap-start flex items-center gap-2 px-3 py-2 text-xs sm:text-sm font-medium rounded-xl transition cursor-pointer ${getTabClassName('capacity', 'indigo')}`}
               >
-                <Gauge className="w-4 h-4" />
-                Capacity &amp; Pools
+                <Gauge className="w-4 h-4 shrink-0" />
+                <span>Capacity &amp; Pools</span>
               </button>
 
               <button
                 onClick={() => setActiveTab('complaints')}
-                className={`flex items-center gap-2 px-3 py-2 text-xs sm:text-sm font-medium rounded-lg transition whitespace-nowrap ${getTabClassName('complaints', 'indigo')}`}
+                className={`shrink-0 whitespace-nowrap snap-start flex items-center gap-2 px-3 py-2 text-xs sm:text-sm font-medium rounded-xl transition cursor-pointer ${getTabClassName('complaints', 'indigo')}`}
               >
-                <AlertTriangle className="w-4 h-4" />
-                Complaints &amp; SLA
+                <AlertTriangle className="w-4 h-4 shrink-0" />
+                <span>Complaints &amp; SLA</span>
                 {pendingSlaCount > 0 && (
                   <span className="text-[10px] px-1.5 py-0.2 rounded-full bg-rose-100 dark:bg-rose-900/80 text-rose-800 dark:text-rose-300 border border-rose-300 dark:border-rose-700/50 font-mono font-bold">
                     {pendingSlaCount}
@@ -618,34 +618,34 @@ export const Header: React.FC<HeaderProps> = ({
 
               <button
                 onClick={() => setActiveTab('olt')}
-                className={`flex items-center gap-2 px-3 py-2 text-xs sm:text-sm font-medium rounded-lg transition whitespace-nowrap ${getTabClassName('olt', 'indigo')}`}
+                className={`shrink-0 whitespace-nowrap snap-start flex items-center gap-2 px-3 py-2 text-xs sm:text-sm font-medium rounded-xl transition cursor-pointer ${getTabClassName('olt', 'indigo')}`}
               >
-                <Layers className="w-4 h-4 text-cyan-600 dark:text-cyan-400" />
-                VSOL OLT
+                <Layers className="w-4 h-4 shrink-0 text-cyan-600 dark:text-cyan-400" />
+                <span>VSOL OLT</span>
               </button>
 
               <button
                 onClick={() => setActiveTab('fiber_gis')}
-                className={`flex items-center gap-2 px-3 py-2 text-xs sm:text-sm font-medium rounded-lg transition whitespace-nowrap ${getTabClassName('fiber_gis', 'indigo')}`}
+                className={`shrink-0 whitespace-nowrap snap-start flex items-center gap-2 px-3 py-2 text-xs sm:text-sm font-medium rounded-xl transition cursor-pointer ${getTabClassName('fiber_gis', 'indigo')}`}
               >
-                <MapPin className="w-4 h-4 text-sky-500 dark:text-sky-400" />
-                Fiber GIS &amp; Map
+                <MapPin className="w-4 h-4 shrink-0 text-sky-500 dark:text-sky-400" />
+                <span>Fiber GIS &amp; Map</span>
               </button>
 
               <button
                 onClick={() => setActiveTab('billing')}
-                className={`flex items-center gap-2 px-3 py-2 text-xs sm:text-sm font-medium rounded-lg transition whitespace-nowrap ${getTabClassName('billing', 'indigo')}`}
+                className={`shrink-0 whitespace-nowrap snap-start flex items-center gap-2 px-3 py-2 text-xs sm:text-sm font-medium rounded-xl transition cursor-pointer ${getTabClassName('billing', 'indigo')}`}
               >
-                <CreditCard className="w-4 h-4" />
-                Agent Cash &amp; Billing
+                <CreditCard className="w-4 h-4 shrink-0" />
+                <span>Agent Cash &amp; Billing</span>
               </button>
 
               <button
                 onClick={() => setActiveTab('profit_expenses')}
-                className={`flex items-center gap-2 px-3 py-2 text-xs sm:text-sm font-medium rounded-lg transition whitespace-nowrap shrink-0 ${getTabClassName('profit_expenses', 'indigo')}`}
+                className={`shrink-0 whitespace-nowrap snap-start flex items-center gap-2 px-3 py-2 text-xs sm:text-sm font-medium rounded-xl transition cursor-pointer ${getTabClassName('profit_expenses', 'indigo')}`}
               >
-                <Wallet className="w-4 h-4 text-emerald-500 dark:text-emerald-400" />
-                Profit &amp; Expenses
+                <Wallet className="w-4 h-4 shrink-0 text-emerald-500 dark:text-emerald-400" />
+                <span>Profit &amp; Expenses</span>
               </button>
             </>
           )}

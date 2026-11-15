@@ -315,7 +315,7 @@ export const PcqSubnetPoolManager: React.FC<PcqSubnetPoolManagerProps> = ({
   );
 
   return (
-    <div className="bg-slate-900/90 border border-slate-800 rounded-xl p-5 space-y-5">
+    <div className="w-full max-w-full min-w-0 box-border bg-slate-900/90 border border-slate-800 rounded-xl p-4 sm:p-5 space-y-5 overflow-hidden">
       {/* Header */}
       <div className="flex flex-col lg:flex-row lg:items-center justify-between gap-4">
         <div className="space-y-1">
@@ -479,7 +479,7 @@ export const PcqSubnetPoolManager: React.FC<PcqSubnetPoolManagerProps> = ({
 
         <div className="flex flex-wrap items-center gap-3">
           {/* Ratio Selector Buttons */}
-          <div className="flex items-center gap-1 bg-slate-950/90 border border-slate-800 rounded-lg p-1">
+          <div className="flex flex-wrap items-center gap-1 bg-slate-950/90 border border-slate-800 rounded-lg p-1 max-w-full">
             <span className="text-[10px] font-mono text-slate-400 px-1.5">Ratio:</span>
             {CONTENTION_RATIOS.map((r) => {
               const active = poolRatios[selectedPool] === r;
@@ -652,8 +652,8 @@ export const PcqSubnetPoolManager: React.FC<PcqSubnetPoolManagerProps> = ({
 
                 {/* Ratio Selector + Editable Max-Limit + Auto-Burst Preview */}
                 <div className="space-y-3 p-3 rounded-lg bg-slate-900/50 border border-slate-800">
-                  <div className="flex flex-wrap items-center justify-between gap-2">
-                    <div className="flex items-center gap-1">
+                  <div className="flex flex-wrap items-center justify-between gap-2 min-w-0">
+                    <div className="flex flex-wrap items-center gap-1 min-w-0">
                       <span className="text-[11px] font-mono text-slate-400 mr-1">Ratio:</span>
                       {CONTENTION_RATIOS.map((r) => {
                         const active = plan.ratioDivisor === r;

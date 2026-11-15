@@ -122,7 +122,7 @@ export const RouterFleet: React.FC<RouterFleetProps> = ({ onOpenAddDeviceModal }
   };
 
   return (
-    <div className="space-y-4">
+    <div className="w-full max-w-full min-w-0 box-border space-y-4">
       {/* Toast Notification */}
       {toastMessage && (
         <div className="fixed bottom-6 right-6 z-50 bg-emerald-950 border border-emerald-600 text-emerald-200 px-4 py-3 rounded-xl shadow-2xl flex items-center gap-2.5 text-xs font-medium animate-fade-in">
@@ -132,15 +132,15 @@ export const RouterFleet: React.FC<RouterFleetProps> = ({ onOpenAddDeviceModal }
       )}
 
       {/* Header & Inventory Counter */}
-      <div className="flex flex-col sm:flex-row items-start sm:items-center justify-between gap-3 bg-slate-900 border border-slate-800 p-4 rounded-xl shadow-lg">
-        <div>
-          <h3 className="text-sm font-bold text-white flex items-center gap-2">
+      <div className="flex flex-col sm:flex-row items-start sm:items-center justify-between gap-3 bg-slate-900 border border-slate-800 p-4 rounded-xl shadow-lg min-w-0 w-full max-w-full overflow-hidden">
+        <div className="min-w-0 w-full sm:w-auto">
+          <h3 className="text-sm font-bold text-white flex flex-wrap items-center gap-2">
             <span>MikroTik Hardware Fleet Inventory</span>
             <span className="text-[10px] px-2 py-0.5 rounded bg-cyan-950 text-cyan-300 border border-cyan-800 font-mono">
               {(routers || []).length} Devices Registered
             </span>
           </h3>
-          <p className="text-xs text-slate-400 mt-0.5">
+          <p className="text-xs text-slate-400 mt-0.5 break-words">
             Manage carrier-grade MikroTik BNG/BRAS routers, configure RouterOS v7 API credentials, and manage telemetry links.
           </p>
         </div>
@@ -154,16 +154,16 @@ export const RouterFleet: React.FC<RouterFleetProps> = ({ onOpenAddDeviceModal }
       </div>
 
       {/* Target Router Gateway Mode: Exclusively Netlify Managed Proxy Mode (/api/mikrotik) */}
-      <div className="bg-slate-900 border border-slate-800 p-4 rounded-xl flex flex-col md:flex-row items-start md:items-center justify-between gap-3 text-xs shadow-lg">
-        <div className="space-y-1">
-          <div className="flex items-center gap-2">
+      <div className="bg-slate-900 border border-slate-800 p-4 rounded-xl flex flex-col md:flex-row items-start md:items-center justify-between gap-3 text-xs shadow-lg min-w-0 w-full max-w-full overflow-hidden">
+        <div className="space-y-1 min-w-0 w-full md:w-auto">
+          <div className="flex flex-wrap items-center gap-2">
             <Network className="w-4 h-4 text-cyan-400 shrink-0" />
             <span className="font-bold text-white text-sm">RouterOS REST Gateway Architecture</span>
             <span className="text-[10px] px-2 py-0.5 rounded font-mono font-bold uppercase border bg-emerald-950 text-emerald-300 border-emerald-700/60">
               Netlify Managed Proxy Mode (Active)
             </span>
           </div>
-          <p className="text-slate-400 text-xs">
+          <p className="text-slate-400 text-xs break-words">
             All RouterOS health checks, CPU/WAN telemetry, and PPPoE sync calls route exclusively through the backend proxy (<code className="text-cyan-300">/api/mikrotik/*</code>) to eliminate browser SSL/CORS errors.
           </p>
         </div>
@@ -181,10 +181,10 @@ export const RouterFleet: React.FC<RouterFleetProps> = ({ onOpenAddDeviceModal }
       </div>
 
       {routerSyncSchemaMissing && (
-        <div className="bg-amber-950/70 border border-amber-700/70 rounded-xl p-4 flex flex-col sm:flex-row sm:items-center justify-between gap-3 text-xs">
-          <div className="space-y-0.5 text-amber-200">
+        <div className="bg-amber-950/70 border border-amber-700/70 rounded-xl p-4 flex flex-col sm:flex-row sm:items-center justify-between gap-3 text-xs min-w-0 w-full max-w-full">
+          <div className="space-y-0.5 text-amber-200 min-w-0">
             <div className="font-bold font-mono text-amber-300 flex items-center gap-1.5">
-              <Database className="w-4 h-4" />
+              <Database className="w-4 h-4 shrink-0" />
               <span>Multi-Device Supabase Router Sync Table Needed</span>
             </div>
             <p className="text-[11px] text-amber-200/80">
@@ -208,7 +208,7 @@ export const RouterFleet: React.FC<RouterFleetProps> = ({ onOpenAddDeviceModal }
 
       {/* Empty State when no routers registered */}
       {(!routers || routers.length === 0) ? (
-        <div className="bg-slate-900 border border-slate-800 rounded-2xl p-10 text-center space-y-4 shadow-xl">
+        <div className="bg-slate-900 border border-slate-800 rounded-2xl p-6 sm:p-10 text-center space-y-4 shadow-xl min-w-0 w-full max-w-full">
           <div className="w-16 h-16 bg-slate-800/80 rounded-2xl flex items-center justify-center mx-auto border border-slate-700 text-slate-400">
             <Server className="w-8 h-8 text-cyan-400/70" />
           </div>
@@ -227,7 +227,7 @@ export const RouterFleet: React.FC<RouterFleetProps> = ({ onOpenAddDeviceModal }
           </button>
         </div>
       ) : (
-        <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
+        <div className="grid grid-cols-1 lg:grid-cols-2 gap-4 min-w-0 w-full">
           {routers.map((router) => {
             if (!router) return null;
             const isSelected = router.id === selectedRouterId;
@@ -237,18 +237,18 @@ export const RouterFleet: React.FC<RouterFleetProps> = ({ onOpenAddDeviceModal }
             return (
               <div
                 key={router.id}
-                className={`bg-slate-900 border rounded-xl p-5 space-y-4 shadow-lg transition flex flex-col justify-between ${
+                className={`bg-slate-900 border rounded-xl p-4 sm:p-5 space-y-4 shadow-lg transition flex flex-col justify-between min-w-0 w-full max-w-full overflow-hidden ${
                   isSelected
                     ? 'border-cyan-500/80 ring-1 ring-cyan-500/30 shadow-cyan-950/20'
                     : 'border-slate-800 hover:border-slate-700'
                 }`}
               >
-              <div className="space-y-3">
+              <div className="space-y-3 min-w-0">
                 {/* Device Header */}
-                <div className="flex items-start justify-between gap-3">
-                  <div className="flex items-center gap-3">
+                <div className="flex flex-wrap items-start justify-between gap-2.5 min-w-0">
+                  <div className="flex items-center gap-3 min-w-0 flex-1">
                     <div
-                      className={`p-2.5 rounded-xl border ${
+                      className={`p-2.5 rounded-xl border shrink-0 ${
                         isSelected
                           ? 'bg-cyan-950/80 border-cyan-500 text-cyan-300'
                           : 'bg-slate-950 border-slate-800 text-slate-400'
@@ -256,9 +256,9 @@ export const RouterFleet: React.FC<RouterFleetProps> = ({ onOpenAddDeviceModal }
                     >
                       <Server className="w-5 h-5" />
                     </div>
-                    <div>
+                    <div className="min-w-0 flex-1">
                       <div className="flex items-center flex-wrap gap-2">
-                        <h4 className="font-bold text-white text-sm font-mono">{router.name}</h4>
+                        <h4 className="font-bold text-white text-sm font-mono truncate">{router.name}</h4>
                         {isSelected && (
                           <span className="text-[10px] px-2 py-0.5 rounded bg-cyan-950 text-cyan-300 border border-cyan-700/60 font-bold font-mono">
                             ACTIVE BNG
@@ -271,7 +271,7 @@ export const RouterFleet: React.FC<RouterFleetProps> = ({ onOpenAddDeviceModal }
                           </span>
                         )}
                       </div>
-                      <span className="text-xs text-slate-400 block">{router.location}</span>
+                      <span className="text-xs text-slate-400 block truncate">{router.location}</span>
                     </div>
                   </div>
 

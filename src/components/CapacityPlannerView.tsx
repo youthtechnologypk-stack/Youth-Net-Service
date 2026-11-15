@@ -687,7 +687,7 @@ export const CapacityPlannerView: React.FC = () => {
   };
 
   return (
-    <div className="space-y-6 text-xs font-sans">
+    <div className="w-full max-w-full min-w-0 box-border space-y-6 text-xs font-sans">
       {/* Feedback Banner */}
       {saveNotice && (
         <div
@@ -772,7 +772,7 @@ export const CapacityPlannerView: React.FC = () => {
                 <span className="text-amber-400 font-mono text-[11px]">· RouterOS Offline</span>
               )}
             </div>
-            <div className="flex items-baseline gap-3 font-mono tabular-nums">
+            <div className="flex flex-wrap items-baseline gap-x-3 gap-y-1 font-mono tabular-nums min-w-0">
               <span className={`text-3xl font-bold ${gaugeStatus.textColor}`}>
                 {saturationPctStr}%
               </span>

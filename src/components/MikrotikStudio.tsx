@@ -328,10 +328,10 @@ export const MikrotikStudio: React.FC<MikrotikStudioProps> = ({
   };
 
   return (
-    <div className="space-y-6">
+    <div className="w-full max-w-full min-w-0 box-border space-y-5 sm:space-y-6 overflow-x-hidden">
       {/* Top Router Hardware Telemetry Banner OR Empty State */}
       {!currentRouter || routers.length === 0 ? (
-        <div className="bg-slate-900 border border-slate-800 rounded-2xl p-10 text-center space-y-4 shadow-xl">
+        <div className="bg-slate-900 border border-slate-800 rounded-2xl p-6 sm:p-10 text-center space-y-4 shadow-xl min-w-0 w-full max-w-full">
           <div className="w-16 h-16 bg-slate-800/80 rounded-2xl flex items-center justify-center mx-auto border border-slate-700 text-slate-400">
             <Server className="w-8 h-8 text-cyan-400/70" />
           </div>
@@ -350,22 +350,22 @@ export const MikrotikStudio: React.FC<MikrotikStudioProps> = ({
           </button>
         </div>
       ) : (
-        <div className="bg-slate-900 border border-slate-800 rounded-xl p-5 shadow-lg">
-          <div className="flex flex-col lg:flex-row items-start lg:items-center justify-between gap-4">
-            <div className="flex items-center gap-3">
-              <div className={`p-3 rounded-lg border ${
+        <div className="bg-slate-900 border border-slate-800 rounded-xl p-4 sm:p-5 shadow-lg min-w-0 w-full max-w-full overflow-hidden">
+          <div className="flex flex-col lg:flex-row items-start lg:items-center justify-between gap-4 min-w-0">
+            <div className="flex items-start sm:items-center gap-3 min-w-0 w-full lg:w-auto">
+              <div className={`p-2.5 sm:p-3 rounded-lg border shrink-0 ${
                 currentRouter.status === 'online'
                   ? 'bg-emerald-950 border-emerald-700/50 text-emerald-400'
                   : currentRouter.status === 'hybrid_online' || currentRouter.mode === 'hybrid'
                   ? 'bg-cyan-950 border-cyan-700/50 text-cyan-400'
                   : 'bg-rose-950 border-rose-700/50 text-rose-400'
               }`}>
-                <Server className="w-6 h-6" />
+                <Server className="w-5 h-5 sm:w-6 sm:h-6" />
               </div>
-              <div>
-                <div className="flex items-center gap-2">
-                  <h2 className="text-lg font-bold text-white">{currentRouter.name}</h2>
-                  <span className={`text-xs px-2.5 py-1 rounded-full font-mono font-medium flex items-center gap-1.5 shadow-sm ${
+              <div className="min-w-0 flex-1">
+                <div className="flex flex-wrap items-center gap-2 min-w-0">
+                  <h2 className="text-base sm:text-lg font-bold text-white truncate">{currentRouter.name}</h2>
+                  <span className={`text-[11px] sm:text-xs px-2.5 py-0.5 sm:py-1 rounded-full font-mono font-medium flex items-center gap-1.5 shadow-sm shrink-0 ${
                     currentRouter.status === 'online'
                       ? 'bg-emerald-950/90 text-emerald-300 border border-emerald-500/30'
                       : 'bg-rose-950/90 text-rose-300 border border-rose-500/30'
@@ -373,24 +373,24 @@ export const MikrotikStudio: React.FC<MikrotikStudioProps> = ({
                     <span className={`w-2 h-2 rounded-full ${currentRouter.status === 'online' ? 'bg-emerald-400 animate-pulse' : 'bg-rose-400'}`} />
                     {currentRouter.status === 'online' ? 'RouterOS v7 REST Live' : 'Router Unreachable'}
                   </span>
-                  <span className="text-xs px-2 py-0.5 rounded bg-slate-800 text-slate-300 font-mono">
+                  <span className="text-[11px] sm:text-xs px-2 py-0.5 rounded bg-slate-800 text-slate-300 font-mono shrink-0">
                     {currentRouter.version}
                   </span>
                 </div>
-                <p className="text-xs text-slate-400 mt-0.5">
+                <p className="text-xs text-slate-400 mt-1 break-words">
                   Model: <strong className="text-slate-200">{currentRouter.model}</strong> &bull; IP: <code className="text-cyan-400">{currentRouter.ip || currentRouter.ipAddress}:{currentRouter.port || (currentRouter.useSsl ? 443 : 80)}</code> (RouterOS v7 HTTPS REST API)
                 </p>
               </div>
             </div>
 
             {/* Router Selection Dropdown & Add Router */}
-            <div className="flex items-center flex-wrap gap-2.5">
-              <div className="flex items-center gap-2">
-                <span className="text-xs text-slate-400">Target Router:</span>
+            <div className="flex items-center flex-wrap gap-2 w-full lg:w-auto min-w-0">
+              <div className="flex items-center gap-2 w-full sm:w-auto min-w-0">
+                <span className="text-xs text-slate-400 shrink-0">Target Router:</span>
                 <select
                   value={selectedRouterId}
                   onChange={(e) => setSelectedRouterId(e.target.value)}
-                  className="bg-slate-950 border border-slate-700 text-slate-200 text-xs px-3 py-2 rounded-lg focus:outline-none focus:border-cyan-500 font-mono"
+                  className="bg-slate-950 border border-slate-700 text-slate-200 text-xs px-2.5 py-2 rounded-lg focus:outline-none focus:border-cyan-500 font-mono min-w-0 flex-1 sm:flex-initial max-w-full truncate"
                 >
                   {routers.map((r) => (
                     <option key={r.id} value={r.id}>
@@ -403,7 +403,7 @@ export const MikrotikStudio: React.FC<MikrotikStudioProps> = ({
               <button
                 onClick={handleTriggerSync}
                 disabled={isSyncingRouter}
-                className="flex items-center gap-1.5 bg-slate-800 hover:bg-slate-700 text-slate-200 border border-slate-700 text-xs px-3 py-2 rounded-lg transition shadow-sm cursor-pointer disabled:opacity-50"
+                className="flex items-center gap-1.5 bg-slate-800 hover:bg-slate-700 text-slate-200 border border-slate-700 text-xs px-3 py-2 rounded-lg transition shadow-sm cursor-pointer disabled:opacity-50 shrink-0"
                 title="Sync live router metrics (/rest/system/resource, /rest/ppp/active, /rest/interface)"
               >
                 <RefreshCw className={`w-3.5 h-3.5 text-cyan-400 ${isSyncingRouter ? 'animate-spin' : ''}`} />
@@ -412,7 +412,7 @@ export const MikrotikStudio: React.FC<MikrotikStudioProps> = ({
 
               <button
                 onClick={() => setIsAddDeviceModalOpen(true)}
-                className="flex items-center gap-1.5 bg-slate-800 hover:bg-slate-700 text-cyan-400 border border-slate-700 font-bold text-xs px-3 py-2 rounded-lg transition shadow-sm cursor-pointer"
+                className="flex items-center gap-1.5 bg-slate-800 hover:bg-slate-700 text-cyan-400 border border-slate-700 font-bold text-xs px-3 py-2 rounded-lg transition shadow-sm cursor-pointer shrink-0"
                 title="Add New MikroTik Router"
               >
                 <Plus className="w-3.5 h-3.5 text-cyan-400" />
@@ -421,7 +421,7 @@ export const MikrotikStudio: React.FC<MikrotikStudioProps> = ({
 
               <button
                 onClick={() => setIsAddUserModalOpen(true)}
-                className="flex items-center gap-1.5 bg-cyan-600 hover:bg-cyan-500 text-slate-950 font-bold text-xs px-3.5 py-2 rounded-lg transition cursor-pointer shadow-sm shadow-cyan-950/40"
+                className="flex items-center gap-1.5 bg-cyan-600 hover:bg-cyan-500 text-slate-950 font-bold text-xs px-3.5 py-2 rounded-lg transition cursor-pointer shadow-sm shadow-cyan-950/40 shrink-0"
               >
                 <Plus className="w-4 h-4" />
                 <span>+ Add PPPoE User</span>
@@ -464,47 +464,49 @@ export const MikrotikStudio: React.FC<MikrotikStudioProps> = ({
           )}
 
           {/* Hardware Resource Indicators */}
-          <div className="grid grid-cols-2 sm:grid-cols-5 gap-3 mt-5 pt-4 border-t border-slate-800 text-xs font-mono">
-            <div className="bg-slate-950/60 p-2.5 rounded border border-slate-800/80">
-              <span className="text-slate-400">Live WAN (RX / TX)</span>
-              <div className="text-sm font-bold mt-0.5 flex items-center gap-1.5 font-mono">
-                <span className="w-1.5 h-1.5 rounded-full bg-emerald-400 animate-pulse" />
-                <span className="text-emerald-400">{currentRouter.currentWanRxMbps ?? 0}M</span>
+          <div className="grid grid-cols-2 sm:grid-cols-5 gap-2.5 sm:gap-3 mt-5 pt-4 border-t border-slate-800 text-xs font-mono min-w-0">
+            <div className="bg-slate-950/60 p-2.5 sm:p-3 rounded-lg border border-slate-800/80 min-w-0 overflow-hidden">
+              <span className="text-slate-400 block truncate">Live WAN (RX / TX)</span>
+              <div className="text-sm font-bold mt-0.5 flex items-center gap-1.5 font-mono min-w-0">
+                <span className="w-1.5 h-1.5 rounded-full bg-emerald-400 animate-pulse shrink-0" />
+                <span className="text-emerald-400 truncate">{currentRouter.currentWanRxMbps ?? 0}M</span>
                 <span className="text-slate-600">/</span>
-                <span className="text-cyan-400">{currentRouter.currentWanTxMbps ?? 0}M</span>
+                <span className="text-cyan-400 truncate">{currentRouter.currentWanTxMbps ?? 0}M</span>
               </div>
             </div>
 
-            <div className="bg-slate-950/60 p-2.5 rounded border border-slate-800/80">
-              <span className="text-slate-400">CPU Usage</span>
-              <div className="text-cyan-300 font-bold text-sm mt-0.5 flex items-center gap-1.5">
-                <Cpu className="w-3.5 h-3.5 text-cyan-400" />
-                {currentRouter.status === 'online' || currentRouter.status === 'hybrid_online' || currentRouter.mode === 'hybrid'
-                  ? `${currentRouter.cpuLoad ?? 0}%`
-                  : '0% (Offline)'}
+            <div className="bg-slate-950/60 p-2.5 sm:p-3 rounded-lg border border-slate-800/80 min-w-0 overflow-hidden">
+              <span className="text-slate-400 block truncate">CPU Usage</span>
+              <div className="text-cyan-300 font-bold text-sm mt-0.5 flex items-center gap-1.5 min-w-0 truncate">
+                <Cpu className="w-3.5 h-3.5 text-cyan-400 shrink-0" />
+                <span className="truncate">
+                  {currentRouter.status === 'online' || currentRouter.status === 'hybrid_online' || currentRouter.mode === 'hybrid'
+                    ? `${currentRouter.cpuLoad ?? 0}%`
+                    : '0% (Offline)'}
+                </span>
               </div>
             </div>
 
-            <div className="bg-slate-950/60 p-2.5 rounded border border-slate-800/80">
-              <span className="text-slate-400">Uptime</span>
-              <div className="text-slate-200 font-bold text-sm mt-0.5">
+            <div className="bg-slate-950/60 p-2.5 sm:p-3 rounded-lg border border-slate-800/80 min-w-0 overflow-hidden">
+              <span className="text-slate-400 block truncate">Uptime</span>
+              <div className="text-slate-200 font-bold text-sm mt-0.5 truncate">
                 {currentRouter.status === 'online' || currentRouter.status === 'hybrid_online' || currentRouter.mode === 'hybrid'
                   ? (currentRouter.uptime || 'Offline')
                   : 'Offline'}
               </div>
             </div>
 
-            <div className="bg-slate-950/60 p-2.5 rounded border border-slate-800/80">
-              <span className="text-slate-400">Active PPPoE</span>
-              <div className={`${currentRouter.status === 'online' || currentRouter.status === 'hybrid_online' || currentRouter.mode === 'hybrid' ? 'text-emerald-400' : 'text-slate-500'} font-bold text-sm mt-0.5`}>
+            <div className="bg-slate-950/60 p-2.5 sm:p-3 rounded-lg border border-slate-800/80 min-w-0 overflow-hidden">
+              <span className="text-slate-400 block truncate">Active PPPoE</span>
+              <div className={`${currentRouter.status === 'online' || currentRouter.status === 'hybrid_online' || currentRouter.mode === 'hybrid' ? 'text-emerald-400' : 'text-slate-500'} font-bold text-sm mt-0.5 truncate`}>
                 {currentRouter.status === 'online' || currentRouter.status === 'hybrid_online' || currentRouter.mode === 'hybrid'
                   ? `${activeSessions.length} Online`
                   : '0 (Offline)'}
               </div>
             </div>
 
-            <div className="bg-slate-950/60 p-2.5 rounded border border-slate-800/80">
-              <span className="text-slate-400">Walled Garden</span>
+            <div className="col-span-2 sm:col-span-1 bg-slate-950/60 p-2.5 sm:p-3 rounded-lg border border-slate-800/80 min-w-0 overflow-hidden">
+              <span className="text-slate-400 block truncate">Walled Garden</span>
               <div className="text-amber-400 font-bold text-sm mt-0.5 truncate">
                 {currentRouter.walledGardenPool || '172.16.102.0/24'}
               </div>
@@ -514,90 +516,90 @@ export const MikrotikStudio: React.FC<MikrotikStudioProps> = ({
       )}
 
       {/* Sub-Navigation & Search Filter Bar */}
-      <div className="flex flex-col sm:flex-row items-center justify-between gap-3 bg-slate-900/90 border border-slate-800 p-2 rounded-lg">
-        <div className="flex space-x-1 w-full sm:w-auto">
+      <div className="flex flex-col lg:flex-row lg:items-center justify-between gap-3 bg-slate-900/90 border border-slate-800 p-2.5 rounded-xl min-w-0 w-full max-w-full box-border">
+        <div className="grid grid-cols-2 sm:flex sm:flex-wrap gap-2 w-full lg:w-auto min-w-0">
           <button
             onClick={() => setActiveSubTab('sessions')}
-            className={`px-3 py-1.5 text-xs font-medium rounded-md transition flex items-center gap-1.5 ${
+            className={`w-full sm:w-auto px-3 py-2 text-xs font-medium rounded-xl transition flex items-center justify-center sm:justify-start gap-1.5 text-center leading-tight min-w-0 cursor-pointer ${
               activeSubTab === 'sessions'
-                ? 'bg-slate-800 text-cyan-400 border border-cyan-600/40 shadow-sm'
-                : 'text-slate-400 hover:text-slate-200'
+                ? 'bg-cyan-600/20 text-cyan-300 border border-cyan-500/50 shadow-sm font-semibold'
+                : 'bg-slate-950/60 sm:bg-transparent text-slate-400 hover:text-slate-200 border border-slate-800/80 sm:border-transparent'
             }`}
           >
-            <Radio className="w-3.5 h-3.5" />
-            Active Sessions ({activeSessions.length})
+            <Radio className="w-3.5 h-3.5 shrink-0" />
+            <span className="truncate">Active Sessions ({activeSessions.length})</span>
           </button>
 
           <button
             onClick={() => setActiveSubTab('session_logs')}
-            className={`px-3 py-1.5 text-xs font-medium rounded-md transition flex items-center gap-1.5 ${
+            className={`w-full sm:w-auto px-3 py-2 text-xs font-medium rounded-xl transition flex items-center justify-center sm:justify-start gap-1.5 text-center leading-tight min-w-0 cursor-pointer ${
               activeSubTab === 'session_logs'
-                ? 'bg-slate-800 text-cyan-400 border border-cyan-600/40 shadow-sm'
-                : 'text-slate-400 hover:text-slate-200'
+                ? 'bg-cyan-600/20 text-cyan-300 border border-cyan-500/50 shadow-sm font-semibold'
+                : 'bg-slate-950/60 sm:bg-transparent text-slate-400 hover:text-slate-200 border border-slate-800/80 sm:border-transparent'
             }`}
           >
-            <Hourglass className="w-3.5 h-3.5" />
-            Session Logs ({persistedSessionLogs.length})
+            <Hourglass className="w-3.5 h-3.5 shrink-0" />
+            <span className="truncate">Session Logs ({persistedSessionLogs.length})</span>
           </button>
 
           <button
             onClick={() => setActiveSubTab('interfaces')}
-            className={`px-3 py-1.5 text-xs font-medium rounded-md transition flex items-center gap-1.5 ${
+            className={`w-full sm:w-auto px-3 py-2 text-xs font-medium rounded-xl transition flex items-center justify-center sm:justify-start gap-1.5 text-center leading-tight min-w-0 cursor-pointer ${
               activeSubTab === 'interfaces'
-                ? 'bg-slate-800 text-cyan-400 border border-cyan-600/40 shadow-sm'
-                : 'text-slate-400 hover:text-slate-200'
+                ? 'bg-cyan-600/20 text-cyan-300 border border-cyan-500/50 shadow-sm font-semibold'
+                : 'bg-slate-950/60 sm:bg-transparent text-slate-400 hover:text-slate-200 border border-slate-800/80 sm:border-transparent'
             }`}
           >
-            <Activity className="w-3.5 h-3.5" />
-            Interfaces ({routerInterfaces.length})
+            <Activity className="w-3.5 h-3.5 shrink-0" />
+            <span className="truncate">Interfaces ({routerInterfaces.length})</span>
           </button>
 
           <button
             onClick={() => setActiveSubTab('secrets')}
-            className={`px-3 py-1.5 text-xs font-medium rounded-md transition flex items-center gap-1.5 ${
+            className={`w-full sm:w-auto px-3 py-2 text-xs font-medium rounded-xl transition flex items-center justify-center sm:justify-start gap-1.5 text-center leading-tight min-w-0 cursor-pointer ${
               activeSubTab === 'secrets'
-                ? 'bg-slate-800 text-cyan-400 border border-cyan-600/40 shadow-sm'
-                : 'text-slate-400 hover:text-slate-200'
+                ? 'bg-cyan-600/20 text-cyan-300 border border-cyan-500/50 shadow-sm font-semibold'
+                : 'bg-slate-950/60 sm:bg-transparent text-slate-400 hover:text-slate-200 border border-slate-800/80 sm:border-transparent'
             }`}
           >
-            <Layers className="w-3.5 h-3.5" />
-            Provisioned Secrets ({displaySecretsCount})
+            <Layers className="w-3.5 h-3.5 shrink-0" />
+            <span className="truncate">Provisioned Secrets ({displaySecretsCount})</span>
           </button>
 
           <button
             onClick={() => setActiveSubTab('profiles')}
-            className={`px-3 py-1.5 text-xs font-medium rounded-md transition flex items-center gap-1.5 ${
+            className={`w-full sm:w-auto px-3 py-2 text-xs font-medium rounded-xl transition flex items-center justify-center sm:justify-start gap-1.5 text-center leading-tight min-w-0 cursor-pointer ${
               activeSubTab === 'profiles'
-                ? 'bg-slate-800 text-cyan-400 border border-cyan-600/40 shadow-sm'
-                : 'text-slate-400 hover:text-slate-200'
+                ? 'bg-cyan-600/20 text-cyan-300 border border-cyan-500/50 shadow-sm font-semibold'
+                : 'bg-slate-950/60 sm:bg-transparent text-slate-400 hover:text-slate-200 border border-slate-800/80 sm:border-transparent'
             }`}
           >
-            <Sliders className="w-3.5 h-3.5" />
-            Bandwidth Profiles ({displayProfilesCount})
+            <Sliders className="w-3.5 h-3.5 shrink-0" />
+            <span className="truncate">Bandwidth Profiles ({displayProfilesCount})</span>
           </button>
 
           <button
             onClick={() => setActiveSubTab('routers')}
-            className={`px-3 py-1.5 text-xs font-medium rounded-md transition flex items-center gap-1.5 ${
+            className={`w-full sm:w-auto px-3 py-2 text-xs font-medium rounded-xl transition flex items-center justify-center sm:justify-start gap-1.5 text-center leading-tight min-w-0 cursor-pointer ${
               activeSubTab === 'routers'
-                ? 'bg-slate-800 text-cyan-400 border border-cyan-600/40 shadow-sm'
-                : 'text-slate-400 hover:text-slate-200'
+                ? 'bg-cyan-600/20 text-cyan-300 border border-cyan-500/50 shadow-sm font-semibold'
+                : 'bg-slate-950/60 sm:bg-transparent text-slate-400 hover:text-slate-200 border border-slate-800/80 sm:border-transparent'
             }`}
           >
-            <Server className="w-3.5 h-3.5" />
-            Router Fleet ({routers.length})
+            <Server className="w-3.5 h-3.5 shrink-0" />
+            <span className="truncate">Router Fleet ({routers.length})</span>
           </button>
         </div>
 
         {/* Search Input */}
-        <div className="relative w-full sm:w-64">
+        <div className="relative w-full lg:w-64 shrink-0">
           <Search className="w-3.5 h-3.5 absolute left-2.5 top-2.5 text-slate-500" />
           <input
             type="text"
             placeholder="Search username, IP, MAC..."
             value={searchQuery}
             onChange={(e) => setSearchQuery(e.target.value)}
-            className="w-full bg-slate-950 border border-slate-700 text-slate-200 text-xs pl-8 pr-3 py-1.5 rounded-md focus:outline-none focus:border-cyan-500 font-mono"
+            className="w-full bg-slate-950 border border-slate-700 text-slate-200 text-xs pl-8 pr-3 py-1.5 rounded-lg focus:outline-none focus:border-cyan-500 font-mono"
           />
         </div>
       </div>
@@ -774,9 +776,9 @@ export const MikrotikStudio: React.FC<MikrotikStudioProps> = ({
 
       {/* SUB-TAB 2: Provisioned Secrets (/ppp/secret) */}
       {activeSubTab === 'secrets' && (
-        <div className="bg-slate-900 border border-slate-800 rounded-xl overflow-hidden shadow-lg">
-          <div className="p-4 border-b border-slate-800 flex items-center justify-between">
-            <div>
+        <div className="bg-slate-900 border border-slate-800 rounded-xl overflow-hidden shadow-lg min-w-0 w-full max-w-full">
+          <div className="p-4 border-b border-slate-800 flex flex-col sm:flex-row sm:items-center justify-between gap-3">
+            <div className="min-w-0">
               <h3 className="text-sm font-bold text-white">
                 Subscriber PPPoE Database (/ppp/secret)
               </h3>
@@ -784,7 +786,7 @@ export const MikrotikStudio: React.FC<MikrotikStudioProps> = ({
                 Manage credentials, speed profiles, and trigger automated Walled-Garden isolation.
               </p>
             </div>
-            <div className="flex items-center gap-2">
+            <div className="flex flex-wrap items-center gap-2 shrink-0">
               <button
                 onClick={() => setIsAddUserModalOpen(true)}
                 className="bg-cyan-600 hover:bg-cyan-500 text-slate-950 font-bold text-xs px-3 py-1.5 rounded-lg transition flex items-center gap-1 shadow-sm cursor-pointer"
@@ -997,10 +999,10 @@ export const MikrotikStudio: React.FC<MikrotikStudioProps> = ({
       {activeSubTab === 'profiles' && (
         <div className="space-y-4">
           {/* Profiles Header & Action Bar */}
-          <div className="flex flex-col sm:flex-row items-start sm:items-center justify-between gap-3 bg-slate-900 border border-slate-800 p-4 rounded-xl shadow-lg">
-            <div>
-              <div className="flex items-center gap-2">
-                <h3 className="text-sm font-bold text-white flex items-center gap-2">
+          <div className="flex flex-col sm:flex-row items-start sm:items-center justify-between gap-3 bg-slate-900 border border-slate-800 p-4 rounded-xl shadow-lg min-w-0 w-full max-w-full">
+            <div className="min-w-0">
+              <div className="flex flex-wrap items-center gap-2">
+                <h3 className="text-sm font-bold text-white flex flex-wrap items-center gap-2">
                   <span>Carrier Bandwidth Profiles (/ppp/profile)</span>
                   <span className="text-[10px] px-2 py-0.5 rounded bg-cyan-950 text-cyan-300 border border-cyan-800 font-mono">
                     {displayProfilesCount} Profiles Live

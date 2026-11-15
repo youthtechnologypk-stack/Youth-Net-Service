@@ -656,16 +656,16 @@ export const BillingView: React.FC<BillingViewProps> = ({
   };
 
   return (
-    <div className="space-y-6">
+    <div className="w-full max-w-full min-w-0 box-border space-y-6">
       {/* Header */}
-      <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4 pb-2 border-b border-slate-800">
-        <div>
-          <div className="flex items-center gap-2">
-            <h1 className="text-2xl font-bold tracking-tight text-white flex items-center gap-2">
-              <CreditCard className="w-6 h-6 text-cyan-400" />
-              <span>Billing & Invoices (Supabase PostgreSQL)</span>
+      <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4 pb-2 border-b border-slate-800 min-w-0">
+        <div className="min-w-0">
+          <div className="flex flex-wrap items-center gap-2">
+            <h1 className="text-xl sm:text-2xl font-bold tracking-tight text-white flex items-center gap-2">
+              <CreditCard className="w-5 h-5 sm:w-6 sm:h-6 text-cyan-400 shrink-0" />
+              <span>Billing &amp; Invoices (Supabase PostgreSQL)</span>
             </h1>
-            <span className="px-2 py-0.5 rounded text-[11px] font-semibold bg-emerald-950 text-emerald-400 border border-emerald-800 flex items-center gap-1">
+            <span className="px-2 py-0.5 rounded text-[11px] font-semibold bg-emerald-950 text-emerald-400 border border-emerald-800 flex items-center gap-1 shrink-0">
               <span className="w-1.5 h-1.5 rounded-full bg-emerald-400 animate-pulse"></span>
               Live PostgreSQL
             </span>

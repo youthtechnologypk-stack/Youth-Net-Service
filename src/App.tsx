@@ -267,7 +267,7 @@ function ISPAppContent() {
       )}
 
       {/* 2. Main Flex Viewport (Navbar + Scrollable Body + Footer) */}
-      <div className="flex-1 flex flex-col h-full overflow-hidden min-w-0">
+      <div className="flex-1 flex flex-col h-full overflow-hidden min-w-0 w-full max-w-full">
         {/* Top Navbar / Header Bar with Menu Toggle Button */}
         <Header
           activeTab={activeTab}
@@ -308,8 +308,8 @@ function ISPAppContent() {
         )}
 
         {/* Scrollable Main Content Body */}
-        <main className="flex-1 overflow-y-auto p-4 sm:p-6 bg-slate-50 dark:bg-[#0B111E] text-slate-900 dark:text-slate-100 transition-colors duration-200">
-          <div className="max-w-7xl mx-auto space-y-6">
+        <main className="flex-1 overflow-y-auto overflow-x-hidden px-3 py-3 sm:p-6 pb-16 sm:pb-8 bg-slate-50 dark:bg-[#0B111E] text-slate-900 dark:text-slate-100 transition-colors duration-200">
+          <div className="w-full max-w-7xl mx-auto min-w-0 space-y-5 sm:space-y-6">
             {/* PWA Mobile Install Banner (Admin only) */}
             {currentRole === 'ADMIN' && (
               <PWAInstallPrompt role={currentRole} variant="banner" forceVisibleOnDesktop={false} />

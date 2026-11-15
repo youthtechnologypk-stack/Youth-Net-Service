@@ -203,7 +203,7 @@ export const NocOverview: React.FC<NocOverviewProps> = ({
   const currentWanTx = bandwidthHistory[bandwidthHistory.length - 1]?.txMbps || 0;
 
   return (
-    <div className="space-y-6">
+    <div className="w-full max-w-full min-w-0 box-border space-y-6">
       {/* Real Router Proxy Connection Notice ONLY when /api/mikrotik reports offline */}
       {routerError && currentRouter?.status !== 'online' && (
         <div className="bg-rose-950/90 border border-rose-500/60 text-rose-200 px-4 py-3.5 rounded-xl flex flex-col md:flex-row md:items-center justify-between gap-3 text-xs sm:text-sm font-mono shadow-lg shadow-rose-950/50">
@@ -251,7 +251,7 @@ export const NocOverview: React.FC<NocOverviewProps> = ({
               Active BNG: <span className="text-slate-200 font-bold">{currentRouter.name}</span> ({currentRouter.ip || currentRouter.ipAddress}:{currentRouter.port || (currentRouter.useSsl ? 443 : 80)})
             </span>
           </div>
-          <div className="flex items-center gap-3 text-xs font-mono text-slate-400">
+          <div className="flex flex-wrap items-center gap-2 sm:gap-3 text-xs font-mono text-slate-400 min-w-0">
             <span className="flex items-center gap-1">
               <span className="w-1.5 h-1.5 rounded-full bg-cyan-400" />
               CPU: <span className="text-cyan-300 font-bold">{currentRouter.cpuLoad || 0}%</span>
@@ -493,20 +493,20 @@ export const NocOverview: React.FC<NocOverviewProps> = ({
           </p>
         </div>
 
-        <div className="flex items-center gap-2.5">
+        <div className="flex flex-wrap items-center gap-2.5 w-full sm:w-auto">
           <button
             onClick={() => runMonthlyBillingCron()}
-            className="flex items-center gap-1.5 bg-indigo-600 hover:bg-indigo-500 text-white text-xs font-semibold px-3.5 py-2 rounded-lg transition shadow-sm"
+            className="flex items-center gap-1.5 bg-indigo-600 hover:bg-indigo-500 text-white text-xs font-semibold px-3.5 py-2 rounded-lg transition shadow-sm cursor-pointer"
           >
-            <Zap className="w-3.5 h-3.5" />
+            <Zap className="w-3.5 h-3.5 shrink-0" />
             <span>Simulate 1st Month Billing CRON</span>
           </button>
 
           <button
             onClick={() => runOverdueScanCron()}
-            className="flex items-center gap-1.5 bg-amber-600 hover:bg-amber-500 text-white text-xs font-semibold px-3.5 py-2 rounded-lg transition shadow-sm"
+            className="flex items-center gap-1.5 bg-amber-600 hover:bg-amber-500 text-white text-xs font-semibold px-3.5 py-2 rounded-lg transition shadow-sm cursor-pointer"
           >
-            <ShieldAlert className="w-3.5 h-3.5" />
+            <ShieldAlert className="w-3.5 h-3.5 shrink-0" />
             <span>Simulate Overdue Walled Garden Scan</span>
           </button>
         </div>

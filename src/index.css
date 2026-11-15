@@ -2,6 +2,27 @@
 
 @custom-variant dark (&:where(.dark, .dark *));
 
+*, *::before, *::after {
+  box-sizing: border-box;
+}
+
+html, body, #root {
+  max-width: 100%;
+  overflow-x: hidden;
+}
+
+/* Cross-browser hidden scrollbar utility for mobile snap-scroll tab bars */
+.no-scrollbar,
+.scrollbar-none {
+  scrollbar-width: none;
+  -ms-overflow-style: none;
+}
+
+.no-scrollbar::-webkit-scrollbar,
+.scrollbar-none::-webkit-scrollbar {
+  display: none;
+}
+
 /* Smooth theme transitions for layout containers */
 .theme-transition {
   transition: background-color 0.2s ease, border-color 0.2s ease, color 0.2s ease;
