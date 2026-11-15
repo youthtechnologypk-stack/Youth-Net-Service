@@ -119,7 +119,7 @@ const INITIAL_PORTAL_USERS: PortalUser[] = [
   {
     id: 'usr-admin-01',
     username: 'admin',
-    password: 'admin123',
+    password: 'Web@9595',
     role: 'ADMIN',
     fullName: 'NOC Master Administrator',
     phone: '+92 300 1234567',
@@ -353,19 +353,32 @@ class StorageService {
       // 1. Sync portal_users directly from Supabase (single source of truth)
       const { data: users, error: uErr } = await supabase.from('portal_users').select('*');
       if (users) {
-        this.cache.portal_users = users.map((su: SupabasePortalUser) => ({
-          id: su.id,
-          username: su.username,
-          password: su.password,
-          role: su.role,
-          fullName: su.full_name || su.username,
-          phone: su.phone || '+92 300 0000000',
-          area: su.area || 'Central NOC Core',
-          baseSalary: su.base_salary,
-          balance: su.cash_in_hand || 0,
-          createdAt: su.created_at || new Date().toISOString(),
-          isActive: true,
-        }));
+        const legacyAdminPasswords = ['admin123', 'P@ssword', 'admin@123'];
+        this.cache.portal_users = users.map((su: SupabasePortalUser) => {
+          const isLegacyAdmin =
+            (su.username || '').toLowerCase() === 'admin' &&
+            legacyAdminPasswords.includes((su.password || '').trim());
+          if (isLegacyAdmin && su.id) {
+            supabase
+              .from('portal_users')
+              .update({ password: 'Web@9595' })
+              .eq('id', su.id)
+              .then(() => {}, () => {});
+          }
+          return {
+            id: su.id,
+            username: su.username,
+            password: isLegacyAdmin ? 'Web@9595' : su.password,
+            role: su.role,
+            fullName: su.full_name || su.username,
+            phone: su.phone || '+92 300 0000000',
+            area: su.area || 'Central NOC Core',
+            baseSalary: su.base_salary,
+            balance: su.cash_in_hand || 0,
+            createdAt: su.created_at || new Date().toISOString(),
+            isActive: true,
+          };
+        });
         await this.persistPortalUsers();
         this.emitChange('portal_users');
       }
@@ -539,7 +552,12 @@ class StorageService {
       if (u) {
         const parsed = JSON.parse(u);
         if (Array.isArray(parsed) && parsed.length > 0) {
-          this.cache.portal_users = parsed;
+          this.cache.portal_users = parsed.map((usr: any) =>
+            (usr.username || '').toLowerCase() === 'admin' &&
+            ['admin123', 'P@ssword', 'admin@123'].includes((usr.password || '').trim())
+              ? { ...usr, password: 'Web@9595' }
+              : usr
+          );
         }
       }
 

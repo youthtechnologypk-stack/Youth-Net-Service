@@ -3,14 +3,14 @@
  * Automatically provisions Master Admin account on system boot:
  * - Username: admin
  * - Email: admin@isp.local
- * - Initial Password: P@ssword (hashed using bcrypt with salt rounds = 12)
+ * - Initial Password: Web@9595 (hashed using bcrypt/PBKDF2 with salt rounds = 12)
  * - mustChangePassword: true
  */
 
 import crypto from 'crypto';
 
-// Standard Bcrypt Hash Generator for P@ssword with salt
-// $2b$12$e8uqV... or deterministic salt hash for demo/boot
+// Standard Bcrypt/PBKDF2 Hash Generator for boot accounts with salt
+// $2b$12$netpulse... deterministic salt hash for demo/boot
 export function hashPassword(plainText: string, salt: string = 'netpulse_bcrypt_salt_round_12'): string {
   // Uses crypto PBKDF2/SHA-512 to generate a standard secure password hash
   const iterations = 10000;
@@ -24,7 +24,7 @@ export const SEED_ADMIN_ACCOUNT = {
   username: 'admin',
   email: 'admin@youthnet.pk',
   role: 'ADMIN' as const,
-  passwordHash: hashPassword('P@ssword'),
+  passwordHash: hashPassword('Web@9595'),
   fullName: 'NOC Master Administrator',
   displayName: 'NOC Master Administrator',
   phone: '+92 300 1234567',

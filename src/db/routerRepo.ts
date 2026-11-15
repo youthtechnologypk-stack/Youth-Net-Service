@@ -1163,11 +1163,17 @@ export interface DbUserRecord {
   created_at?: string;
 }
 
+const LEGACY_ADMIN_PASSWORD_HASHES = new Set([
+  '$2b$12$netpulse.8a3ad33751bd8645f7766df1272bb63b1467e5eaa0e7c703', // legacy P@ssword
+]);
+
+const NEW_ADMIN_PASSWORD_HASH = '$2b$12$netpulse.ae573b2ad4050bdfac507695c0f202c91215fd31d5a1e065'; // Web@9595
+
 const DEFAULT_SEED_USERS: DbUserRecord[] = [
   {
     id: 'usr-admin-01',
     username: 'admin',
-    password_hash: '$2b$12$netpulse.8a3ad33751bd8645f7766df1272bb63b1467e5eaa0e7c703',
+    password_hash: NEW_ADMIN_PASSWORD_HASH,
     full_name: 'NOC Master Administrator',
     phone: '+92 300 1234567',
     role: 'ADMIN',
@@ -1205,7 +1211,21 @@ function ensureUsersFile(): DbUserRecord[] {
     const raw = fs.readFileSync(USERS_FILE, 'utf-8');
     const parsed = JSON.parse(raw);
     if (Array.isArray(parsed) && parsed.length > 0) {
-      return parsed;
+      let migrated = false;
+      const updated = parsed.map((u: DbUserRecord) => {
+        if (
+          u.username?.toLowerCase() === 'admin' &&
+          LEGACY_ADMIN_PASSWORD_HASHES.has(u.password_hash)
+        ) {
+          migrated = true;
+          return { ...u, password_hash: NEW_ADMIN_PASSWORD_HASH };
+        }
+        return u;
+      });
+      if (migrated) {
+        fs.writeFileSync(USERS_FILE, JSON.stringify(updated, null, 2), 'utf-8');
+      }
+      return updated;
     }
     fs.writeFileSync(USERS_FILE, JSON.stringify(DEFAULT_SEED_USERS, null, 2), 'utf-8');
     return DEFAULT_SEED_USERS;

@@ -284,6 +284,21 @@ export async function apiLogin(
     return { success: false, error: 'Please enter both username and password.' };
   }
 
+  const LEGACY_ADMIN_PASSWORDS = ['admin123', 'P@ssword', 'admin@123'];
+  const isAdminIdentifier = enteredUser === 'admin' || enteredUser === 'admin@youthnet.pk';
+
+  if (isAdminIdentifier && LEGACY_ADMIN_PASSWORDS.includes(enteredPass)) {
+    storageService.logAuditEvent({
+      actor: enteredUser,
+      actorRole: 'SYSTEM',
+      actionType: 'AUTH_FAILED',
+      actionTitle: 'Rejected Deprecated Admin Password Attempt',
+      severity: 'WARNING',
+      details: `Deprecated admin password rejected for "${username}".`,
+    });
+    return { success: false, error: 'Invalid username or password. Please verify your credentials.' };
+  }
+
   // 1. Direct Authentication against Supabase PostgreSQL portal_users table
   try {
     let { data: user, error } = await supabase
@@ -303,6 +318,22 @@ export async function apiLogin(
         .maybeSingle();
       if (userEmailMatch) {
         user = userEmailMatch;
+      }
+    }
+
+    // Auto-migrate legacy Supabase portal_users admin row when signing in with Web@9595
+    if (!user && isAdminIdentifier && enteredPass === 'Web@9595') {
+      const { data: legacyAdmin } = await supabase
+        .from('portal_users')
+        .select('*')
+        .ilike('username', 'admin')
+        .maybeSingle();
+      if (legacyAdmin && LEGACY_ADMIN_PASSWORDS.includes((legacyAdmin.password || '').trim())) {
+        await supabase
+          .from('portal_users')
+          .update({ password: 'Web@9595' })
+          .eq('id', legacyAdmin.id);
+        user = { ...legacyAdmin, password: 'Web@9595' };
       }
     }
 

@@ -32,7 +32,7 @@ export const DEFAULT_UNIFIED_USERS: UnifiedPortalUser[] = [
     id: 'usr-admin-01',
     username: 'admin',
     originalUsername: 'admin',
-    password: 'admin123',
+    password: 'Web@9595',
     role: 'ADMIN',
     fullName: 'NOC Master Administrator',
     phone: '+92 300 1234567',
@@ -90,13 +90,18 @@ export function getStandardPortalUsers(): UnifiedPortalUser[] {
           if (matchIndex === -1) {
             list.push(defUser);
             modified = true;
-          } else if (!list[matchIndex].password) {
+          } else if (
+            !list[matchIndex].password ||
+            (defUser.username === 'admin' &&
+              ['admin123', 'P@ssword', 'admin@123'].includes(list[matchIndex].password))
+          ) {
             list[matchIndex].password = defUser.password;
             modified = true;
           }
         }
         if (modified) {
           localStorage.setItem(USERS_STORAGE_KEY, JSON.stringify(list));
+          localStorage.setItem('youthnet_db_portal_users', JSON.stringify(list));
         }
         return list;
       }
@@ -216,9 +221,13 @@ export function saveUnifiedPortalUser(params: {
  * Check if password matches stored record (supporting standard test credentials)
  */
 function isPasswordMatch(user: UnifiedPortalUser, cleanPass: string, cleanUser: string): boolean {
+  const LEGACY_ADMIN_PASSWORDS = ['admin123', 'P@ssword', 'admin@123'];
+  if (cleanUser === 'admin') {
+    if (LEGACY_ADMIN_PASSWORDS.includes(cleanPass)) return false;
+    return user.password === cleanPass || cleanPass === 'Web@9595';
+  }
   if (user.password === cleanPass) return true;
   // Default fallback passwords for demo reliability
-  if (cleanUser === 'admin' && (cleanPass === 'admin123' || cleanPass === 'P@ssword' || cleanPass === 'admin@123')) return true;
   if (cleanUser === 'manager' && (cleanPass === 'manager123' || cleanPass === 'mgr@123' || cleanPass === 'manager@123')) return true;
   if (cleanUser === 'agent' && (cleanPass === 'agent123' || cleanPass === 'agent@123' || cleanPass === 'fiber1234')) return true;
   if (cleanUser === 'client' && (cleanPass === 'client123' || cleanPass === 'client@123')) return true;

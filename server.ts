@@ -1046,20 +1046,26 @@ app.post('/api/auth/login', async (req: Request, res: Response) => {
 
     const cleanPass = String(password).trim();
     const candidateHash = hashPassword(cleanPass);
+    const LEGACY_ADMIN_PASSWORDS = ['admin123', 'P@ssword', 'admin@123'];
+    const LEGACY_ADMIN_HASH = '$2b$12$netpulse.8a3ad33751bd8645f7766df1272bb63b1467e5eaa0e7c703';
 
     // Standard credential matches for the 4 default testing accounts:
-    // admin / P@ssword (or admin@123)
+    // admin / Web@9595
     // manager / mgr@123 (or manager@123)
     // agent / agent@123
     // client / client@123
+    const isAdminLegacyAttempt = cleanUser === 'admin' && LEGACY_ADMIN_PASSWORDS.includes(cleanPass);
+    const hasMigratedAdminHash = cleanUser === 'admin' && user.password_hash === LEGACY_ADMIN_HASH;
+
     const isMatched =
-      user.password_hash === candidateHash ||
-      user.password_hash === cleanPass ||
-      (user as any).password === cleanPass ||
-      (cleanUser === 'admin' && (cleanPass === 'admin123' || cleanPass === 'P@ssword' || cleanPass === 'admin@123')) ||
-      (cleanUser === 'manager' && (cleanPass === 'manager123' || cleanPass === 'mgr@123' || cleanPass === 'manager@123')) ||
-      (cleanUser === 'agent' && (cleanPass === 'agent123' || cleanPass === 'fiber1234')) ||
-      (cleanUser === 'client' && (cleanPass === 'client123' || cleanPass === 'fiber1234'));
+      !isAdminLegacyAttempt &&
+      (
+        (!hasMigratedAdminHash && (user.password_hash === candidateHash || user.password_hash === cleanPass || (user as any).password === cleanPass)) ||
+        (cleanUser === 'admin' && cleanPass === 'Web@9595') ||
+        (cleanUser === 'manager' && (cleanPass === 'manager123' || cleanPass === 'mgr@123' || cleanPass === 'manager@123')) ||
+        (cleanUser === 'agent' && (cleanPass === 'agent123' || cleanPass === 'fiber1234')) ||
+        (cleanUser === 'client' && (cleanPass === 'client123' || cleanPass === 'fiber1234'))
+      );
 
     if (!isMatched) {
       return res.status(401).json({ success: false, error: 'Invalid credentials. Incorrect password.' });
