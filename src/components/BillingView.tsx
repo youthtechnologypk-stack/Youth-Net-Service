@@ -1,4 +1,5 @@
 import React, { useState, useEffect, useMemo } from 'react';
+import ReactDOM from 'react-dom';
 import {
   CreditCard,
   Plus,
@@ -966,10 +967,197 @@ export const BillingView: React.FC<BillingViewProps> = ({
         </div>
       </div>
 
-      {/* Invoices Table */}
-      <div className="rounded-xl border border-slate-800 bg-[#111A2E] overflow-hidden shadow-lg">
+      {/* Mobile Invoice Card List (< 768px) */}
+      <div className="flex flex-col gap-3 md:hidden w-full max-w-full">
+        {filteredInvoices.length === 0 ? (
+          <div className="w-full max-w-full overflow-hidden rounded-xl border border-slate-800 bg-[#111A2E] py-10 px-4 text-center text-slate-500 box-border shadow-lg">
+            <FileText className="w-10 h-10 text-slate-600 mx-auto mb-2 opacity-50" />
+            <p className="text-base font-semibold text-slate-400">No invoices found</p>
+            <p className="text-xs text-slate-500 mt-1">
+              Click &quot;+ Generate Invoice&quot; to create an invoice in Supabase PostgreSQL.
+            </p>
+          </div>
+        ) : (
+          filteredInvoices.map((inv) => {
+            const totalAmount = Number(inv.amount || 0);
+            const alreadyPaid = Number(inv.paid_amount || 0);
+            const balanceDue = Math.max(0, totalAmount - alreadyPaid);
+            const displayStatus = balanceDue === 0 ? 'PAID' : (inv.status || 'DUE').toUpperCase();
+            const isPaid = displayStatus === 'PAID';
+            const isPartial = displayStatus === 'PARTIAL';
+
+            return (
+              <div
+                key={inv.id}
+                className="w-full max-w-full overflow-hidden rounded-xl border border-slate-800 bg-[#111A2E] p-3.5 space-y-3 box-border shadow-lg"
+              >
+                {/* Row 1: @username (bold) + INV-# + Status Badge */}
+                <div className="flex items-start justify-between gap-2 min-w-0">
+                  <div className="min-w-0 flex-1">
+                    <div className="font-bold text-white text-base truncate">
+                      @{inv.subscriber_username}
+                    </div>
+                    <div className="flex flex-wrap items-center gap-x-2 gap-y-0.5 text-xs mt-0.5">
+                      <span className="font-mono font-semibold text-cyan-400">
+                        #{inv.invoice_no}
+                      </span>
+                      <span className="text-slate-500">• Cycle: {inv.cycle_day || 31}d</span>
+                    </div>
+                  </div>
+                  <div className="shrink-0">
+                    {isPaid ? (
+                      <span className="inline-flex items-center gap-1 px-2.5 py-1 rounded-md text-xs font-bold bg-emerald-500/20 text-emerald-400 border border-emerald-500/30">
+                        <CheckCircle2 className="w-3.5 h-3.5 text-emerald-400" />
+                        <span>PAID</span>
+                      </span>
+                    ) : isPartial ? (
+                      <span className="inline-flex items-center gap-1 px-2.5 py-1 rounded-md text-xs font-bold bg-amber-500/20 text-amber-400 border border-amber-500/30">
+                        <Clock className="w-3.5 h-3.5 text-amber-400" />
+                        <span>PARTIAL</span>
+                      </span>
+                    ) : (
+                      <span className="inline-flex items-center gap-1 px-2.5 py-1 rounded-md text-xs font-bold bg-rose-500/20 text-rose-400 border border-rose-500/30">
+                        <Clock className="w-3.5 h-3.5 text-rose-400" />
+                        <span>DUE</span>
+                      </span>
+                    )}
+                  </div>
+                </div>
+
+                {/* Row 2: Amount, Paid, Remaining Balance (highlighted), Due Date, Agent */}
+                <div className="grid grid-cols-2 gap-2 p-2.5 rounded-lg bg-slate-950 border border-slate-800 text-xs min-w-0">
+                  <div className="min-w-0">
+                    <span className="text-[11px] text-slate-400 block">Invoice Amount</span>
+                    <span className="font-mono font-bold text-white text-sm">
+                      {formatCurrency(totalAmount)}
+                    </span>
+                  </div>
+                  <div className="min-w-0 text-right">
+                    <span className="text-[11px] text-slate-400 block">Paid</span>
+                    <span className="font-mono font-semibold text-emerald-400 text-sm">
+                      {formatCurrency(alreadyPaid)}
+                    </span>
+                  </div>
+                  <div className="min-w-0 col-span-2 flex items-center justify-between pt-1.5 border-t border-slate-800/80">
+                    <span className="font-semibold text-amber-300">Remaining Balance</span>
+                    <span
+                      className={`font-mono font-bold text-sm ${
+                        balanceDue > 0 ? 'text-amber-400' : 'text-emerald-400'
+                      }`}
+                    >
+                      {formatCurrency(balanceDue)}
+                    </span>
+                  </div>
+                  <div className="min-w-0 pt-1 border-t border-slate-800/80">
+                    <span className="text-[11px] text-slate-400 block">Due Date</span>
+                    <span className="font-mono text-slate-200">{inv.due_date}</span>
+                  </div>
+                  <div className="min-w-0 pt-1 border-t border-slate-800/80 text-right">
+                    <span className="text-[11px] text-slate-400 block">Agent</span>
+                    <span className="text-slate-200 font-medium truncate block">
+                      {inv.assigned_agent_name || 'Unassigned'}
+                    </span>
+                  </div>
+                </div>
+
+                {/* Row 3: Full-Width Action Buttons directly visible without scrolling */}
+                <div className="flex flex-col gap-2 w-full min-w-0">
+                  {balanceDue > 0 && displayStatus !== 'PAID' ? (
+                    <>
+                      <button
+                        type="button"
+                        onClick={() => handleOpenMarkPaid(inv)}
+                        className="w-full py-2.5 px-3 bg-emerald-600 hover:bg-emerald-500 text-white font-bold rounded-xl text-sm flex items-center justify-center gap-1.5 transition active:scale-[0.99] shadow cursor-pointer"
+                      >
+                        <DollarSign className="w-4 h-4 shrink-0" />
+                        <span>$ Add Payment</span>
+                      </button>
+                      <div className="flex items-center gap-2 w-full min-w-0">
+                        <button
+                          type="button"
+                          onClick={() => handleSendInvoiceWhatsApp(inv)}
+                          className="flex-1 min-w-0 py-2 px-3 bg-emerald-950/60 hover:bg-emerald-900/70 text-emerald-300 border border-emerald-700/60 rounded-xl text-xs font-semibold flex items-center justify-center gap-1.5 transition cursor-pointer"
+                        >
+                          <Send className="w-3.5 h-3.5 shrink-0" />
+                          <span className="truncate">WA Receipt</span>
+                        </button>
+                        {(currentRole === 'ADMIN' || currentRole === 'MANAGER') && (
+                          <>
+                            <button
+                              type="button"
+                              onClick={() => handleOpenEditModal(inv)}
+                              className="p-2 bg-slate-800 hover:bg-slate-700 text-cyan-400 border border-slate-700 rounded-xl transition cursor-pointer shrink-0"
+                              title="Edit Invoice Details"
+                            >
+                              <Edit2 className="w-4 h-4" />
+                              <span className="sr-only">Edit Invoice</span>
+                            </button>
+                            <button
+                              type="button"
+                              onClick={() => setInvoiceToDelete(inv)}
+                              className="p-2 bg-rose-950/80 hover:bg-rose-900 text-rose-300 border border-rose-800 rounded-xl transition cursor-pointer shrink-0"
+                              title="Delete Invoice"
+                            >
+                              <Trash2 className="w-4 h-4" />
+                              <span className="sr-only">Delete Invoice</span>
+                            </button>
+                          </>
+                        )}
+                      </div>
+                    </>
+                  ) : (
+                    <div className="flex flex-wrap items-center gap-2 w-full min-w-0">
+                      <button
+                        type="button"
+                        onClick={() => handleSendInvoiceWhatsApp(inv)}
+                        className="flex-1 min-w-0 py-2.5 px-3 bg-emerald-600 hover:bg-emerald-500 text-white font-bold rounded-xl text-xs flex items-center justify-center gap-1.5 transition cursor-pointer shadow"
+                      >
+                        <Send className="w-3.5 h-3.5 shrink-0" />
+                        <span className="truncate">WA Receipt</span>
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => onOpenReceiptModal?.(inv)}
+                        className="flex-1 min-w-0 py-2.5 px-3 bg-slate-800 hover:bg-slate-700 text-cyan-400 border border-slate-700 rounded-xl text-xs font-semibold flex items-center justify-center gap-1.5 transition cursor-pointer"
+                      >
+                        <Printer className="w-3.5 h-3.5 shrink-0" />
+                        <span className="truncate">Receipt</span>
+                      </button>
+                      {(currentRole === 'ADMIN' || currentRole === 'MANAGER') && (
+                        <>
+                          <button
+                            type="button"
+                            onClick={() => handleOpenEditModal(inv)}
+                            className="p-2.5 bg-slate-800 hover:bg-slate-700 text-cyan-400 border border-slate-700 rounded-xl transition cursor-pointer shrink-0"
+                            title="Edit Invoice Details"
+                          >
+                            <Edit2 className="w-4 h-4" />
+                            <span className="sr-only">Edit Invoice</span>
+                          </button>
+                          <button
+                            type="button"
+                            onClick={() => setInvoiceToDelete(inv)}
+                            className="p-2.5 bg-rose-950/80 hover:bg-rose-900 text-rose-300 border border-rose-800 rounded-xl transition cursor-pointer shrink-0"
+                            title="Delete Invoice"
+                          >
+                            <Trash2 className="w-4 h-4" />
+                            <span className="sr-only">Delete Invoice</span>
+                          </button>
+                        </>
+                      )}
+                    </div>
+                  )}
+                </div>
+              </div>
+            );
+          })
+        )}
+      </div>
+
+      {/* Desktop Invoices Table (>= 768px) */}
+      <div className="hidden md:block rounded-xl border border-slate-800 bg-[#111A2E] overflow-hidden shadow-lg">
         <div className="overflow-x-auto">
-          <table className="w-full text-left text-sm text-slate-300">
+          <table className="hidden md:table w-full text-left text-sm text-slate-300">
             <thead className="bg-slate-900/80 text-xs uppercase tracking-wider text-slate-400 border-b border-slate-800">
               <tr>
                 <th className="py-3 px-4">Invoice #</th>
@@ -988,7 +1176,7 @@ export const BillingView: React.FC<BillingViewProps> = ({
                     <FileText className="w-10 h-10 text-slate-600 mx-auto mb-2 opacity-50" />
                     <p className="text-base font-semibold text-slate-400">No invoices found</p>
                     <p className="text-xs text-slate-500 mt-1">
-                      Click "+ Generate Invoice" to create an invoice in Supabase PostgreSQL.
+                      Click &quot;+ Generate Invoice&quot; to create an invoice in Supabase PostgreSQL.
                     </p>
                   </td>
                 </tr>
@@ -998,7 +1186,6 @@ export const BillingView: React.FC<BillingViewProps> = ({
                   const alreadyPaid = Number(inv.paid_amount || 0);
                   const balanceDue = Math.max(0, totalAmount - alreadyPaid);
                   const displayStatus = balanceDue === 0 ? 'PAID' : (inv.status || 'DUE').toUpperCase();
-                  const isPaid = displayStatus === 'PAID';
                   const isPartial = displayStatus === 'PARTIAL';
 
                   return (
@@ -1161,356 +1348,449 @@ export const BillingView: React.FC<BillingViewProps> = ({
         }}
       />
 
-      {/* Modal: Record Payment / Mark Paid */}
-      {isMarkPaidModalOpen && selectedInvoice && (() => {
-        const alreadyPaid = Number(selectedInvoice.paid_amount) || 0;
-        const totalAmount = Number(selectedInvoice.amount) || 0;
-        const remainingDue = Math.max(0, totalAmount - alreadyPaid);
-        const enteredVal = Number(paymentReceivedInput) || 0;
-        const projectedTotalPaid = alreadyPaid + enteredVal;
-        const willBeFullyPaid = projectedTotalPaid >= totalAmount;
+      {/* Modal: Record Payment / Mark Paid (Portal to document.body for mobile viewport lock) */}
+      {isMarkPaidModalOpen &&
+        selectedInvoice &&
+        typeof document !== 'undefined' &&
+        (() => {
+          const alreadyPaid = Number(selectedInvoice.paid_amount) || 0;
+          const totalAmount = Number(selectedInvoice.amount) || 0;
+          const remainingDue = Math.max(0, totalAmount - alreadyPaid);
+          const enteredVal = Number(paymentReceivedInput) || 0;
+          const projectedTotalPaid = alreadyPaid + enteredVal;
+          const willBeFullyPaid = projectedTotalPaid >= totalAmount;
 
-        return (
-          <div className="fixed inset-0 z-[9999] flex items-center justify-center bg-black/75 backdrop-blur-sm p-3 overflow-y-auto animate-fade-in font-sans">
-            <div className="w-[95vw] sm:w-full max-w-lg max-h-[90vh] overflow-y-auto mx-auto my-auto rounded-2xl box-border bg-[#111A2E] border border-slate-700 p-4 sm:p-6 shadow-2xl relative">
-              <div className="flex items-center justify-between pb-4 border-b border-slate-800">
-                <h2 className="text-lg font-bold text-white flex items-center gap-2">
-                  <DollarSign className="w-5 h-5 text-emerald-400" />
-                  <span>Record Payment &amp; Arrears</span>
-                </h2>
-                <button
-                  type="button"
-                  onClick={() => setIsMarkPaidModalOpen(false)}
-                  className="text-slate-400 hover:text-white transition"
-                >
-                  <X className="w-5 h-5" />
-                </button>
-              </div>
-
-              <div className="space-y-4 mt-4">
-                {/* Financial Summary */}
-                <div className="p-3.5 bg-slate-900 rounded-xl border border-slate-800 space-y-2">
-                  <div className="flex justify-between items-center text-xs">
-                    <span className="text-slate-400">Invoice No:</span>
-                    <span className="text-cyan-400 font-mono font-bold">#{selectedInvoice.invoice_no}</span>
-                  </div>
-                  <div className="flex justify-between items-center text-xs">
-                    <span className="text-slate-400">Subscriber:</span>
-                    <span className="text-white font-semibold">@{selectedInvoice.subscriber_username}</span>
-                  </div>
-                  <div className="pt-2 border-t border-slate-800/80 flex justify-between items-center text-xs">
-                    <span className="text-slate-400">Total Amount:</span>
-                    <span className="text-white font-mono font-bold">{formatCurrency(totalAmount)}</span>
-                  </div>
-                  <div className="flex justify-between items-center text-xs">
-                    <span className="text-slate-400">Already Paid:</span>
-                    <span className="text-emerald-400 font-mono font-semibold">{formatCurrency(alreadyPaid)}</span>
-                  </div>
-                  <div className="flex justify-between items-center text-sm font-semibold">
-                    <span className="text-amber-300">Remaining Due:</span>
-                    <span className="text-amber-400 font-mono font-bold text-base">{formatCurrency(remainingDue)}</span>
-                  </div>
-                </div>
-
-                {/* Payment Input Field */}
-                <div>
-                  <div className="flex justify-between items-center mb-1">
-                    <label className="text-xs font-medium text-slate-300">
-                      Payment Received (Rs.)
-                    </label>
-                    <button
-                      type="button"
-                      onClick={() => setPaymentReceivedInput(remainingDue)}
-                      className="text-cyan-400 hover:text-cyan-300 text-[11px] underline cursor-pointer"
-                    >
-                      Fill Full Remaining ({formatCurrency(remainingDue)})
-                    </button>
-                  </div>
-                  <div className="relative">
-                    <span className="absolute left-3 top-2.5 text-slate-500 font-mono text-sm">Rs.</span>
-                    <input
-                      type="number"
-                      min="1"
-                      step="any"
-                      value={paymentReceivedInput}
-                      onChange={(e) => setPaymentReceivedInput(e.target.value)}
-                      placeholder={`Default: ${remainingDue}`}
-                      className="w-full pl-10 pr-3 py-2 bg-slate-900 border border-slate-700 rounded-lg text-white font-mono text-base focus:outline-none focus:border-cyan-500"
-                    />
-                  </div>
-                  <div className="flex items-center justify-between text-[11px] mt-1.5 px-0.5">
-                    <span className="text-slate-400">
-                      Resulting Status:{' '}
-                      <span className={`font-bold ${willBeFullyPaid ? 'text-emerald-400' : 'text-amber-400'}`}>
-                        {willBeFullyPaid ? 'PAID (Settled)' : 'PARTIAL (Arrears Remaining)'}
-                      </span>
-                    </span>
-                    {!willBeFullyPaid && (
-                      <span className="text-amber-400 font-mono">
-                        Arrears: {formatCurrency(Math.max(0, totalAmount - projectedTotalPaid))}
-                      </span>
-                    )}
-                  </div>
-                </div>
-
-                {/* Collecting Agent Selection */}
-                <div>
-                  <label className="block text-xs font-medium text-slate-300 mb-1">
-                    Collecting Field Recovery Agent (Credits Cash-in-Hand)
-                  </label>
-                  <select
-                    value={collectingAgentId}
-                    onChange={(e) => setCollectingAgentId(e.target.value)}
-                    className="w-full px-3 py-2 bg-slate-900 border border-slate-700 rounded-lg text-sm text-white focus:outline-none focus:border-cyan-500"
-                  >
-                    <option value="">-- No Agent Credit (Direct NOC Collection) --</option>
-                    {portalAgents.map((ag) => (
-                      <option key={ag.id} value={ag.id}>
-                        {ag.full_name} ({ag.area})
-                      </option>
-                    ))}
-                  </select>
-                  <p className="text-[11px] text-slate-500 mt-1">
-                    Selected agent's `cash_in_hand` in Supabase `portal_users` will be credited by{' '}
-                    <span className="text-emerald-400 font-mono font-bold">
-                      {formatCurrency(Number(paymentReceivedInput) || 0)}
-                    </span>.
-                  </p>
-                </div>
-
-                {/* Payment Method */}
-                <div>
-                  <label className="block text-xs font-medium text-slate-300 mb-1">Payment Method</label>
-                  <select
-                    value={paidPaymentMethod}
-                    onChange={(e) => setPaidPaymentMethod(e.target.value)}
-                    className="w-full px-3 py-2 bg-slate-900 border border-slate-700 rounded-lg text-sm text-white focus:outline-none focus:border-cyan-500"
-                  >
-                    <option value="Cash Handover">Cash Handover</option>
-                    <option value="JazzCash">JazzCash</option>
-                    <option value="EasyPaisa">EasyPaisa</option>
-                    <option value="Bank Transfer">Bank Transfer</option>
-                  </select>
-                </div>
-
-                <div className="flex items-center justify-end gap-3 pt-3 border-t border-slate-800">
+          return ReactDOM.createPortal(
+            <div
+              style={{
+                position: 'fixed',
+                top: 0,
+                left: 0,
+                right: 0,
+                bottom: 0,
+                width: '100vw',
+                height: '100dvh',
+                zIndex: 999999,
+              }}
+              className="bg-black/85 backdrop-blur-sm flex items-center justify-center p-3 overflow-y-auto font-sans"
+            >
+              <div
+                style={{ width: '100%', maxWidth: '390px', maxHeight: '88dvh' }}
+                className="mobile-safe-modal overflow-y-auto overflow-x-hidden rounded-2xl p-4 box-border mx-auto bg-[#111A2E] border border-slate-700 shadow-2xl relative"
+              >
+                <div className="flex items-center justify-between gap-2 pb-3 border-b border-slate-800 w-full min-w-0">
+                  <h2 className="text-base font-bold text-white flex items-center gap-2 min-w-0 truncate">
+                    <DollarSign className="w-5 h-5 text-emerald-400 shrink-0" />
+                    <span className="truncate">Record Payment &amp; Arrears</span>
+                  </h2>
                   <button
                     type="button"
                     onClick={() => setIsMarkPaidModalOpen(false)}
-                    className="px-4 py-2 bg-slate-800 hover:bg-slate-700 text-slate-300 rounded-lg text-sm transition cursor-pointer"
+                    className="text-slate-400 hover:text-white transition p-1 shrink-0 cursor-pointer"
+                    aria-label="Close modal"
                   >
-                    Cancel
-                  </button>
-                  <button
-                    type="button"
-                    onClick={handleConfirmMarkPaid}
-                    disabled={isSubmitting || Number(paymentReceivedInput) <= 0}
-                    className="px-5 py-2 bg-emerald-600 hover:bg-emerald-500 disabled:opacity-50 disabled:cursor-not-allowed text-white font-bold rounded-lg text-sm transition shadow-sm flex items-center gap-1.5 cursor-pointer"
-                  >
-                    {isSubmitting ? (
-                      <>
-                        <RefreshCw className="w-4 h-4 animate-spin" />
-                        <span>Recording...</span>
-                      </>
-                    ) : (
-                      <>
-                        <CheckCircle2 className="w-4 h-4" />
-                        <span>Confirm &amp; Record Payment</span>
-                      </>
-                    )}
+                    <X className="w-5 h-5" />
                   </button>
                 </div>
+
+                <div className="space-y-3.5 mt-3.5 w-full min-w-0">
+                  {/* Financial Summary */}
+                  <div className="p-3 bg-slate-900 rounded-xl border border-slate-800 space-y-1.5 w-full min-w-0">
+                    <div className="flex justify-between items-center gap-2 text-xs w-full min-w-0">
+                      <span className="text-slate-400 shrink-0">Invoice No:</span>
+                      <span className="text-cyan-400 font-mono font-bold truncate">
+                        #{selectedInvoice.invoice_no}
+                      </span>
+                    </div>
+                    <div className="flex justify-between items-center gap-2 text-xs w-full min-w-0">
+                      <span className="text-slate-400 shrink-0">Subscriber:</span>
+                      <span className="text-white font-semibold truncate">
+                        @{selectedInvoice.subscriber_username}
+                      </span>
+                    </div>
+                    <div className="pt-1.5 border-t border-slate-800/80 flex justify-between items-center gap-2 text-xs w-full min-w-0">
+                      <span className="text-slate-400 shrink-0">Total Amount:</span>
+                      <span className="text-white font-mono font-bold">
+                        {formatCurrency(totalAmount)}
+                      </span>
+                    </div>
+                    <div className="flex justify-between items-center gap-2 text-xs w-full min-w-0">
+                      <span className="text-slate-400 shrink-0">Already Paid:</span>
+                      <span className="text-emerald-400 font-mono font-semibold">
+                        {formatCurrency(alreadyPaid)}
+                      </span>
+                    </div>
+                    <div className="flex justify-between items-center gap-2 text-sm font-semibold w-full min-w-0">
+                      <span className="text-amber-300 shrink-0">Remaining Due:</span>
+                      <span className="text-amber-400 font-mono font-bold text-base">
+                        {formatCurrency(remainingDue)}
+                      </span>
+                    </div>
+                  </div>
+
+                  {/* Payment Input Field */}
+                  <div className="w-full min-w-0">
+                    <div className="flex flex-wrap justify-between items-center gap-1 mb-1 w-full min-w-0">
+                      <label className="text-xs font-medium text-slate-300">
+                        Payment Received (Rs.)
+                      </label>
+                      <button
+                        type="button"
+                        onClick={() => setPaymentReceivedInput(remainingDue)}
+                        className="text-cyan-400 hover:text-cyan-300 text-xs underline cursor-pointer"
+                      >
+                        Fill Full ({formatCurrency(remainingDue)})
+                      </button>
+                    </div>
+                    <div className="relative w-full min-w-0">
+                      <span className="absolute left-3 top-1/2 -translate-y-1/2 text-slate-500 font-mono text-sm">
+                        Rs.
+                      </span>
+                      <input
+                        type="number"
+                        min="1"
+                        step="any"
+                        value={paymentReceivedInput}
+                        onChange={(e) => setPaymentReceivedInput(e.target.value)}
+                        placeholder={`Default: ${remainingDue}`}
+                        className="w-full min-w-0 pl-10 pr-3 py-2.5 bg-slate-900 border border-slate-700 rounded-xl text-white font-mono text-base focus:outline-none focus:border-cyan-500"
+                      />
+                    </div>
+                    <div className="flex flex-wrap items-center justify-between gap-1 text-xs mt-1.5 px-0.5 w-full min-w-0">
+                      <span className="text-slate-400">
+                        Status:{' '}
+                        <span
+                          className={`font-bold ${
+                            willBeFullyPaid ? 'text-emerald-400' : 'text-amber-400'
+                          }`}
+                        >
+                          {willBeFullyPaid ? 'PAID (Settled)' : 'PARTIAL'}
+                        </span>
+                      </span>
+                      {!willBeFullyPaid && (
+                        <span className="text-amber-400 font-mono">
+                          Arrears: {formatCurrency(Math.max(0, totalAmount - projectedTotalPaid))}
+                        </span>
+                      )}
+                    </div>
+                  </div>
+
+                  {/* Collecting Agent Selection */}
+                  <div className="w-full min-w-0">
+                    <label className="block text-xs font-medium text-slate-300 mb-1">
+                      Collecting Field Agent (Credits Cash-in-Hand)
+                    </label>
+                    <select
+                      value={collectingAgentId}
+                      onChange={(e) => setCollectingAgentId(e.target.value)}
+                      className="w-full min-w-0 px-3 py-2.5 bg-slate-900 border border-slate-700 rounded-xl text-base text-white focus:outline-none focus:border-cyan-500"
+                    >
+                      <option value="">-- Direct NOC Collection --</option>
+                      {portalAgents.map((ag) => (
+                        <option key={ag.id} value={ag.id}>
+                          {ag.full_name} ({ag.area})
+                        </option>
+                      ))}
+                    </select>
+                    <p className="text-[11px] text-slate-500 mt-1 leading-snug">
+                      Credits agent&apos;s cash-in-hand by{' '}
+                      <span className="text-emerald-400 font-mono font-bold">
+                        {formatCurrency(Number(paymentReceivedInput) || 0)}
+                      </span>
+                      .
+                    </p>
+                  </div>
+
+                  {/* Payment Method */}
+                  <div className="w-full min-w-0">
+                    <label className="block text-xs font-medium text-slate-300 mb-1">
+                      Payment Method
+                    </label>
+                    <select
+                      value={paidPaymentMethod}
+                      onChange={(e) => setPaidPaymentMethod(e.target.value)}
+                      className="w-full min-w-0 px-3 py-2.5 bg-slate-900 border border-slate-700 rounded-xl text-base text-white focus:outline-none focus:border-cyan-500"
+                    >
+                      <option value="Cash Handover">Cash Handover</option>
+                      <option value="JazzCash">JazzCash</option>
+                      <option value="EasyPaisa">EasyPaisa</option>
+                      <option value="Bank Transfer">Bank Transfer</option>
+                    </select>
+                  </div>
+
+                  <div className="flex flex-col gap-2 pt-3 border-t border-slate-800 w-full min-w-0">
+                    <button
+                      type="button"
+                      onClick={handleConfirmMarkPaid}
+                      disabled={isSubmitting || Number(paymentReceivedInput) <= 0}
+                      className="w-full min-w-0 py-3 px-4 bg-emerald-600 hover:bg-emerald-500 disabled:opacity-50 disabled:cursor-not-allowed text-white font-bold rounded-xl text-base transition shadow-sm flex items-center justify-center gap-2 cursor-pointer"
+                    >
+                      {isSubmitting ? (
+                        <>
+                          <RefreshCw className="w-4 h-4 animate-spin shrink-0" />
+                          <span>Recording Payment...</span>
+                        </>
+                      ) : (
+                        <>
+                          <CheckCircle2 className="w-4 h-4 shrink-0" />
+                          <span>Confirm &amp; Save Payment</span>
+                        </>
+                      )}
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => setIsMarkPaidModalOpen(false)}
+                      className="w-full min-w-0 py-2.5 px-4 bg-slate-800 hover:bg-slate-700 text-slate-300 rounded-xl text-base font-medium transition cursor-pointer"
+                    >
+                      Cancel
+                    </button>
+                  </div>
+                </div>
               </div>
-            </div>
-          </div>
-        );
-      })()}
+            </div>,
+            document.body
+          );
+        })()}
 
       {/* Modal: Edit Invoice */}
-      {isEditModalOpen && invoiceToEdit && (
-        <div className="fixed inset-0 z-[9999] flex items-center justify-center bg-black/75 backdrop-blur-sm p-3 overflow-y-auto animate-fade-in font-sans">
-          <div className="w-[95vw] sm:w-full max-w-lg max-h-[90vh] overflow-y-auto mx-auto my-auto rounded-2xl box-border bg-[#111A2E] border border-slate-700 p-4 sm:p-6 shadow-2xl relative">
-            <div className="flex items-center justify-between pb-4 border-b border-slate-800">
-              <div className="flex items-center gap-2.5">
-                <div className="p-2 bg-indigo-950 border border-indigo-700/60 text-indigo-400 rounded-xl">
-                  <Edit2 className="w-4 h-4" />
+      {isEditModalOpen &&
+        invoiceToEdit &&
+        typeof document !== 'undefined' &&
+        ReactDOM.createPortal(
+          <div
+            style={{
+              position: 'fixed',
+              top: 0,
+              left: 0,
+              right: 0,
+              bottom: 0,
+              width: '100vw',
+              height: '100dvh',
+              zIndex: 999999,
+            }}
+            className="bg-black/85 backdrop-blur-sm flex items-center justify-center p-3 overflow-y-auto font-sans"
+          >
+            <div
+              style={{ width: '100%', maxWidth: '390px', maxHeight: '88dvh' }}
+              className="mobile-safe-modal overflow-y-auto overflow-x-hidden rounded-2xl p-4 box-border mx-auto bg-[#111A2E] border border-slate-700 shadow-2xl relative"
+            >
+              <div className="flex items-center justify-between gap-2 pb-3 border-b border-slate-800 w-full min-w-0">
+                <div className="flex items-center gap-2.5 min-w-0">
+                  <div className="p-2 bg-indigo-950 border border-indigo-700/60 text-indigo-400 rounded-xl shrink-0">
+                    <Edit2 className="w-4 h-4" />
+                  </div>
+                  <div className="min-w-0">
+                    <h2 className="text-base font-bold text-white truncate">Edit Invoice Details</h2>
+                    <p className="text-xs text-slate-400 font-mono truncate">
+                      Invoice #{invoiceToEdit.invoice_no}
+                    </p>
+                  </div>
                 </div>
-                <div>
-                  <h2 className="text-base font-bold text-white">Edit Invoice Details</h2>
-                  <p className="text-xs text-slate-400 font-mono">Invoice #{invoiceToEdit.invoice_no}</p>
-                </div>
-              </div>
-              <button
-                type="button"
-                onClick={() => {
-                  setIsEditModalOpen(false);
-                  setInvoiceToEdit(null);
-                }}
-                className="text-slate-400 hover:text-white transition"
-              >
-                <X className="w-5 h-5" />
-              </button>
-            </div>
-
-            <form onSubmit={handleUpdateInvoice} className="space-y-4 mt-4">
-              <div>
-                <label className="block text-xs font-medium text-slate-300 mb-1">
-                  Subscriber Username
-                </label>
-                <input
-                  type="text"
-                  disabled
-                  value={`@${invoiceToEdit.subscriber_username}`}
-                  className="w-full px-3 py-2 bg-slate-950 border border-slate-800 rounded-lg text-sm text-slate-400 font-mono cursor-not-allowed"
-                />
-              </div>
-
-              <div className="grid grid-cols-2 gap-3">
-                <div>
-                  <label className="block text-xs font-medium text-slate-300 mb-1">Amount (PKR)</label>
-                  <input
-                    type="number"
-                    required
-                    min="0"
-                    step="50"
-                    value={editAmount}
-                    onChange={(e) => setEditAmount(Number(e.target.value))}
-                    className="w-full px-3 py-2 bg-slate-900 border border-slate-700 rounded-lg text-sm text-white font-mono focus:outline-none focus:border-cyan-500"
-                  />
-                </div>
-
-                <div>
-                  <label className="block text-xs font-medium text-slate-300 mb-1">Billing Cycle Day</label>
-                  <input
-                    type="number"
-                    min="1"
-                    max="31"
-                    value={editCycleDay}
-                    onChange={(e) => setEditCycleDay(Number(e.target.value))}
-                    className="w-full px-3 py-2 bg-slate-900 border border-slate-700 rounded-lg text-sm text-white font-mono focus:outline-none focus:border-cyan-500"
-                  />
-                </div>
-              </div>
-
-              <div className="grid grid-cols-2 gap-3">
-                <div>
-                  <label className="block text-xs font-medium text-slate-300 mb-1">Due Date</label>
-                  <input
-                    type="date"
-                    required
-                    value={editDueDate}
-                    onChange={(e) => setEditDueDate(e.target.value)}
-                    className="w-full px-3 py-2 bg-slate-900 border border-slate-700 rounded-lg text-sm text-white focus:outline-none focus:border-cyan-500"
-                  />
-                </div>
-
-                <div>
-                  <label className="block text-xs font-medium text-slate-300 mb-1">Payment Status</label>
-                  <select
-                    value={editStatus}
-                    onChange={(e) => setEditStatus(e.target.value as any)}
-                    className="w-full px-3 py-2 bg-slate-900 border border-slate-700 rounded-lg text-sm text-white focus:outline-none focus:border-cyan-500"
-                  >
-                    <option value="DUE">DUE</option>
-                    <option value="PARTIAL">PARTIAL</option>
-                    <option value="PAID">PAID</option>
-                    <option value="OVERDUE">OVERDUE</option>
-                  </select>
-                </div>
-              </div>
-
-              <div>
-                <label className="block text-xs font-medium text-slate-300 mb-1">Assigned Field Recovery Agent</label>
-                <select
-                  value={editAssignedAgentId}
-                  onChange={(e) => setEditAssignedAgentId(e.target.value)}
-                  className="w-full px-3 py-2 bg-slate-900 border border-slate-700 rounded-lg text-sm text-white focus:outline-none focus:border-cyan-500"
-                >
-                  <option value="">-- Unassigned --</option>
-                  {portalAgents.map((ag) => (
-                    <option key={ag.id} value={ag.id}>
-                      {ag.full_name} ({ag.area})
-                    </option>
-                  ))}
-                </select>
-              </div>
-
-              <div className="flex items-center justify-end gap-3 pt-3 border-t border-slate-800">
                 <button
                   type="button"
                   onClick={() => {
                     setIsEditModalOpen(false);
                     setInvoiceToEdit(null);
                   }}
-                  className="px-4 py-2 bg-slate-800 hover:bg-slate-700 text-slate-300 rounded-lg text-sm transition"
+                  className="text-slate-400 hover:text-white transition shrink-0"
                 >
-                  Cancel
+                  <X className="w-5 h-5" />
                 </button>
+              </div>
+
+              <form onSubmit={handleUpdateInvoice} className="space-y-3.5 mt-4 w-full min-w-0">
+                <div className="w-full min-w-0">
+                  <label className="block text-xs font-medium text-slate-300 mb-1">
+                    Subscriber Username
+                  </label>
+                  <input
+                    type="text"
+                    disabled
+                    value={`@${invoiceToEdit.subscriber_username}`}
+                    className="w-full min-w-0 px-3 py-2 bg-slate-950 border border-slate-800 rounded-xl text-base text-slate-400 font-mono cursor-not-allowed"
+                  />
+                </div>
+
+                <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 w-full min-w-0">
+                  <div className="w-full min-w-0">
+                    <label className="block text-xs font-medium text-slate-300 mb-1">
+                      Amount (PKR)
+                    </label>
+                    <input
+                      type="number"
+                      required
+                      min="0"
+                      step="50"
+                      value={editAmount}
+                      onChange={(e) => setEditAmount(Number(e.target.value))}
+                      className="w-full min-w-0 px-3 py-2 bg-slate-900 border border-slate-700 rounded-xl text-base text-white font-mono focus:outline-none focus:border-cyan-500"
+                    />
+                  </div>
+
+                  <div className="w-full min-w-0">
+                    <label className="block text-xs font-medium text-slate-300 mb-1">
+                      Billing Cycle Day
+                    </label>
+                    <input
+                      type="number"
+                      min="1"
+                      max="31"
+                      value={editCycleDay}
+                      onChange={(e) => setEditCycleDay(Number(e.target.value))}
+                      className="w-full min-w-0 px-3 py-2 bg-slate-900 border border-slate-700 rounded-xl text-base text-white font-mono focus:outline-none focus:border-cyan-500"
+                    />
+                  </div>
+                </div>
+
+                <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 w-full min-w-0">
+                  <div className="w-full min-w-0">
+                    <label className="block text-xs font-medium text-slate-300 mb-1">
+                      Due Date
+                    </label>
+                    <input
+                      type="date"
+                      required
+                      value={editDueDate}
+                      onChange={(e) => setEditDueDate(e.target.value)}
+                      className="w-full min-w-0 px-3 py-2 bg-slate-900 border border-slate-700 rounded-xl text-base text-white focus:outline-none focus:border-cyan-500"
+                    />
+                  </div>
+
+                  <div className="w-full min-w-0">
+                    <label className="block text-xs font-medium text-slate-300 mb-1">
+                      Payment Status
+                    </label>
+                    <select
+                      value={editStatus}
+                      onChange={(e) => setEditStatus(e.target.value as any)}
+                      className="w-full min-w-0 px-3 py-2 bg-slate-900 border border-slate-700 rounded-xl text-base text-white focus:outline-none focus:border-cyan-500"
+                    >
+                      <option value="DUE">DUE</option>
+                      <option value="PARTIAL">PARTIAL</option>
+                      <option value="PAID">PAID</option>
+                      <option value="OVERDUE">OVERDUE</option>
+                    </select>
+                  </div>
+                </div>
+
+                <div className="w-full min-w-0">
+                  <label className="block text-xs font-medium text-slate-300 mb-1">
+                    Assigned Field Recovery Agent
+                  </label>
+                  <select
+                    value={editAssignedAgentId}
+                    onChange={(e) => setEditAssignedAgentId(e.target.value)}
+                    className="w-full min-w-0 px-3 py-2 bg-slate-900 border border-slate-700 rounded-xl text-base text-white focus:outline-none focus:border-cyan-500"
+                  >
+                    <option value="">-- Unassigned --</option>
+                    {portalAgents.map((ag) => (
+                      <option key={ag.id} value={ag.id}>
+                        {ag.full_name} ({ag.area})
+                      </option>
+                    ))}
+                  </select>
+                </div>
+
+                <div className="flex flex-col gap-2 pt-3 border-t border-slate-800 w-full min-w-0">
+                  <button
+                    type="submit"
+                    disabled={isSubmitting}
+                    className="w-full min-w-0 py-2.5 px-4 bg-indigo-600 hover:bg-indigo-500 text-white font-bold rounded-xl text-base transition shadow-lg flex items-center justify-center gap-1.5 cursor-pointer"
+                  >
+                    {isSubmitting ? (
+                      <>
+                        <RefreshCw className="w-4 h-4 animate-spin" />
+                        <span>Saving...</span>
+                      </>
+                    ) : (
+                      <span>Save Changes</span>
+                    )}
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setIsEditModalOpen(false);
+                      setInvoiceToEdit(null);
+                    }}
+                    className="w-full min-w-0 py-2 px-4 bg-slate-800 hover:bg-slate-700 text-slate-300 rounded-xl text-base transition cursor-pointer"
+                  >
+                    Cancel
+                  </button>
+                </div>
+              </form>
+            </div>
+          </div>,
+          document.body
+        )}
+
+      {/* Modal: Delete Invoice Confirmation */}
+      {invoiceToDelete &&
+        typeof document !== 'undefined' &&
+        ReactDOM.createPortal(
+          <div
+            style={{
+              position: 'fixed',
+              top: 0,
+              left: 0,
+              right: 0,
+              bottom: 0,
+              width: '100vw',
+              height: '100dvh',
+              zIndex: 999999,
+            }}
+            className="bg-black/85 backdrop-blur-sm flex items-center justify-center p-3 overflow-y-auto font-sans"
+          >
+            <div
+              style={{ width: '100%', maxWidth: '390px', maxHeight: '88dvh' }}
+              className="mobile-safe-modal overflow-y-auto overflow-x-hidden rounded-2xl p-4 box-border mx-auto bg-[#111A2E] border border-rose-800/80 shadow-2xl relative space-y-4"
+            >
+              <div className="flex items-center gap-3 w-full min-w-0">
+                <div className="p-3 bg-rose-950/90 border border-rose-700 text-rose-400 rounded-xl shrink-0">
+                  <Trash2 className="w-5 h-5" />
+                </div>
+                <div className="min-w-0">
+                  <h3 className="text-base font-bold text-white">Delete Invoice?</h3>
+                  <p className="text-xs text-rose-300 font-mono truncate">
+                    Invoice #{invoiceToDelete.invoice_no}
+                  </p>
+                </div>
+              </div>
+
+              <p className="text-sm text-slate-300 leading-relaxed">
+                Are you sure you want to permanently delete Invoice{' '}
+                <strong className="text-white font-mono">#{invoiceToDelete.invoice_no}</strong> for{' '}
+                <strong className="text-cyan-300">@{invoiceToDelete.subscriber_username}</strong> (
+                {formatCurrency(Number(invoiceToDelete.amount) || 0)})?
+              </p>
+
+              <div className="flex flex-col gap-2 pt-3 border-t border-slate-800 w-full min-w-0">
                 <button
-                  type="submit"
+                  type="button"
+                  onClick={handleDeleteInvoice}
                   disabled={isSubmitting}
-                  className="px-5 py-2 bg-indigo-600 hover:bg-indigo-500 text-white font-bold rounded-lg text-sm transition shadow-lg shadow-indigo-950/50 flex items-center gap-1.5"
+                  className="w-full min-w-0 py-2.5 px-4 bg-rose-600 hover:bg-rose-500 text-white font-bold rounded-xl text-base transition flex items-center justify-center gap-1.5 cursor-pointer"
                 >
                   {isSubmitting ? (
                     <>
                       <RefreshCw className="w-4 h-4 animate-spin" />
-                      <span>Saving...</span>
+                      <span>Deleting...</span>
                     </>
                   ) : (
-                    <span>Save Changes</span>
+                    <span>Delete Permanently</span>
                   )}
                 </button>
-              </div>
-            </form>
-          </div>
-        </div>
-      )}
-
-      {/* Modal: Delete Invoice Confirmation */}
-      {invoiceToDelete && (
-        <div className="fixed inset-0 z-[9999] flex items-center justify-center bg-black/75 backdrop-blur-sm p-3 overflow-y-auto animate-fade-in font-sans">
-          <div className="w-[95vw] sm:w-full max-w-lg max-h-[90vh] overflow-y-auto mx-auto my-auto rounded-2xl box-border bg-[#111A2E] border border-rose-800/80 p-4 sm:p-6 shadow-2xl relative space-y-4">
-            <div className="flex items-center gap-3">
-              <div className="p-3 bg-rose-950/90 border border-rose-700 text-rose-400 rounded-xl">
-                <Trash2 className="w-5 h-5" />
-              </div>
-              <div>
-                <h3 className="text-base font-bold text-white">Delete Invoice?</h3>
-                <p className="text-xs text-rose-300 font-mono">Invoice #{invoiceToDelete.invoice_no}</p>
+                <button
+                  type="button"
+                  onClick={() => setInvoiceToDelete(null)}
+                  className="w-full min-w-0 py-2 px-4 bg-slate-800 hover:bg-slate-700 text-slate-300 rounded-xl text-base font-semibold transition cursor-pointer"
+                >
+                  Cancel
+                </button>
               </div>
             </div>
-
-            <p className="text-xs text-slate-300 leading-relaxed">
-              Are you sure you want to permanently delete Invoice <strong className="text-white font-mono">#{invoiceToDelete.invoice_no}</strong> for <strong className="text-cyan-300">@{invoiceToDelete.subscriber_username}</strong> ({formatCurrency(Number(invoiceToDelete.amount) || 0)})?
-            </p>
-
-            <div className="flex items-center justify-end gap-2.5 pt-3 border-t border-slate-800">
-              <button
-                type="button"
-                onClick={() => setInvoiceToDelete(null)}
-                className="px-4 py-2 bg-slate-800 hover:bg-slate-700 text-slate-300 rounded-lg text-xs font-semibold transition"
-              >
-                Cancel
-              </button>
-              <button
-                type="button"
-                onClick={handleDeleteInvoice}
-                disabled={isSubmitting}
-                className="px-4 py-2 bg-rose-600 hover:bg-rose-500 text-white font-bold rounded-lg text-xs transition shadow-lg shadow-rose-950/50 flex items-center gap-1.5 cursor-pointer"
-              >
-                {isSubmitting ? (
-                  <>
-                    <RefreshCw className="w-3.5 h-3.5 animate-spin" />
-                    <span>Deleting...</span>
-                  </>
-                ) : (
-                  <span>Delete Permanently</span>
-                )}
-              </button>
-            </div>
-          </div>
-        </div>
-      )}
+          </div>,
+          document.body
+        )}
 
       {/* Payment Accounts & WhatsApp Billing Center Drawer */}
       <WhatsAppBillingCenter

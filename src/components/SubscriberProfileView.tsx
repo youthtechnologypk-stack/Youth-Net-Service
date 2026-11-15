@@ -1,4 +1,5 @@
 import React, { useState, useEffect, useMemo, useRef } from 'react';
+import ReactDOM from 'react-dom';
 import {
   ArrowLeft,
   User,
@@ -2622,107 +2623,145 @@ export const SubscriberProfileView: React.FC<SubscriberProfileViewProps> = ({
       )}
 
       {/* MODAL 6: QUICK RECORD PAYMENT (TAB 2) */}
-      {isRecordPaymentModalOpen && selectedInvoiceForPayment && (
-        <div className="fixed inset-0 z-[9999] flex items-center justify-center bg-black/75 backdrop-blur-sm p-3 overflow-y-auto animate-fade-in font-sans">
-          <div className="w-[95vw] sm:w-full max-w-lg max-h-[90vh] overflow-y-auto mx-auto my-auto rounded-2xl box-border bg-[#111A2E] border border-slate-700 p-4 sm:p-5 shadow-2xl relative text-xs">
-            <div className="flex items-center justify-between pb-3 border-b border-slate-800">
-              <h3 className="text-sm font-bold text-white flex items-center gap-2">
-                <DollarSign className="w-4 h-4 text-emerald-400" />
-                <span>Record Invoice Payment</span>
-              </h3>
-              <button
-                type="button"
-                onClick={() => setIsRecordPaymentModalOpen(false)}
-                className="text-slate-400 hover:text-white"
-              >
-                <X className="w-4 h-4" />
-              </button>
-            </div>
-
-            <div className="space-y-3.5 mt-4">
-              <div className="p-3 bg-slate-900 rounded-xl border border-slate-800 space-y-1 font-mono">
-                <div className="flex justify-between">
-                  <span className="text-slate-400">Invoice:</span>
-                  <span className="text-cyan-400 font-bold">#{selectedInvoiceForPayment.invoice_no}</span>
-                </div>
-                <div className="flex justify-between">
-                  <span className="text-slate-400">Total Amount:</span>
-                  <span className="text-white">{formatCurrency(selectedInvoiceForPayment.amount)}</span>
-                </div>
-                <div className="flex justify-between">
-                  <span className="text-slate-400">Already Paid:</span>
-                  <span className="text-emerald-400">{formatCurrency(selectedInvoiceForPayment.paid_amount || 0)}</span>
-                </div>
-                <div className="flex justify-between pt-1 border-t border-slate-800 font-bold">
-                  <span className="text-amber-400">Balance Due:</span>
-                  <span className="text-amber-400">
-                    {formatCurrency(Math.max(0, Number(selectedInvoiceForPayment.amount) - Number(selectedInvoiceForPayment.paid_amount || 0)))}
-                  </span>
-                </div>
-              </div>
-
-              <div>
-                <label className="block font-medium text-slate-300 mb-1">Payment Received (Rs.)</label>
-                <input
-                  type="number"
-                  min="1"
-                  required
-                  value={paymentAmountInput}
-                  onChange={(e) => setPaymentAmountInput(e.target.value)}
-                  className="w-full px-3 py-2 bg-slate-900 border border-slate-700 rounded-lg text-white font-mono text-base focus:outline-none focus:border-cyan-500"
-                />
-              </div>
-
-              <div>
-                <label className="block font-medium text-slate-300 mb-1">Collecting Agent</label>
-                <select
-                  value={collectingAgentInput}
-                  onChange={(e) => setCollectingAgentInput(e.target.value)}
-                  className="w-full px-3 py-2 bg-slate-900 border border-slate-700 rounded-lg text-white focus:outline-none focus:border-cyan-500"
-                >
-                  <option value="">-- Direct NOC / Bank --</option>
-                  {portalAgents.map((ag) => (
-                    <option key={ag.id} value={ag.id}>
-                      {ag.full_name} ({ag.area})
-                    </option>
-                  ))}
-                </select>
-              </div>
-
-              <div>
-                <label className="block font-medium text-slate-300 mb-1">Payment Method</label>
-                <select
-                  value={paymentModeInput}
-                  onChange={(e) => setPaymentModeInput(e.target.value)}
-                  className="w-full px-3 py-2 bg-slate-900 border border-slate-700 rounded-lg text-white focus:outline-none focus:border-cyan-500"
-                >
-                  <option value="Cash Handover">Cash Handover</option>
-                  <option value="JazzCash">JazzCash</option>
-                  <option value="EasyPaisa">EasyPaisa</option>
-                  <option value="Bank Transfer">Bank Transfer</option>
-                </select>
-              </div>
-
-              <div className="flex items-center justify-end gap-2.5 pt-2 border-t border-slate-800">
+      {isRecordPaymentModalOpen &&
+        selectedInvoiceForPayment &&
+        typeof document !== 'undefined' &&
+        ReactDOM.createPortal(
+          <div
+            style={{
+              position: 'fixed',
+              top: 0,
+              left: 0,
+              right: 0,
+              bottom: 0,
+              width: '100vw',
+              height: '100dvh',
+              zIndex: 999999,
+            }}
+            className="bg-black/85 backdrop-blur-sm flex items-center justify-center p-3 overflow-y-auto font-sans"
+          >
+            <div
+              style={{ width: '100%', maxWidth: '390px', maxHeight: '88dvh' }}
+              className="mobile-safe-modal overflow-y-auto overflow-x-hidden rounded-2xl p-4 box-border mx-auto bg-[#111A2E] border border-slate-700 shadow-2xl relative text-base"
+            >
+              <div className="flex items-center justify-between gap-2 pb-3 border-b border-slate-800 w-full min-w-0">
+                <h3 className="text-base font-bold text-white flex items-center gap-2 min-w-0 truncate">
+                  <DollarSign className="w-4 h-4 text-emerald-400 shrink-0" />
+                  <span className="truncate">Record Invoice Payment</span>
+                </h3>
                 <button
                   type="button"
                   onClick={() => setIsRecordPaymentModalOpen(false)}
-                  className="px-3.5 py-1.5 bg-slate-800 hover:bg-slate-700 text-slate-300 rounded-lg transition cursor-pointer"
+                  className="text-slate-400 hover:text-white shrink-0 cursor-pointer"
                 >
-                  Cancel
-                </button>
-                <button
-                  type="button"
-                  onClick={handleConfirmPayment}
-                  className="px-4 py-1.5 bg-emerald-600 hover:bg-emerald-500 text-slate-950 font-bold rounded-lg transition shadow flex items-center gap-1.5 cursor-pointer font-mono"
-                >
-                  Confirm Payment
+                  <X className="w-5 h-5" />
                 </button>
               </div>
+
+              <div className="space-y-3.5 mt-4 w-full min-w-0">
+                <div className="p-3 bg-slate-900 rounded-xl border border-slate-800 space-y-1.5 font-mono text-xs w-full min-w-0">
+                  <div className="flex justify-between gap-2">
+                    <span className="text-slate-400">Invoice:</span>
+                    <span className="text-cyan-400 font-bold truncate">
+                      #{selectedInvoiceForPayment.invoice_no}
+                    </span>
+                  </div>
+                  <div className="flex justify-between gap-2">
+                    <span className="text-slate-400">Total Amount:</span>
+                    <span className="text-white">
+                      {formatCurrency(selectedInvoiceForPayment.amount)}
+                    </span>
+                  </div>
+                  <div className="flex justify-between gap-2">
+                    <span className="text-slate-400">Already Paid:</span>
+                    <span className="text-emerald-400">
+                      {formatCurrency(selectedInvoiceForPayment.paid_amount || 0)}
+                    </span>
+                  </div>
+                  <div className="flex justify-between gap-2 pt-1 border-t border-slate-800 font-bold text-sm">
+                    <span className="text-amber-400">Balance Due:</span>
+                    <span className="text-amber-400">
+                      {formatCurrency(
+                        Math.max(
+                          0,
+                          Number(selectedInvoiceForPayment.amount) -
+                            Number(selectedInvoiceForPayment.paid_amount || 0)
+                        )
+                      )}
+                    </span>
+                  </div>
+                </div>
+
+                <div className="w-full min-w-0">
+                  <label className="block text-xs font-medium text-slate-300 mb-1">
+                    Payment Received (Rs.)
+                  </label>
+                  <input
+                    type="number"
+                    min="1"
+                    required
+                    value={paymentAmountInput}
+                    onChange={(e) => setPaymentAmountInput(e.target.value)}
+                    className="w-full min-w-0 px-3 py-2 bg-slate-900 border border-slate-700 rounded-xl text-white font-mono text-base focus:outline-none focus:border-cyan-500"
+                  />
+                </div>
+
+                <div className="w-full min-w-0">
+                  <label className="block text-xs font-medium text-slate-300 mb-1">
+                    Collecting Agent
+                  </label>
+                  <select
+                    value={collectingAgentInput}
+                    onChange={(e) => setCollectingAgentInput(e.target.value)}
+                    className="w-full min-w-0 px-3 py-2 bg-slate-900 border border-slate-700 rounded-xl text-white text-base focus:outline-none focus:border-cyan-500"
+                  >
+                    <option value="">-- Direct NOC / Bank --</option>
+                    {portalAgents.map((ag) => (
+                      <option key={ag.id} value={ag.id}>
+                        {ag.full_name} ({ag.area})
+                      </option>
+                    ))}
+                  </select>
+                </div>
+
+                <div className="w-full min-w-0">
+                  <label className="block text-xs font-medium text-slate-300 mb-1">
+                    Payment Method
+                  </label>
+                  <select
+                    value={paymentModeInput}
+                    onChange={(e) => setPaymentModeInput(e.target.value)}
+                    className="w-full min-w-0 px-3 py-2 bg-slate-900 border border-slate-700 rounded-xl text-white text-base focus:outline-none focus:border-cyan-500"
+                  >
+                    <option value="Cash Handover">Cash Handover</option>
+                    <option value="JazzCash">JazzCash</option>
+                    <option value="EasyPaisa">EasyPaisa</option>
+                    <option value="Bank Transfer">Bank Transfer</option>
+                  </select>
+                </div>
+
+                <div className="flex flex-col gap-2 pt-2 border-t border-slate-800 w-full min-w-0">
+                  <button
+                    type="button"
+                    onClick={handleConfirmPayment}
+                    className="w-full min-w-0 py-3 px-4 bg-emerald-600 hover:bg-emerald-500 text-white font-bold rounded-xl text-base transition shadow flex items-center justify-center gap-1.5 cursor-pointer"
+                  >
+                    <CheckCircle2 className="w-4 h-4 shrink-0" />
+                    <span>Confirm &amp; Save Payment</span>
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => setIsRecordPaymentModalOpen(false)}
+                    className="w-full min-w-0 py-2.5 px-4 bg-slate-800 hover:bg-slate-700 text-slate-300 rounded-xl text-base transition cursor-pointer"
+                  >
+                    Cancel
+                  </button>
+                </div>
+              </div>
             </div>
-          </div>
-        </div>
-      )}
+          </div>,
+          document.body
+        )}
 
       {/* Modal: Generate Invoice for Current Locked Subscriber */}
       <CreateInvoiceModal

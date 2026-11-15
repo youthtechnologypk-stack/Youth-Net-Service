@@ -1,4 +1,5 @@
 import React, { useState, useEffect } from 'react';
+import ReactDOM from 'react-dom';
 import {
   CreditCard,
   DollarSign,
@@ -83,7 +84,7 @@ export const RecordPaymentModal: React.FC<RecordPaymentModalProps> = ({
     }
   }, [invoice, agents]);
 
-  if (!isOpen || !invoice) return null;
+  if (!isOpen || !invoice || typeof document === 'undefined') return null;
 
   const handleSubmit = (e: React.FormEvent) => {
     e.preventDefault();
@@ -116,30 +117,47 @@ export const RecordPaymentModal: React.FC<RecordPaymentModalProps> = ({
     }
   };
 
-  return (
-    <div className="fixed inset-0 z-[9999] flex items-center justify-center bg-black/75 backdrop-blur-sm p-3 overflow-y-auto animate-fadeIn">
-      <div className="w-[95vw] sm:w-full max-w-lg max-h-[90vh] overflow-y-auto mx-auto my-auto rounded-2xl box-border bg-slate-900 border border-slate-800 p-4 sm:p-6 shadow-2xl space-y-5 text-xs font-sans">
+  return ReactDOM.createPortal(
+    <div
+      style={{
+        position: 'fixed',
+        top: 0,
+        left: 0,
+        right: 0,
+        bottom: 0,
+        width: '100vw',
+        height: '100dvh',
+        zIndex: 999999,
+      }}
+      className="bg-black/85 backdrop-blur-sm flex items-center justify-center p-3 overflow-y-auto font-sans"
+    >
+      <div
+        style={{ width: '100%', maxWidth: '390px', maxHeight: '88dvh' }}
+        className="mobile-safe-modal overflow-y-auto overflow-x-hidden rounded-2xl p-4 box-border mx-auto bg-slate-900 border border-slate-800 shadow-2xl space-y-4 text-base font-sans"
+      >
         {/* Header */}
-        <div className="flex items-center justify-between pb-3 border-b border-slate-800">
-          <div className="flex items-center gap-2.5">
-            <div className="p-2 bg-emerald-950 border border-emerald-700/60 rounded-xl text-emerald-400">
+        <div className="flex items-start justify-between gap-2 pb-3 border-b border-slate-800 w-full min-w-0">
+          <div className="flex items-start gap-2.5 min-w-0">
+            <div className="p-2 bg-emerald-950 border border-emerald-700/60 rounded-xl text-emerald-400 shrink-0">
               <CreditCard className="w-5 h-5" />
             </div>
-            <div>
-              <div className="flex items-center gap-2">
-                <h3 className="text-base font-bold text-white">Record Fee Payment</h3>
-                <span className="px-2 py-0.5 rounded font-mono text-[10px] font-bold bg-cyan-950 text-cyan-300 border border-cyan-800">
+            <div className="min-w-0">
+              <div className="flex flex-wrap items-center gap-1.5 min-w-0">
+                <h3 className="text-base font-bold text-white truncate">Record Payment &amp; Arrears</h3>
+                <span className="px-2 py-0.5 rounded font-mono text-[10px] font-bold bg-cyan-950 text-cyan-300 border border-cyan-800 shrink-0">
                   {invoice.invoiceNumber}
                 </span>
               </div>
-              <p className="text-slate-400 text-xs mt-0.5">
-                Mark fee as cleared, update subscriber balance to zero, and record timestamp.
+              <p className="text-slate-400 text-xs mt-0.5 leading-snug">
+                Clear invoice balance and update subscriber ledger.
               </p>
             </div>
           </div>
           <button
+            type="button"
             onClick={onClose}
-            className="text-slate-400 hover:text-white p-1 rounded-lg transition"
+            className="text-slate-400 hover:text-white p-1 rounded-lg transition shrink-0 cursor-pointer"
+            aria-label="Close modal"
           >
             <X className="w-5 h-5" />
           </button>
@@ -147,67 +165,69 @@ export const RecordPaymentModal: React.FC<RecordPaymentModalProps> = ({
 
         {/* Error Alert */}
         {errorMessage && (
-          <div className="p-3 bg-rose-950/80 border border-rose-800 rounded-xl text-rose-300 text-xs flex items-center gap-2">
+          <div className="p-3 bg-rose-950/80 border border-rose-800 rounded-xl text-rose-300 text-xs flex items-center gap-2 w-full min-w-0">
             <AlertCircle className="w-4 h-4 shrink-0 text-rose-400" />
-            <span>{errorMessage}</span>
+            <span className="min-w-0 break-words">{errorMessage}</span>
           </div>
         )}
 
         {/* Subscriber & Invoice Summary Card */}
-        <div className="bg-slate-950 p-4 rounded-xl border border-slate-800 space-y-2 font-mono">
-          <div className="flex items-start justify-between">
-            <div>
-              <span className="text-[10px] text-slate-500 uppercase block">Subscriber &amp; Account</span>
-              <span className="text-white font-bold text-sm font-sans block">{invoice.customerName}</span>
-              <span className="text-cyan-400 text-[11px] block">
-                PPPoE: @{customer?.pppoeUsername || invoice.customerId}
+        <div className="bg-slate-950 p-3.5 rounded-xl border border-slate-800 space-y-2 font-mono w-full min-w-0">
+          <div className="flex items-start justify-between gap-2 w-full min-w-0">
+            <div className="min-w-0 flex-1">
+              <span className="text-[10px] text-slate-500 uppercase block">Subscriber</span>
+              <span className="text-white font-bold text-sm font-sans block truncate">
+                {invoice.customerName}
+              </span>
+              <span className="text-cyan-400 text-xs block truncate">
+                @{customer?.pppoeUsername || invoice.customerId}
               </span>
             </div>
-            <div className="text-right">
-              <span className="text-[10px] text-slate-500 uppercase block">Total Due Balance</span>
+            <div className="text-right shrink-0">
+              <span className="text-[10px] text-slate-500 uppercase block">Total Due</span>
               <span className="text-emerald-400 font-bold text-base block">
                 {formatCurrency(invoice.totalAmount)}
               </span>
               <span className="text-[10px] text-slate-400 block font-sans">
-                Month: {invoice.billingMonth}
+                {invoice.billingMonth}
               </span>
             </div>
           </div>
 
-          <div className="grid grid-cols-2 gap-2 pt-2 border-t border-slate-800/80 text-[11px] text-slate-400 font-sans">
-            <div>
+          <div className="flex flex-wrap items-center justify-between gap-2 pt-2 border-t border-slate-800/80 text-xs text-slate-400 font-sans w-full min-w-0">
+            <div className="min-w-0 truncate">
               <span>Package: </span>
               <strong className="text-slate-200">{invoice.packageName}</strong>
             </div>
-            <div className="text-right">
-              <span>Invoice Due Date: </span>
+            <div className="shrink-0">
+              <span>Due: </span>
               <strong className="text-amber-400">{invoice.dueDate}</strong>
             </div>
           </div>
         </div>
 
         {/* Form */}
-        <form onSubmit={handleSubmit} className="space-y-4">
-          <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+        <form onSubmit={handleSubmit} className="space-y-3.5 w-full min-w-0">
+          <div className="grid grid-cols-1 gap-3 w-full min-w-0">
             {/* Payment Received Date & Time */}
-            <div>
-              <label className="block text-slate-400 text-[11px] mb-1 font-mono flex items-center gap-1">
-                <Calendar className="w-3.5 h-3.5 text-cyan-400" />
-                <span>Payment Received Date &amp; Time *</span>
+            <div className="w-full min-w-0">
+              <label className="block text-slate-400 text-xs mb-1 font-mono flex items-center gap-1">
+                <Calendar className="w-3.5 h-3.5 text-cyan-400 shrink-0" />
+                <span>Payment Date &amp; Time *</span>
               </label>
               <input
                 type="datetime-local"
                 required
                 value={paymentDate}
                 onChange={(e) => setPaymentDate(e.target.value)}
-                className="w-full bg-slate-950 border border-slate-700 rounded-xl px-3 py-2 text-white text-xs focus:outline-none focus:border-cyan-500 font-mono"
+                className="w-full min-w-0 bg-slate-950 border border-slate-700 rounded-xl px-3 py-2 text-white text-base focus:outline-none focus:border-cyan-500 font-mono"
               />
             </div>
 
             {/* Amount Received */}
-            <div>
-              <label className="block text-slate-400 text-[11px] mb-1 font-mono flex items-center gap-1">
-                <DollarSign className="w-3.5 h-3.5 text-emerald-400" />
+            <div className="w-full min-w-0">
+              <label className="block text-slate-400 text-xs mb-1 font-mono flex items-center gap-1">
+                <DollarSign className="w-3.5 h-3.5 text-emerald-400 shrink-0" />
                 <span>Amount Received ({currencySymbol}) *</span>
               </label>
               <input
@@ -217,21 +237,21 @@ export const RecordPaymentModal: React.FC<RecordPaymentModalProps> = ({
                 required
                 value={amountReceived}
                 onChange={(e) => setAmountReceived(Number(e.target.value))}
-                className="w-full bg-slate-950 border border-slate-700 rounded-xl px-3 py-2 text-white text-xs focus:outline-none focus:border-cyan-500 font-mono font-bold"
+                className="w-full min-w-0 bg-slate-950 border border-slate-700 rounded-xl px-3 py-2 text-white text-base focus:outline-none focus:border-cyan-500 font-mono font-bold"
               />
             </div>
           </div>
 
-          <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+          <div className="grid grid-cols-1 gap-3 w-full min-w-0">
             {/* Payment Method */}
-            <div>
-              <label className="block text-slate-400 text-[11px] mb-1 font-mono">
+            <div className="w-full min-w-0">
+              <label className="block text-slate-400 text-xs mb-1 font-mono">
                 Payment Method / Channel *
               </label>
               <select
                 value={paymentMethod}
                 onChange={(e) => setPaymentMethod(e.target.value)}
-                className="w-full bg-slate-950 border border-slate-700 rounded-xl px-3 py-2 text-white text-xs focus:outline-none focus:border-cyan-500"
+                className="w-full min-w-0 bg-slate-950 border border-slate-700 rounded-xl px-3 py-2 text-white text-base focus:outline-none focus:border-cyan-500"
               >
                 <option value="agent_cash">Cash Handover to Field Agent</option>
                 <option value="easypaisa">EasyPaisa Mobile Account</option>
@@ -242,9 +262,9 @@ export const RecordPaymentModal: React.FC<RecordPaymentModalProps> = ({
             </div>
 
             {/* Collector / Agent Name */}
-            <div>
-              <label className="block text-slate-400 text-[11px] mb-1 font-mono flex items-center gap-1">
-                <User className="w-3.5 h-3.5 text-cyan-400" />
+            <div className="w-full min-w-0">
+              <label className="block text-slate-400 text-xs mb-1 font-mono flex items-center gap-1">
+                <User className="w-3.5 h-3.5 text-cyan-400 shrink-0" />
                 <span>Collector / Officer Name *</span>
               </label>
               <input
@@ -252,14 +272,14 @@ export const RecordPaymentModal: React.FC<RecordPaymentModalProps> = ({
                 required
                 value={collectorName}
                 onChange={(e) => setCollectorName(e.target.value)}
-                placeholder="e.g. Field Recovery Agent / Counter Cashier"
-                className="w-full bg-slate-950 border border-slate-700 rounded-xl px-3 py-2 text-white text-xs focus:outline-none focus:border-cyan-500 font-sans"
+                placeholder="e.g. Field Recovery Agent"
+                className="w-full min-w-0 bg-slate-950 border border-slate-700 rounded-xl px-3 py-2 text-white text-base focus:outline-none focus:border-cyan-500 font-sans"
               />
             </div>
           </div>
 
           {/* Quick Collector Preset Pills */}
-          <div className="flex flex-wrap items-center gap-1.5 font-mono text-[10px]">
+          <div className="flex flex-wrap items-center gap-1.5 font-mono text-xs w-full min-w-0">
             <span className="text-slate-500">Quick Fill:</span>
             {agents.slice(0, 3).map((a) => (
               <button
@@ -269,7 +289,7 @@ export const RecordPaymentModal: React.FC<RecordPaymentModalProps> = ({
                   setCollectorName(a.name);
                   setPaymentMethod('agent_cash');
                 }}
-                className="px-2 py-0.5 rounded bg-slate-950 hover:bg-slate-800 text-slate-300 border border-slate-800 transition cursor-pointer"
+                className="px-2 py-1 rounded-lg bg-slate-950 hover:bg-slate-800 text-slate-300 border border-slate-800 transition cursor-pointer"
               >
                 {a.name}
               </button>
@@ -280,39 +300,36 @@ export const RecordPaymentModal: React.FC<RecordPaymentModalProps> = ({
                 setCollectorName('Office Counter Cashier');
                 setPaymentMethod('agent_cash');
               }}
-              className="px-2 py-0.5 rounded bg-slate-950 hover:bg-slate-800 text-cyan-300 border border-slate-800 transition cursor-pointer"
+              className="px-2 py-1 rounded-lg bg-slate-950 hover:bg-slate-800 text-cyan-300 border border-slate-800 transition cursor-pointer"
             >
               Office Counter
             </button>
           </div>
 
           {/* Transaction / Reference ID */}
-          <div>
-            <label className="block text-slate-400 text-[11px] mb-1 font-mono">
-              Transaction Voucher / Bank Reference (Optional)
+          <div className="w-full min-w-0">
+            <label className="block text-slate-400 text-xs mb-1 font-mono">
+              Transaction Reference (Optional)
             </label>
             <input
               type="text"
               value={transactionRef}
               onChange={(e) => setTransactionRef(e.target.value)}
-              placeholder="e.g. EP-90481283 or Bank Slip #401"
-              className="w-full bg-slate-950 border border-slate-700 rounded-xl px-3 py-2 text-white text-xs focus:outline-none focus:border-cyan-500 font-mono"
+              placeholder="e.g. EP-90481283"
+              className="w-full min-w-0 bg-slate-950 border border-slate-700 rounded-xl px-3 py-2 text-white text-base focus:outline-none focus:border-cyan-500 font-mono"
             />
           </div>
 
           {/* WhatsApp Receipt Toggle */}
-          <div className="p-3 bg-slate-950 rounded-xl border border-slate-800 flex items-center justify-between">
-            <div className="flex items-center gap-2">
+          <div className="p-3 bg-slate-950 rounded-xl border border-slate-800 flex items-center justify-between gap-2 w-full min-w-0">
+            <div className="flex items-center gap-2 min-w-0">
               <Smartphone className="w-4 h-4 text-emerald-400 shrink-0" />
-              <div>
-                <div className="flex items-center gap-1.5">
-                  <span className="font-bold text-white block">WhatsApp Business Cloud API Receipt</span>
-                  <span className="px-1.5 py-0.2 rounded font-mono text-[9px] font-bold bg-emerald-950 text-emerald-300 border border-emerald-800">
-                    Template v19.0
-                  </span>
-                </div>
-                <span className="text-[10px] text-slate-400">
-                  Automated dispatch with WAMID tracking to {invoice.customerPhone || 'Subscriber Phone'}
+              <div className="min-w-0">
+                <span className="font-bold text-white text-xs block truncate">
+                  WhatsApp Receipt Dispatch
+                </span>
+                <span className="text-[11px] text-slate-400 block truncate">
+                  To {invoice.customerPhone || 'Subscriber Phone'}
                 </span>
               </div>
             </div>
@@ -320,32 +337,33 @@ export const RecordPaymentModal: React.FC<RecordPaymentModalProps> = ({
               type="checkbox"
               checked={sendWhatsApp}
               onChange={(e) => setSendWhatsApp(e.target.checked)}
-              className="w-4 h-4 accent-emerald-500 cursor-pointer rounded"
+              className="w-5 h-5 accent-emerald-500 cursor-pointer rounded shrink-0"
             />
           </div>
 
           {/* Footer Actions */}
-          <div className="flex items-center justify-end gap-2.5 pt-3 border-t border-slate-800">
+          <div className="flex flex-col gap-2 pt-3 border-t border-slate-800 w-full min-w-0">
+            <button
+              type="submit"
+              disabled={isSubmitting}
+              className="w-full min-w-0 py-3 px-4 rounded-xl bg-emerald-600 hover:bg-emerald-500 text-white font-bold text-base flex items-center justify-center gap-1.5 transition cursor-pointer shadow-lg shadow-emerald-950/50"
+            >
+              <CheckCircle2 className="w-4 h-4 shrink-0" />
+              <span>{isSubmitting ? 'Saving Payment...' : 'Confirm & Save Payment'}</span>
+            </button>
             <button
               type="button"
               onClick={onClose}
               disabled={isSubmitting}
-              className="px-4 py-2 rounded-xl bg-slate-800 hover:bg-slate-700 text-slate-300 font-bold transition cursor-pointer"
+              className="w-full min-w-0 py-2.5 px-4 rounded-xl bg-slate-800 hover:bg-slate-700 text-slate-300 font-semibold text-base transition cursor-pointer"
             >
               Cancel
-            </button>
-            <button
-              type="submit"
-              disabled={isSubmitting}
-              className="px-5 py-2 rounded-xl bg-emerald-600 hover:bg-emerald-500 text-slate-950 font-bold text-xs flex items-center gap-1.5 transition cursor-pointer shadow-lg shadow-emerald-950/50"
-            >
-              <CheckCircle2 className="w-4 h-4" />
-              <span>{isSubmitting ? 'Recording Payment...' : 'Confirm Payment & Mark Paid'}</span>
             </button>
           </div>
         </form>
       </div>
-    </div>
+    </div>,
+    document.body
   );
 };
 
