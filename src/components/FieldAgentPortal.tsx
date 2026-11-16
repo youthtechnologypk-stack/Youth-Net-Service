@@ -56,6 +56,7 @@ import {
   isLikelyNetworkError,
   isOfflineCapableRole,
 } from '../services/OfflineSyncManager';
+import { reportSupabaseReachability } from '../lib/offlineFieldQueue';
 
 interface FieldAgentPortalProps {
   currentUser: UserAccount;
@@ -308,8 +309,12 @@ export const FieldAgentPortal: React.FC<FieldAgentPortalProps> = ({
       setAgentCash(overlaid.cashInHand);
       setPaymentAccounts(loadedAccounts);
       setWhatsappConfig(loadedWaConfig);
+      reportSupabaseReachability(true);
     } catch (err) {
       console.warn('FieldAgentPortal fetch error:', err);
+      if (isLikelyNetworkError(err)) {
+        reportSupabaseReachability(false);
+      }
       const effectiveId = resolvedAgentIdRef.current || currentUser.id;
       applyCachedOfflineSnapshot(effectiveId);
     } finally {
@@ -591,6 +596,7 @@ export const FieldAgentPortal: React.FC<FieldAgentPortalProps> = ({
       await fetchAgentData();
     } catch (err: any) {
       if (isLikelyNetworkError(err) && isOfflineCapableRole(currentUser.role)) {
+        reportSupabaseReachability(false);
         try {
           offlineSyncManager.enqueueOfflinePayment(effectiveAgentId, currentUser.role, {
             invoiceId: inv.id,

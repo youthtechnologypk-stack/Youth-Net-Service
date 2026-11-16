@@ -478,4 +478,25 @@ BEGIN
         END IF;
     END IF;
 END $$;
+
+CREATE TABLE IF NOT EXISTS public.agent_gps_breadcrumbs (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    agent_id TEXT NOT NULL,
+    agent_name TEXT NOT NULL DEFAULT 'Field Agent',
+    lat DOUBLE PRECISION NOT NULL,
+    lng DOUBLE PRECISION NOT NULL,
+    accuracy_meters DOUBLE PRECISION NULL,
+    recorded_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+CREATE INDEX IF NOT EXISTS idx_agent_gps_breadcrumbs_agent_time ON public.agent_gps_breadcrumbs (agent_id, recorded_at DESC);
+ALTER TABLE public.agent_gps_breadcrumbs ENABLE ROW LEVEL SECURITY;
+GRANT SELECT, INSERT, UPDATE, DELETE ON public.agent_gps_breadcrumbs TO anon, authenticated;
+
+DO $$
+BEGIN
+    IF NOT EXISTS (SELECT 1 FROM pg_policies WHERE schemaname='public' AND tablename='agent_gps_breadcrumbs' AND policyname='agent_gps_breadcrumbs_full_access') THEN
+        CREATE POLICY agent_gps_breadcrumbs_full_access ON public.agent_gps_breadcrumbs FOR ALL TO anon, authenticated USING (true) WITH CHECK (true);
+    END IF;
+END $$;
 `;

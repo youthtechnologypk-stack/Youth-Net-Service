@@ -69,6 +69,16 @@ import {
   SqliteSyncProgress,
   sqliteOfflineAdapter,
 } from './lib/sqliteOfflineAdapter';
+import {
+  OfflineConnectivitySnapshot,
+  flushGpsBreadcrumbsToSupabase,
+  getConnectivitySnapshot,
+  hydrateOfflineQueueFromIndexedDb,
+  probeSupabaseReachability,
+  reportSupabaseReachability,
+  subscribeOfflineFieldConnectivity,
+} from './lib/offlineFieldQueue';
+import { offlineSyncManager } from './services/OfflineSyncManager';
 
 function getLandingTabForRole(role: SystemRole): ActiveTab {
   switch (role) {
@@ -194,6 +204,9 @@ function ISPAppContent() {
     sqliteOfflineAdapter.getCachedStats()
   );
   const [sqliteDatasetProgress, setSqliteDatasetProgress] = useState<SqliteSyncProgress | null>(null);
+  const [connectivityState, setConnectivityState] = useState<OfflineConnectivitySnapshot>(() =>
+    getConnectivitySnapshot()
+  );
   const [offlineSyncNotice, setOfflineSyncNotice] = useState<string | null>(null);
   const isSyncingQueueRef = useRef<boolean>(false);
 
@@ -206,50 +219,99 @@ function ISPAppContent() {
     setOfflineQueuedRequests(items);
   }, [activeAgentId, isAgentSession]);
 
-  const runOfflineQueueSync = useCallback(async () => {
-    if (!isAgentSession || !activeAgentId || isSyncingQueueRef.current) return;
-    if (typeof navigator !== 'undefined' && navigator.onLine === false) return;
-
-    isSyncingQueueRef.current = true;
-    setIsSyncingOfflineQueue(true);
-    setQueueSyncProgress(null);
-    try {
-      const result = await syncIndexedDbApiQueue(activeAgentId, (progress) => {
-        setQueueSyncProgress(progress);
-      });
-      const remaining = await getQueuedApiRequests(activeAgentId);
-      setOfflineQueuedRequests(remaining);
-      void sqliteOfflineAdapter.refreshStats();
-
-      if (result.syncedCount > 0) {
-        setOfflineSyncNotice(
-          `Connection restored — Synced ${result.syncedCount} offline API request${
-            result.syncedCount === 1 ? '' : 's'
-          } from Local SQLite / IndexedDB.`
-        );
-        window.dispatchEvent(
-          new CustomEvent('youthnet-offline-api-synced', {
-            detail: { agentId: activeAgentId, syncedCount: result.syncedCount },
-          })
-        );
+  const runOfflineQueueSync = useCallback(
+    async (verifyReachabilityFirst = false) => {
+      if (!isAgentSession || !activeAgentId || isSyncingQueueRef.current) return;
+      if (typeof navigator !== 'undefined' && navigator.onLine === false) {
+        reportSupabaseReachability(false);
+        return;
       }
-    } finally {
-      isSyncingQueueRef.current = false;
-      setIsSyncingOfflineQueue(false);
+
+      if (verifyReachabilityFirst) {
+        const ok = await probeSupabaseReachability();
+        if (!ok) return;
+      }
+
+      isSyncingQueueRef.current = true;
+      setIsSyncingOfflineQueue(true);
       setQueueSyncProgress(null);
-    }
-  }, [activeAgentId, isAgentSession]);
+      try {
+        const [gpsRes, outboxRes, apiRes] = await Promise.all([
+          flushGpsBreadcrumbsToSupabase(activeAgentId),
+          offlineSyncManager.autoSyncOutbox(activeAgentId, currentRole),
+          syncIndexedDbApiQueue(activeAgentId, (progress) => {
+            setQueueSyncProgress(progress);
+          }),
+        ]);
+
+        const remaining = await getQueuedApiRequests(activeAgentId);
+        setOfflineQueuedRequests(remaining);
+        setConnectivityState(getConnectivitySnapshot(remaining.length));
+        void sqliteOfflineAdapter.refreshStats();
+
+        const totalSynced = gpsRes.syncedCount + outboxRes.syncedCount + apiRes.syncedCount;
+        if (totalSynced > 0) {
+          setOfflineSyncNotice(
+            `Auto-synced ${totalSynced} queued offline item${
+              totalSynced === 1 ? '' : 's'
+            } (${gpsRes.syncedCount} GPS, ${outboxRes.syncedCount} field action, ${
+              apiRes.syncedCount
+            } API) to Supabase.`
+          );
+          window.dispatchEvent(
+            new CustomEvent('youthnet-offline-api-synced', {
+              detail: { agentId: activeAgentId, syncedCount: totalSynced },
+            })
+          );
+        }
+      } finally {
+        isSyncingQueueRef.current = false;
+        setIsSyncingOfflineQueue(false);
+        setQueueSyncProgress(null);
+      }
+    },
+    [activeAgentId, currentRole, isAgentSession]
+  );
 
   useEffect(() => {
     if (!isAgentSession) return;
     void sqliteOfflineAdapter.init();
+    void hydrateOfflineQueueFromIndexedDb();
     const unsubStats = sqliteOfflineAdapter.subscribeStats(setSqliteStats);
     const unsubProgress = sqliteOfflineAdapter.subscribeProgress(setSqliteDatasetProgress);
+    const unsubConn = subscribeOfflineFieldConnectivity((snap) => {
+      setConnectivityState(snap);
+    });
+
+    // Periodic reachability probe handles WhatsApp-only mobile SIM packages where
+    // navigator.onLine stays true while Supabase is temporarily unreachable.
+    const probeTimer = window.setInterval(async () => {
+      const wasBlocked = getConnectivitySnapshot().isOfflineOrBlocked;
+      const reachable = await probeSupabaseReachability();
+      if (reachable) {
+        const snap = getConnectivitySnapshot();
+        if (wasBlocked || snap.totalQueuedItems > 0) {
+          void runOfflineQueueSync(false);
+        }
+      }
+    }, 20000);
+
+    const handleVisibilityOrFocus = () => {
+      if (typeof document !== 'undefined' && document.visibilityState === 'hidden') return;
+      void runOfflineQueueSync(true);
+    };
+    window.addEventListener('focus', handleVisibilityOrFocus);
+    document.addEventListener('visibilitychange', handleVisibilityOrFocus);
+
     return () => {
+      window.clearInterval(probeTimer);
+      window.removeEventListener('focus', handleVisibilityOrFocus);
+      document.removeEventListener('visibilitychange', handleVisibilityOrFocus);
       unsubStats();
       unsubProgress();
+      unsubConn();
     };
-  }, [isAgentSession]);
+  }, [isAgentSession, runOfflineQueueSync]);
 
   useEffect(() => {
     if (!offlineSyncNotice) return;
@@ -298,10 +360,17 @@ function ISPAppContent() {
       }
 
       try {
-        return await nativeFetch(input, init);
+        const res = await nativeFetch(input, init);
+        if (url.toLowerCase().includes('/rest/v1/')) {
+          reportSupabaseReachability(true);
+        }
+        return res;
       } catch (err) {
         if (isNetworkFetchError(err)) {
-          setIsNetworkOnline(false);
+          reportSupabaseReachability(false);
+          if (typeof navigator !== 'undefined' && navigator.onLine === false) {
+            setIsNetworkOnline(false);
+          }
           return queueAndRespond();
         }
         throw err;
@@ -312,11 +381,12 @@ function ISPAppContent() {
 
     const handleOnline = () => {
       setIsNetworkOnline(true);
-      void runOfflineQueueSync();
+      void runOfflineQueueSync(true);
     };
 
     const handleOffline = () => {
       setIsNetworkOnline(false);
+      reportSupabaseReachability(false);
     };
 
     window.addEventListener('online', handleOnline);
@@ -468,6 +538,20 @@ function ISPAppContent() {
           onSwitchRole={isOriginalAdmin ? handleSwitchRole : undefined}
           currentUser={currentUser}
           onLogout={handleLogout}
+          offlineModeStatus={
+            isAgent
+              ? {
+                  isOfflineOrBlocked:
+                    !isNetworkOnline || connectivityState.isOfflineOrBlocked,
+                  isAutoSyncing: isSyncingOfflineQueue,
+                  queuedCount:
+                    connectivityState.gpsBreadcrumbsCount +
+                    connectivityState.pendingPaymentsCount +
+                    offlineQueuedRequests.length,
+                  onRetrySync: () => void runOfflineQueueSync(true),
+                }
+              : undefined
+          }
         />
 
         {/* RBAC Role Indicator Banner (Strictly hidden for logged-in CLIENT, AGENT, and MANAGER) */}
@@ -502,17 +586,19 @@ function ISPAppContent() {
             {/* Local SQLite & IndexedDB Offline API Queue Status Bar (Field Agents) */}
             {isAgent &&
               (!isNetworkOnline ||
+                connectivityState.isOfflineOrBlocked ||
+                connectivityState.totalQueuedItems > 0 ||
                 offlineQueuedRequests.length > 0 ||
                 isSyncingOfflineQueue ||
                 sqliteDatasetProgress !== null ||
                 offlineSyncNotice) && (
                 <div
                   className={`w-full rounded-xl border px-3.5 py-2.5 flex flex-wrap items-center justify-between gap-2 text-xs font-mono shadow-sm ${
-                    !isNetworkOnline
+                    !isNetworkOnline || connectivityState.isOfflineOrBlocked
                       ? 'bg-amber-950/75 border-amber-600/60 text-amber-100'
                       : isSyncingOfflineQueue || sqliteDatasetProgress
                       ? 'bg-cyan-950/75 border-cyan-600/60 text-cyan-100'
-                      : offlineQueuedRequests.length > 0
+                      : connectivityState.totalQueuedItems + offlineQueuedRequests.length > 0
                       ? 'bg-indigo-950/75 border-indigo-600/60 text-indigo-100'
                       : 'bg-emerald-950/75 border-emerald-600/60 text-emerald-100'
                   }`}
@@ -520,38 +606,44 @@ function ISPAppContent() {
                   aria-live="polite"
                 >
                   <div className="flex items-center gap-2 min-w-0">
-                    {!isNetworkOnline ? (
+                    {!isNetworkOnline || connectivityState.isOfflineOrBlocked ? (
                       <WifiOff className="w-4 h-4 text-amber-400 shrink-0" />
                     ) : isSyncingOfflineQueue || sqliteDatasetProgress ? (
                       <RefreshCw className="w-4 h-4 text-cyan-400 animate-spin shrink-0" />
-                    ) : offlineQueuedRequests.length > 0 ? (
+                    ) : connectivityState.totalQueuedItems + offlineQueuedRequests.length > 0 ? (
                       <Database className="w-4 h-4 text-indigo-400 shrink-0" />
                     ) : (
                       <CheckCircle2 className="w-4 h-4 text-emerald-400 shrink-0" />
                     )}
 
                     <span className="truncate sm:whitespace-normal">
-                      {!isNetworkOnline
-                        ? `Offline Mode — ${offlineQueuedRequests.length} API request(s) queued • SQLite Cache: ${sqliteStats.nodesCount} nodes, ${sqliteStats.subscribersCount} subscribers`
+                      {!isNetworkOnline || connectivityState.isOfflineOrBlocked
+                        ? `Offline / Restricted Bundle Mode — ${
+                            connectivityState.gpsBreadcrumbsCount
+                          } GPS, ${connectivityState.pendingPaymentsCount} payments, ${
+                            offlineQueuedRequests.length
+                          } API queued • SQLite: ${sqliteStats.nodesCount} nodes`
                         : isSyncingOfflineQueue
-                        ? `Connection restored — Syncing queued API requests (${
+                        ? `🔄 Auto-Syncing to DB... (${
                             queueSyncProgress
                               ? `${queueSyncProgress.processed}/${queueSyncProgress.total}`
-                              : `0/${offlineQueuedRequests.length}`
-                          })...`
+                              : `${connectivityState.totalQueuedItems + offlineQueuedRequests.length} items`
+                          })`
                         : sqliteDatasetProgress
                         ? `SQLite Background Cache (${sqliteDatasetProgress.dataset}): ${sqliteDatasetProgress.processed}/${sqliteDatasetProgress.total} rows`
-                        : offlineQueuedRequests.length > 0
-                        ? `${offlineQueuedRequests.length} offline API request(s) queued in Local SQLite / IndexedDB.`
+                        : connectivityState.totalQueuedItems + offlineQueuedRequests.length > 0
+                        ? `${
+                            connectivityState.totalQueuedItems + offlineQueuedRequests.length
+                          } offline item(s) queued & ready to sync.`
                         : offlineSyncNotice}
                     </span>
                   </div>
 
                   <div className="flex items-center gap-2 shrink-0">
-                    {isNetworkOnline && offlineQueuedRequests.length > 0 && (
+                    {connectivityState.totalQueuedItems + offlineQueuedRequests.length > 0 && (
                       <button
                         type="button"
-                        onClick={() => void runOfflineQueueSync()}
+                        onClick={() => void runOfflineQueueSync(true)}
                         disabled={isSyncingOfflineQueue}
                         className="px-2.5 py-1 rounded-lg bg-emerald-600 hover:bg-emerald-500 disabled:opacity-60 text-white font-bold flex items-center gap-1 cursor-pointer transition"
                       >
@@ -562,16 +654,19 @@ function ISPAppContent() {
                       </button>
                     )}
 
-                    {offlineSyncNotice && offlineQueuedRequests.length === 0 && isNetworkOnline && (
-                      <button
-                        type="button"
-                        onClick={() => setOfflineSyncNotice(null)}
-                        aria-label="Dismiss sync notice"
-                        className="p-1 rounded-md hover:bg-emerald-900/60 text-emerald-300 cursor-pointer"
-                      >
-                        <X className="w-3.5 h-3.5" />
-                      </button>
-                    )}
+                    {offlineSyncNotice &&
+                      connectivityState.totalQueuedItems + offlineQueuedRequests.length === 0 &&
+                      isNetworkOnline &&
+                      !connectivityState.isOfflineOrBlocked && (
+                        <button
+                          type="button"
+                          onClick={() => setOfflineSyncNotice(null)}
+                          aria-label="Dismiss sync notice"
+                          className="p-1 rounded-md hover:bg-emerald-900/60 text-emerald-300 cursor-pointer"
+                        >
+                          <X className="w-3.5 h-3.5" />
+                        </button>
+                      )}
                   </div>
                 </div>
               )}

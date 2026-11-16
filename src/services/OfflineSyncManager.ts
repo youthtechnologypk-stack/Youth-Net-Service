@@ -9,6 +9,10 @@ import {
   restoreSubscriberOnInvoicePaid,
 } from '../lib/billingAndNetwork';
 import { sqliteOfflineAdapter } from '../lib/sqliteOfflineAdapter';
+import {
+  mirrorPendingPaymentsInSyncQueue,
+  reportSupabaseReachability,
+} from '../lib/offlineFieldQueue';
 
 export type OfflineActionType = 'COLLECT_CASH' | 'RESOLVE_TICKET';
 
@@ -176,6 +180,7 @@ class OfflineSyncManager {
   private saveOutbox(agentId: string, items: OfflineOutboxAction[]): void {
     const keys = getStorageKeys(agentId);
     writeJson(keys.outbox, items);
+    mirrorPendingPaymentsInSyncQueue(items);
   }
 
   private getSyncedIds(agentId: string): string[] {
@@ -604,9 +609,11 @@ class OfflineSyncManager {
           this.markActionSynced(agentId, item.action_id);
           workingOutbox = workingOutbox.filter((x) => x.action_id !== item.action_id);
           this.saveOutbox(agentId, workingOutbox);
+          reportSupabaseReachability(true);
           syncedCount++;
         } catch (err) {
           if (isLikelyNetworkError(err)) {
+            reportSupabaseReachability(false);
             hadNetworkError = true;
             break;
           }

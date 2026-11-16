@@ -70,6 +70,12 @@ interface HeaderProps {
   onLogout?: () => void;
   isSidebarOpen?: boolean;
   onToggleSidebar?: () => void;
+  offlineModeStatus?: {
+    isOfflineOrBlocked: boolean;
+    isAutoSyncing: boolean;
+    queuedCount: number;
+    onRetrySync?: () => void;
+  };
 }
 
 export const Header: React.FC<HeaderProps> = ({
@@ -87,6 +93,7 @@ export const Header: React.FC<HeaderProps> = ({
   onLogout,
   isSidebarOpen,
   onToggleSidebar,
+  offlineModeStatus,
 }) => {
   const {
     routers,
@@ -215,6 +222,30 @@ export const Header: React.FC<HeaderProps> = ({
           </div>
 
           <div className="flex flex-wrap items-center gap-2 sm:gap-3 min-w-0">
+            {offlineModeStatus &&
+              (offlineModeStatus.isAutoSyncing ? (
+                <span
+                  className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full bg-cyan-500/15 border border-cyan-500/50 text-cyan-700 dark:text-cyan-300 text-[11px] font-mono font-bold animate-pulse shrink-0"
+                  role="status"
+                  aria-live="polite"
+                >
+                  🔄 Auto-Syncing to DB...
+                </span>
+              ) : offlineModeStatus.isOfflineOrBlocked || offlineModeStatus.queuedCount > 0 ? (
+                <button
+                  type="button"
+                  onClick={() => offlineModeStatus.onRetrySync?.()}
+                  title="Tap to test internet connection and sync queued offline GPS & payment entries"
+                  className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full bg-amber-500/15 hover:bg-amber-500/25 border border-amber-500/50 text-amber-800 dark:text-amber-300 text-[11px] font-mono font-bold cursor-pointer transition shrink-0"
+                  role="status"
+                  aria-live="polite"
+                >
+                  📴 Offline Mode ({offlineModeStatus.queuedCount} items queued)
+                </button>
+              ) : null)}
+
+            <PWAInstallPrompt role="AGENT" variant="button" />
+
             <ThemeToggle />
 
             <div className="flex items-center gap-1.5 bg-slate-100 dark:bg-slate-900 border border-slate-200 dark:border-slate-800 px-2.5 py-1.5 rounded-xl font-mono text-xs min-w-0 max-w-full">
