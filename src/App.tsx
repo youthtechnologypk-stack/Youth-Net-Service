@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useCallback, useRef } from 'react';
 import { ThemeProvider } from './context/ThemeContext';
 import { CurrencyProvider } from './context/CurrencyContext';
 import { AuthProvider } from './context/AuthContext';
@@ -49,7 +49,26 @@ import {
   getPathFromTab,
   getLandingRouteForRole,
 } from './lib/auth';
-import { Radio, ShieldCheck, Database, ShieldAlert, ArrowLeft } from 'lucide-react';
+import { Radio, ShieldCheck, Database, ShieldAlert, ArrowLeft, WifiOff, RefreshCw, CheckCircle2, X } from 'lucide-react';
+import {
+  QueuedApiRequest,
+  SyncQueueProgress,
+  buildOfflineQueuedResponse,
+  enqueueOfflineApiRequest,
+  extractSerializableBody,
+  getNativeFetch,
+  getQueuedApiRequests,
+  isNetworkFetchError,
+  normalizeHeaders,
+  normalizeUrl,
+  shouldCaptureOfflineApiRequest,
+  syncIndexedDbApiQueue,
+} from './lib/indexedDbRequestQueue';
+import {
+  SqliteAdapterStats,
+  SqliteSyncProgress,
+  sqliteOfflineAdapter,
+} from './lib/sqliteOfflineAdapter';
 
 function getLandingTabForRole(role: SystemRole): ActiveTab {
   switch (role) {
@@ -156,6 +175,164 @@ function ISPAppContent() {
     window.addEventListener('keydown', handleKeyDown);
     return () => window.removeEventListener('keydown', handleKeyDown);
   }, [isSidebarOpen]);
+
+  // IndexedDB Offline API Request Queue (captures agent mutations while offline & auto-syncs on reconnect)
+  const isAgentSession = Boolean(
+    currentUser && (currentRole === 'AGENT' || currentUser.role === 'AGENT')
+  );
+  const activeAgentId = currentUser
+    ? currentUser.linkedAgentId || currentUser.id || currentUser.username
+    : '';
+
+  const [isNetworkOnline, setIsNetworkOnline] = useState<boolean>(() =>
+    typeof navigator !== 'undefined' ? navigator.onLine : true
+  );
+  const [offlineQueuedRequests, setOfflineQueuedRequests] = useState<QueuedApiRequest[]>([]);
+  const [isSyncingOfflineQueue, setIsSyncingOfflineQueue] = useState<boolean>(false);
+  const [queueSyncProgress, setQueueSyncProgress] = useState<SyncQueueProgress | null>(null);
+  const [sqliteStats, setSqliteStats] = useState<SqliteAdapterStats>(() =>
+    sqliteOfflineAdapter.getCachedStats()
+  );
+  const [sqliteDatasetProgress, setSqliteDatasetProgress] = useState<SqliteSyncProgress | null>(null);
+  const [offlineSyncNotice, setOfflineSyncNotice] = useState<string | null>(null);
+  const isSyncingQueueRef = useRef<boolean>(false);
+
+  const refreshOfflineQueue = useCallback(async () => {
+    if (!isAgentSession || !activeAgentId) {
+      setOfflineQueuedRequests([]);
+      return;
+    }
+    const items = await getQueuedApiRequests(activeAgentId);
+    setOfflineQueuedRequests(items);
+  }, [activeAgentId, isAgentSession]);
+
+  const runOfflineQueueSync = useCallback(async () => {
+    if (!isAgentSession || !activeAgentId || isSyncingQueueRef.current) return;
+    if (typeof navigator !== 'undefined' && navigator.onLine === false) return;
+
+    isSyncingQueueRef.current = true;
+    setIsSyncingOfflineQueue(true);
+    setQueueSyncProgress(null);
+    try {
+      const result = await syncIndexedDbApiQueue(activeAgentId, (progress) => {
+        setQueueSyncProgress(progress);
+      });
+      const remaining = await getQueuedApiRequests(activeAgentId);
+      setOfflineQueuedRequests(remaining);
+      void sqliteOfflineAdapter.refreshStats();
+
+      if (result.syncedCount > 0) {
+        setOfflineSyncNotice(
+          `Connection restored — Synced ${result.syncedCount} offline API request${
+            result.syncedCount === 1 ? '' : 's'
+          } from Local SQLite / IndexedDB.`
+        );
+        window.dispatchEvent(
+          new CustomEvent('youthnet-offline-api-synced', {
+            detail: { agentId: activeAgentId, syncedCount: result.syncedCount },
+          })
+        );
+      }
+    } finally {
+      isSyncingQueueRef.current = false;
+      setIsSyncingOfflineQueue(false);
+      setQueueSyncProgress(null);
+    }
+  }, [activeAgentId, isAgentSession]);
+
+  useEffect(() => {
+    if (!isAgentSession) return;
+    void sqliteOfflineAdapter.init();
+    const unsubStats = sqliteOfflineAdapter.subscribeStats(setSqliteStats);
+    const unsubProgress = sqliteOfflineAdapter.subscribeProgress(setSqliteDatasetProgress);
+    return () => {
+      unsubStats();
+      unsubProgress();
+    };
+  }, [isAgentSession]);
+
+  useEffect(() => {
+    if (!offlineSyncNotice) return;
+    const timer = window.setTimeout(() => setOfflineSyncNotice(null), 7000);
+    return () => window.clearTimeout(timer);
+  }, [offlineSyncNotice]);
+
+  useEffect(() => {
+    if (!isAgentSession || !activeAgentId || typeof window === 'undefined') {
+      return;
+    }
+
+    const nativeFetch = getNativeFetch();
+
+    const interceptedFetch: typeof window.fetch = async (input, init) => {
+      const url = normalizeUrl(input);
+      const method = (
+        init?.method ||
+        (typeof Request !== 'undefined' && input instanceof Request ? input.method : 'GET')
+      ).toUpperCase();
+      const headers = normalizeHeaders(input, init);
+
+      if (!shouldCaptureOfflineApiRequest(url, method, headers)) {
+        return nativeFetch(input, init);
+      }
+
+      const { serializable, body } = await extractSerializableBody(input, init);
+      if (!serializable) {
+        return nativeFetch(input, init);
+      }
+
+      const queueAndRespond = async (): Promise<Response> => {
+        const queued = await enqueueOfflineApiRequest({
+          agentId: activeAgentId,
+          url,
+          method: method as QueuedApiRequest['method'],
+          headers,
+          body,
+        });
+        await refreshOfflineQueue();
+        return buildOfflineQueuedResponse(url, headers, queued.id);
+      };
+
+      if (typeof navigator !== 'undefined' && navigator.onLine === false) {
+        return queueAndRespond();
+      }
+
+      try {
+        return await nativeFetch(input, init);
+      } catch (err) {
+        if (isNetworkFetchError(err)) {
+          setIsNetworkOnline(false);
+          return queueAndRespond();
+        }
+        throw err;
+      }
+    };
+
+    window.fetch = interceptedFetch;
+
+    const handleOnline = () => {
+      setIsNetworkOnline(true);
+      void runOfflineQueueSync();
+    };
+
+    const handleOffline = () => {
+      setIsNetworkOnline(false);
+    };
+
+    window.addEventListener('online', handleOnline);
+    window.addEventListener('offline', handleOffline);
+
+    void refreshOfflineQueue();
+    if (typeof navigator === 'undefined' || navigator.onLine !== false) {
+      void runOfflineQueueSync();
+    }
+
+    return () => {
+      window.fetch = nativeFetch;
+      window.removeEventListener('online', handleOnline);
+      window.removeEventListener('offline', handleOffline);
+    };
+  }, [activeAgentId, isAgentSession, refreshOfflineQueue, runOfflineQueueSync]);
 
   // Handle Login success
   const handleLoginSuccess = (user: UserAccount) => {
@@ -317,14 +494,87 @@ function ISPAppContent() {
         {/* Scrollable Main Content Body */}
         <main className="flex-1 overflow-y-auto overflow-x-hidden px-3 py-3 sm:p-6 pb-16 sm:pb-8 bg-slate-50 dark:bg-[#0B111E] text-slate-900 dark:text-slate-100 transition-colors duration-200">
           <div className="w-full max-w-7xl mx-auto min-w-0 space-y-5 sm:space-y-6">
-            {/* Compulsory Live GPS Tracking & Guard for Field Agents */}
+            {/* Non-blocking Live GPS Tracking & Dismissible Warning Banner for Field Agents */}
             {isAgent && (
-              <FieldAgentGpsGuard
-                currentUser={currentUser}
-                isAdminPreview={isOriginalAdmin && currentUser.role === 'ADMIN'}
-                onLogout={handleLogout}
-              />
+              <FieldAgentGpsGuard currentUser={currentUser} />
             )}
+
+            {/* Local SQLite & IndexedDB Offline API Queue Status Bar (Field Agents) */}
+            {isAgent &&
+              (!isNetworkOnline ||
+                offlineQueuedRequests.length > 0 ||
+                isSyncingOfflineQueue ||
+                sqliteDatasetProgress !== null ||
+                offlineSyncNotice) && (
+                <div
+                  className={`w-full rounded-xl border px-3.5 py-2.5 flex flex-wrap items-center justify-between gap-2 text-xs font-mono shadow-sm ${
+                    !isNetworkOnline
+                      ? 'bg-amber-950/75 border-amber-600/60 text-amber-100'
+                      : isSyncingOfflineQueue || sqliteDatasetProgress
+                      ? 'bg-cyan-950/75 border-cyan-600/60 text-cyan-100'
+                      : offlineQueuedRequests.length > 0
+                      ? 'bg-indigo-950/75 border-indigo-600/60 text-indigo-100'
+                      : 'bg-emerald-950/75 border-emerald-600/60 text-emerald-100'
+                  }`}
+                  role="status"
+                  aria-live="polite"
+                >
+                  <div className="flex items-center gap-2 min-w-0">
+                    {!isNetworkOnline ? (
+                      <WifiOff className="w-4 h-4 text-amber-400 shrink-0" />
+                    ) : isSyncingOfflineQueue || sqliteDatasetProgress ? (
+                      <RefreshCw className="w-4 h-4 text-cyan-400 animate-spin shrink-0" />
+                    ) : offlineQueuedRequests.length > 0 ? (
+                      <Database className="w-4 h-4 text-indigo-400 shrink-0" />
+                    ) : (
+                      <CheckCircle2 className="w-4 h-4 text-emerald-400 shrink-0" />
+                    )}
+
+                    <span className="truncate sm:whitespace-normal">
+                      {!isNetworkOnline
+                        ? `Offline Mode — ${offlineQueuedRequests.length} API request(s) queued • SQLite Cache: ${sqliteStats.nodesCount} nodes, ${sqliteStats.subscribersCount} subscribers`
+                        : isSyncingOfflineQueue
+                        ? `Connection restored — Syncing queued API requests (${
+                            queueSyncProgress
+                              ? `${queueSyncProgress.processed}/${queueSyncProgress.total}`
+                              : `0/${offlineQueuedRequests.length}`
+                          })...`
+                        : sqliteDatasetProgress
+                        ? `SQLite Background Cache (${sqliteDatasetProgress.dataset}): ${sqliteDatasetProgress.processed}/${sqliteDatasetProgress.total} rows`
+                        : offlineQueuedRequests.length > 0
+                        ? `${offlineQueuedRequests.length} offline API request(s) queued in Local SQLite / IndexedDB.`
+                        : offlineSyncNotice}
+                    </span>
+                  </div>
+
+                  <div className="flex items-center gap-2 shrink-0">
+                    {isNetworkOnline && offlineQueuedRequests.length > 0 && (
+                      <button
+                        type="button"
+                        onClick={() => void runOfflineQueueSync()}
+                        disabled={isSyncingOfflineQueue}
+                        className="px-2.5 py-1 rounded-lg bg-emerald-600 hover:bg-emerald-500 disabled:opacity-60 text-white font-bold flex items-center gap-1 cursor-pointer transition"
+                      >
+                        <RefreshCw
+                          className={`w-3 h-3 ${isSyncingOfflineQueue ? 'animate-spin' : ''}`}
+                        />
+                        <span>{isSyncingOfflineQueue ? 'Syncing...' : 'Sync Now'}</span>
+                      </button>
+                    )}
+
+                    {offlineSyncNotice && offlineQueuedRequests.length === 0 && isNetworkOnline && (
+                      <button
+                        type="button"
+                        onClick={() => setOfflineSyncNotice(null)}
+                        aria-label="Dismiss sync notice"
+                        className="p-1 rounded-md hover:bg-emerald-900/60 text-emerald-300 cursor-pointer"
+                      >
+                        <X className="w-3.5 h-3.5" />
+                      </button>
+                    )}
+                  </div>
+                </div>
+              )}
 
             {/* PWA Mobile Install Banner (Admin only) */}
             {currentRole === 'ADMIN' && (

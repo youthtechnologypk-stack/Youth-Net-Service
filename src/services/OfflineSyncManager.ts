@@ -8,6 +8,7 @@ import {
   add31DaysDateString,
   restoreSubscriberOnInvoicePaid,
 } from '../lib/billingAndNetwork';
+import { sqliteOfflineAdapter } from '../lib/sqliteOfflineAdapter';
 
 export type OfflineActionType = 'COLLECT_CASH' | 'RESOLVE_TICKET';
 
@@ -215,6 +216,9 @@ class OfflineSyncManager {
     if (snapshot.wallet) {
       writeJson(keys.wallet, snapshot.wallet);
     }
+
+    // Mirror large subscriber/invoice/ticket datasets into Local SQLite Web Worker off the main thread
+    void sqliteOfflineAdapter.persistAgentDataset(agentId, snapshot);
   }
 
   /**
@@ -305,6 +309,42 @@ class OfflineSyncManager {
 
     return {
       subscribers,
+      invoices: overlaid.invoices,
+      tickets: overlaid.tickets,
+      wallet: {
+        ...wallet,
+        cashInHand: overlaid.cashInHand,
+      },
+      cachedAt: new Date().toISOString(),
+    };
+  }
+
+  /**
+   * Hydrates agent snapshot from the Local SQLite Database Adapter when disconnected.
+   */
+  public async hydrateSnapshotFromSqlite(
+    agentId: string,
+    role: string | null | undefined
+  ): Promise<CachedAgentSnapshot | null> {
+    if (!agentId || !isOfflineCapableRole(role)) return null;
+    const dataset = await sqliteOfflineAdapter.loadAgentDataset(agentId);
+    if (!dataset) return null;
+
+    const wallet: CachedAgentWallet = dataset.wallet || {
+      cashInHand: 0,
+      baseSalary: 0,
+      advanceBalance: 0,
+      cashTransactions: [],
+    };
+
+    const overlaid = this.applyOutboxOverlay(agentId, role, {
+      invoices: (dataset.invoices || []) as SupabaseInvoice[],
+      tickets: (dataset.tickets || []) as SupabaseTicket[],
+      cashInHand: wallet.cashInHand,
+    });
+
+    return {
+      subscribers: dataset.subscribers || {},
       invoices: overlaid.invoices,
       tickets: overlaid.tickets,
       wallet: {

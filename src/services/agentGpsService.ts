@@ -1,4 +1,5 @@
 import { supabase } from './supabaseClient';
+import { sqliteOfflineAdapter } from '../lib/sqliteOfflineAdapter';
 import { isMissingTableOrColumnError } from '../lib/expiryUtils';
 
 export interface AgentLiveLocationRow {
@@ -180,6 +181,11 @@ export function subscribeToAgentLiveLocations(
 }
 
 export async function loadGisAreaZones(): Promise<GisAreaZoneRow[]> {
+  if (typeof navigator !== 'undefined' && navigator.onLine === false) {
+    const sqliteZones = await sqliteOfflineAdapter.loadAreaZones();
+    return sqliteZones.length > 0 ? sqliteZones : readLocalAreaZones();
+  }
+
   try {
     const { data, error } = await supabase
       .from('gis_area_zones')
@@ -187,7 +193,8 @@ export async function loadGisAreaZones(): Promise<GisAreaZoneRow[]> {
       .order('created_at', { ascending: true });
 
     if (error) {
-      return readLocalAreaZones();
+      const sqliteZones = await sqliteOfflineAdapter.loadAreaZones();
+      return sqliteZones.length > 0 ? sqliteZones : readLocalAreaZones();
     }
     const rows: GisAreaZoneRow[] = (data || []).map((r: any) => ({
       id: String(r.id),
@@ -199,9 +206,11 @@ export async function loadGisAreaZones(): Promise<GisAreaZoneRow[]> {
       created_at: r.created_at,
     }));
     writeLocalAreaZones(rows);
+    void sqliteOfflineAdapter.persistAreaZones(rows);
     return rows;
   } catch {
-    return readLocalAreaZones();
+    const sqliteZones = await sqliteOfflineAdapter.loadAreaZones();
+    return sqliteZones.length > 0 ? sqliteZones : readLocalAreaZones();
   }
 }
 

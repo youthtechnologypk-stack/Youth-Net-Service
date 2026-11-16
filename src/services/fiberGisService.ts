@@ -44,6 +44,7 @@ import type {
 } from './supabaseClient';
 import { isMissingTableOrColumnError } from '../lib/expiryUtils';
 import { applyEquipmentSwapInventory } from './erpInventoryService';
+import { sqliteOfflineAdapter } from '../lib/sqliteOfflineAdapter';
 
 const ENCLOSURE_META_MARKER = '__yn_enclosure_meta';
 
@@ -833,31 +834,47 @@ export async function loadGisOltsOnly(): Promise<{
 export async function loadGisTopology(
   fallbackActiveUsernames: string[] = []
 ): Promise<LoadedGisTopology> {
-  const [
-    oltsRes,
-    ponPortsRes,
-    nodesRes,
-    cablesRes,
-    fiberRoutesRes,
-    portsRes,
-    outputsRes,
-    subsRes,
-    onlineMap,
-  ] = await Promise.all([
-    supabase.from('gis_olts').select('*').order('created_at', { ascending: true }),
-    supabase.from('gis_olt_pon_ports').select('*').order('port_number', { ascending: true }),
-    supabase.from('gis_nodes').select('*').order('created_at', { ascending: true }),
-    supabase.from('gis_cables').select('*').order('created_at', { ascending: true }),
-    supabase.from('fiber_routes').select('*').order('updated_at', { ascending: true }),
-    supabase.from('gis_fdb_ports').select('*').order('port_number', { ascending: true }),
-    supabase.from('gis_splitter_outputs').select('*').order('port_number', { ascending: true }),
-    supabase
-      .from('portal_users')
-      .select('id, username, full_name, phone, area, address, package_speed, account_status')
-      .eq('role', 'CLIENT')
-      .order('full_name', { ascending: true }),
-    fetchOnlineSubscribersMap(fallbackActiveUsernames),
-  ]);
+  if (typeof navigator !== 'undefined' && navigator.onLine === false) {
+    const cachedOffline = await sqliteOfflineAdapter.loadGisTopologySnapshot();
+    if (cachedOffline) {
+      return cachedOffline;
+    }
+  }
+
+  try {
+    const [
+      oltsRes,
+      ponPortsRes,
+      nodesRes,
+      cablesRes,
+      fiberRoutesRes,
+      portsRes,
+      outputsRes,
+      subsRes,
+      onlineMap,
+    ] = await Promise.all([
+      supabase.from('gis_olts').select('*').order('created_at', { ascending: true }),
+      supabase.from('gis_olt_pon_ports').select('*').order('port_number', { ascending: true }),
+      supabase.from('gis_nodes').select('*').order('created_at', { ascending: true }),
+      supabase.from('gis_cables').select('*').order('created_at', { ascending: true }),
+      supabase.from('fiber_routes').select('*').order('updated_at', { ascending: true }),
+      supabase.from('gis_fdb_ports').select('*').order('port_number', { ascending: true }),
+      supabase.from('gis_splitter_outputs').select('*').order('port_number', { ascending: true }),
+      supabase
+        .from('portal_users')
+        .select('id, username, full_name, phone, area, address, package_speed, account_status')
+        .eq('role', 'CLIENT')
+        .order('full_name', { ascending: true }),
+      fetchOnlineSubscribersMap(fallbackActiveUsernames),
+    ]);
+
+    const anyNetworkFailure =
+      nodesRes.error &&
+      String(nodesRes.error.message || '').toLowerCase().includes('fetch');
+    if (anyNetworkFailure) {
+      const cachedOffline = await sqliteOfflineAdapter.loadGisTopologySnapshot();
+      if (cachedOffline) return cachedOffline;
+    }
 
   const baseMissing =
     (nodesRes.error && isMissingTableOrColumnError(nodesRes.error)) ||
@@ -958,17 +975,31 @@ export async function loadGisTopology(
     };
   });
 
-  return {
-    olts: rawOlts,
-    ponPorts: rawPonPorts,
-    nodes: rawNodes,
-    cables: rawCables,
-    ports: rawPorts,
-    splitterOutputs: rawOutputs,
-    subscribers,
-    schemaMissing: Boolean(baseMissing || oltSchemaMissing || splitterSchemaMissing),
-    oltSchemaMissing: Boolean(oltSchemaMissing),
-  };
+    const loadedTopology: LoadedGisTopology = {
+      olts: rawOlts,
+      ponPorts: rawPonPorts,
+      nodes: rawNodes,
+      cables: rawCables,
+      ports: rawPorts,
+      splitterOutputs: rawOutputs,
+      subscribers,
+      schemaMissing: Boolean(baseMissing || oltSchemaMissing || splitterSchemaMissing),
+      oltSchemaMissing: Boolean(oltSchemaMissing),
+    };
+
+    // Persist large GIS node/cable/subscriber topology asynchronously in SQLite Web Worker
+    if (!loadedTopology.schemaMissing && (rawNodes.length > 0 || subscribers.length > 0)) {
+      void sqliteOfflineAdapter.persistGisTopology(loadedTopology);
+    }
+
+    return loadedTopology;
+  } catch (err) {
+    const cachedOffline = await sqliteOfflineAdapter.loadGisTopologySnapshot();
+    if (cachedOffline) {
+      return cachedOffline;
+    }
+    throw err;
+  }
 }
 
 export interface PonPortDraftInput {

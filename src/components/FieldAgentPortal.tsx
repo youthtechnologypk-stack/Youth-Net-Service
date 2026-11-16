@@ -122,15 +122,38 @@ export const FieldAgentPortal: React.FC<FieldAgentPortalProps> = ({
 
   const applyCachedOfflineSnapshot = (agentIdToLoad: string) => {
     const cached = offlineSyncManager.getCachedAgentSnapshot(agentIdToLoad, currentUser.role);
-    if (!cached) return false;
-    setAssignedTickets(cached.tickets);
-    setAssignedInvoices(cached.invoices);
-    setSubscriberDirectory(cached.subscribers);
-    setAgentCash(cached.wallet.cashInHand);
-    setAgentBaseSalary(cached.wallet.baseSalary);
-    setAgentAdvanceBalance(cached.wallet.advanceBalance);
-    setAgentCashTransactions(cached.wallet.cashTransactions);
-    return true;
+    const hasLocalRows = Boolean(
+      cached &&
+        (cached.tickets.length > 0 ||
+          cached.invoices.length > 0 ||
+          Object.keys(cached.subscribers).length > 0)
+    );
+    if (cached && hasLocalRows) {
+      setAssignedTickets(cached.tickets);
+      setAssignedInvoices(cached.invoices);
+      setSubscriberDirectory(cached.subscribers);
+      setAgentCash(cached.wallet.cashInHand);
+      setAgentBaseSalary(cached.wallet.baseSalary);
+      setAgentAdvanceBalance(cached.wallet.advanceBalance);
+      setAgentCashTransactions(cached.wallet.cashTransactions);
+      return true;
+    }
+
+    // Fallback to off-thread Local SQLite Database Adapter for large datasets
+    void offlineSyncManager
+      .hydrateSnapshotFromSqlite(agentIdToLoad, currentUser.role)
+      .then((sqliteCached) => {
+        if (!sqliteCached) return;
+        setAssignedTickets(sqliteCached.tickets);
+        setAssignedInvoices(sqliteCached.invoices);
+        setSubscriberDirectory(sqliteCached.subscribers);
+        setAgentCash(sqliteCached.wallet.cashInHand);
+        setAgentBaseSalary(sqliteCached.wallet.baseSalary);
+        setAgentAdvanceBalance(sqliteCached.wallet.advanceBalance);
+        setAgentCashTransactions(sqliteCached.wallet.cashTransactions);
+      });
+
+    return Boolean(cached);
   };
 
   // Fetch this specific agent's live data from Supabase (with automatic offline cache fallback)

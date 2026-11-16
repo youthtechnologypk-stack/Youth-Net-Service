@@ -1,5 +1,5 @@
 import React, { useCallback, useEffect, useRef, useState } from 'react';
-import { MapPin, Navigation, RefreshCw, ShieldAlert, LogOut } from 'lucide-react';
+import { MapPin, Navigation, RefreshCw, ShieldAlert, X } from 'lucide-react';
 import type { UserAccount } from '../types/auth';
 import { haversineMeters } from '../lib/fiberOpticEngine';
 import {
@@ -9,16 +9,12 @@ import {
 
 interface FieldAgentGpsGuardProps {
   currentUser: UserAccount;
-  isAdminPreview?: boolean;
-  onLogout?: () => void;
 }
 
 type GpsGuardStatus = 'checking' | 'active' | 'blocked';
 
 export const FieldAgentGpsGuard: React.FC<FieldAgentGpsGuardProps> = ({
   currentUser,
-  isAdminPreview = false,
-  onLogout,
 }) => {
   const [status, setStatus] = useState<GpsGuardStatus>('checking');
   const [errorDetail, setErrorDetail] = useState<string>('');
@@ -29,7 +25,7 @@ export const FieldAgentGpsGuard: React.FC<FieldAgentGpsGuardProps> = ({
     syncedAt: string;
   } | null>(null);
   const [isRetrying, setIsRetrying] = useState(false);
-  const [previewDismissed, setPreviewDismissed] = useState(false);
+  const [bannerDismissed, setBannerDismissed] = useState(false);
 
   const watchIdRef = useRef<number | null>(null);
   const lastSyncRef = useRef<{ lat: number; lng: number; ts: number } | null>(null);
@@ -45,6 +41,7 @@ export const FieldAgentGpsGuard: React.FC<FieldAgentGpsGuardProps> = ({
 
       setStatus('active');
       setErrorDetail('');
+      setBannerDismissed(false);
 
       const prev = lastSyncRef.current;
       const elapsedMs = prev ? nowMs - prev.ts : Infinity;
@@ -80,7 +77,11 @@ export const FieldAgentGpsGuard: React.FC<FieldAgentGpsGuardProps> = ({
     [agentId, agentName]
   );
 
-  const startWatch = useCallback(() => {
+  const startWatch = useCallback((showBannerOnFail = false) => {
+    if (showBannerOnFail) {
+      setBannerDismissed(false);
+    }
+
     if (typeof navigator === 'undefined' || !navigator.geolocation) {
       setStatus('blocked');
       setErrorDetail('GPS / Geolocation is not supported by this browser.');
@@ -105,7 +106,7 @@ export const FieldAgentGpsGuard: React.FC<FieldAgentGpsGuardProps> = ({
         if (err.code === 1) {
           setStatus('blocked');
           setErrorDetail(
-            'Location permission is denied. Allow Location access in your browser/app settings.'
+            'Location permission is denied or blocked by an active screen overlay.'
           );
         } else if (err.code === 2) {
           setStatus('blocked');
@@ -137,7 +138,7 @@ export const FieldAgentGpsGuard: React.FC<FieldAgentGpsGuardProps> = ({
           setStatus('blocked');
           setErrorDetail(
             err.code === 1
-              ? 'Location permission is denied. Please allow Location access to continue.'
+              ? 'Location permission is denied or blocked by an active screen overlay.'
               : 'Phone GPS / Location Services turned OFF. Please enable GPS.'
           );
         }
@@ -151,7 +152,7 @@ export const FieldAgentGpsGuard: React.FC<FieldAgentGpsGuardProps> = ({
   }, [pushPosition]);
 
   useEffect(() => {
-    startWatch();
+    startWatch(false);
 
     const handleBeforeUnload = () => {
       void markAgentLocationOffline(agentId);
@@ -167,66 +168,87 @@ export const FieldAgentGpsGuard: React.FC<FieldAgentGpsGuardProps> = ({
     };
   }, [agentId, startWatch]);
 
-  if (status === 'blocked' && !(isAdminPreview && previewDismissed)) {
+  if (status === 'blocked' && !bannerDismissed) {
     return (
       <div
-        className="fixed inset-0 z-[120] bg-slate-950/92 backdrop-blur-md flex items-center justify-center p-4"
-        role="alertdialog"
-        aria-modal="true"
-        aria-labelledby="gps-duty-guard-title"
+        className="w-full rounded-xl bg-amber-950/85 border border-amber-500/60 shadow-lg px-3.5 py-3 text-xs"
+        role="status"
+        aria-live="polite"
       >
-        <div className="w-full max-w-md rounded-2xl bg-slate-900 border border-rose-500/60 shadow-2xl p-6 space-y-5 text-center">
-          <div className="mx-auto w-14 h-14 rounded-2xl bg-rose-500/15 border border-rose-500/40 flex items-center justify-center text-rose-400">
-            <ShieldAlert className="w-7 h-7" />
-          </div>
+        <div className="flex items-start justify-between gap-3">
+          <div className="flex items-start gap-2.5 min-w-0">
+            <div className="mt-0.5 w-7 h-7 rounded-lg bg-amber-500/20 border border-amber-500/40 flex items-center justify-center text-amber-300 shrink-0">
+              <ShieldAlert className="w-4 h-4" />
+            </div>
 
-          <div className="space-y-2">
-            <h2
-              id="gps-duty-guard-title"
-              className="text-base sm:text-lg font-bold text-white leading-snug"
-            >
-              📍 GPS Location Required for Field Duty — Please turn ON your phone Location / GPS and tap &apos;Enable GPS&apos; to continue.
-            </h2>
-            {errorDetail && (
-              <p className="text-xs font-mono text-rose-300 bg-rose-950/50 border border-rose-800/60 rounded-lg px-3 py-2">
-                {errorDetail}
+            <div className="space-y-1.5 min-w-0">
+              <p className="font-bold text-amber-100 leading-snug">
+                📍 Field Duty GPS Inactive — Turn ON phone Location / GPS so NOC can view your live field position.
               </p>
-            )}
+
+              {errorDetail && (
+                <p className="text-[11px] font-mono text-rose-200 bg-rose-950/60 border border-rose-700/50 rounded-md px-2.5 py-1">
+                  {errorDetail}
+                </p>
+              )}
+
+              <p className="text-[11px] text-amber-200/95 leading-relaxed">
+                <strong>Tip:</strong> If Android says &apos;Close bubbles or overlays from other apps&apos;, close any floating chat bubbles / screen filters on your screen and tap Retry GPS.
+              </p>
+
+              <div className="pt-1 flex flex-wrap items-center gap-2">
+                <button
+                  type="button"
+                  onClick={() => startWatch(true)}
+                  disabled={isRetrying}
+                  className="px-3 py-1.5 rounded-lg bg-emerald-600 hover:bg-emerald-500 disabled:opacity-60 text-white font-bold text-xs flex items-center gap-1.5 cursor-pointer shadow transition"
+                >
+                  <RefreshCw className={`w-3.5 h-3.5 ${isRetrying ? 'animate-spin' : ''}`} />
+                  <span>{isRetrying ? 'Checking GPS...' : 'Retry GPS'}</span>
+                </button>
+
+                <button
+                  type="button"
+                  onClick={() => setBannerDismissed(true)}
+                  className="px-3 py-1.5 rounded-lg bg-slate-900/80 hover:bg-slate-800 border border-amber-600/40 text-amber-200 font-semibold text-xs cursor-pointer transition"
+                >
+                  Dismiss Banner
+                </button>
+              </div>
+            </div>
           </div>
 
-          <div className="space-y-2.5">
-            <button
-              type="button"
-              onClick={() => startWatch()}
-              disabled={isRetrying}
-              className="w-full py-3 px-4 rounded-xl bg-emerald-600 hover:bg-emerald-500 disabled:opacity-60 text-white font-bold text-sm flex items-center justify-center gap-2 cursor-pointer shadow-lg transition"
-            >
-              <RefreshCw className={`w-4 h-4 ${isRetrying ? 'animate-spin' : ''}`} />
-              <span>{isRetrying ? 'Checking GPS Lock...' : 'Enable / Retry GPS'}</span>
-            </button>
-
-            {onLogout && (
-              <button
-                type="button"
-                onClick={onLogout}
-                className="w-full py-2.5 px-4 rounded-xl bg-slate-800 hover:bg-slate-700 border border-slate-700 text-slate-200 font-semibold text-xs flex items-center justify-center gap-2 cursor-pointer transition"
-              >
-                <LogOut className="w-3.5 h-3.5" />
-                <span>Sign Out</span>
-              </button>
-            )}
-
-            {isAdminPreview && (
-              <button
-                type="button"
-                onClick={() => setPreviewDismissed(true)}
-                className="w-full py-2 text-[11px] font-mono text-slate-400 hover:text-slate-200 underline cursor-pointer"
-              >
-                Continue Admin Role Preview Without GPS
-              </button>
-            )}
-          </div>
+          <button
+            type="button"
+            onClick={() => setBannerDismissed(true)}
+            aria-label="Dismiss GPS warning banner"
+            className="p-1 rounded-lg text-amber-300/80 hover:text-white hover:bg-amber-900/50 cursor-pointer shrink-0 transition"
+          >
+            <X className="w-4 h-4" />
+          </button>
         </div>
+      </div>
+    );
+  }
+
+  if (status === 'blocked' && bannerDismissed) {
+    return (
+      <div className="w-full rounded-xl bg-slate-900/70 border border-amber-700/40 px-3.5 py-2 flex flex-wrap items-center justify-between gap-2 text-xs font-mono">
+        <div className="flex items-center gap-2 text-amber-200">
+          <MapPin className="w-3.5 h-3.5 text-amber-400 shrink-0" />
+          <span className="font-bold text-white">Field Duty GPS:</span>
+          <span className="text-amber-300">Paused / Blocked (Portal unlocked)</span>
+        </div>
+
+        <button
+          type="button"
+          onClick={() => startWatch(true)}
+          disabled={isRetrying}
+          className="px-2.5 py-1 rounded-lg bg-emerald-700/80 hover:bg-emerald-600 text-white font-semibold flex items-center gap-1 cursor-pointer transition"
+        >
+          <RefreshCw className={`w-3 h-3 ${isRetrying ? 'animate-spin' : ''}`} />
+          <span>{isRetrying ? 'Checking...' : 'Retry GPS'}</span>
+        </button>
       </div>
     );
   }
@@ -250,7 +272,7 @@ export const FieldAgentGpsGuard: React.FC<FieldAgentGpsGuardProps> = ({
 
       <button
         type="button"
-        onClick={() => startWatch()}
+        onClick={() => startWatch(true)}
         className="px-2.5 py-1 rounded-lg bg-slate-900 border border-emerald-700/70 text-emerald-300 hover:text-white flex items-center gap-1 cursor-pointer"
       >
         <MapPin className="w-3 h-3" />
