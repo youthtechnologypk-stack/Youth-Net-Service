@@ -34,6 +34,8 @@ import { CashPaymentModal } from './components/CashPaymentModal';
 import { AddMikrotikDeviceModal } from './components/AddMikrotikDeviceModal';
 import { PWAInstallPrompt } from './components/PWAInstallPrompt';
 import { ErrorBoundary } from './components/ErrorBoundary';
+import { FieldAgentGpsGuard } from './components/FieldAgentGpsGuard';
+import { markAgentLocationOffline } from './services/agentGpsService';
 import { Invoice } from './types/isp';
 import { SystemRole, UserAccount } from './types/auth';
 import {
@@ -169,6 +171,10 @@ function ISPAppContent() {
 
   // Handle Logout
   const handleLogout = async () => {
+    if (currentUser && (currentUser.role === 'AGENT' || currentRole === 'AGENT')) {
+      const agentId = currentUser.linkedAgentId || currentUser.id || currentUser.username;
+      await markAgentLocationOffline(agentId);
+    }
     try {
       await apiLogout();
     } catch {}
@@ -311,6 +317,15 @@ function ISPAppContent() {
         {/* Scrollable Main Content Body */}
         <main className="flex-1 overflow-y-auto overflow-x-hidden px-3 py-3 sm:p-6 pb-16 sm:pb-8 bg-slate-50 dark:bg-[#0B111E] text-slate-900 dark:text-slate-100 transition-colors duration-200">
           <div className="w-full max-w-7xl mx-auto min-w-0 space-y-5 sm:space-y-6">
+            {/* Compulsory Live GPS Tracking & Guard for Field Agents */}
+            {isAgent && (
+              <FieldAgentGpsGuard
+                currentUser={currentUser}
+                isAdminPreview={isOriginalAdmin && currentUser.role === 'ADMIN'}
+                onLogout={handleLogout}
+              />
+            )}
+
             {/* PWA Mobile Install Banner (Admin only) */}
             {currentRole === 'ADMIN' && (
               <PWAInstallPrompt role={currentRole} variant="banner" forceVisibleOnDesktop={false} />

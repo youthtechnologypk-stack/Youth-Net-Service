@@ -26,7 +26,9 @@ import {
   Users,
   Wrench,
   X,
+  Zap,
 } from 'lucide-react';
+import { SearchableCombobox, SearchableOption } from './SearchableCombobox';
 import type {
   CoreSpliceAction,
   EnclosureCoreSpliceEntry,
@@ -137,6 +139,15 @@ interface FiberGisInspectorPanelProps {
   onUpdatePonPort?: (portId: string, patch: Partial<SupabaseGisOltPonPort>) => Promise<void>;
   onOpenUpgradeModal?: (node: SupabaseGisNode) => void;
   onRouteCableFromNode?: (node: SupabaseGisNode) => void;
+  onQuickSpliceAndExtendCore?: (params: {
+    sourceNode: SupabaseGisNode;
+    incomingCableId: string;
+    incomingCoreNumber: number;
+    targetNodeId: string;
+    outgoingCableCores: 1 | 2 | 4 | 6 | 8 | 12 | 24 | 48;
+    outgoingCoreNumber: number;
+    spliceLossDb: number;
+  }) => Promise<void>;
   onFocusNode?: (node: SupabaseGisNode) => void;
 }
 
@@ -169,6 +180,7 @@ export const FiberGisInspectorPanel: React.FC<FiberGisInspectorPanelProps> = ({
   onUpdatePonPort,
   onOpenUpgradeModal,
   onRouteCableFromNode,
+  onQuickSpliceAndExtendCore,
 }) => {
   const [fdbSubTab, setFdbSubTab] = useState<'ports' | 'splices' | 'signal'>('ports');
   const [confirmDelete, setConfirmDelete] = useState(false);
@@ -196,6 +208,12 @@ export const FiberGisInspectorPanel: React.FC<FiberGisInspectorPanelProps> = ({
   const [activeLegEditor, setActiveLegEditor] = useState<{ splitterId: string; legNumber: number } | null>(null);
   const [legSubSearch, setLegSubSearch] = useState('');
   const [showAllSpliceCables, setShowAllSpliceCables] = useState(false);
+  const [quickExtendCoreKey, setQuickExtendCoreKey] = useState<string | null>(null);
+  const [quickExtendTargetNodeId, setQuickExtendTargetNodeId] = useState<string>('');
+  const [quickExtendCableCores, setQuickExtendCableCores] = useState<
+    1 | 2 | 4 | 6 | 8 | 12 | 24 | 48
+  >(2);
+  const [quickExtendOutCore, setQuickExtendOutCore] = useState<number>(1);
   const [localSaving, setLocalSaving] = useState(false);
   const [localSaveError, setLocalSaveError] = useState<string | null>(null);
 
@@ -228,6 +246,10 @@ export const FiberGisInspectorPanel: React.FC<FiberGisInspectorPanelProps> = ({
     setSubSearch('');
     setLegSubSearch('');
     setShowAllSpliceCables(false);
+    setQuickExtendCoreKey(null);
+    setQuickExtendTargetNodeId('');
+    setQuickExtendCableCores(2);
+    setQuickExtendOutCore(1);
     setLocalSaveError(null);
     if (selectedNode) {
       const spType = (selectedNode.splitter_type ||
@@ -649,18 +671,87 @@ export const FiberGisInspectorPanel: React.FC<FiberGisInspectorPanelProps> = ({
       setNodeBoxCapacity((prev) => Math.max(prev, totalAllocatedLegs + seededLegs.length, 16));
     };
 
-    const allPonPortOptions: Array<{ id: string; label: string }> = [];
+    const allPonPortOptions: SearchableOption[] = [];
     for (const o of olts) {
       const pps = (ponPortsByOltId[o.id] || []).slice().sort((a, b) => a.port_number - b.port_number);
       for (const pp of pps) {
         allPonPortOptions.push({
-          id: pp.id,
-          label: `${o.name} · PON-${pp.port_number} (${pp.port_label || 'Main'}) +${Number(
-            pp.tx_power_dbm
-          ).toFixed(1)}dBm`,
+          value: pp.id,
+          label: `${o.name} · PON-${pp.port_number}`,
+          sublabel: pp.port_label || 'Main',
+          metric: `+${Number(pp.tx_power_dbm).toFixed(1)} dBm`,
+          metricTone: 'sky',
+          keywords: `${o.name} PON-${pp.port_number} ${pp.port_label || ''}`,
         });
       }
     }
+
+    const connectedCableOptions: SearchableOption[] = connectedCables.map((c) => {
+      const otherId = c.source_node_id === node.id ? c.target_node_id : c.source_node_id;
+      const otherNode = nodesById[otherId];
+      const otherName = otherNode?.name || 'Node';
+      const otherBudget = budgetsByNodeId[otherId];
+      const otherOutDbm =
+        otherNode?.node_type === 'OLT'
+          ? otherBudget?.oltTxDbm
+          : SPLITTER_SPECS[otherNode?.splitter_type || 'none']?.isAsymmetricFbt
+          ? otherBudget?.thruOutputDbm
+          : otherBudget?.ontRxDbm ?? otherBudget?.thruOutputDbm;
+      return {
+        value: c.id,
+        label: `From ${otherName}`,
+        sublabel: `${c.cable_cores}C · ${c.distance_meters}m${otherNode?.area_name ? ` · ${otherNode.area_name}` : ''}`,
+        metric:
+          otherOutDbm !== null && otherOutDbm !== undefined
+            ? `${otherOutDbm >= 0 ? '+' : ''}${otherOutDbm.toFixed(1)} dBm`
+            : undefined,
+        metricTone:
+          otherNode?.node_type === 'OLT'
+            ? 'sky'
+            : otherBudget?.healthBand === 'CRITICAL LOS RISK'
+            ? 'rose'
+            : otherBudget?.healthBand === 'MARGINAL'
+            ? 'amber'
+            : 'emerald',
+        keywords: `${otherName} ${otherNode?.area_name || ''} ${c.name || ''} ${c.cable_cores}C`,
+      };
+    });
+
+    const destinationNodeOptions: SearchableOption[] = nodes
+      .filter((n) => n.id !== node.id && n.node_type !== 'OLT')
+      .slice()
+      .sort((a, b) => a.name.localeCompare(b.name))
+      .map((n) => {
+        const b = budgetsByNodeId[n.id];
+        const sum = b?.enclosureSummary;
+        const spec = SPLITTER_SPECS[n.splitter_type] || SPLITTER_SPECS['none'];
+        const tPorts = sum
+          ? sum.boxCapacity
+          : Math.max(Number(n.box_capacity || 0), Number(n.total_ports || 0), spec.defaultPorts || 0);
+        const uPorts = sum
+          ? sum.usedPorts
+          : (splitterOutputsByNodeId[n.id] || []).filter((o) => o.utilization_type !== 'FREE_PORT').length ||
+            (portsByNodeId[n.id] || []).filter((p) => p.status !== 'FREE').length;
+        const fPorts = Math.max(0, tPorts - uPorts);
+        const dbmVal = b?.ontRxDbm ?? b?.thruOutputDbm ?? b?.inputDbm;
+        return {
+          value: n.id,
+          label: n.name,
+          sublabel: `${n.node_type}${n.area_name ? ` · ${n.area_name}` : ''}${
+            tPorts > 0 ? ` · ${fPorts}/${tPorts} Free` : ''
+          }`,
+          metric: dbmVal !== null && dbmVal !== undefined ? `${dbmVal.toFixed(1)} dBm` : 'Unlinked',
+          metricTone:
+            b?.healthBand === 'IDEAL' || b?.healthBand === 'GOOD'
+              ? 'emerald'
+              : b?.healthBand === 'MARGINAL'
+              ? 'amber'
+              : b?.healthBand === 'CRITICAL LOS RISK'
+              ? 'rose'
+              : 'slate',
+          keywords: `${n.name} ${n.area_name || ''} ${n.node_type}`,
+        };
+      });
 
     return (
       <div className="flex flex-col h-full overflow-hidden">
@@ -1125,10 +1216,11 @@ export const FiberGisInspectorPanel: React.FC<FiberGisInspectorPanelProps> = ({
                                 <label className="block text-[9px] text-slate-400 mb-0.5">
                                   Incoming Cable
                                 </label>
-                                <select
+                                <SearchableCombobox
+                                  compact
                                   value={unit.incoming_cable_id || ''}
-                                  onChange={(e) => {
-                                    const cId = e.target.value;
+                                  options={connectedCableOptions}
+                                  onChange={(cId) => {
                                     setInternalSplittersDraft((prev) =>
                                       prev.map((s) =>
                                         s.id === unit.id
@@ -1137,21 +1229,11 @@ export const FiberGisInspectorPanel: React.FC<FiberGisInspectorPanelProps> = ({
                                       )
                                     );
                                   }}
-                                  className="w-full bg-slate-950 border border-slate-700 rounded px-2 py-1.5 text-[11px] text-white"
-                                >
-                                  <option value="">Auto Box Feed</option>
-                                  {connectedCables.map((c) => {
-                                    const oId =
-                                      c.source_node_id === node.id
-                                        ? c.target_node_id
-                                        : c.source_node_id;
-                                    return (
-                                      <option key={c.id} value={c.id}>
-                                        From {nodesById[oId]?.name || 'Node'} ({c.cable_cores}C)
-                                      </option>
-                                    );
-                                  })}
-                                </select>
+                                  emptyOptionLabel="Auto Box Feed"
+                                  searchPlaceholder="Search cable or node..."
+                                  accentColor="cyan"
+                                  ariaLabel="Splitter incoming cable"
+                                />
                               </div>
                               <div>
                                 <label className="block text-[9px] text-slate-400 mb-0.5">
@@ -1472,41 +1554,48 @@ export const FiberGisInspectorPanel: React.FC<FiberGisInspectorPanelProps> = ({
                                     )}
 
                                     {leg.status === 'OUTGOING_CABLE_FEED' && (
-                                      <div className="grid grid-cols-2 gap-1.5 font-mono">
-                                        <select
-                                          value={leg.target_cable_id || ''}
-                                          onChange={(e) => {
-                                            const cId = e.target.value || null;
-                                            setInternalSplittersDraft((prev) =>
-                                              prev.map((s) =>
-                                                s.id === unit.id
-                                                  ? {
-                                                      ...s,
-                                                      legs: s.legs.map((l) =>
-                                                        l.legNumber === leg.legNumber
-                                                          ? { ...l, target_cable_id: cId }
-                                                          : l
-                                                      ),
-                                                    }
-                                                  : s
-                                              )
-                                            );
-                                          }}
-                                          className="bg-slate-950 border border-slate-700 rounded px-2 py-1.5 text-white"
-                                        >
-                                          <option value="">Outgoing Cable...</option>
-                                          {connectedCables.map((c) => {
-                                            const oId =
-                                              c.source_node_id === node.id
-                                                ? c.target_node_id
-                                                : c.source_node_id;
-                                            return (
-                                              <option key={c.id} value={c.id}>
-                                                To {nodesById[oId]?.name || 'Node'} ({c.cable_cores}C)
-                                              </option>
-                                            );
-                                          })}
-                                        </select>
+                                      <div className="grid grid-cols-1 sm:grid-cols-3 gap-1.5 font-mono">
+                                        <div className="sm:col-span-2">
+                                          <SearchableCombobox
+                                            compact
+                                            value={leg.target_cable_id || ''}
+                                            options={connectedCables.map((c) => {
+                                              const oId =
+                                                c.source_node_id === node.id
+                                                  ? c.target_node_id
+                                                  : c.source_node_id;
+                                              const oNode = nodesById[oId];
+                                              return {
+                                                value: c.id,
+                                                label: `To ${oNode?.name || 'Node'}`,
+                                                sublabel: `${c.cable_cores}C · ${c.distance_meters}m${
+                                                  oNode?.area_name ? ` · ${oNode.area_name}` : ''
+                                                }`,
+                                                keywords: `${oNode?.name || ''} ${oNode?.area_name || ''} ${c.name || ''}`,
+                                              };
+                                            })}
+                                            onChange={(cId) => {
+                                              setInternalSplittersDraft((prev) =>
+                                                prev.map((s) =>
+                                                  s.id === unit.id
+                                                    ? {
+                                                        ...s,
+                                                        legs: s.legs.map((l) =>
+                                                          l.legNumber === leg.legNumber
+                                                            ? { ...l, target_cable_id: cId || null }
+                                                            : l
+                                                        ),
+                                                      }
+                                                    : s
+                                                )
+                                              );
+                                            }}
+                                            emptyOptionLabel="Outgoing Cable..."
+                                            searchPlaceholder="Search outgoing cable..."
+                                            accentColor="amber"
+                                            ariaLabel="Outgoing cable"
+                                          />
+                                        </div>
                                         <select
                                           value={leg.target_core_number || 1}
                                           onChange={(e) => {
@@ -2293,36 +2382,46 @@ export const FiberGisInspectorPanel: React.FC<FiberGisInspectorPanelProps> = ({
                               )}
 
                               {currentAction === 'PASS_THROUGH_JOINT' && (
-                                <div className="space-y-1.5">
+                                <div className="space-y-2">
                                   {candidateOutCables.length === 0 ? (
                                     <div className="p-2 rounded bg-amber-950/50 border border-amber-700/60 text-[10px] text-amber-200">
-                                      No outgoing cable connected yet — click{' '}
-                                      <strong>&ldquo;Route Outgoing Cable From This Box&rdquo;</strong> above first.
+                                      No outgoing cable connected yet — use{' '}
+                                      <strong>&ldquo;Splice &amp; Extend Core Directly to Next FDB&rdquo;</strong>{' '}
+                                      below to create the span and bind this pass-through joint in 1 click.
                                     </div>
                                   ) : (
                                     <>
                                       <div className="grid grid-cols-1 sm:grid-cols-3 gap-1.5">
-                                        <select
-                                          value={selectedOutCableId}
-                                          onChange={(e) =>
-                                            updateCoreSplice({
-                                              outgoing_cable_id: e.target.value || null,
-                                            })
-                                          }
-                                          className="sm:col-span-2 bg-slate-950 border border-indigo-600/80 rounded px-2 py-1 text-[11px] text-white"
-                                        >
-                                          {candidateOutCables.map((oc) => {
-                                            const oTargetId =
-                                              oc.source_node_id === node.id
-                                                ? oc.target_node_id
-                                                : oc.source_node_id;
-                                            return (
-                                              <option key={oc.id} value={oc.id}>
-                                                Out → {nodesById[oTargetId]?.name || 'Node'} ({oc.cable_cores}C · {oc.distance_meters}m)
-                                              </option>
-                                            );
-                                          })}
-                                        </select>
+                                        <div className="sm:col-span-2">
+                                          <SearchableCombobox
+                                            compact
+                                            value={selectedOutCableId}
+                                            options={candidateOutCables.map((oc) => {
+                                              const oTargetId =
+                                                oc.source_node_id === node.id
+                                                  ? oc.target_node_id
+                                                  : oc.source_node_id;
+                                              const oNode = nodesById[oTargetId];
+                                              return {
+                                                value: oc.id,
+                                                label: `Out → ${oNode?.name || 'Node'}`,
+                                                sublabel: `${oc.cable_cores}C · ${oc.distance_meters}m${
+                                                  oNode?.area_name ? ` · ${oNode.area_name}` : ''
+                                                }`,
+                                                keywords: `${oNode?.name || ''} ${oNode?.area_name || ''} ${oc.name || ''}`,
+                                              };
+                                            })}
+                                            onChange={(val) =>
+                                              updateCoreSplice({
+                                                outgoing_cable_id: val || null,
+                                              })
+                                            }
+                                            placeholder="Select outgoing cable..."
+                                            searchPlaceholder="Search target FDB / cable..."
+                                            accentColor="indigo"
+                                            ariaLabel="Outgoing pass-through cable"
+                                          />
+                                        </div>
                                         <select
                                           value={selectedOutCore}
                                           onChange={(e) =>
@@ -2330,7 +2429,7 @@ export const FiberGisInspectorPanel: React.FC<FiberGisInspectorPanelProps> = ({
                                               outgoing_core_number: Number(e.target.value),
                                             })
                                           }
-                                          className="bg-slate-950 border border-indigo-600/80 rounded px-2 py-1 text-[11px] text-white"
+                                          className="bg-slate-950 border border-indigo-600/80 rounded-lg px-2 py-1.5 text-[11px] text-white"
                                         >
                                           {Array.from(
                                             {
@@ -2362,6 +2461,168 @@ export const FiberGisInspectorPanel: React.FC<FiberGisInspectorPanelProps> = ({
                                         </span>
                                       </div>
                                     </>
+                                  )}
+                                </div>
+                              )}
+
+                              {/* 1-Step Mid-Span Splice & Extend Core Directly to Next FDB */}
+                              {onQuickSpliceAndExtendCore && (
+                                <div className="pt-1 border-t border-slate-800/80">
+                                  {quickExtendCoreKey !== arrivalKey ? (
+                                    <button
+                                      type="button"
+                                      onClick={() => {
+                                        setQuickExtendCoreKey(arrivalKey);
+                                        setQuickExtendCableCores(2);
+                                        setQuickExtendOutCore(1);
+                                        setQuickExtendTargetNodeId('');
+                                      }}
+                                      className="w-full py-1.5 px-2.5 rounded-lg bg-indigo-950/70 hover:bg-indigo-900/80 border border-indigo-700/70 text-[10px] font-bold text-indigo-200 flex items-center justify-center gap-1.5 cursor-pointer transition"
+                                    >
+                                      <Zap className="w-3 h-3 text-amber-300 shrink-0" />
+                                      <span>Splice &amp; Extend Core #{coreNum} Directly to Next FDB</span>
+                                    </button>
+                                  ) : (
+                                    <div className="p-2.5 rounded-lg bg-slate-950 border border-indigo-600/80 space-y-2">
+                                      <div className="flex items-center justify-between gap-2">
+                                        <span className="text-[10px] font-bold uppercase tracking-wider text-indigo-300 flex items-center gap-1">
+                                          <Zap className="w-3 h-3 text-amber-300" />
+                                          1-Step Mid-Span Extend (Core #{coreNum} {coreColor.name})
+                                        </span>
+                                        <button
+                                          type="button"
+                                          onClick={() => setQuickExtendCoreKey(null)}
+                                          className="text-slate-400 hover:text-white text-[10px] cursor-pointer"
+                                        >
+                                          Cancel
+                                        </button>
+                                      </div>
+
+                                      <div>
+                                        <label className="block text-[9px] text-slate-400 mb-1">
+                                          Destination FDB / FAT / Joint (e.g. LAL-CHAND)
+                                        </label>
+                                        <SearchableCombobox
+                                          compact
+                                          value={quickExtendTargetNodeId}
+                                          options={destinationNodeOptions}
+                                          onChange={setQuickExtendTargetNodeId}
+                                          placeholder="Search target FDB / FAT..."
+                                          searchPlaceholder="Type box name, area, or dBm..."
+                                          accentColor="indigo"
+                                          ariaLabel="Target FDB for mid-span core extension"
+                                        />
+                                      </div>
+
+                                      <div className="grid grid-cols-2 gap-1.5">
+                                        <div>
+                                          <label className="block text-[9px] text-slate-400 mb-0.5">
+                                            New Cable Capacity
+                                          </label>
+                                          <select
+                                            value={quickExtendCableCores}
+                                            onChange={(e) => {
+                                              const nextC = Number(e.target.value) as
+                                                | 1
+                                                | 2
+                                                | 4
+                                                | 6
+                                                | 8
+                                                | 12
+                                                | 24
+                                                | 48;
+                                              setQuickExtendCableCores(nextC);
+                                              if (quickExtendOutCore > nextC) {
+                                                setQuickExtendOutCore(1);
+                                              }
+                                            }}
+                                            className="w-full bg-slate-900 border border-slate-700 rounded-lg px-2 py-1.5 text-[11px] text-white"
+                                          >
+                                            {[1, 2, 4, 6, 8, 12, 24, 48].map((cnt) => (
+                                              <option key={cnt} value={cnt}>
+                                                {cnt}C Fiber Cable
+                                              </option>
+                                            ))}
+                                          </select>
+                                        </div>
+                                        <div>
+                                          <label className="block text-[9px] text-slate-400 mb-0.5">
+                                            Target Incoming Core #
+                                          </label>
+                                          <select
+                                            value={quickExtendOutCore}
+                                            onChange={(e) =>
+                                              setQuickExtendOutCore(Number(e.target.value))
+                                            }
+                                            className="w-full bg-slate-900 border border-slate-700 rounded-lg px-2 py-1.5 text-[11px] text-white"
+                                          >
+                                            {Array.from(
+                                              { length: quickExtendCableCores },
+                                              (_, i) => i + 1
+                                            ).map((cIdx) => (
+                                              <option key={cIdx} value={cIdx}>
+                                                Core #{cIdx} ({getTia598Color(cIdx).name})
+                                              </option>
+                                            ))}
+                                          </select>
+                                        </div>
+                                      </div>
+
+                                      <div className="text-[10px] text-emerald-300 bg-emerald-950/40 border border-emerald-800/60 rounded px-2 py-1.5">
+                                        {arrivalDbm !== undefined
+                                          ? `Signal: ${arrivalDbm.toFixed(
+                                              2
+                                            )} dBm - ${DEFAULT_PASS_THROUGH_SPLICE_LOSS_DB.toFixed(
+                                              2
+                                            )} dB splice = ${(
+                                              arrivalDbm - DEFAULT_PASS_THROUGH_SPLICE_LOSS_DB
+                                            ).toFixed(2)} dBm → Core #${quickExtendOutCore} (${
+                                              getTia598Color(quickExtendOutCore).name
+                                            }), bypassing local splitter!`
+                                          : `Bypasses local splitter (-${DEFAULT_PASS_THROUGH_SPLICE_LOSS_DB.toFixed(
+                                              2
+                                            )} dB splice loss)`}
+                                      </div>
+
+                                      <button
+                                        type="button"
+                                        disabled={
+                                          !quickExtendTargetNodeId || isSaving || localSaving
+                                        }
+                                        onClick={async () => {
+                                          if (!quickExtendTargetNodeId) return;
+                                          setLocalSaveError(null);
+                                          setLocalSaving(true);
+                                          try {
+                                            await onQuickSpliceAndExtendCore({
+                                              sourceNode: node,
+                                              incomingCableId: incCable.id,
+                                              incomingCoreNumber: coreNum,
+                                              targetNodeId: quickExtendTargetNodeId,
+                                              outgoingCableCores: quickExtendCableCores,
+                                              outgoingCoreNumber: quickExtendOutCore,
+                                              spliceLossDb: DEFAULT_PASS_THROUGH_SPLICE_LOSS_DB,
+                                            });
+                                            setQuickExtendCoreKey(null);
+                                          } catch (err: any) {
+                                            setLocalSaveError(
+                                              err?.message ||
+                                                'Failed to extend pass-through core to destination FDB.'
+                                            );
+                                          } finally {
+                                            setLocalSaving(false);
+                                          }
+                                        }}
+                                        className="w-full min-h-[36px] py-1.5 px-3 rounded-lg bg-emerald-600 hover:bg-emerald-500 disabled:opacity-50 text-slate-950 font-bold text-[11px] flex items-center justify-center gap-1.5 cursor-pointer"
+                                      >
+                                        <Zap className="w-3.5 h-3.5" />
+                                        <span>
+                                          {localSaving
+                                            ? 'Creating Cable & Saving Splice...'
+                                            : 'Create Cable & Bind Pass-Through Splice'}
+                                        </span>
+                                      </button>
+                                    </div>
                                   )}
                                 </div>
                               )}
@@ -3209,40 +3470,20 @@ export const FiberGisInspectorPanel: React.FC<FiberGisInspectorPanelProps> = ({
                     </button>
                   )}
 
-                  <div className="grid grid-cols-2 gap-2">
+                  <div className="grid grid-cols-1 gap-2.5">
                     <div>
                       <label className="block text-[10px] font-mono text-slate-400 mb-1">
                         Incoming Feed Cable
                       </label>
-                      <select
+                      <SearchableCombobox
                         value={nodeFeedCableId}
-                        onChange={(e) => setNodeFeedCableId(e.target.value)}
-                        className="w-full bg-slate-900 border border-slate-700 rounded-lg px-2 py-2 text-xs text-white"
-                      >
-                        <option value="">Auto (Best OLT Path)</option>
-                        {connectedCables.map((c) => {
-                          const otherId =
-                            c.source_node_id === node.id ? c.target_node_id : c.source_node_id;
-                          const otherNode = nodesById[otherId];
-                          const otherName = otherNode?.name || 'Node';
-                          const otherBudget = budgetsByNodeId[otherId];
-                          const otherOutDbm =
-                            otherNode?.node_type === 'OLT'
-                              ? otherBudget?.oltTxDbm
-                              : SPLITTER_SPECS[otherNode?.splitter_type || 'none']?.isAsymmetricFbt
-                              ? otherBudget?.thruOutputDbm
-                              : otherBudget?.ontRxDbm ?? otherBudget?.thruOutputDbm;
-                          return (
-                            <option key={c.id} value={c.id}>
-                              From {otherName} ({c.cable_cores}C · {c.distance_meters}m
-                              {otherOutDbm !== null && otherOutDbm !== undefined
-                                ? ` · ${otherOutDbm >= 0 ? '+' : ''}${otherOutDbm.toFixed(1)}dBm`
-                                : ''}
-                              )
-                            </option>
-                          );
-                        })}
-                      </select>
+                        options={connectedCableOptions}
+                        onChange={(val) => setNodeFeedCableId(val)}
+                        emptyOptionLabel="Auto (Best OLT Path)"
+                        searchPlaceholder="Search upstream cable or dBm..."
+                        accentColor="cyan"
+                        ariaLabel="Incoming Feed Cable"
+                      />
                       {budget?.parentOutputDbm !== null && budget?.parentOutputDbm !== undefined && (
                         <span className="block text-[10px] font-mono text-cyan-400 mt-1">
                           Inherits {nodesById[budget.parentNodeId || '']?.name || 'parent'} output ({budget.parentOutputDbm >= 0 ? '+' : ''}
@@ -3250,53 +3491,51 @@ export const FiberGisInspectorPanel: React.FC<FiberGisInspectorPanelProps> = ({
                         </span>
                       )}
                     </div>
-                    <div>
-                      <label className="block text-[10px] font-mono text-slate-400 mb-1">
-                        Incoming Core #
-                      </label>
-                      <select
-                        value={nodeFeedCore}
-                        onChange={(e) => setNodeFeedCore(Number(e.target.value))}
-                        className="w-full bg-slate-900 border border-slate-700 rounded-lg px-2 py-2 text-xs text-white"
-                      >
-                        {Array.from({ length: 48 }, (_, i) => i + 1).map((num) => (
-                          <option key={num} value={num}>
-                            Core #{num} ({getTia598Color(num).name})
-                          </option>
-                        ))}
-                      </select>
-                    </div>
-                  </div>
 
-                  <div className="grid grid-cols-2 gap-2">
-                    <div>
-                      <label className="block text-[10px] font-mono text-slate-400 mb-1">
-                        Feed Core / Pair Label
-                      </label>
-                      <input
-                        type="text"
-                        value={nodeFeedCorePair}
-                        onChange={(e) => setNodeFeedCorePair(e.target.value)}
-                        placeholder={`Core #${nodeFeedCore} (${getTia598Color(nodeFeedCore).name})`}
-                        className="w-full bg-slate-900 border border-slate-700 rounded-lg px-2.5 py-2 text-xs text-white"
-                      />
+                    <div className="grid grid-cols-2 gap-2">
+                      <div>
+                        <label className="block text-[10px] font-mono text-slate-400 mb-1">
+                          Incoming Core #
+                        </label>
+                        <select
+                          value={nodeFeedCore}
+                          onChange={(e) => setNodeFeedCore(Number(e.target.value))}
+                          className="w-full bg-slate-900 border border-slate-700 rounded-lg px-2 py-2 text-xs text-white"
+                        >
+                          {Array.from({ length: 48 }, (_, i) => i + 1).map((num) => (
+                            <option key={num} value={num}>
+                              Core #{num} ({getTia598Color(num).name})
+                            </option>
+                          ))}
+                        </select>
+                      </div>
+                      <div>
+                        <label className="block text-[10px] font-mono text-slate-400 mb-1">
+                          Feed Core / Pair Label
+                        </label>
+                        <input
+                          type="text"
+                          value={nodeFeedCorePair}
+                          onChange={(e) => setNodeFeedCorePair(e.target.value)}
+                          placeholder={`Core #${nodeFeedCore} (${getTia598Color(nodeFeedCore).name})`}
+                          className="w-full bg-slate-900 border border-slate-700 rounded-lg px-2.5 py-2 text-xs text-white"
+                        />
+                      </div>
                     </div>
+
                     <div>
                       <label className="block text-[10px] font-mono text-slate-400 mb-1">
                         Source PON Port
                       </label>
-                      <select
+                      <SearchableCombobox
                         value={nodePonPortId}
-                        onChange={(e) => setNodePonPortId(e.target.value)}
-                        className="w-full bg-slate-900 border border-slate-700 rounded-lg px-2 py-2 text-xs text-white"
-                      >
-                        <option value="">Auto (Inherited)</option>
-                        {allPonPortOptions.map((opt) => (
-                          <option key={opt.id} value={opt.id}>
-                            {opt.label}
-                          </option>
-                        ))}
-                      </select>
+                        options={allPonPortOptions}
+                        onChange={(val) => setNodePonPortId(val)}
+                        emptyOptionLabel="Auto (Inherited)"
+                        searchPlaceholder="Search OLT or PON port..."
+                        accentColor="sky"
+                        ariaLabel="Source PON Port"
+                      />
                     </div>
                   </div>
                 </>
@@ -3609,41 +3848,47 @@ export const FiberGisInspectorPanel: React.FC<FiberGisInspectorPanelProps> = ({
               </div>
             </div>
 
-            <div className="grid grid-cols-2 gap-2 font-mono">
+            <div className="grid grid-cols-1 sm:grid-cols-2 gap-2 font-mono">
               <div>
                 <label className="block text-[10px] text-slate-400 mb-1">Source OLT</label>
-                <select
+                <SearchableCombobox
+                  compact
                   value={cableSourceOltId}
-                  onChange={(e) => {
-                    const nextOlt = e.target.value;
+                  options={olts.map((o) => ({
+                    value: o.id,
+                    label: o.name,
+                    sublabel: `${o.pon_mode} · ${o.total_pon_ports} PON`,
+                    metricTone: 'sky',
+                  }))}
+                  onChange={(nextOlt) => {
                     setCableSourceOltId(nextOlt);
                     const pps = nextOlt ? ponPortsByOltId[nextOlt] || [] : [];
                     setCableSourcePonPortId(pps[0]?.id || '');
                   }}
-                  className="w-full bg-slate-900 border border-slate-700 rounded-lg px-2 py-1.5 text-[11px] text-white"
-                >
-                  <option value="">None / Unassigned</option>
-                  {olts.map((o) => (
-                    <option key={o.id} value={o.id}>
-                      {o.name} ({o.pon_mode})
-                    </option>
-                  ))}
-                </select>
+                  emptyOptionLabel="None / Unassigned"
+                  searchPlaceholder="Search OLT..."
+                  accentColor="sky"
+                  ariaLabel="Cable Source OLT"
+                />
               </div>
               <div>
                 <label className="block text-[10px] text-slate-400 mb-1">Source PON Port</label>
-                <select
+                <SearchableCombobox
+                  compact
                   value={cableSourcePonPortId}
-                  onChange={(e) => setCableSourcePonPortId(e.target.value)}
-                  className="w-full bg-slate-900 border border-slate-700 rounded-lg px-2 py-1.5 text-[11px] text-white"
-                >
-                  <option value="">Auto / Any PON</option>
-                  {selectedOltPons.map((pp) => (
-                    <option key={pp.id} value={pp.id}>
-                      PON-{pp.port_number} ({pp.port_label || 'Main'}) +{Number(pp.tx_power_dbm).toFixed(1)}dBm
-                    </option>
-                  ))}
-                </select>
+                  options={selectedOltPons.map((pp) => ({
+                    value: pp.id,
+                    label: `PON-${pp.port_number}`,
+                    sublabel: pp.port_label || 'Main',
+                    metric: `+${Number(pp.tx_power_dbm).toFixed(1)} dBm`,
+                    metricTone: 'emerald',
+                  }))}
+                  onChange={(val) => setCableSourcePonPortId(val)}
+                  emptyOptionLabel="Auto / Any PON"
+                  searchPlaceholder="Search PON port..."
+                  accentColor="cyan"
+                  ariaLabel="Cable Source PON Port"
+                />
               </div>
             </div>
 

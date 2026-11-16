@@ -1,21 +1,29 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
   Cable,
+  Calculator,
   CheckCircle2,
+  ChevronDown,
+  ChevronUp,
   Copy,
   Crosshair,
   Database,
+  Eye,
+  EyeOff,
   Filter,
   Layers,
   MapPin,
   MousePointer,
+  Navigation,
   Plus,
   Radio,
   RefreshCw,
   RotateCcw,
   Search,
   Server,
+  Tag,
   Undo2,
+  Users,
   Wifi,
   Wrench,
   X,
@@ -66,15 +74,30 @@ import {
 } from '../services/fiberGisService';
 import {
   CABLE_CAPACITY_PRESETS,
+  DEFAULT_FUSION_SPLICE_LOSS_DB,
+  FIBER_ATTENUATION_DB_PER_KM,
   SFP_TX_PRESETS,
   SPLITTER_SPECS,
+  cableCoresToType,
   calculateTopologyOpticalBudgets,
   computePolylineDistanceMeters,
   getTia598Color,
+  haversineMeters,
   inferSfpClassFromDbm,
   inferSplitterCategory,
+  normalizeCableCores,
+  resolveHopSpliceLoss,
   traceOpticalPathToNode,
 } from '../lib/fiberOpticEngine';
+import {
+  AgentLiveLocationRow,
+  GisAreaZoneRow,
+  createGisAreaZone,
+  deleteGisAreaZone,
+  formatAgentLastSeen,
+  loadGisAreaZones,
+  subscribeToAgentLiveLocations,
+} from '../services/agentGpsService';
 import { FIBER_GIS_MIGRATION_SQL } from '../lib/gisMigrationSql';
 import {
   collectSortedAreaOptions,
@@ -83,6 +106,7 @@ import {
 import { DEFAULT_NETWORK_AREAS } from '../lib/billingAndNetwork';
 import {
   FiberGisLeafletCanvas,
+  GisNodeAlertStatus,
   GisToolMode,
   MapLayerType,
 } from './gis/FiberGisLeafletCanvas';
@@ -90,6 +114,7 @@ import { FiberGisInspectorPanel } from './gis/FiberGisInspectorPanel';
 import { FiberTraceabilityDrawer } from './gis/FiberTraceabilityDrawer';
 import { FiberConnectionModal } from './gis/FiberConnectionModal';
 import { FiberEquipmentUpgradeModal } from './gis/FiberEquipmentUpgradeModal';
+import { SearchableCombobox, SearchableOption } from './gis/SearchableCombobox';
 import { OltFormDraft, OltManagerModal } from './OltManagerModal';
 
 interface FiberGisMapViewProps {
@@ -100,11 +125,265 @@ interface FiberGisMapViewProps {
 const DEFAULT_MAP_CENTER: GisLatLng = { lat: 31.5204, lng: 74.3587 };
 const DEFAULT_MAP_ZOOM = 15;
 
+export interface LinkSegmentInput {
+  lengthMeters: number;
+  splicesCount?: number;
+  spliceLossDb?: number;
+}
+
+export interface OpticalLinkBudgetEstimate {
+  sourceNodeId: string;
+  targetNodeId: string;
+  sourceName: string;
+  targetName: string;
+  routeMode: 'TOPOLOGY_PATH' | 'DIRECT_DRAFT';
+  segmentCount: number;
+  totalLengthMeters: number;
+  totalSplices: number;
+  fiberLossDb: number;
+  spliceLossDb: number;
+  totalEstimatedLossDb: number;
+  hopNodeNames: string[];
+}
+
+function roundLoss2(n: number): number {
+  return Math.round(n * 100) / 100;
+}
+
+/**
+ * Helper utility that calculates the estimated optical link budget loss (dB)
+ * from fiber segment lengths and number of splices between two selected nodes.
+ */
+export function calculateOpticalLinkBudgetLoss(params: {
+  sourceNodeId: string;
+  targetNodeId: string;
+  nodes: SupabaseGisNode[];
+  cables: SupabaseGisCable[];
+  draftWaypoints?: GisLatLng[];
+  customSegments?: LinkSegmentInput[];
+  splicesOverride?: number;
+  attenuationDbPerKm?: number;
+  lossPerSpliceDb?: number;
+}): OpticalLinkBudgetEstimate | null {
+  const {
+    sourceNodeId,
+    targetNodeId,
+    nodes,
+    cables,
+    draftWaypoints,
+    customSegments,
+    splicesOverride,
+    attenuationDbPerKm = FIBER_ATTENUATION_DB_PER_KM,
+    lossPerSpliceDb = DEFAULT_FUSION_SPLICE_LOSS_DB,
+  } = params;
+
+  if (!sourceNodeId || !targetNodeId || sourceNodeId === targetNodeId) {
+    return null;
+  }
+
+  const nodeById: Record<string, SupabaseGisNode> = {};
+  for (const n of nodes) {
+    nodeById[n.id] = n;
+  }
+
+  const sourceNode = nodeById[sourceNodeId];
+  const targetNode = nodeById[targetNodeId];
+  if (!sourceNode || !targetNode) {
+    return null;
+  }
+
+  if (Array.isArray(customSegments) && customSegments.length > 0) {
+    let totalLengthMeters = 0;
+    let totalSplices = 0;
+    let spliceLossSum = 0;
+    for (const seg of customSegments) {
+      const len = Math.max(0, Number(seg.lengthMeters) || 0);
+      const splices = Math.max(0, Number(seg.splicesCount ?? 1));
+      const perSplice =
+        seg.spliceLossDb !== undefined ? Number(seg.spliceLossDb) : lossPerSpliceDb;
+      totalLengthMeters += len;
+      totalSplices += splices;
+      spliceLossSum += splices * perSplice;
+    }
+    if (splicesOverride !== undefined) {
+      totalSplices = Math.max(0, splicesOverride);
+      spliceLossSum = totalSplices * lossPerSpliceDb;
+    }
+    const fiberLossDb = roundLoss2((totalLengthMeters / 1000) * attenuationDbPerKm);
+    const spliceLossDb = roundLoss2(spliceLossSum);
+    return {
+      sourceNodeId,
+      targetNodeId,
+      sourceName: sourceNode.name,
+      targetName: targetNode.name,
+      routeMode: 'DIRECT_DRAFT',
+      segmentCount: customSegments.length,
+      totalLengthMeters: Math.round(totalLengthMeters),
+      totalSplices,
+      fiberLossDb,
+      spliceLossDb,
+      totalEstimatedLossDb: roundLoss2(fiberLossDb + spliceLossDb),
+      hopNodeNames: [sourceNode.name, targetNode.name],
+    };
+  }
+
+  // Build undirected adjacency list to find shortest cable path between the two selected nodes
+  const adj: Record<
+    string,
+    Array<{ neighborId: string; cable: SupabaseGisCable; lengthMeters: number }>
+  > = {};
+  for (const c of cables) {
+    const segSrc = nodeById[c.source_node_id];
+    const segDst = nodeById[c.target_node_id];
+    const fallbackDist =
+      c.route_coordinates_json && c.route_coordinates_json.length >= 2
+        ? computePolylineDistanceMeters(c.route_coordinates_json)
+        : segSrc && segDst
+        ? computePolylineDistanceMeters([
+            { lat: segSrc.lat, lng: segSrc.lng },
+            { lat: segDst.lat, lng: segDst.lng },
+          ])
+        : 0;
+    const len = Math.max(1, Number(c.distance_meters || fallbackDist || 0));
+    if (!adj[c.source_node_id]) adj[c.source_node_id] = [];
+    if (!adj[c.target_node_id]) adj[c.target_node_id] = [];
+    adj[c.source_node_id].push({ neighborId: c.target_node_id, cable: c, lengthMeters: len });
+    adj[c.target_node_id].push({ neighborId: c.source_node_id, cable: c, lengthMeters: len });
+  }
+
+  // Dijkstra shortest path by total fiber meters
+  const distById: Record<string, number> = { [sourceNodeId]: 0 };
+  const prevById: Record<
+    string,
+    { parentId: string; cable: SupabaseGisCable; lengthMeters: number } | undefined
+  > = {};
+  const visited: Record<string, boolean> = {};
+  const queue: string[] = [sourceNodeId];
+
+  while (queue.length > 0) {
+    queue.sort((a, b) => (distById[a] ?? Infinity) - (distById[b] ?? Infinity));
+    const curr = queue.shift()!;
+    if (visited[curr]) continue;
+    visited[curr] = true;
+    if (curr === targetNodeId) break;
+
+    for (const edge of adj[curr] || []) {
+      if (visited[edge.neighborId]) continue;
+      const alt = (distById[curr] ?? Infinity) + edge.lengthMeters;
+      if (alt < (distById[edge.neighborId] ?? Infinity)) {
+        distById[edge.neighborId] = alt;
+        prevById[edge.neighborId] = {
+          parentId: curr,
+          cable: edge.cable,
+          lengthMeters: edge.lengthMeters,
+        };
+        queue.push(edge.neighborId);
+      }
+    }
+  }
+
+  if (prevById[targetNodeId]) {
+    const pathCables: Array<{ cable: SupabaseGisCable; lengthMeters: number }> = [];
+    const hopNodeIds: string[] = [targetNodeId];
+    let step = targetNodeId;
+    while (step !== sourceNodeId && prevById[step]) {
+      const prev = prevById[step]!;
+      pathCables.unshift({ cable: prev.cable, lengthMeters: prev.lengthMeters });
+      hopNodeIds.unshift(prev.parentId);
+      step = prev.parentId;
+    }
+
+    let totalLengthMeters = 0;
+    for (const seg of pathCables) {
+      totalLengthMeters += seg.lengthMeters;
+    }
+
+    // Count splices along endpoints and intermediate joints/enclosures (N segments => N + 1 splice points)
+    let totalSplices = hopNodeIds.length;
+    let spliceLossSum = 0;
+    if (splicesOverride !== undefined) {
+      totalSplices = Math.max(0, splicesOverride);
+      spliceLossSum = totalSplices * lossPerSpliceDb;
+    } else if (params.lossPerSpliceDb !== undefined) {
+      spliceLossSum = totalSplices * params.lossPerSpliceDb;
+    } else {
+      for (let i = 0; i < hopNodeIds.length; i++) {
+        const hopNode = nodeById[hopNodeIds[i]];
+        const prevCable = i > 0 ? pathCables[i - 1]?.cable : undefined;
+        const nextCable = i < pathCables.length ? pathCables[i]?.cable : undefined;
+        const matchedJoint =
+          prevCable && nextCable && Array.isArray(hopNode?.core_splices)
+            ? hopNode.core_splices.find(
+                (sp) =>
+                  sp.action === 'PASS_THROUGH_JOINT' &&
+                  ((sp.incoming_cable_id === prevCable.id &&
+                    sp.outgoing_cable_id === nextCable.id) ||
+                    (sp.incoming_cable_id === nextCable.id &&
+                      sp.outgoing_cable_id === prevCable.id))
+              )
+            : undefined;
+        const pointLoss =
+          matchedJoint && matchedJoint.splice_loss_db !== undefined
+            ? Number(matchedJoint.splice_loss_db)
+            : resolveHopSpliceLoss(hopNode?.loss_per_splice);
+        spliceLossSum += pointLoss;
+      }
+    }
+
+    const fiberLossDb = roundLoss2((totalLengthMeters / 1000) * attenuationDbPerKm);
+    const spliceLossDb = roundLoss2(spliceLossSum);
+    return {
+      sourceNodeId,
+      targetNodeId,
+      sourceName: sourceNode.name,
+      targetName: targetNode.name,
+      routeMode: 'TOPOLOGY_PATH',
+      segmentCount: pathCables.length,
+      totalLengthMeters: Math.round(totalLengthMeters),
+      totalSplices,
+      fiberLossDb,
+      spliceLossDb,
+      totalEstimatedLossDb: roundLoss2(fiberLossDb + spliceLossDb),
+      hopNodeNames: hopNodeIds.map((id) => nodeById[id]?.name || id),
+    };
+  }
+
+  // Fallback: direct/draft route between the two selected nodes
+  const draftPts: GisLatLng[] =
+    draftWaypoints && draftWaypoints.length >= 2
+      ? [...draftWaypoints, { lat: targetNode.lat, lng: targetNode.lng }]
+      : [
+          { lat: sourceNode.lat, lng: sourceNode.lng },
+          ...(draftWaypoints ? draftWaypoints.slice(1) : []),
+          { lat: targetNode.lat, lng: targetNode.lng },
+        ];
+  const directMeters = computePolylineDistanceMeters(draftPts);
+  const totalSplices =
+    splicesOverride !== undefined ? Math.max(0, splicesOverride) : 2;
+  const fiberLossDb = roundLoss2((directMeters / 1000) * attenuationDbPerKm);
+  const spliceLossDb = roundLoss2(totalSplices * lossPerSpliceDb);
+
+  return {
+    sourceNodeId,
+    targetNodeId,
+    sourceName: sourceNode.name,
+    targetName: targetNode.name,
+    routeMode: 'DIRECT_DRAFT',
+    segmentCount: 1,
+    totalLengthMeters: Math.round(directMeters),
+    totalSplices,
+    fiberLossDb,
+    spliceLossDb,
+    totalEstimatedLossDb: roundLoss2(fiberLossDb + spliceLossDb),
+    hopNodeNames: [sourceNode.name, targetNode.name],
+  };
+}
+
 export const FiberGisMapView: React.FC<FiberGisMapViewProps> = ({
   currentUser,
   compactMobile = false,
 }) => {
-  const { activeSessions } = useISP();
+  const { activeSessions, complaints, outages } = useISP();
 
   const [olts, setOlts] = useState<SupabaseGisOlt[]>([]);
   const [ponPorts, setPonPorts] = useState<SupabaseGisOltPonPort[]>([]);
@@ -124,6 +403,23 @@ export const FiberGisMapView: React.FC<FiberGisMapViewProps> = ({
 
   // Free OpenStreetMap + Esri World Imagery Layer State
   const [layerType, setLayerType] = useState<MapLayerType>('hybrid');
+  const [showCablesLayer, setShowCablesLayer] = useState<boolean>(true);
+  const [showFdbNodesLayer, setShowFdbNodesLayer] = useState<boolean>(true);
+  const [showCoreHubsLayer, setShowCoreHubsLayer] = useState<boolean>(true);
+  const [showSubscribersLayer, setShowSubscribersLayer] = useState<boolean>(true);
+  const [showAreaLabelsLayer, setShowAreaLabelsLayer] = useState<boolean>(true);
+  const [showAgentsLayer, setShowAgentsLayer] = useState<boolean>(true);
+  const [isLayerPanelOpen, setIsLayerPanelOpen] = useState<boolean>(!compactMobile);
+  const [areaZones, setAreaZones] = useState<GisAreaZoneRow[]>([]);
+  const [liveAgents, setLiveAgents] = useState<AgentLiveLocationRow[]>([]);
+  const [nearestAgentMatch, setNearestAgentMatch] = useState<{
+    agent: AgentLiveLocationRow;
+    targetLabel: string;
+    distanceMeters: number;
+  } | null>(null);
+  const [pendingAreaZoneCoords, setPendingAreaZoneCoords] = useState<GisLatLng | null>(null);
+  const [newAreaZoneName, setNewAreaZoneName] = useState('');
+  const [newAreaZoneColor, setNewAreaZoneColor] = useState('#22d3ee');
   const [mapCenter, setMapCenter] = useState<GisLatLng>(DEFAULT_MAP_CENTER);
   const [mapZoom, setMapZoom] = useState<number>(DEFAULT_MAP_ZOOM);
   const [flyToTarget, setFlyToTarget] = useState<{
@@ -190,6 +486,12 @@ export const FiberGisMapView: React.FC<FiberGisMapViewProps> = ({
   const [filterPonPortId, setFilterPonPortId] = useState<string>('ALL');
   const [filterAreaName, setFilterAreaName] = useState<string>('ALL');
   const [filterZoomTriggerTs, setFilterZoomTriggerTs] = useState<number>(0);
+
+  // Two-Node Optical Link Budget Loss Estimator State
+  const [isLinkEstimatorOpen, setIsLinkEstimatorOpen] = useState(false);
+  const [linkCalcNodeAId, setLinkCalcNodeAId] = useState<string>('');
+  const [linkCalcNodeBId, setLinkCalcNodeBId] = useState<string>('');
+  const [linkCalcCustomSplices, setLinkCalcCustomSplices] = useState<string>('');
 
   const actorUsername = currentUser?.username || 'admin';
 
@@ -280,6 +582,17 @@ export const FiberGisMapView: React.FC<FiberGisMapViewProps> = ({
 
   useEffect(() => {
     refreshTopology(true);
+    loadGisAreaZones().then(setAreaZones).catch(() => {});
+  }, []);
+
+  // Live Field Agent GPS Subscriptions + 15s polling fallback
+  useEffect(() => {
+    const unsubAgents = subscribeToAgentLiveLocations((agentsList) => {
+      setLiveAgents(agentsList);
+    });
+    return () => {
+      unsubAgents();
+    };
   }, []);
 
   // Real-time Supabase WebSocket syncing across gis_olts, gis_olt_pon_ports, gis_nodes, gis_cables, and gis_fdb_ports
@@ -406,6 +719,51 @@ export const FiberGisMapView: React.FC<FiberGisMapViewProps> = ({
     [nodes, cables, ponPortsById]
   );
 
+  const connectNodeSearchOptions: SearchableOption[] = useMemo(() => {
+    return nodes
+      .slice()
+      .sort((a, b) => a.name.localeCompare(b.name))
+      .map((n) => {
+        const b = budgetsByNodeId[n.id];
+        const sum = b?.enclosureSummary;
+        const spec = SPLITTER_SPECS[n.splitter_type] || SPLITTER_SPECS['none'];
+        const tPorts = sum
+          ? sum.boxCapacity
+          : Math.max(Number(n.box_capacity || 0), Number(n.total_ports || 0), spec.defaultPorts || 0);
+        const uPorts = sum
+          ? sum.usedPorts
+          : (splitterOutputsByNodeId[n.id] || []).filter((o) => o.utilization_type !== 'FREE_PORT')
+              .length || (portsByNodeId[n.id] || []).filter((p) => p.status !== 'FREE').length;
+        const fPorts = Math.max(0, tPorts - uPorts);
+        const dbmVal =
+          n.node_type === 'OLT'
+            ? Number(n.tx_power_dbm ?? 5.0)
+            : b?.ontRxDbm ?? b?.thruOutputDbm ?? b?.inputDbm;
+        return {
+          value: n.id,
+          label: n.name,
+          sublabel: `${n.node_type}${n.area_name ? ` · ${n.area_name}` : ''}${
+            tPorts > 0 ? ` · ${fPorts}/${tPorts} Free` : ''
+          }`,
+          metric:
+            dbmVal !== null && dbmVal !== undefined
+              ? `${dbmVal >= 0 && n.node_type === 'OLT' ? '+' : ''}${dbmVal.toFixed(1)} dBm`
+              : undefined,
+          metricTone:
+            n.node_type === 'OLT'
+              ? 'sky'
+              : b?.healthBand === 'IDEAL' || b?.healthBand === 'GOOD'
+              ? 'emerald'
+              : b?.healthBand === 'MARGINAL'
+              ? 'amber'
+              : b?.healthBand === 'CRITICAL LOS RISK'
+              ? 'rose'
+              : 'slate',
+          keywords: `${n.name} ${n.area_name || ''} ${n.node_type}`,
+        };
+      });
+  }, [nodes, budgetsByNodeId, splitterOutputsByNodeId, portsByNodeId]);
+
   const areaFilterOptions = useMemo(
     () =>
       collectSortedAreaOptions({
@@ -512,6 +870,262 @@ export const FiberGisMapView: React.FC<FiberGisMapViewProps> = ({
     [cables, selectedCableId]
   );
 
+  const layerCounts = useMemo(() => {
+    const subsById: Record<string, GisSubscriberSummary> = {};
+    const subsByUsername: Record<string, GisSubscriberSummary> = {};
+    for (const s of subscribers) {
+      subsById[s.id] = s;
+      if (s.username) subsByUsername[s.username.toLowerCase()] = s;
+    }
+
+    let fdbNodes = 0;
+    let coreHubs = 0;
+    let subscribersTotal = 0;
+    let subscribersOnline = 0;
+
+    for (const n of nodes) {
+      if (n.node_type === 'FDB_FAT') {
+        fdbNodes += 1;
+      } else {
+        coreHubs += 1;
+      }
+
+      const seenSubs = new Map<string, boolean>();
+      if (Array.isArray(n.internal_splitters)) {
+        for (const sp of n.internal_splitters) {
+          for (const leg of sp.legs || []) {
+            if (leg.status !== 'SUBSCRIBER_DROP') continue;
+            const sub =
+              (leg.subscriber_id && subsById[leg.subscriber_id]) ||
+              (leg.subscriber_username &&
+                subsByUsername[leg.subscriber_username.toLowerCase()]) ||
+              null;
+            const key = sub?.id || `${sp.id}-${leg.legNumber}`;
+            seenSubs.set(key, Boolean(sub?.isOnline));
+          }
+        }
+      }
+      for (const out of splitterOutputsByNodeId[n.id] || []) {
+        if (out.utilization_type !== 'CLIENT_ONT') continue;
+        const sub =
+          (out.subscriber_id && subsById[out.subscriber_id]) ||
+          (out.subscriber_username &&
+            subsByUsername[out.subscriber_username.toLowerCase()]) ||
+          null;
+        const key = sub?.id || `out-${out.port_number}`;
+        if (!seenSubs.has(key)) seenSubs.set(key, Boolean(sub?.isOnline));
+      }
+      for (const fp of portsByNodeId[n.id] || []) {
+        if (fp.status !== 'ACTIVE') continue;
+        const sub =
+          (fp.subscriber_id && subsById[fp.subscriber_id]) ||
+          (fp.subscriber_username &&
+            subsByUsername[fp.subscriber_username.toLowerCase()]) ||
+          null;
+        const key = sub?.id || `port-${fp.port_number}`;
+        if (!seenSubs.has(key)) seenSubs.set(key, Boolean(sub?.isOnline));
+      }
+
+      subscribersTotal += seenSubs.size;
+      for (const online of seenSubs.values()) {
+        if (online) subscribersOnline += 1;
+      }
+    }
+
+    const onlineAgentsCount = liveAgents.filter((a) => a.is_online !== false).length;
+    const areaLabelCount = new Set(
+      [
+        ...areaZones.map((z) => z.name.trim().toLowerCase()),
+        ...nodes.map((n) => (n.area_name || '').trim().toLowerCase()),
+      ].filter(Boolean)
+    ).size;
+
+    const activeCount =
+      Number(showCablesLayer) +
+      Number(showFdbNodesLayer) +
+      Number(showSubscribersLayer) +
+      Number(showCoreHubsLayer) +
+      Number(showAreaLabelsLayer) +
+      Number(showAgentsLayer);
+
+    return {
+      cables: cables.length,
+      fdbNodes,
+      coreHubs,
+      subscribersTotal,
+      subscribersOnline,
+      areaLabelCount,
+      onlineAgentsCount,
+      activeCount,
+    };
+  }, [
+    nodes,
+    cables.length,
+    subscribers,
+    splitterOutputsByNodeId,
+    portsByNodeId,
+    areaZones,
+    liveAgents,
+    showCablesLayer,
+    showFdbNodesLayer,
+    showSubscribersLayer,
+    showCoreHubsLayer,
+    showAreaLabelsLayer,
+    showAgentsLayer,
+  ]);
+
+  const connectLinkLossEstimate = useMemo(() => {
+    if (!connectSourceNodeId || !connectTargetNodeId) return null;
+    return calculateOpticalLinkBudgetLoss({
+      sourceNodeId: connectSourceNodeId,
+      targetNodeId: connectTargetNodeId,
+      nodes,
+      cables,
+      draftWaypoints,
+    });
+  }, [connectSourceNodeId, connectTargetNodeId, nodes, cables, draftWaypoints]);
+
+  const manualLinkLossEstimate = useMemo(() => {
+    if (!linkCalcNodeAId || !linkCalcNodeBId) return null;
+    const trimmed = linkCalcCustomSplices.trim();
+    const parsedSplices =
+      trimmed !== '' && !Number.isNaN(Number(trimmed))
+        ? Math.max(0, Math.floor(Number(trimmed)))
+        : undefined;
+    return calculateOpticalLinkBudgetLoss({
+      sourceNodeId: linkCalcNodeAId,
+      targetNodeId: linkCalcNodeBId,
+      nodes,
+      cables,
+      splicesOverride: parsedSplices,
+    });
+  }, [linkCalcNodeAId, linkCalcNodeBId, linkCalcCustomSplices, nodes, cables]);
+
+  const nodeAlertStatusByNodeId = useMemo(() => {
+    const normalize = (v?: string | null) => (v || '').trim().toLowerCase();
+    const activeOutages = (outages || []).filter((o) => o.status !== 'resolved');
+    const highOpenTickets = (complaints || []).filter(
+      (t) =>
+        t.status !== 'resolved' &&
+        t.status !== 'closed' &&
+        (t.priority === 'high' || t.priority === 'critical')
+    );
+
+    const statusMap: Record<string, GisNodeAlertStatus> = {};
+    if (activeOutages.length === 0 && highOpenTickets.length === 0) {
+      return statusMap;
+    }
+
+    const subsById: Record<string, GisSubscriberSummary> = {};
+    for (const s of subscribers) {
+      subsById[s.id] = s;
+    }
+
+    for (const n of nodes) {
+      if (n.node_type !== 'FDB_FAT') continue;
+
+      const nodeNameNorm = normalize(n.name);
+      const nodeAreaNorm = normalize(n.area_name);
+      const budget = budgetsByNodeId[n.id];
+      const ponLabelNorm = normalize(budget?.sourcePonLabel);
+      const oltNameNorm = normalize(budget?.oltName);
+
+      // Collect all subscriber IDs and usernames assigned to this FDB enclosure
+      const subIdSet: Record<string, boolean> = {};
+      const subUserSet: Record<string, boolean> = {};
+
+      if (Array.isArray(n.internal_splitters)) {
+        for (const sp of n.internal_splitters) {
+          for (const leg of sp.legs || []) {
+            if (leg.status !== 'SUBSCRIBER_DROP') continue;
+            if (leg.subscriber_id) {
+              subIdSet[leg.subscriber_id] = true;
+              const matched = subsById[leg.subscriber_id];
+              if (matched?.username) subUserSet[normalize(matched.username)] = true;
+            }
+            if (leg.subscriber_username) {
+              subUserSet[normalize(leg.subscriber_username)] = true;
+            }
+          }
+        }
+      }
+
+      for (const out of splitterOutputsByNodeId[n.id] || []) {
+        if (out.utilization_type !== 'CLIENT_ONT') continue;
+        if (out.subscriber_id) {
+          subIdSet[out.subscriber_id] = true;
+          const matched = subsById[out.subscriber_id];
+          if (matched?.username) subUserSet[normalize(matched.username)] = true;
+        }
+        if (out.subscriber_username) {
+          subUserSet[normalize(out.subscriber_username)] = true;
+        }
+      }
+
+      for (const fp of portsByNodeId[n.id] || []) {
+        if (fp.status !== 'ACTIVE') continue;
+        if (fp.subscriber_id) {
+          subIdSet[fp.subscriber_id] = true;
+          const matched = subsById[fp.subscriber_id];
+          if (matched?.username) subUserSet[normalize(matched.username)] = true;
+        }
+        if (fp.subscriber_username) {
+          subUserSet[normalize(fp.subscriber_username)] = true;
+        }
+      }
+
+      let activeOutageCount = 0;
+      for (const o of activeOutages) {
+        const oArea = normalize(o.areaNode);
+        const oFeeder = normalize(o.feederLine);
+        const oPon = normalize(o.ponPort);
+        const matchesNodeOrArea =
+          (nodeNameNorm && (oFeeder === nodeNameNorm || oArea === nodeNameNorm)) ||
+          (nodeAreaNorm && oArea === nodeAreaNorm) ||
+          (oPon &&
+            ((ponLabelNorm && (oPon === ponLabelNorm || ponLabelNorm.includes(oPon))) ||
+              (oltNameNorm && oPon.includes(oltNameNorm) && nodeAreaNorm && oArea === nodeAreaNorm)));
+        if (matchesNodeOrArea) {
+          activeOutageCount += 1;
+        }
+      }
+
+      let highPriorityTicketCount = 0;
+      for (const t of highOpenTickets) {
+        const tUser = normalize(t.pppoeUsername);
+        const tArea = normalize(t.areaNode);
+        const tFeeder = normalize(t.feederLine);
+        const matchesSubscriber =
+          (t.customerId && subIdSet[t.customerId]) || (tUser && subUserSet[tUser]);
+        const matchesBox =
+          (nodeNameNorm && (tFeeder === nodeNameNorm || tArea === nodeNameNorm)) ||
+          (nodeAreaNorm && tArea === nodeAreaNorm && !tUser);
+        if (matchesSubscriber || matchesBox) {
+          highPriorityTicketCount += 1;
+        }
+      }
+
+      if (activeOutageCount > 0 || highPriorityTicketCount > 0) {
+        statusMap[n.id] = {
+          hasOutage: activeOutageCount > 0,
+          hasHighPriorityTicket: highPriorityTicketCount > 0,
+          activeOutageCount,
+          highPriorityTicketCount,
+        };
+      }
+    }
+
+    return statusMap;
+  }, [
+    nodes,
+    outages,
+    complaints,
+    subscribers,
+    budgetsByNodeId,
+    splitterOutputsByNodeId,
+    portsByNodeId,
+  ]);
+
   // Quick search matches across Nodes and Subscriber Port Links
   const searchMatches = useMemo(() => {
     const q = searchQuery.trim().toLowerCase();
@@ -555,6 +1169,52 @@ export const FiberGisMapView: React.FC<FiberGisMapViewProps> = ({
     }
     return results.slice(0, 10);
   }, [searchQuery, nodes, ports]);
+
+  const handleLocateNearestAgent = () => {
+    const activeAgents = liveAgents.filter((a) => a.is_online !== false);
+    if (activeAgents.length === 0) {
+      showToast(
+        'No live Field Agent GPS signals online yet. Ask agents to open the Field Portal with GPS enabled.',
+        'err'
+      );
+      return;
+    }
+
+    const alertedFdb = nodes.find(
+      (n) => n.node_type === 'FDB_FAT' && Boolean(nodeAlertStatusByNodeId[n.id])
+    );
+    const targetNode = selectedNode || alertedFdb || null;
+    const targetCoords: GisLatLng = targetNode
+      ? { lat: targetNode.lat, lng: targetNode.lng }
+      : mapCenter;
+    const targetLabel = targetNode ? targetNode.name : 'Current Map Center';
+
+    let bestAgent: AgentLiveLocationRow | null = null;
+    let bestDist = Infinity;
+    for (const ag of activeAgents) {
+      const dist = haversineMeters(targetCoords, { lat: ag.lat, lng: ag.lng });
+      if (dist < bestDist) {
+        bestDist = dist;
+        bestAgent = ag;
+      }
+    }
+
+    if (!bestAgent) return;
+    setShowAgentsLayer(true);
+    setNearestAgentMatch({
+      agent: bestAgent,
+      targetLabel,
+      distanceMeters: bestDist,
+    });
+    const distLabel =
+      bestDist >= 1000 ? `${(bestDist / 1000).toFixed(2)} km` : `${bestDist}m`;
+    setFlyToTarget({ lat: bestAgent.lat, lng: bestAgent.lng, zoom: 17, ts: Date.now() });
+    showToast(
+      `🛵 Nearest Agent to ${targetLabel}: ${bestAgent.agent_name} (${distLabel} away • ${formatAgentLastSeen(
+        bestAgent.updated_at
+      )})`
+    );
+  };
 
   const handleToggleGps = () => {
     if (typeof navigator === 'undefined' || !navigator.geolocation) {
@@ -666,6 +1326,13 @@ export const FiberGisMapView: React.FC<FiberGisMapViewProps> = ({
         setNewNodeSplitter(nodeType === 'FDB_FAT' ? '1:8' : nodeType === 'DIST_NODE' ? '90:10' : 'none');
         setNewNodeTrayCap(12);
         setPendingPlaceCoords({ coords, nodeType });
+        return;
+      }
+
+      if (toolMode === 'place_area_zone') {
+        setNewAreaZoneName('');
+        setNewAreaZoneColor('#22d3ee');
+        setPendingAreaZoneCoords(coords);
         return;
       }
 
@@ -973,9 +1640,12 @@ export const FiberGisMapView: React.FC<FiberGisMapViewProps> = ({
             const downstreamNode = nextNodes.find((n) => n.id === neighborId);
             if (!downstreamNode || downstreamNode.node_type === 'OLT') continue;
 
+            const hasExplicitSpliceRules =
+              Array.isArray(downstreamNode.core_splices) && downstreamNode.core_splices.length > 0;
             const needsFeedSync =
               downstreamNode.feed_cable_id !== outCable.id ||
-              Number(downstreamNode.feed_core_number || 1) !== target.coreNum;
+              (!hasExplicitSpliceRules &&
+                Number(downstreamNode.feed_core_number || 1) !== target.coreNum);
 
             if (needsFeedSync) {
               seenNodeUpdates.add(neighborId);
@@ -1055,6 +1725,178 @@ export const FiberGisMapView: React.FC<FiberGisMapViewProps> = ({
       setIsSaving(false);
     }
   };
+
+  const handleQuickSpliceAndExtendCore = useCallback(
+    async (params: {
+      sourceNode: SupabaseGisNode;
+      incomingCableId: string;
+      incomingCoreNumber: number;
+      targetNodeId: string;
+      outgoingCableCores: 1 | 2 | 4 | 6 | 8 | 12 | 24 | 48;
+      outgoingCoreNumber: number;
+      spliceLossDb: number;
+    }) => {
+      const targetNode = nodes.find((n) => n.id === params.targetNodeId);
+      if (!targetNode) {
+        throw new Error('Selected destination FDB / FAT node was not found.');
+      }
+
+      setIsSaving(true);
+      const schemaWarnings: string[] = [];
+      const collectWarning = (msg: string) => {
+        if (msg && !schemaWarnings.includes(msg)) schemaWarnings.push(msg);
+      };
+
+      try {
+        const routeCoordinates: GisLatLng[] = [
+          { lat: params.sourceNode.lat, lng: params.sourceNode.lng },
+          { lat: targetNode.lat, lng: targetNode.lng },
+        ];
+        const distMeters = Math.max(1, computePolylineDistanceMeters(routeCoordinates));
+        const cableType = cableCoresToType(params.outgoingCableCores);
+        const srcBudget = budgetsByNodeId[params.sourceNode.id];
+        const arrivalDbm =
+          srcBudget?.arrivalDbmByCoreKey?.[
+            `${params.incomingCableId}:${params.incomingCoreNumber}`
+          ] ??
+          srcBudget?.inputDbm ??
+          null;
+        const forwardedDbm =
+          arrivalDbm !== null ? Number((arrivalDbm - params.spliceLossDb).toFixed(2)) : null;
+
+        const baseCores = normalizeCableCores(params.outgoingCableCores, []);
+        const outColor = getTia598Color(params.outgoingCoreNumber);
+        const initialCores = baseCores.map((c) => {
+          if (c.coreNumber === params.outgoingCoreNumber) {
+            const originLabel = `${params.sourceNode.name} Pass-Thru Core #${params.incomingCoreNumber}`;
+            const destLabel = `${targetNode.name}${
+              targetNode.area_name ? ` (${targetNode.area_name})` : ''
+            }`;
+            return {
+              ...c,
+              core_status: 'ACTIVE' as const,
+              status: 'Feed / Splitter' as const,
+              usage_type: 'SPLITTER_FEED' as const,
+              origin_olt_id: srcBudget?.oltId || null,
+              origin_pon_port_id: srcBudget?.sourcePonPortId || null,
+              origin_olt_label: originLabel,
+              source_signal: originLabel,
+              forwarded_to_area: destLabel,
+              destination_target: destLabel,
+              destinationNote: destLabel,
+              optical_power_dbm: forwardedDbm !== null ? `${forwardedDbm.toFixed(2)}` : '',
+            };
+          }
+          return c;
+        });
+
+        const createdCable = await createGisCable({
+          name: `${params.sourceNode.name} [Pass-Thru C${params.incomingCoreNumber}] → ${targetNode.name}`,
+          sourceNodeId: params.sourceNode.id,
+          targetNodeId: targetNode.id,
+          sourceOltId: srcBudget?.oltId || null,
+          sourcePonPortId: srcBudget?.sourcePonPortId || null,
+          cableType,
+          cableCores: params.outgoingCableCores,
+          distanceMeters: distMeters,
+          routeCoordinates,
+          initialCores,
+          notes: `Mid-span pass-through from ${params.sourceNode.name} Core #${params.incomingCoreNumber} → ${targetNode.name} Core #${params.outgoingCoreNumber} (${outColor.name})`,
+          updatedBy: actorUsername,
+        });
+
+        const nextCables = applyRealtimeCableDelta(cables, 'INSERT', createdCable);
+        setCables(nextCables);
+
+        const existingSplices = Array.isArray(params.sourceNode.core_splices)
+          ? params.sourceNode.core_splices
+          : [];
+        const newSpliceEntry = {
+          id: `${params.incomingCableId}-${params.incomingCoreNumber}`,
+          incoming_cable_id: params.incomingCableId,
+          incoming_core_number: params.incomingCoreNumber,
+          action: 'PASS_THROUGH_JOINT' as const,
+          target_splitter_id: null,
+          outgoing_cable_id: createdCable.id,
+          outgoing_core_number: params.outgoingCoreNumber,
+          splice_loss_db: params.spliceLossDb,
+          calculated_output_dbm: forwardedDbm,
+          notes: `Mid-span extended directly to ${targetNode.name} Core #${params.outgoingCoreNumber} (${outColor.name})`,
+        };
+        const mergedSplices = existingSplices.some(
+          (s) =>
+            s.incoming_cable_id === params.incomingCableId &&
+            s.incoming_core_number === params.incomingCoreNumber
+        )
+          ? existingSplices.map((s) =>
+              s.incoming_cable_id === params.incomingCableId &&
+              s.incoming_core_number === params.incomingCoreNumber
+                ? { ...s, ...newSpliceEntry }
+                : s
+            )
+          : [...existingSplices, newSpliceEntry];
+
+        const updatedSource = await updateGisNode(
+          params.sourceNode.id,
+          {
+            core_splices: mergedSplices,
+            updated_by: actorUsername,
+          },
+          { onSchemaWarning: collectWarning }
+        );
+        let nextNodes = applyRealtimeNodeDelta(nodes, 'UPDATE', updatedSource);
+
+        const updatedTarget = await updateGisNode(
+          targetNode.id,
+          {
+            feed_cable_id: createdCable.id,
+            feed_core_number: params.outgoingCoreNumber,
+            feed_core_pair: `Core #${params.outgoingCoreNumber} (${outColor.name})`,
+            pon_port_id: targetNode.pon_port_id || srcBudget?.sourcePonPortId || null,
+            updated_by: actorUsername,
+          },
+          { onSchemaWarning: collectWarning }
+        );
+        nextNodes = applyRealtimeNodeDelta(nextNodes, 'UPDATE', updatedTarget);
+
+        const freshBudgets = await syncOpticalBudgetsToDb(nextNodes, nextCables, ponPortsById);
+        const nextNodesWithBudgets = nextNodes.map((n) => {
+          if (n.node_type === 'OLT') return n;
+          const b = freshBudgets[n.id];
+          if (!b) return n;
+          return {
+            ...n,
+            calculated_input_dbm: b.inputDbm,
+            calculated_output_dbm: b.thruOutputDbm,
+            calculated_ont_rx_dbm: b.ontRxDbm,
+          };
+        });
+        setNodes(nextNodesWithBudgets);
+
+        const targetBudget = freshBudgets[targetNode.id];
+        const targetRxMsg =
+          targetBudget?.ontRxDbm !== null && targetBudget?.ontRxDbm !== undefined
+            ? ` (ONT Rx: ${targetBudget.ontRxDbm.toFixed(2)} dBm)`
+            : forwardedDbm !== null
+            ? ` (Arriving ${forwardedDbm.toFixed(2)} dBm)`
+            : '';
+
+        if (schemaWarnings.length > 0) {
+          showToast(
+            `Extended Core #${params.incomingCoreNumber} → ${targetNode.name}${targetRxMsg} — DB notice: ${schemaWarnings[0]}`,
+            'err'
+          );
+        } else {
+          showToast(
+            `✅ Core #${params.incomingCoreNumber} Pass-Thru spliced to ${targetNode.name} Core #${params.outgoingCoreNumber} (${outColor.name})${targetRxMsg}`
+          );
+        }
+      } finally {
+        setIsSaving(false);
+      }
+    },
+    [nodes, cables, budgetsByNodeId, ponPortsById, actorUsername, showToast]
+  );
 
   const handleDeleteNode = async (nodeId: string) => {
     setIsSaving(true);
@@ -1454,6 +2296,14 @@ export const FiberGisMapView: React.FC<FiberGisMapViewProps> = ({
                     onClick={() => {
                       setIsSearchOpen(false);
                       setSearchQuery(m.title);
+                      if (m.node.node_type === 'FDB_FAT') {
+                        setShowFdbNodesLayer(true);
+                      } else {
+                        setShowCoreHubsLayer(true);
+                      }
+                      if (m.id.startsWith('port-')) {
+                        setShowSubscribersLayer(true);
+                      }
                       setSelectedNodeId(m.node.id);
                       setSelectedCableId(null);
                       setFlyToTarget({
@@ -1601,6 +2451,55 @@ export const FiberGisMapView: React.FC<FiberGisMapViewProps> = ({
 
           <button
             type="button"
+            onClick={() => {
+              setIsLinkEstimatorOpen((prev) => {
+                const next = !prev;
+                if (next && !linkCalcNodeAId && selectedNodeId) {
+                  setLinkCalcNodeAId(selectedNodeId);
+                }
+                return next;
+              });
+            }}
+            className={`min-h-[40px] px-2.5 py-1.5 rounded-lg border text-xs font-mono font-semibold flex items-center gap-1.5 whitespace-nowrap cursor-pointer transition ${
+              isLinkEstimatorOpen
+                ? 'bg-emerald-500 text-slate-950 border-white font-bold'
+                : 'bg-slate-950 text-emerald-300 border-slate-700 hover:border-emerald-500'
+            }`}
+            title="Estimate optical link budget loss between two nodes"
+          >
+            <Calculator className="w-3.5 h-3.5" />
+            <span className="hidden sm:inline">Link Loss</span>
+          </button>
+
+          <button
+            type="button"
+            onClick={handleLocateNearestAgent}
+            className="min-h-[40px] px-2.5 py-1.5 rounded-lg border bg-slate-950 text-emerald-300 border-emerald-700/70 hover:border-emerald-400 text-xs font-mono font-semibold flex items-center gap-1.5 whitespace-nowrap cursor-pointer transition"
+            title="Find closest online Field Agent to selected FDB/Fault"
+          >
+            <Navigation className="w-3.5 h-3.5" />
+            <span className="hidden sm:inline">Nearest Agent</span>
+          </button>
+
+          <button
+            type="button"
+            onClick={() => {
+              setToolMode((prev) => (prev === 'place_area_zone' ? 'pan' : 'place_area_zone'));
+              setShowAreaLabelsLayer(true);
+            }}
+            className={`min-h-[40px] px-2.5 py-1.5 rounded-lg border text-xs font-mono font-semibold flex items-center gap-1.5 whitespace-nowrap cursor-pointer transition ${
+              toolMode === 'place_area_zone'
+                ? 'bg-cyan-500 text-slate-950 border-white font-bold'
+                : 'bg-slate-950 text-cyan-300 border-slate-700 hover:border-cyan-500'
+            }`}
+            title="Drop a custom Area / Mohallah / Street zone label on the map"
+          >
+            <Tag className="w-3.5 h-3.5" />
+            <span className="hidden sm:inline">+ Area Label</span>
+          </button>
+
+          <button
+            type="button"
             onClick={handleToggleGps}
             className={`min-h-[40px] px-2.5 py-1.5 rounded-lg border text-xs font-mono font-semibold flex items-center gap-1.5 whitespace-nowrap cursor-pointer transition ${
               isTrackingGps
@@ -1619,7 +2518,11 @@ export const FiberGisMapView: React.FC<FiberGisMapViewProps> = ({
               <button
                 key={lt}
                 type="button"
-                onClick={() => setLayerType(lt)}
+                onClick={() => {
+                  setLayerType(lt);
+                  if (lt === 'hybrid') setShowAreaLabelsLayer(true);
+                  if (lt === 'satellite') setShowAreaLabelsLayer(false);
+                }}
                 className={`px-2.5 h-full min-h-[38px] text-[11px] font-mono font-semibold capitalize cursor-pointer transition ${
                   layerType === lt
                     ? 'bg-sky-600 text-white font-bold dark:bg-sky-500/20 dark:text-sky-300'
@@ -1653,84 +2556,94 @@ export const FiberGisMapView: React.FC<FiberGisMapViewProps> = ({
       </div>
 
       {/* Highlight Filter Bar (OLT / PON Port / Area) */}
-      <div className="px-3 py-2 bg-slate-900/80 border-b border-slate-800 flex flex-wrap items-center justify-between gap-2">
+      <div className="relative z-30 px-3 py-2 bg-slate-900/80 border-b border-slate-800 flex flex-wrap items-center justify-between gap-2">
         <div className="flex flex-wrap items-center gap-2 flex-1 min-w-0">
           <div className="flex items-center gap-1.5 text-[11px] font-mono font-bold text-cyan-400 shrink-0">
             <Filter className="w-3.5 h-3.5" />
             <span>Highlight Filter</span>
           </div>
 
-          <select
-            aria-label="Filter by OLT"
-            value={filterOltId}
-            onChange={(e) => {
-              const nextOltId = e.target.value;
-              setFilterOltId(nextOltId);
-              if (
-                nextOltId !== 'ALL' &&
-                filterPonPortId !== 'ALL' &&
-                ponPortsById[filterPonPortId]?.olt_id !== nextOltId
-              ) {
-                setFilterPonPortId('ALL');
-              }
-              setFilterZoomTriggerTs(Date.now());
-            }}
-            className="min-h-[36px] max-w-full bg-slate-950 border border-slate-700 hover:border-cyan-600/70 rounded-lg px-2.5 py-1 text-xs font-mono text-white focus:outline-none focus:border-cyan-500 cursor-pointer"
-          >
-            <option value="ALL">All OLTs ({olts.length})</option>
-            {olts
-              .slice()
-              .sort((a, b) => a.name.localeCompare(b.name))
-              .map((olt) => (
-                <option key={olt.id} value={olt.id}>
-                  {olt.name} ({olt.pon_mode})
-                </option>
-              ))}
-          </select>
+          <div className="w-44 sm:w-52">
+            <SearchableCombobox
+              compact
+              ariaLabel="Filter by OLT"
+              value={filterOltId === 'ALL' ? '' : filterOltId}
+              options={olts
+                .slice()
+                .sort((a, b) => a.name.localeCompare(b.name))
+                .map((olt) => ({
+                  value: olt.id,
+                  label: olt.name,
+                  sublabel: `${olt.pon_mode} · ${olt.total_pon_ports} PON`,
+                  metricTone: 'sky',
+                }))}
+              onChange={(val) => {
+                const nextOltId = val || 'ALL';
+                setFilterOltId(nextOltId);
+                if (
+                  nextOltId !== 'ALL' &&
+                  filterPonPortId !== 'ALL' &&
+                  ponPortsById[filterPonPortId]?.olt_id !== nextOltId
+                ) {
+                  setFilterPonPortId('ALL');
+                }
+                setFilterZoomTriggerTs(Date.now());
+              }}
+              emptyOptionLabel={`All OLTs (${olts.length})`}
+              searchPlaceholder="Search OLT..."
+              accentColor="sky"
+            />
+          </div>
 
-          <select
-            aria-label="Filter by PON Port"
-            value={filterPonPortId}
-            onChange={(e) => {
-              const nextPonId = e.target.value;
-              setFilterPonPortId(nextPonId);
-              if (nextPonId !== 'ALL' && filterOltId === 'ALL') {
-                const parentOltId = ponPortsById[nextPonId]?.olt_id;
-                if (parentOltId) setFilterOltId(parentOltId);
-              }
-              setFilterZoomTriggerTs(Date.now());
-            }}
-            className="min-h-[36px] max-w-full bg-slate-950 border border-slate-700 hover:border-cyan-600/70 rounded-lg px-2.5 py-1 text-xs font-mono text-white focus:outline-none focus:border-cyan-500 cursor-pointer"
-          >
-            <option value="ALL">All PON Ports ({availablePonPortsForFilter.length})</option>
-            {availablePonPortsForFilter.map((pp) => {
-              const oltName = oltsById[pp.olt_id]?.name || 'OLT';
-              const prefix = filterOltId === 'ALL' ? `${oltName} · ` : '';
-              return (
-                <option key={pp.id} value={pp.id}>
-                  {prefix}PON {pp.port_number}
-                  {pp.port_label ? ` — ${pp.port_label}` : ''}
-                </option>
-              );
-            })}
-          </select>
+          <div className="w-44 sm:w-56">
+            <SearchableCombobox
+              compact
+              ariaLabel="Filter by PON Port"
+              value={filterPonPortId === 'ALL' ? '' : filterPonPortId}
+              options={availablePonPortsForFilter.map((pp) => {
+                const oltName = oltsById[pp.olt_id]?.name || 'OLT';
+                return {
+                  value: pp.id,
+                  label: `${filterOltId === 'ALL' ? `${oltName} · ` : ''}PON ${pp.port_number}`,
+                  sublabel: pp.port_label || 'Main',
+                  metric: `+${Number(pp.tx_power_dbm).toFixed(1)} dBm`,
+                  metricTone: 'emerald',
+                  keywords: `${oltName} PON ${pp.port_number} ${pp.port_label || ''}`,
+                };
+              })}
+              onChange={(val) => {
+                const nextPonId = val || 'ALL';
+                setFilterPonPortId(nextPonId);
+                if (nextPonId !== 'ALL' && filterOltId === 'ALL') {
+                  const parentOltId = ponPortsById[nextPonId]?.olt_id;
+                  if (parentOltId) setFilterOltId(parentOltId);
+                }
+                setFilterZoomTriggerTs(Date.now());
+              }}
+              emptyOptionLabel={`All PON Ports (${availablePonPortsForFilter.length})`}
+              searchPlaceholder="Search PON port..."
+              accentColor="cyan"
+            />
+          </div>
 
-          <select
-            aria-label="Filter by Area or Mohallah"
-            value={filterAreaName}
-            onChange={(e) => {
-              setFilterAreaName(e.target.value);
-              setFilterZoomTriggerTs(Date.now());
-            }}
-            className="min-h-[36px] max-w-full bg-slate-950 border border-slate-700 hover:border-cyan-600/70 rounded-lg px-2.5 py-1 text-xs font-mono text-white focus:outline-none focus:border-cyan-500 cursor-pointer"
-          >
-            <option value="ALL">All Areas ({areaFilterOptions.length})</option>
-            {areaFilterOptions.map((area) => (
-              <option key={area} value={area}>
-                {area}
-              </option>
-            ))}
-          </select>
+          <div className="w-44 sm:w-52">
+            <SearchableCombobox
+              compact
+              ariaLabel="Filter by Area or Mohallah"
+              value={filterAreaName === 'ALL' ? '' : filterAreaName}
+              options={areaFilterOptions.map((area) => ({
+                value: area,
+                label: area,
+              }))}
+              onChange={(val) => {
+                setFilterAreaName(val || 'ALL');
+                setFilterZoomTriggerTs(Date.now());
+              }}
+              emptyOptionLabel={`All Areas (${areaFilterOptions.length})`}
+              searchPlaceholder="Search area / mohallah..."
+              accentColor="cyan"
+            />
+          </div>
 
           {highlightFilterResult.isFilterActive && (
             <button
@@ -1758,9 +2671,100 @@ export const FiberGisMapView: React.FC<FiberGisMapViewProps> = ({
         )}
       </div>
 
+      {/* Collapsible Two-Node Optical Link Budget Loss Calculator */}
+      {isLinkEstimatorOpen && (
+        <div className="relative z-20 px-3 py-2.5 bg-slate-950/95 border-b border-emerald-800/60 flex flex-wrap items-center justify-between gap-2.5">
+          <div className="flex flex-wrap items-center gap-2 flex-1 min-w-0">
+            <div className="flex items-center gap-1.5 text-[11px] font-mono font-bold text-emerald-400 shrink-0">
+              <Calculator className="w-3.5 h-3.5" />
+              <span>Link Loss Calculator</span>
+            </div>
+
+            <div className="w-44 sm:w-52">
+              <SearchableCombobox
+                compact
+                ariaLabel="Link Calculator Node A"
+                value={linkCalcNodeAId}
+                options={connectNodeSearchOptions}
+                onChange={(val) => setLinkCalcNodeAId(val || '')}
+                emptyOptionLabel="-- Select Node A --"
+                searchPlaceholder="Search start node..."
+                accentColor="emerald"
+              />
+            </div>
+
+            <span className="text-[11px] font-mono text-slate-400">&rarr;</span>
+
+            <div className="w-44 sm:w-52">
+              <SearchableCombobox
+                compact
+                ariaLabel="Link Calculator Node B"
+                value={linkCalcNodeBId}
+                options={connectNodeSearchOptions.filter((o) => o.value !== linkCalcNodeAId)}
+                onChange={(val) => setLinkCalcNodeBId(val || '')}
+                emptyOptionLabel="-- Select Node B --"
+                searchPlaceholder="Search end node..."
+                accentColor="amber"
+              />
+            </div>
+
+            <label className="flex items-center gap-1.5 text-[11px] font-mono text-slate-300">
+              <span>Splices:</span>
+              <input
+                type="number"
+                min={0}
+                max={64}
+                value={linkCalcCustomSplices}
+                onChange={(e) => setLinkCalcCustomSplices(e.target.value)}
+                placeholder="Auto"
+                className="w-16 px-2 py-1 rounded-lg bg-slate-900 border border-slate-700 text-xs font-mono text-white placeholder-slate-500 focus:outline-none focus:border-emerald-500"
+              />
+            </label>
+          </div>
+
+          <div className="flex items-center gap-2 flex-wrap">
+            {manualLinkLossEstimate ? (
+              <div className="px-2.5 py-1 rounded-lg bg-emerald-950/60 border border-emerald-700/60 text-[11px] font-mono text-emerald-200 tabular-nums flex flex-wrap items-center gap-x-3 gap-y-0.5">
+                <span className="font-bold text-white">
+                  Est. Loss: -{manualLinkLossEstimate.totalEstimatedLossDb.toFixed(2)} dB
+                </span>
+                <span>
+                  {manualLinkLossEstimate.segmentCount}{' '}
+                  {manualLinkLossEstimate.segmentCount === 1 ? 'segment' : 'segments'} (
+                  {(manualLinkLossEstimate.totalLengthMeters / 1000).toFixed(2)} km = -
+                  {manualLinkLossEstimate.fiberLossDb.toFixed(2)} dB)
+                </span>
+                <span>
+                  {manualLinkLossEstimate.totalSplices}{' '}
+                  {manualLinkLossEstimate.totalSplices === 1 ? 'splice' : 'splices'} (-
+                  {manualLinkLossEstimate.spliceLossDb.toFixed(2)} dB)
+                </span>
+                <span className="text-slate-400">
+                  {manualLinkLossEstimate.routeMode === 'TOPOLOGY_PATH'
+                    ? manualLinkLossEstimate.hopNodeNames.join(' → ')
+                    : 'Direct Span'}
+                </span>
+              </div>
+            ) : (
+              <span className="text-[11px] font-mono text-slate-400">
+                Pick any two nodes to estimate fiber + splice loss.
+              </span>
+            )}
+            <button
+              type="button"
+              onClick={() => setIsLinkEstimatorOpen(false)}
+              className="p-1 rounded-lg bg-slate-900 border border-slate-700 text-slate-400 hover:text-white cursor-pointer"
+              title="Close Link Loss Calculator"
+            >
+              <X className="w-3.5 h-3.5" />
+            </button>
+          </div>
+        </div>
+      )}
+
       {/* Mode Instruction Strip (Placement / Pick OLT Coords / Connect Cable Route) */}
       {toolMode !== 'pan' && (
-        <div className="px-4 py-2 bg-cyan-950/90 border-b border-cyan-700/70 text-cyan-100 text-xs font-mono flex flex-wrap items-center justify-between gap-2">
+        <div className="relative z-20 px-4 py-2 bg-cyan-950/90 border-b border-cyan-700/70 text-cyan-100 text-xs font-mono flex flex-wrap items-center justify-between gap-2">
           {toolMode === 'pick_olt_coords' ? (
             <>
               <div className="flex items-center gap-2">
@@ -1802,6 +2806,12 @@ export const FiberGisMapView: React.FC<FiberGisMapViewProps> = ({
                   ) : (
                     <span className="font-bold text-cyan-300">
                       A &rarr; B Selected! Open Connection Form to mark cores &amp; save
+                      {connectLinkLossEstimate && (
+                        <span className="ml-2 inline-flex items-center gap-1 px-2 py-0.5 rounded bg-slate-950/90 border border-emerald-500/40 text-emerald-300 text-[10px] font-mono tabular-nums">
+                          Est. Loss: -{connectLinkLossEstimate.totalEstimatedLossDb.toFixed(2)} dB (
+                          {connectLinkLossEstimate.totalLengthMeters}m · {connectLinkLossEstimate.totalSplices} splices)
+                        </span>
+                      )}
                     </span>
                   )}
                 </div>
@@ -1859,17 +2869,19 @@ export const FiberGisMapView: React.FC<FiberGisMapViewProps> = ({
                 </div>
               </div>
 
-              {/* Fallback Start / End Node Dropdown Pickers (handles overlapping map markers) */}
+              {/* Searchable Start / End Node Combobox Pickers (handles overlapping map markers) */}
               <div className="grid grid-cols-1 sm:grid-cols-2 gap-2 pt-1 border-t border-cyan-800/50">
-                <div className="flex items-center gap-1.5">
+                <div className="flex items-center gap-1.5 min-w-0">
                   <span className="text-[10px] font-bold text-emerald-300 shrink-0 uppercase">
                     A-Start:
                   </span>
-                  <select
-                    aria-label="Fallback Start Node"
+                  <SearchableCombobox
+                    compact
+                    ariaLabel="Fallback Start Node"
                     value={connectSourceNodeId || ''}
-                    onChange={(e) => {
-                      const nextId = e.target.value || null;
+                    options={connectNodeSearchOptions}
+                    onChange={(val) => {
+                      const nextId = val || null;
                       setConnectSourceNodeId(nextId);
                       const matched = nextId ? nodes.find((n) => n.id === nextId) : undefined;
                       if (matched) {
@@ -1878,44 +2890,32 @@ export const FiberGisMapView: React.FC<FiberGisMapViewProps> = ({
                         setDraftWaypoints([]);
                       }
                     }}
-                    className="w-full bg-slate-950 border border-emerald-700/70 rounded-lg px-2 py-1 text-xs text-white"
-                  >
-                    <option value="">-- Select Start Node (OLT / Joint / FDB) --</option>
-                    {nodes.map((n) => (
-                      <option key={n.id} value={n.id}>
-                        [{n.node_type}] {n.name}
-                        {n.area_name ? ` (${n.area_name})` : ''}
-                      </option>
-                    ))}
-                  </select>
+                    emptyOptionLabel="-- Select Start Node (OLT / Joint / FDB) --"
+                    searchPlaceholder="Search start node, area, dBm..."
+                    accentColor="emerald"
+                  />
                 </div>
 
-                <div className="flex items-center gap-1.5">
+                <div className="flex items-center gap-1.5 min-w-0">
                   <span className="text-[10px] font-bold text-amber-300 shrink-0 uppercase">
                     B-End:
                   </span>
-                  <select
-                    aria-label="Fallback End Node"
+                  <SearchableCombobox
+                    compact
+                    ariaLabel="Fallback End Node"
                     value={connectTargetNodeId || ''}
-                    onChange={(e) => {
-                      const nextId = e.target.value || null;
+                    options={connectNodeSearchOptions.filter((o) => o.value !== connectSourceNodeId)}
+                    onChange={(val) => {
+                      const nextId = val || null;
                       setConnectTargetNodeId(nextId);
                       if (nextId && connectSourceNodeId && nextId !== connectSourceNodeId) {
                         setIsConnectionModalOpen(true);
                       }
                     }}
-                    className="w-full bg-slate-950 border border-amber-700/70 rounded-lg px-2 py-1 text-xs text-white"
-                  >
-                    <option value="">-- Select End Node (FDB / FAT / Joint) --</option>
-                    {nodes
-                      .filter((n) => n.id !== connectSourceNodeId)
-                      .map((n) => (
-                        <option key={n.id} value={n.id}>
-                          [{n.node_type}] {n.name}
-                          {n.area_name ? ` (${n.area_name})` : ''}
-                        </option>
-                      ))}
-                  </select>
+                    emptyOptionLabel="-- Select End Node (FDB / FAT / Joint) --"
+                    searchPlaceholder="Search end node, area, dBm..."
+                    accentColor="amber"
+                  />
                 </div>
               </div>
             </div>
@@ -1932,6 +2932,8 @@ export const FiberGisMapView: React.FC<FiberGisMapViewProps> = ({
                       ? 'Distribution Node'
                       : toolMode === 'place_fosc'
                       ? 'FOSC Joint Closure'
+                      : toolMode === 'place_area_zone'
+                      ? 'Area / Mohallah / Street Zone Label'
                       : 'FDB / FAT Splitter Box'}
                   </strong>
                   .
@@ -1974,7 +2976,7 @@ export const FiberGisMapView: React.FC<FiberGisMapViewProps> = ({
 
       {/* Main Split Map + Inspector Viewport (Explicit Height Required — CF2) */}
       <div
-        className={`flex w-full relative overflow-hidden ${
+        className={`flex w-full relative z-10 overflow-hidden ${
           compactMobile
             ? 'h-[calc(100vh-210px)] min-h-[460px]'
             : 'h-[calc(100vh-205px)] min-h-[540px]'
@@ -1994,6 +2996,17 @@ export const FiberGisMapView: React.FC<FiberGisMapViewProps> = ({
             oltsById={oltsById}
             ponPortsByOltId={ponPortsByOltId}
             ponPortsById={ponPortsById}
+            subscribers={subscribers}
+            nodeAlertStatusByNodeId={nodeAlertStatusByNodeId}
+            areaZones={areaZones}
+            liveAgents={liveAgents}
+            highlightedAgentId={nearestAgentMatch?.agent.agent_id || null}
+            showCables={showCablesLayer}
+            showFdbNodes={showFdbNodesLayer}
+            showCoreHubs={showCoreHubsLayer}
+            showSubscribers={showSubscribersLayer}
+            showAreaLabels={showAreaLabelsLayer}
+            showAgents={showAgentsLayer}
             selectedNodeId={selectedNodeId}
             selectedCableId={selectedCableId}
             connectSourceNodeId={connectSourceNodeId}
@@ -2009,14 +3022,236 @@ export const FiberGisMapView: React.FC<FiberGisMapViewProps> = ({
             onNodeClick={handleNodeClick}
             onNodeDragEnd={handleNodeDragEnd}
             onCableClick={handleCableClick}
+            onAreaZoneClick={async (zone) => {
+              await deleteGisAreaZone(zone.id);
+              setAreaZones((prev) => prev.filter((z) => z.id !== zone.id));
+              showToast(`Removed area zone label "${zone.name}".`);
+            }}
+            onAgentClick={(agent) => {
+              setFlyToTarget({ lat: agent.lat, lng: agent.lng, zoom: 17, ts: Date.now() });
+              showToast(
+                `🛵 ${agent.agent_name} • ${formatAgentLastSeen(agent.updated_at)}${
+                  agent.accuracy_meters ? ` • ±${Math.round(agent.accuracy_meters)}m` : ''
+                }`
+              );
+            }}
             onCameraChange={(c, z) => {
               setMapCenter(c);
               setMapZoom(z);
             }}
           />
 
+          {/* Nearest Field Agent Alert Banner */}
+          {nearestAgentMatch && (
+            <div className="absolute top-3 left-14 z-20 max-w-sm rounded-xl bg-slate-950/92 border border-emerald-500/60 backdrop-blur-md shadow-2xl px-3 py-2 flex items-center justify-between gap-2.5 text-[11px] font-mono">
+              <div className="min-w-0">
+                <div className="font-bold text-emerald-300 truncate">
+                  🛵 {nearestAgentMatch.agent.agent_name} &bull;{' '}
+                  {nearestAgentMatch.distanceMeters >= 1000
+                    ? `${(nearestAgentMatch.distanceMeters / 1000).toFixed(2)} km`
+                    : `${nearestAgentMatch.distanceMeters}m`}{' '}
+                  from {nearestAgentMatch.targetLabel}
+                </div>
+                <div className="text-[10px] text-slate-400 truncate">
+                  {formatAgentLastSeen(nearestAgentMatch.agent.updated_at)}
+                  {nearestAgentMatch.agent.accuracy_meters
+                    ? ` • ±${Math.round(nearestAgentMatch.agent.accuracy_meters)}m`
+                    : ''}
+                </div>
+              </div>
+              <button
+                type="button"
+                onClick={() => setNearestAgentMatch(null)}
+                className="p-1 rounded bg-slate-900 border border-slate-700 text-slate-400 hover:text-white cursor-pointer shrink-0"
+                title="Dismiss"
+              >
+                <X className="w-3 h-3" />
+              </button>
+            </div>
+          )}
+
+          {/* Floating Map Layers Control Panel */}
+          <div className="absolute top-3 right-3 z-20 w-64 max-w-[calc(100%-56px)] rounded-xl bg-slate-950/92 border border-slate-700/80 backdrop-blur-md shadow-2xl overflow-hidden">
+            <div
+              className={`flex items-center justify-between px-3 py-2 ${
+                isLayerPanelOpen ? 'border-b border-slate-800/80' : ''
+              }`}
+            >
+              <button
+                type="button"
+                onClick={() => setIsLayerPanelOpen((v) => !v)}
+                className="flex items-center gap-2 text-left flex-1 min-w-0 cursor-pointer"
+              >
+                <Layers className="w-3.5 h-3.5 text-cyan-400 shrink-0" />
+                <span className="text-[11px] font-bold tracking-wide text-slate-100 uppercase truncate">
+                  Map Layers
+                </span>
+                <span
+                  className={`ml-auto text-[10px] font-mono tabular-nums px-1.5 py-0.5 rounded border ${
+                    layerCounts.activeCount < 6
+                      ? 'bg-amber-500/15 text-amber-300 border-amber-500/40'
+                      : 'bg-slate-800/90 text-cyan-300 border-slate-700/70'
+                  }`}
+                >
+                  {layerCounts.activeCount}/6
+                </span>
+                {isLayerPanelOpen ? (
+                  <ChevronUp className="w-3.5 h-3.5 text-slate-400 shrink-0" />
+                ) : (
+                  <ChevronDown className="w-3.5 h-3.5 text-slate-400 shrink-0" />
+                )}
+              </button>
+            </div>
+
+            {isLayerPanelOpen && (
+              <div className="p-2 space-y-1.5 max-h-[68vh] overflow-y-auto">
+                {[
+                  {
+                    id: 'labels',
+                    label: 'Area & Road Labels',
+                    sublabel: 'Esri places, streets & zones',
+                    count: layerCounts.areaLabelCount,
+                    active: showAreaLabelsLayer,
+                    dotClass: 'bg-cyan-300',
+                    icon: Tag,
+                    onToggle: () => setShowAreaLabelsLayer((v) => !v),
+                  },
+                  {
+                    id: 'agents',
+                    label: 'Field Agents GPS',
+                    sublabel: 'Live moving field staff',
+                    count: layerCounts.onlineAgentsCount,
+                    active: showAgentsLayer,
+                    dotClass: 'bg-emerald-400',
+                    icon: Navigation,
+                    onToggle: () => setShowAgentsLayer((v) => !v),
+                  },
+                  {
+                    id: 'cables',
+                    label: 'Fiber Cables',
+                    sublabel: 'Trunk & drop spans',
+                    count: layerCounts.cables,
+                    active: showCablesLayer,
+                    dotClass: 'bg-cyan-400',
+                    icon: Cable,
+                    onToggle: () => setShowCablesLayer((v) => !v),
+                  },
+                  {
+                    id: 'fdb',
+                    label: 'FDB / FAT Nodes',
+                    sublabel: 'Splitter enclosures',
+                    count: layerCounts.fdbNodes,
+                    active: showFdbNodesLayer,
+                    dotClass: 'bg-emerald-400',
+                    icon: MapPin,
+                    onToggle: () => setShowFdbNodesLayer((v) => !v),
+                  },
+                  {
+                    id: 'subscribers',
+                    label: 'Subscriber Markers',
+                    sublabel: `${layerCounts.subscribersOnline} online`,
+                    count: layerCounts.subscribersTotal,
+                    active: showSubscribersLayer,
+                    dotClass: 'bg-green-400',
+                    icon: Users,
+                    onToggle: () => setShowSubscribersLayer((v) => !v),
+                  },
+                  {
+                    id: 'hubs',
+                    label: 'OLT, Dist & FOSC',
+                    sublabel: 'Core hubs & joints',
+                    count: layerCounts.coreHubs,
+                    active: showCoreHubsLayer,
+                    dotClass: 'bg-sky-400',
+                    icon: Server,
+                    onToggle: () => setShowCoreHubsLayer((v) => !v),
+                  },
+                ].map((item) => {
+                  const Icon = item.icon;
+                  return (
+                    <button
+                      key={item.id}
+                      type="button"
+                      onClick={item.onToggle}
+                      aria-pressed={item.active}
+                      className={`w-full flex items-center justify-between gap-2 px-2.5 py-2 rounded-lg border text-left transition-colors cursor-pointer ${
+                        item.active
+                          ? 'bg-slate-900/95 border-slate-700/80 text-slate-100 hover:border-cyan-500/50'
+                          : 'bg-slate-950/60 border-slate-800/70 text-slate-500 hover:text-slate-300 hover:border-slate-700'
+                      }`}
+                    >
+                      <div className="flex items-center gap-2 min-w-0">
+                        <span
+                          className={`w-2 h-2 rounded-full shrink-0 ${
+                            item.active ? item.dotClass : 'bg-slate-700'
+                          }`}
+                        />
+                        <Icon className="w-3.5 h-3.5 shrink-0 opacity-85" />
+                        <div className="min-w-0">
+                          <div className="text-[11px] font-semibold leading-tight truncate">
+                            {item.label}
+                          </div>
+                          <div className="text-[9px] font-mono text-slate-400 truncate">
+                            {item.sublabel}
+                          </div>
+                        </div>
+                      </div>
+                      <div className="flex items-center gap-1.5 shrink-0">
+                        <span className="text-[10px] font-mono tabular-nums px-1.5 py-0.5 rounded bg-slate-950/90 border border-slate-800 text-slate-300">
+                          {item.count}
+                        </span>
+                        {item.active ? (
+                          <Eye className="w-3.5 h-3.5 text-cyan-400" />
+                        ) : (
+                          <EyeOff className="w-3.5 h-3.5 text-slate-600" />
+                        )}
+                      </div>
+                    </button>
+                  );
+                })}
+
+                <div className="grid grid-cols-2 gap-1.5 pt-1">
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setShowAreaLabelsLayer(true);
+                      setToolMode('place_area_zone');
+                    }}
+                    className="py-1.5 px-2 rounded-lg bg-slate-900 hover:bg-slate-800 border border-slate-700 text-[10px] font-semibold text-cyan-300 text-center transition-colors cursor-pointer"
+                  >
+                    + Area Label
+                  </button>
+                  <button
+                    type="button"
+                    onClick={handleLocateNearestAgent}
+                    className="py-1.5 px-2 rounded-lg bg-emerald-500/15 hover:bg-emerald-500/25 border border-emerald-500/40 text-[10px] font-semibold text-emerald-300 text-center transition-colors cursor-pointer"
+                  >
+                    Nearest Agent
+                  </button>
+                </div>
+
+                {layerCounts.activeCount < 6 && (
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setShowCablesLayer(true);
+                      setShowFdbNodesLayer(true);
+                      setShowSubscribersLayer(true);
+                      setShowCoreHubsLayer(true);
+                      setShowAreaLabelsLayer(true);
+                      setShowAgentsLayer(true);
+                    }}
+                    className="w-full py-1.5 px-2.5 rounded-lg bg-cyan-500/10 hover:bg-cyan-500/20 border border-cyan-500/30 text-[10px] font-semibold text-cyan-300 text-center transition-colors cursor-pointer"
+                  >
+                    Show All Layers
+                  </button>
+                )}
+              </div>
+            )}
+          </div>
+
           {/* Compact Bottom-Left Legend Overlay */}
-          <div className="absolute bottom-3 left-3 z-10 pointer-events-none hidden sm:flex items-center gap-3 px-3 py-1.5 rounded-xl bg-slate-950/90 border border-slate-800 backdrop-blur-md text-[10px] font-mono text-slate-300 shadow-xl">
+          <div className="absolute bottom-3 left-3 z-10 pointer-events-none hidden sm:flex flex-wrap items-center gap-3 px-3 py-1.5 rounded-xl bg-slate-950/90 border border-slate-800 backdrop-blur-md text-[10px] font-mono text-slate-300 shadow-xl">
             <span className="flex items-center gap-1.5">
               <span className="w-2.5 h-2.5 rounded-sm bg-sky-500" /> OLT
             </span>
@@ -2035,6 +3270,26 @@ export const FiberGisMapView: React.FC<FiberGisMapViewProps> = ({
             <span className="flex items-center gap-1.5">
               <span className="w-2.5 h-2.5 rounded-sm bg-purple-600" /> FOSC Joint
             </span>
+            {showSubscribersLayer && (
+              <>
+                <span className="flex items-center gap-1.5">
+                  <span className="w-2.5 h-2.5 rounded-full bg-green-500 border border-slate-950" /> ONT Online
+                </span>
+                <span className="flex items-center gap-1.5">
+                  <span className="w-2.5 h-2.5 rounded-full bg-rose-500 border border-slate-950" /> ONT Offline
+                </span>
+              </>
+            )}
+            {showAgentsLayer && (
+              <span className="flex items-center gap-1.5 text-emerald-300">
+                <span>🛵</span> Live Field Agent
+              </span>
+            )}
+            {Object.keys(nodeAlertStatusByNodeId).length > 0 && (
+              <span className="flex items-center gap-1.5 text-amber-300">
+                <span className="w-2.5 h-2.5 rounded-full bg-rose-500/80 ring-2 ring-amber-400/50" /> Outage / High Ticket Pulse
+              </span>
+            )}
           </div>
         </div>
 
@@ -2076,6 +3331,7 @@ export const FiberGisMapView: React.FC<FiberGisMapViewProps> = ({
           }}
           onUpdatePonPort={handleUpdatePonPort}
           onOpenUpgradeModal={(node) => setUpgradeTargetNodeId(node.id)}
+          onQuickSpliceAndExtendCore={handleQuickSpliceAndExtendCore}
           onRouteCableFromNode={(node) => {
             setToolMode('connect_cable');
             setConnectSourceNodeId(node.id);
@@ -2375,6 +3631,9 @@ export const FiberGisMapView: React.FC<FiberGisMapViewProps> = ({
         oltsById={oltsById}
         ponPortsByOltId={ponPortsByOltId}
         ponPortsById={ponPortsById}
+        budgetsByNodeId={budgetsByNodeId}
+        portsByNodeId={portsByNodeId}
+        splitterOutputsByNodeId={splitterOutputsByNodeId}
         initialStartNodeId={connectSourceNodeId}
         initialEndNodeId={connectTargetNodeId}
         initialWaypoints={draftWaypoints}
@@ -2493,6 +3752,101 @@ export const FiberGisMapView: React.FC<FiberGisMapViewProps> = ({
         onClose={() => setUpgradeTargetNodeId(null)}
         onConfirmReplace={handleReplaceNodeEquipment}
       />
+
+      {/* Custom Area / Sector Zone Label Creation Modal */}
+      {pendingAreaZoneCoords && (
+        <div className="fixed inset-0 z-50 bg-slate-950/75 backdrop-blur-sm flex items-center justify-center p-4">
+          <form
+            onSubmit={async (e) => {
+              e.preventDefault();
+              if (!newAreaZoneName.trim()) {
+                showToast('Please enter an Area, Mohallah, or Street label.', 'err');
+                return;
+              }
+              setIsSaving(true);
+              try {
+                const created = await createGisAreaZone({
+                  name: newAreaZoneName.trim(),
+                  lat: pendingAreaZoneCoords.lat,
+                  lng: pendingAreaZoneCoords.lng,
+                  color: newAreaZoneColor,
+                  updatedBy: actorUsername,
+                });
+                setAreaZones((prev) => [...prev, created]);
+                setPendingAreaZoneCoords(null);
+                setToolMode('pan');
+                setShowAreaLabelsLayer(true);
+                showToast(`Added Area Zone Label "${created.name}".`);
+              } finally {
+                setIsSaving(false);
+              }
+            }}
+            className="w-full max-w-sm rounded-2xl bg-slate-900 border border-slate-700 p-5 space-y-4 shadow-2xl"
+          >
+            <div className="flex items-center justify-between">
+              <h3 className="text-sm font-bold text-white flex items-center gap-2">
+                <Tag className="w-4 h-4 text-cyan-400" />
+                <span>Add Area / Road Label</span>
+              </h3>
+              <button
+                type="button"
+                onClick={() => setPendingAreaZoneCoords(null)}
+                className="p-1 rounded-lg text-slate-400 hover:text-white cursor-pointer"
+              >
+                <X className="w-4 h-4" />
+              </button>
+            </div>
+
+            <div className="space-y-1.5">
+              <label className="block text-[11px] font-mono text-slate-300">
+                Mohallah / Sector / Street Name
+              </label>
+              <input
+                type="text"
+                autoFocus
+                value={newAreaZoneName}
+                onChange={(e) => setNewAreaZoneName(e.target.value)}
+                placeholder="e.g., Lalkurti Basti, Saddar Bazaar, Dehli Road"
+                className="w-full px-3 py-2 rounded-xl bg-slate-950 border border-slate-700 text-xs text-white focus:outline-none focus:border-cyan-500"
+              />
+            </div>
+
+            <div className="space-y-1.5">
+              <label className="block text-[11px] font-mono text-slate-300">Badge Accent Color</label>
+              <div className="flex items-center gap-2">
+                {['#22d3ee', '#10b981', '#f59e0b', '#a855f7', '#fb7185'].map((c) => (
+                  <button
+                    key={c}
+                    type="button"
+                    onClick={() => setNewAreaZoneColor(c)}
+                    className={`w-6 h-6 rounded-full border-2 cursor-pointer ${
+                      newAreaZoneColor === c ? 'border-white scale-110' : 'border-transparent'
+                    }`}
+                    style={{ backgroundColor: c }}
+                  />
+                ))}
+              </div>
+            </div>
+
+            <div className="flex items-center justify-end gap-2 pt-2">
+              <button
+                type="button"
+                onClick={() => setPendingAreaZoneCoords(null)}
+                className="px-3 py-2 rounded-xl bg-slate-800 text-xs font-semibold text-slate-300 cursor-pointer"
+              >
+                Cancel
+              </button>
+              <button
+                type="submit"
+                disabled={isSaving}
+                className="px-4 py-2 rounded-xl bg-cyan-500 hover:bg-cyan-400 text-slate-950 text-xs font-bold cursor-pointer"
+              >
+                {isSaving ? 'Saving...' : 'Save Zone Label'}
+              </button>
+            </div>
+          </form>
+        </div>
+      )}
     </div>
   );
 };

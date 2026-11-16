@@ -424,4 +424,58 @@ BEGIN
         END IF;
     END IF;
 END $$;
+
+-- Live Field Agent GPS Tracking & Custom Area/Sector Zone Labels
+CREATE TABLE IF NOT EXISTS public.agent_live_locations (
+    agent_id TEXT PRIMARY KEY,
+    agent_name TEXT NOT NULL DEFAULT 'Field Agent',
+    lat DOUBLE PRECISION NOT NULL,
+    lng DOUBLE PRECISION NOT NULL,
+    accuracy_meters DOUBLE PRECISION NULL,
+    is_online BOOLEAN NOT NULL DEFAULT true,
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+CREATE TABLE IF NOT EXISTS public.gis_area_zones (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    name TEXT NOT NULL,
+    lat DOUBLE PRECISION NOT NULL,
+    lng DOUBLE PRECISION NOT NULL,
+    color TEXT DEFAULT '#22d3ee',
+    updated_by TEXT DEFAULT 'admin',
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+CREATE INDEX IF NOT EXISTS idx_agent_live_locations_updated ON public.agent_live_locations (updated_at DESC);
+
+ALTER TABLE public.agent_live_locations ENABLE ROW LEVEL SECURITY;
+ALTER TABLE public.gis_area_zones ENABLE ROW LEVEL SECURITY;
+
+GRANT SELECT, INSERT, UPDATE, DELETE ON public.agent_live_locations TO anon, authenticated;
+GRANT SELECT, INSERT, UPDATE, DELETE ON public.gis_area_zones TO anon, authenticated;
+
+DO $$
+BEGIN
+    IF NOT EXISTS (SELECT 1 FROM pg_policies WHERE schemaname='public' AND tablename='agent_live_locations' AND policyname='agent_live_locations_full_access') THEN
+        CREATE POLICY agent_live_locations_full_access ON public.agent_live_locations FOR ALL TO anon, authenticated USING (true) WITH CHECK (true);
+    END IF;
+    IF NOT EXISTS (SELECT 1 FROM pg_policies WHERE schemaname='public' AND tablename='gis_area_zones' AND policyname='gis_area_zones_full_access') THEN
+        CREATE POLICY gis_area_zones_full_access ON public.gis_area_zones FOR ALL TO anon, authenticated USING (true) WITH CHECK (true);
+    END IF;
+END $$;
+
+ALTER TABLE public.agent_live_locations REPLICA IDENTITY FULL;
+ALTER TABLE public.gis_area_zones REPLICA IDENTITY FULL;
+
+DO $$
+BEGIN
+    IF EXISTS (SELECT 1 FROM pg_publication WHERE pubname = 'supabase_realtime') THEN
+        IF NOT EXISTS (SELECT 1 FROM pg_publication_tables WHERE pubname = 'supabase_realtime' AND schemaname = 'public' AND tablename = 'agent_live_locations') THEN
+            ALTER PUBLICATION supabase_realtime ADD TABLE public.agent_live_locations;
+        END IF;
+        IF NOT EXISTS (SELECT 1 FROM pg_publication_tables WHERE pubname = 'supabase_realtime' AND schemaname = 'public' AND tablename = 'gis_area_zones') THEN
+            ALTER PUBLICATION supabase_realtime ADD TABLE public.gis_area_zones;
+        END IF;
+    END IF;
+END $$;
 `;

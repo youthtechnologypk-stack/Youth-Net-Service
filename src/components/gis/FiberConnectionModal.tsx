@@ -6,7 +6,6 @@ import {
   MapPin,
   RefreshCw,
   Save,
-  Search,
   Sparkles,
   X,
 } from 'lucide-react';
@@ -15,13 +14,17 @@ import type {
   GisCoreEntry,
   GisCoreLedgerStatus,
   GisLatLng,
+  SupabaseGisFdbPort,
   SupabaseGisNode,
   SupabaseGisOlt,
   SupabaseGisOltPonPort,
+  SupabaseGisSplitterOutput,
 } from '../../services/supabaseClient';
 import {
   CABLE_CAPACITY_PRESETS,
   CableCapacityPreset,
+  NodeOpticalBudgetResult,
+  SPLITTER_SPECS,
   computePolylineDistanceMeters,
   coreStatusToLedgerStatus,
   coreStatusToUsageType,
@@ -30,6 +33,7 @@ import {
   summarizeCableCores,
 } from '../../lib/fiberOpticEngine';
 import { DEFAULT_NETWORK_AREAS } from '../../lib/billingAndNetwork';
+import { SearchableCombobox, SearchableOption } from './SearchableCombobox';
 
 interface FiberConnectionModalProps {
   isOpen: boolean;
@@ -38,6 +42,9 @@ interface FiberConnectionModalProps {
   oltsById: Record<string, SupabaseGisOlt>;
   ponPortsByOltId: Record<string, SupabaseGisOltPonPort[]>;
   ponPortsById: Record<string, SupabaseGisOltPonPort>;
+  budgetsByNodeId?: Record<string, NodeOpticalBudgetResult>;
+  portsByNodeId?: Record<string, SupabaseGisFdbPort[]>;
+  splitterOutputsByNodeId?: Record<string, SupabaseGisSplitterOutput[]>;
   initialStartNodeId?: string | null;
   initialEndNodeId?: string | null;
   initialWaypoints?: GisLatLng[];
@@ -79,6 +86,9 @@ export const FiberConnectionModal: React.FC<FiberConnectionModalProps> = ({
   oltsById,
   ponPortsByOltId,
   ponPortsById,
+  budgetsByNodeId = {},
+  portsByNodeId = {},
+  splitterOutputsByNodeId = {},
   initialStartNodeId = null,
   initialEndNodeId = null,
   initialWaypoints = [],
@@ -87,8 +97,6 @@ export const FiberConnectionModal: React.FC<FiberConnectionModalProps> = ({
   onClose,
   onSaveConnection,
 }) => {
-  const [startSearch, setStartSearch] = useState('');
-  const [endSearch, setEndSearch] = useState('');
   const [startNodeId, setStartNodeId] = useState<string>('');
   const [endNodeId, setEndNodeId] = useState<string>('');
   const [presetId, setPresetId] = useState<string>('12C');
@@ -125,27 +133,58 @@ export const FiberConnectionModal: React.FC<FiberConnectionModalProps> = ({
     [nodes]
   );
 
-  const filteredStartNodes = useMemo(() => {
-    const q = startSearch.trim().toLowerCase();
-    if (!q) return sortedNodes;
-    return sortedNodes.filter(
-      (n) =>
-        n.name.toLowerCase().includes(q) ||
-        (n.area_name || '').toLowerCase().includes(q) ||
-        n.node_type.toLowerCase().includes(q)
-    );
-  }, [sortedNodes, startSearch]);
+  const nodeOptions: SearchableOption[] = useMemo(() => {
+    return sortedNodes.map((n) => {
+      const budget = budgetsByNodeId[n.id];
+      const summary = budget?.enclosureSummary;
+      const spec = SPLITTER_SPECS[n.splitter_type] || SPLITTER_SPECS['none'];
+      const nodePorts = portsByNodeId[n.id] || [];
+      const nodeOutputs = splitterOutputsByNodeId[n.id] || [];
 
-  const filteredEndNodes = useMemo(() => {
-    const q = endSearch.trim().toLowerCase();
-    if (!q) return sortedNodes;
-    return sortedNodes.filter(
-      (n) =>
-        n.name.toLowerCase().includes(q) ||
-        (n.area_name || '').toLowerCase().includes(q) ||
-        n.node_type.toLowerCase().includes(q)
-    );
-  }, [sortedNodes, endSearch]);
+      const totalPorts = summary
+        ? summary.boxCapacity
+        : Math.max(Number(n.box_capacity || 0), Number(n.total_ports || 0), spec.defaultPorts || 0);
+      const usedPorts = summary
+        ? summary.usedPorts
+        : nodeOutputs.length > 0
+        ? nodeOutputs.filter((o) => o.utilization_type !== 'FREE_PORT').length
+        : nodePorts.filter((p) => p.status !== 'FREE').length;
+      const freePorts = Math.max(0, totalPorts - usedPorts);
+
+      const dbmVal =
+        n.node_type === 'OLT'
+          ? Number(n.tx_power_dbm ?? 5.0)
+          : budget?.ontRxDbm ?? budget?.thruOutputDbm ?? budget?.inputDbm;
+      const metric =
+        dbmVal !== null && dbmVal !== undefined
+          ? `${dbmVal >= 0 && n.node_type === 'OLT' ? '+' : ''}${dbmVal.toFixed(1)} dBm`
+          : undefined;
+      const metricTone: SearchableOption['metricTone'] =
+        n.node_type === 'OLT'
+          ? 'sky'
+          : budget?.healthBand === 'IDEAL' || budget?.healthBand === 'GOOD'
+          ? 'emerald'
+          : budget?.healthBand === 'MARGINAL'
+          ? 'amber'
+          : budget?.healthBand === 'CRITICAL LOS RISK'
+          ? 'rose'
+          : 'slate';
+
+      const subParts: string[] = [n.node_type];
+      if (n.area_name) subParts.push(n.area_name);
+      if (totalPorts > 0) subParts.push(`${freePorts}/${totalPorts} Free`);
+      else if (n.node_type === 'FOSC_JOINT') subParts.push(`${n.tray_capacity}C`);
+
+      return {
+        value: n.id,
+        label: n.name,
+        sublabel: subParts.join(' · '),
+        metric,
+        metricTone,
+        keywords: `${n.name} ${n.area_name || ''} ${n.node_type} ${n.splitter_type || ''}`,
+      };
+    });
+  }, [sortedNodes, budgetsByNodeId, portsByNodeId, splitterOutputsByNodeId]);
 
   const activePreset: CableCapacityPreset = useMemo(
     () =>
@@ -178,8 +217,6 @@ export const FiberConnectionModal: React.FC<FiberConnectionModalProps> = ({
   useEffect(() => {
     if (!isOpen) return;
     setFormError('');
-    setStartSearch('');
-    setEndSearch('');
     setNameTouched(false);
     setNotes('');
 
@@ -455,29 +492,16 @@ export const FiberConnectionModal: React.FC<FiberConnectionModalProps> = ({
                 <label className="block text-[10px] font-mono font-bold uppercase text-emerald-400">
                   Start Node (A-End · NOC / OLT / Joint)
                 </label>
-                <div className="relative">
-                  <Search className="w-3.5 h-3.5 text-slate-500 absolute left-2.5 top-2" />
-                  <input
-                    type="text"
-                    value={startSearch}
-                    onChange={(e) => setStartSearch(e.target.value)}
-                    placeholder="Filter start node..."
-                    className="w-full bg-slate-950 border border-slate-700 rounded-lg pl-8 pr-2.5 py-1.5 text-[11px] text-white placeholder-slate-500 focus:outline-none focus:border-emerald-500"
-                  />
-                </div>
-                <select
+                <SearchableCombobox
                   value={startNodeId}
-                  onChange={(e) => handleStartNodeChange(e.target.value)}
-                  className="w-full bg-slate-950 border border-slate-700 rounded-lg px-2.5 py-2 text-xs font-mono text-white focus:outline-none focus:border-emerald-500"
-                >
-                  <option value="">-- Choose Start Node --</option>
-                  {filteredStartNodes.map((n) => (
-                    <option key={n.id} value={n.id}>
-                      [{n.node_type}] {n.name}
-                      {n.area_name ? ` (${n.area_name})` : ''}
-                    </option>
-                  ))}
-                </select>
+                  options={nodeOptions}
+                  onChange={handleStartNodeChange}
+                  placeholder="-- Choose Start Node --"
+                  searchPlaceholder="Search node name, area, type, dBm..."
+                  emptyOptionLabel="-- Choose Start Node --"
+                  accentColor="emerald"
+                  ariaLabel="Start Node (A-End)"
+                />
               </div>
 
               {/* End Node (B-End) */}
@@ -485,29 +509,16 @@ export const FiberConnectionModal: React.FC<FiberConnectionModalProps> = ({
                 <label className="block text-[10px] font-mono font-bold uppercase text-amber-400">
                   End Node (B-End · FDB / FAT / Joint)
                 </label>
-                <div className="relative">
-                  <Search className="w-3.5 h-3.5 text-slate-500 absolute left-2.5 top-2" />
-                  <input
-                    type="text"
-                    value={endSearch}
-                    onChange={(e) => setEndSearch(e.target.value)}
-                    placeholder="Filter end node..."
-                    className="w-full bg-slate-950 border border-slate-700 rounded-lg pl-8 pr-2.5 py-1.5 text-[11px] text-white placeholder-slate-500 focus:outline-none focus:border-amber-500"
-                  />
-                </div>
-                <select
+                <SearchableCombobox
                   value={endNodeId}
-                  onChange={(e) => handleEndNodeChange(e.target.value)}
-                  className="w-full bg-slate-950 border border-slate-700 rounded-lg px-2.5 py-2 text-xs font-mono text-white focus:outline-none focus:border-amber-500"
-                >
-                  <option value="">-- Choose End Node --</option>
-                  {filteredEndNodes.map((n) => (
-                    <option key={n.id} value={n.id}>
-                      [{n.node_type}] {n.name}
-                      {n.area_name ? ` (${n.area_name})` : ''}
-                    </option>
-                  ))}
-                </select>
+                  options={nodeOptions}
+                  onChange={handleEndNodeChange}
+                  placeholder="-- Choose End Node --"
+                  searchPlaceholder="Search node name, area, type, dBm..."
+                  emptyOptionLabel="-- Choose End Node --"
+                  accentColor="amber"
+                  ariaLabel="End Node (B-End)"
+                />
               </div>
             </div>
           </div>
@@ -576,40 +587,43 @@ export const FiberConnectionModal: React.FC<FiberConnectionModalProps> = ({
             <div className="grid grid-cols-1 sm:grid-cols-3 gap-2.5 font-mono">
               <div>
                 <label className="block text-[10px] text-slate-400 mb-1">Source OLT</label>
-                <select
+                <SearchableCombobox
                   value={sourceOltId}
-                  onChange={(e) => {
-                    const nextOlt = e.target.value;
+                  options={olts.map((o) => ({
+                    value: o.id,
+                    label: o.name,
+                    sublabel: `${o.pon_mode} · ${o.total_pon_ports} PON`,
+                    metricTone: 'sky',
+                  }))}
+                  onChange={(nextOlt) => {
                     setSourceOltId(nextOlt);
                     const pps = nextOlt ? ponPortsByOltId[nextOlt] || [] : [];
                     setSourcePonPortId(pps[0]?.id || '');
                   }}
-                  className="w-full bg-slate-900 border border-slate-700 rounded-lg px-2.5 py-2 text-xs text-white"
-                >
-                  <option value="">None / Downstream Span</option>
-                  {olts.map((o) => (
-                    <option key={o.id} value={o.id}>
-                      {o.name} ({o.pon_mode})
-                    </option>
-                  ))}
-                </select>
+                  emptyOptionLabel="None / Downstream Span"
+                  searchPlaceholder="Search OLT..."
+                  accentColor="sky"
+                  ariaLabel="Source OLT"
+                />
               </div>
 
               <div>
                 <label className="block text-[10px] text-slate-400 mb-1">Source PON Port</label>
-                <select
+                <SearchableCombobox
                   value={sourcePonPortId}
-                  onChange={(e) => setSourcePonPortId(e.target.value)}
-                  className="w-full bg-slate-900 border border-slate-700 rounded-lg px-2.5 py-2 text-xs text-white"
-                >
-                  <option value="">Auto / Any PON</option>
-                  {selectedOltPons.map((pp) => (
-                    <option key={pp.id} value={pp.id}>
-                      PON-{pp.port_number} ({pp.port_label || 'Main'}) +
-                      {Number(pp.tx_power_dbm).toFixed(1)}dBm
-                    </option>
-                  ))}
-                </select>
+                  options={selectedOltPons.map((pp) => ({
+                    value: pp.id,
+                    label: `PON-${pp.port_number}`,
+                    sublabel: pp.port_label || 'Main',
+                    metric: `+${Number(pp.tx_power_dbm).toFixed(1)} dBm`,
+                    metricTone: 'emerald',
+                  }))}
+                  onChange={(val) => setSourcePonPortId(val)}
+                  emptyOptionLabel="Auto / Any PON"
+                  searchPlaceholder="Search PON port..."
+                  accentColor="cyan"
+                  ariaLabel="Source PON Port"
+                />
               </div>
 
               <div>

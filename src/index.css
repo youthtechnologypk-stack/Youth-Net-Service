@@ -383,3 +383,115 @@ html.dark button[class*="bg-cyan-600/20"] {
 .light ::-webkit-scrollbar-thumb:hover {
   background: rgba(100, 116, 139, 0.45);
 }
+
+/* Compact, non-overlapping Leaflet GIS permanent labels (Zoom < 17) */
+.leaflet-tooltip.youthnet-compact-label {
+  background: rgba(2, 6, 23, 0.88);
+  color: #f8fafc;
+  border: 1px solid rgba(148, 163, 184, 0.38);
+  border-radius: 9999px;
+  padding: 1px 7px;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+  font-size: 10px;
+  font-weight: 600;
+  line-height: 1.35;
+  white-space: nowrap;
+  box-shadow: 0 2px 6px rgba(0, 0, 0, 0.45);
+  backdrop-filter: blur(4px);
+  pointer-events: none;
+}
+
+.leaflet-tooltip.youthnet-compact-label::before {
+  display: none;
+}
+
+/* Subtle slow pulse animations for FDB markers with active outages or high-priority open tickets */
+@keyframes youthnet-fdb-halo-pulse {
+  0% {
+    transform: translate(-50%, -50%) scale(0.95);
+    opacity: 0.72;
+  }
+  70% {
+    transform: translate(-50%, -50%) scale(2.05);
+    opacity: 0;
+  }
+  100% {
+    transform: translate(-50%, -50%) scale(2.05);
+    opacity: 0;
+  }
+}
+
+@keyframes youthnet-fdb-pill-outage {
+  0%,
+  100% {
+    box-shadow: 0 0 0 1px rgba(244, 63, 94, 0.55), 0 4px 14px rgba(244, 63, 94, 0.22);
+  }
+  50% {
+    box-shadow: 0 0 0 4px rgba(244, 63, 94, 0.25), 0 4px 18px rgba(244, 63, 94, 0.52);
+  }
+}
+
+@keyframes youthnet-fdb-pill-ticket {
+  0%,
+  100% {
+    box-shadow: 0 0 0 1px rgba(245, 158, 11, 0.55), 0 4px 14px rgba(245, 158, 11, 0.2);
+  }
+  50% {
+    box-shadow: 0 0 0 4px rgba(245, 158, 11, 0.24), 0 4px 18px rgba(245, 158, 11, 0.48);
+  }
+}
+
+.youthnet-fdb-pulse-ring {
+  position: absolute;
+  top: 0;
+  left: 0;
+  width: 20px;
+  height: 20px;
+  border-radius: 9999px;
+  pointer-events: none;
+  animation: youthnet-fdb-halo-pulse 2.8s cubic-bezier(0.4, 0, 0.2, 1) infinite;
+}
+
+.youthnet-fdb-pulse-outage {
+  background: rgba(244, 63, 94, 0.34);
+  border: 1.5px solid rgba(251, 113, 133, 0.85);
+}
+
+.youthnet-fdb-pulse-ticket {
+  background: rgba(245, 158, 11, 0.3);
+  border: 1.5px solid rgba(251, 191, 36, 0.85);
+}
+
+.youthnet-fdb-pill-pulse-outage {
+  border-color: rgba(251, 113, 133, 0.9) !important;
+  animation: youthnet-fdb-pill-outage 2.8s ease-in-out infinite;
+}
+
+.youthnet-fdb-pill-pulse-ticket {
+  border-color: rgba(251, 191, 36, 0.9) !important;
+  animation: youthnet-fdb-pill-ticket 2.8s ease-in-out infinite;
+}
+
+.youthnet-agent-pulse-ring {
+  position: absolute;
+  top: 0;
+  left: 0;
+  width: 28px;
+  height: 28px;
+  border-radius: 9999px;
+  background: rgba(16, 185, 129, 0.32);
+  border: 1.5px solid rgba(56, 189, 248, 0.85);
+  pointer-events: none;
+  animation: youthnet-fdb-halo-pulse 2.4s cubic-bezier(0.4, 0, 0.2, 1) infinite;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .youthnet-fdb-pulse-ring,
+  .youthnet-fdb-pill-pulse-outage,
+  .youthnet-fdb-pill-pulse-ticket,
+  .youthnet-agent-pulse-ring {
+    animation: none;
+  }
+}
+
+
