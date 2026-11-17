@@ -53,7 +53,9 @@ import {
   enforce31DayAutoExpiry,
   triggerAutoExpirySweep,
   addCalendarMonthDateString,
+  bulkReceivePayments,
 } from '../lib/billingAndNetwork';
+import { BulkReceiveAmountModal } from './BulkReceiveAmountModal';
 import {
   DEFAULT_SUPPORT_WHATSAPP,
   WHATSAPP_CONFIG_UPDATED_EVENT,
@@ -145,6 +147,12 @@ export const BillingView: React.FC<BillingViewProps> = ({
   const [newDueDate, setNewDueDate] = useState<string>(() => addCalendarMonthDateString());
   const [newAssignedAgentId, setNewAssignedAgentId] = useState<string>('');
   const [isSubmitting, setIsSubmitting] = useState<boolean>(false);
+
+  // Bulk Receive Amount States
+  const [selectedInvoiceIds, setSelectedInvoiceIds] = useState<Record<string, boolean>>({});
+  const [isBulkReceiveModalOpen, setIsBulkReceiveModalOpen] = useState<boolean>(false);
+  const [isBulkReceiving, setIsBulkReceiving] = useState<boolean>(false);
+  const [bulkReceiveProgress, setBulkReceiveProgress] = useState<string | null>(null);
 
   // 1. Fetch Invoices and Agents from Supabase
   const fetchInvoices = async () => {
@@ -422,6 +430,7 @@ export const BillingView: React.FC<BillingViewProps> = ({
         await restoreSubscriberOnInvoicePaid(selectedInvoice.subscriber_username, {
           triggeredBy: 'ADMIN',
           notes: `Payment recorded on Invoice #${selectedInvoice.invoice_no} (${paidPaymentMethod})`,
+          activeRouter: activeRouterRef.current,
         });
       }
 
@@ -557,6 +566,7 @@ export const BillingView: React.FC<BillingViewProps> = ({
         await restoreSubscriberOnInvoicePaid(invoiceToEdit.subscriber_username, {
           triggeredBy: 'ADMIN',
           notes: `Invoice #${invoiceToEdit.invoice_no} updated to PAID`,
+          activeRouter: activeRouterRef.current,
         });
       }
 
@@ -645,6 +655,126 @@ export const BillingView: React.FC<BillingViewProps> = ({
       return matchSearch && matchStatus;
     });
   }, [dateFilteredInvoices, searchTerm, statusFilter]);
+
+  const selectableUnpaidInvoices = useMemo(
+    () =>
+      filteredInvoices.filter((inv) => {
+        const balanceDue = Math.max(0, (Number(inv?.amount) || 0) - (Number(inv?.paid_amount) || 0));
+        const displayStatus = balanceDue === 0 ? 'PAID' : (inv?.status || 'DUE').toUpperCase();
+        return balanceDue > 0 && displayStatus !== 'PAID';
+      }),
+    [filteredInvoices]
+  );
+
+  const selectedInvoices = useMemo(
+    () => selectableUnpaidInvoices.filter((inv) => Boolean(selectedInvoiceIds[inv.id])),
+    [selectableUnpaidInvoices, selectedInvoiceIds]
+  );
+
+  const selectedInvoicesTotal = useMemo(
+    () =>
+      selectedInvoices.reduce(
+        (sum, inv) => sum + Math.max(0, (Number(inv.amount) || 0) - (Number(inv.paid_amount) || 0)),
+        0
+      ),
+    [selectedInvoices]
+  );
+
+  const allUnpaidSelected =
+    selectableUnpaidInvoices.length > 0 &&
+    selectedInvoices.length === selectableUnpaidInvoices.length;
+
+  const toggleSelectAllInvoices = () => {
+    if (allUnpaidSelected) {
+      setSelectedInvoiceIds((prev) => {
+        const next = { ...prev };
+        for (const inv of selectableUnpaidInvoices) {
+          delete next[inv.id];
+        }
+        return next;
+      });
+    } else {
+      setSelectedInvoiceIds((prev) => {
+        const next = { ...prev };
+        for (const inv of selectableUnpaidInvoices) {
+          next[inv.id] = true;
+        }
+        return next;
+      });
+    }
+  };
+
+  const toggleSelectOneInvoice = (invoiceId: string) => {
+    if (!invoiceId) return;
+    setSelectedInvoiceIds((prev) => ({ ...prev, [invoiceId]: !prev[invoiceId] }));
+  };
+
+  const bulkAgentOptions = useMemo(() => {
+    if (liveFieldStaff.length > 0) {
+      return liveFieldStaff.map((s) => ({
+        id: s.id,
+        full_name: s.name,
+        area: s.assignedArea,
+        role: s.role,
+      }));
+    }
+    return portalAgents.map((a) => ({
+      id: a.id,
+      full_name: a.full_name,
+      area: a.area,
+      role: a.role,
+    }));
+  }, [liveFieldStaff, portalAgents]);
+
+  const handleConfirmBulkReceive = async (payload: {
+    paymentMethod: string;
+    agentId: string;
+    agentName: string;
+    referenceNote: string;
+  }) => {
+    if (selectedInvoices.length === 0 || isBulkReceiving) return;
+    setIsBulkReceiving(true);
+    setBulkReceiveProgress(`Processing 0 / ${selectedInvoices.length}...`);
+    try {
+      const res = await bulkReceivePayments({
+        items: selectedInvoices.map((inv) => ({
+          invoice: inv,
+          amountToCollect: Math.max(0, (Number(inv.amount) || 0) - (Number(inv.paid_amount) || 0)),
+        })),
+        allInvoices: invoices,
+        portalClients,
+        paymentMethod: payload.paymentMethod,
+        agentId: payload.agentId || null,
+        agentName: payload.agentName,
+        collectedByName: currentUser?.fullName || payload.agentName,
+        referenceNote: payload.referenceNote,
+        activeRouter: activeRouterRef.current,
+        onProgress: (curr, total, label) => {
+          setBulkReceiveProgress(`Collecting ${curr} / ${total} (${label})...`);
+        },
+      });
+
+      setSelectedInvoiceIds({});
+      setIsBulkReceiveModalOpen(false);
+      setActionNotice(
+        `Bulk Payment Complete: Settled ${res.settledInvoicesCount} invoice(s) (${formatCurrency(
+          res.totalCollected,
+          0
+        )}) via ${payload.paymentMethod}${
+          payload.agentId ? ` -> Credited ${payload.agentName}` : ''
+        } • Restored ${res.restoredSubscribersCount} MikroTik account(s) & kicked ${
+          res.kickedSessions
+        } session(s)${res.errors.length > 0 ? ` (${res.errors.length} warning)` : ''}.`
+      );
+      setTimeout(() => setActionNotice(null), 10000);
+      await fetchInvoices();
+    } catch (err: any) {
+      setActionNotice(`Bulk payment notice: ${err?.message || 'Unable to process bulk payment'}`);
+    } finally {
+      setIsBulkReceiving(false);
+      setBulkReceiveProgress(null);
+    }
+  };
 
   // Dynamic Period Aggregate Metrics
   const totalBilled = dateFilteredInvoices.reduce((acc, i) => acc + (Number(i.amount) || 0), 0);
@@ -1078,8 +1208,58 @@ export const BillingView: React.FC<BillingViewProps> = ({
         </div>
       </div>
 
+      {/* Sticky Bulk Payment Action Bar */}
+      {selectedInvoices.length > 0 && (
+        <div className="sticky top-2 z-30 rounded-xl border border-emerald-500/60 bg-slate-950/95 backdrop-blur-md px-3.5 py-2.5 shadow-2xl flex flex-wrap items-center justify-between gap-2.5">
+          <div className="flex items-center gap-2 text-xs">
+            <span className="px-2.5 py-1 rounded-md bg-emerald-500/20 text-emerald-300 border border-emerald-500/40 font-mono font-bold">
+              {selectedInvoices.length} Invoice{selectedInvoices.length === 1 ? '' : 's'} Selected • Total{' '}
+              {formatCurrency(selectedInvoicesTotal, 0)}
+            </span>
+          </div>
+          <div className="flex flex-wrap items-center gap-2">
+            <button
+              type="button"
+              onClick={() => setIsBulkReceiveModalOpen(true)}
+              disabled={isBulkReceiving}
+              className="px-3.5 py-2 rounded-lg bg-emerald-500 hover:bg-emerald-400 text-slate-950 font-bold text-xs flex items-center gap-1.5 transition cursor-pointer shadow disabled:opacity-50"
+            >
+              <DollarSign className="w-3.5 h-3.5" />
+              <span>
+                Bulk Receive Amount ({selectedInvoices.length} Selected • Total{' '}
+                {formatCurrency(selectedInvoicesTotal, 0)})
+              </span>
+            </button>
+            <button
+              type="button"
+              onClick={() => setSelectedInvoiceIds({})}
+              disabled={isBulkReceiving}
+              className="px-2.5 py-2 rounded-lg bg-slate-800 hover:bg-slate-700 text-slate-300 text-xs font-semibold cursor-pointer"
+            >
+              Clear
+            </button>
+          </div>
+        </div>
+      )}
+
       {/* Mobile Invoice Card List (< 768px) */}
       <div className="flex flex-col gap-3 md:hidden w-full max-w-full">
+        {selectableUnpaidInvoices.length > 0 && (
+          <div className="flex items-center justify-between px-3 py-2 rounded-xl border border-slate-800 bg-[#111A2E] text-xs">
+            <label className="inline-flex items-center gap-2 font-semibold text-slate-200 cursor-pointer">
+              <input
+                type="checkbox"
+                checked={allUnpaidSelected}
+                onChange={toggleSelectAllInvoices}
+                className="w-4 h-4 rounded border-slate-600 bg-slate-900 text-emerald-500 focus:ring-emerald-500 cursor-pointer"
+              />
+              <span>Select All Unpaid ({selectableUnpaidInvoices.length})</span>
+            </label>
+            <span className="font-mono text-slate-400">
+              {selectedInvoices.length} selected
+            </span>
+          </div>
+        )}
         {filteredInvoices.length === 0 ? (
           <div className="w-full max-w-full overflow-hidden rounded-xl border border-slate-800 bg-[#111A2E] py-10 px-4 text-center text-slate-500 box-border shadow-lg">
             <FileText className="w-10 h-10 text-slate-600 mx-auto mb-2 opacity-50" />
@@ -1096,23 +1276,40 @@ export const BillingView: React.FC<BillingViewProps> = ({
             const displayStatus = balanceDue === 0 ? 'PAID' : (inv.status || 'DUE').toUpperCase();
             const isPaid = displayStatus === 'PAID';
             const isPartial = displayStatus === 'PARTIAL';
+            const isSelectable = balanceDue > 0 && !isPaid;
+            const isChecked = Boolean(isSelectable && selectedInvoiceIds[inv.id]);
 
             return (
               <div
                 key={inv.id}
-                className="w-full max-w-full overflow-hidden rounded-xl border border-slate-800 bg-[#111A2E] p-3.5 space-y-3 box-border shadow-lg"
+                className={`w-full max-w-full overflow-hidden rounded-xl border p-3.5 space-y-3 box-border shadow-lg transition ${
+                  isChecked
+                    ? 'border-emerald-500/70 bg-emerald-950/15'
+                    : 'border-slate-800 bg-[#111A2E]'
+                }`}
               >
-                {/* Row 1: @username (bold) + INV-# + Status Badge */}
+                {/* Row 1: Checkbox + @username (bold) + INV-# + Status Badge */}
                 <div className="flex items-start justify-between gap-2 min-w-0">
-                  <div className="min-w-0 flex-1">
-                    <div className="font-bold text-white text-base truncate">
-                      @{inv.subscriber_username}
-                    </div>
-                    <div className="flex flex-wrap items-center gap-x-2 gap-y-0.5 text-xs mt-0.5">
-                      <span className="font-mono font-semibold text-cyan-400">
-                        #{inv.invoice_no}
-                      </span>
-                      <span className="text-slate-500">• Bill Day: {inv.cycle_day || 'Monthly'}</span>
+                  <div className="flex items-start gap-2.5 min-w-0 flex-1">
+                    {isSelectable && (
+                      <input
+                        type="checkbox"
+                        checked={isChecked}
+                        onChange={() => toggleSelectOneInvoice(inv.id)}
+                        aria-label={`Select invoice ${inv.invoice_no}`}
+                        className="mt-1 w-4 h-4 rounded border-slate-600 bg-slate-900 text-emerald-500 focus:ring-emerald-500 cursor-pointer shrink-0"
+                      />
+                    )}
+                    <div className="min-w-0 flex-1">
+                      <div className="font-bold text-white text-base truncate">
+                        @{inv.subscriber_username}
+                      </div>
+                      <div className="flex flex-wrap items-center gap-x-2 gap-y-0.5 text-xs mt-0.5">
+                        <span className="font-mono font-semibold text-cyan-400">
+                          #{inv.invoice_no}
+                        </span>
+                        <span className="text-slate-500">• Bill Day: {inv.cycle_day || 'Monthly'}</span>
+                      </div>
                     </div>
                   </div>
                   <div className="shrink-0">
@@ -1271,6 +1468,17 @@ export const BillingView: React.FC<BillingViewProps> = ({
           <table className="hidden md:table w-full text-left text-sm text-slate-300">
             <thead className="bg-slate-900/80 text-xs uppercase tracking-wider text-slate-400 border-b border-slate-800">
               <tr>
+                <th className="py-3 px-3 w-10 text-center">
+                  <input
+                    type="checkbox"
+                    checked={allUnpaidSelected}
+                    disabled={selectableUnpaidInvoices.length === 0}
+                    onChange={toggleSelectAllInvoices}
+                    title="Select All Unpaid Invoices"
+                    aria-label="Select All Unpaid Invoices"
+                    className="w-4 h-4 rounded border-slate-600 bg-slate-900 text-emerald-500 focus:ring-emerald-500 cursor-pointer disabled:opacity-30"
+                  />
+                </th>
                 <th className="py-3 px-4">Invoice #</th>
                 <th className="py-3 px-4">Subscriber</th>
                 <th className="py-3 px-4">Assigned Agent</th>
@@ -1283,7 +1491,7 @@ export const BillingView: React.FC<BillingViewProps> = ({
             <tbody className="divide-y divide-slate-800/60 font-sans">
               {filteredInvoices.length === 0 ? (
                 <tr>
-                  <td colSpan={7} className="py-12 text-center text-slate-500">
+                  <td colSpan={8} className="py-12 text-center text-slate-500">
                     <FileText className="w-10 h-10 text-slate-600 mx-auto mb-2 opacity-50" />
                     <p className="text-base font-semibold text-slate-400">No invoices found</p>
                     <p className="text-xs text-slate-500 mt-1">
@@ -1298,9 +1506,29 @@ export const BillingView: React.FC<BillingViewProps> = ({
                   const balanceDue = Math.max(0, totalAmount - alreadyPaid);
                   const displayStatus = balanceDue === 0 ? 'PAID' : (inv.status || 'DUE').toUpperCase();
                   const isPartial = displayStatus === 'PARTIAL';
+                  const isSelectable = balanceDue > 0 && displayStatus !== 'PAID';
+                  const isChecked = Boolean(isSelectable && selectedInvoiceIds[inv.id]);
 
                   return (
-                    <tr key={inv.id} className="hover:bg-slate-800/30 transition">
+                    <tr
+                      key={inv.id}
+                      className={`transition ${
+                        isChecked ? 'bg-emerald-950/20 hover:bg-emerald-950/30' : 'hover:bg-slate-800/30'
+                      }`}
+                    >
+                      <td className="py-3 px-3 text-center">
+                        {isSelectable ? (
+                          <input
+                            type="checkbox"
+                            checked={isChecked}
+                            onChange={() => toggleSelectOneInvoice(inv.id)}
+                            aria-label={`Select invoice ${inv.invoice_no}`}
+                            className="w-4 h-4 rounded border-slate-600 bg-slate-900 text-emerald-500 focus:ring-emerald-500 cursor-pointer"
+                          />
+                        ) : (
+                          <Check className="w-3.5 h-3.5 text-emerald-600/60 mx-auto" />
+                        )}
+                      </td>
                       <td className="py-3 px-4 font-mono font-semibold text-cyan-400">{inv.invoice_no}</td>
                       <td className="py-3 px-4">
                         <div className="font-semibold text-white">@{inv.subscriber_username}</div>
@@ -1937,6 +2165,25 @@ export const BillingView: React.FC<BillingViewProps> = ({
           </div>,
           document.body
         )}
+
+      {/* Bulk Receive Amount Confirmation Modal */}
+      <BulkReceiveAmountModal
+        isOpen={isBulkReceiveModalOpen}
+        onClose={() => !isBulkReceiving && setIsBulkReceiveModalOpen(false)}
+        title="Bulk Receive Invoice Payments"
+        itemLabel="Invoices"
+        previewRows={selectedInvoices.map((inv) => ({
+          key: inv.id,
+          username: inv.subscriber_username,
+          label: `#${inv.invoice_no} (Due ${inv.due_date})`,
+          amount: Math.max(0, (Number(inv.amount) || 0) - (Number(inv.paid_amount) || 0)),
+        }))}
+        totalAmount={selectedInvoicesTotal}
+        agents={bulkAgentOptions}
+        isProcessing={isBulkReceiving}
+        progressLabel={bulkReceiveProgress}
+        onConfirm={handleConfirmBulkReceive}
+      />
 
       {/* Payment Accounts & WhatsApp Billing Center Drawer */}
       <WhatsAppBillingCenter

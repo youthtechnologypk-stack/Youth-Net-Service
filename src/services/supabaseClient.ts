@@ -42,6 +42,7 @@ export interface SupabasePortalUser {
   billing_anchor_day?: number | null;
   next_billing_date?: string | null;
   expiry_date?: string | null;
+  package_name?: string | null;
   package_profile_name?: string | null;
   original_package_profile?: string | null;
   billing_status?: 'ACTIVE' | 'REMINDER_SENT' | 'GRACE_PERIOD' | 'SUSPENDED_EXPIRED' | string | null;

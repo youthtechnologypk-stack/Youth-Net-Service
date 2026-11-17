@@ -6,6 +6,7 @@ import {
   Clock,
   Copy,
   Database,
+  DollarSign,
   History,
   MessageSquare,
   Play,
@@ -38,6 +39,9 @@ import {
   syncMikrotikSecretProfile,
   kickMikrotikActiveSessionForUser,
   triggerAutoExpirySweep,
+  syncProfilesFromMikrotikToSupabase,
+  bulkActivateSubscribers,
+  bulkReceivePayments,
 } from '../lib/billingAndNetwork';
 import { openWhatsAppLink } from '../lib/whatsappBilling';
 import { EXPIRY_MIGRATION_SQL } from '../lib/expiryMigrationSql';
@@ -47,7 +51,17 @@ import {
   isMissingTableOrColumnError,
   loadBillingSettingsFromDb,
 } from '../lib/expiryUtils';
-import { computeBillingAnchorDay, evaluateSubscribersExpiryBuckets } from '../lib/anniversaryBilling';
+import {
+  computeBillingAnchorDay,
+  evaluateSubscribersExpiryBuckets,
+  fetchLiveFieldStaffWithBalances,
+} from '../lib/anniversaryBilling';
+import {
+  extractOrigPkgFromComment,
+  isExpiryOrBlockedProfile,
+  resolveExactSubscriberProfile,
+} from '../lib/mikrotikProfileSync';
+import { BulkReceiveAmountModal } from './BulkReceiveAmountModal';
 
 type ExpiryTabKey = 'expiring_3d' | 'grace_24h' | 'suspended_16' | 'audit_logs';
 
@@ -105,8 +119,19 @@ export const ExpiryAutomationView: React.FC = () => {
   const [isLoading, setIsLoading] = useState<boolean>(true);
   const [isSavingSettings, setIsSavingSettings] = useState<boolean>(false);
   const [isRunningSweep, setIsRunningSweep] = useState<boolean>(false);
+  const [isSyncingProfiles, setIsSyncingProfiles] = useState<boolean>(false);
+  const [lastProfileSyncSummary, setLastProfileSyncSummary] = useState<string | null>(null);
   const [busyUsernames, setBusyUsernames] = useState<Record<string, boolean>>({});
   const [nowTickMs, setNowTickMs] = useState<number>(() => Date.now());
+  const [fieldAgents, setFieldAgents] = useState<
+    Array<{ id: string; full_name: string; area?: string; role?: string }>
+  >([]);
+  const [selectedUsernames, setSelectedUsernames] = useState<Record<string, boolean>>({});
+  const [isBulkActivating, setIsBulkActivating] = useState<boolean>(false);
+  const [bulkActivateProgress, setBulkActivateProgress] = useState<string | null>(null);
+  const [isBulkReceiveModalOpen, setIsBulkReceiveModalOpen] = useState<boolean>(false);
+  const [isBulkReceiving, setIsBulkReceiving] = useState<boolean>(false);
+  const [bulkReceiveProgress, setBulkReceiveProgress] = useState<string | null>(null);
   const [extraGraceTarget, setExtraGraceTarget] = useState<
     (SupabasePortalUser & { amountDue: number; effectiveExpiryMs?: number | null; isSyntheticRecord?: boolean }) | null
   >(null);
@@ -157,7 +182,7 @@ export const ExpiryAutomationView: React.FC = () => {
     setIsLoading(true);
     const missing = new Set<string>();
     try {
-      const [settingsRes, clientsRes, invRes, auditRes, waRes] = await Promise.all([
+      const [settingsRes, clientsRes, invRes, auditRes, waRes, staffRes] = await Promise.all([
         loadBillingSettingsFromDb(supabase),
         supabase.from('portal_users').select('*').eq('role', 'CLIENT').order('username', { ascending: true }),
         supabase.from('invoices').select('*').order('created_at', { ascending: false }),
@@ -171,6 +196,7 @@ export const ExpiryAutomationView: React.FC = () => {
           .select('*')
           .order('created_at', { ascending: false })
           .limit(200),
+        fetchLiveFieldStaffWithBalances(supabase).catch(() => []),
       ]);
 
       setSettings(settingsRes.settings);
@@ -183,6 +209,16 @@ export const ExpiryAutomationView: React.FC = () => {
       }
       if (invRes.data) {
         setAllInvoices(invRes.data as SupabaseInvoice[]);
+      }
+      if (Array.isArray(staffRes)) {
+        setFieldAgents(
+          staffRes.map((s) => ({
+            id: s.id,
+            full_name: s.name,
+            area: s.assignedArea,
+            role: s.role,
+          }))
+        );
       }
 
       if (auditRes.error && isMissingTableOrColumnError(auditRes.error)) {
@@ -414,13 +450,32 @@ export const ExpiryAutomationView: React.FC = () => {
         isExtraGrace: Boolean(item.isExtraGrace),
         extraGraceNote: item.extraGraceNote || null,
       })),
-      suspended16: evaluated.suspended16.map((item) => ({
-        ...item.subscriber,
-        amountDue: item.amountDue,
-        effectiveExpiryMs: item.effectiveExpiryMs,
-        isSyntheticRecord: item.isSyntheticRecord,
-        suspensionReason: item.suspensionReason,
-      })),
+      suspended16: evaluated.suspended16.map((item) => {
+        const unameLower = String(item.subscriber.username || '').trim().toLowerCase();
+        const mkSec = mkSecrets.find(
+          (s) => String(s?.name || '').trim().toLowerCase() === unameLower
+        );
+        const origFromComment = extractOrigPkgFromComment(
+          mkSec?.comment,
+          settings.expiry_ppp_profile
+        );
+        const adoptedProfile =
+          origFromComment ||
+          resolveExactSubscriberProfile({
+            liveSecret: mkSec,
+            subscriber: item.subscriber,
+            mikrotikProfiles,
+            expiryProfileName: settings.expiry_ppp_profile,
+          });
+        return {
+          ...item.subscriber,
+          amountDue: item.amountDue,
+          effectiveExpiryMs: item.effectiveExpiryMs,
+          isSyntheticRecord: item.isSyntheticRecord,
+          suspensionReason: item.suspensionReason,
+          adoptedProfile,
+        };
+      }),
     };
   }, [
     subscribers,
@@ -431,8 +486,258 @@ export const ExpiryAutomationView: React.FC = () => {
     settings.expiry_ppp_profile,
     mkSecrets,
     mkActive,
+    mikrotikProfiles,
     nowTickMs,
   ]);
+
+  const activeTabRows = useMemo(() => {
+    if (activeSubTab === 'expiring_3d') return categorizedSubscribers.expiring3d;
+    if (activeSubTab === 'grace_24h') return categorizedSubscribers.inGrace;
+    if (activeSubTab === 'suspended_16') return categorizedSubscribers.suspended16;
+    return [];
+  }, [activeSubTab, categorizedSubscribers]);
+
+  const selectedRowsInActiveTab = useMemo(
+    () =>
+      activeTabRows.filter((row) => {
+        const u = String(row.username || '').trim().toLowerCase();
+        return Boolean(u && selectedUsernames[u]);
+      }),
+    [activeTabRows, selectedUsernames]
+  );
+
+  const selectedTotalDueInTab = useMemo(
+    () =>
+      selectedRowsInActiveTab.reduce((sum, r) => sum + (Number((r as any).amountDue) || 0), 0),
+    [selectedRowsInActiveTab]
+  );
+
+  const allInTabSelected =
+    activeTabRows.length > 0 && selectedRowsInActiveTab.length === activeTabRows.length;
+
+  const toggleSelectAllInTab = () => {
+    if (allInTabSelected) {
+      setSelectedUsernames((prev) => {
+        const next = { ...prev };
+        for (const r of activeTabRows) {
+          delete next[String(r.username || '').trim().toLowerCase()];
+        }
+        return next;
+      });
+    } else {
+      setSelectedUsernames((prev) => {
+        const next = { ...prev };
+        for (const r of activeTabRows) {
+          const u = String(r.username || '').trim().toLowerCase();
+          if (u) next[u] = true;
+        }
+        return next;
+      });
+    }
+  };
+
+  const toggleSelectOneUser = (username: string) => {
+    const u = String(username || '').trim().toLowerCase();
+    if (!u) return;
+    setSelectedUsernames((prev) => ({ ...prev, [u]: !prev[u] }));
+  };
+
+  // Sync exact PPPoE profiles from MikroTik /ppp/profile & /ppp/secret into Supabase portal_users
+  const handleSyncProfilesFromMikrotik = async () => {
+    setIsSyncingProfiles(true);
+    try {
+      const res = await syncProfilesFromMikrotikToSupabase(
+        activeRouterRef.current,
+        settings.expiry_ppp_profile
+      );
+      if (!res.success) {
+        showNotice(`MikroTik Profile Sync failed: ${res.error || 'Router unreachable'}`, 'error');
+        return;
+      }
+      if (res.profiles.length > 0) {
+        setMikrotikProfiles(res.profiles);
+      }
+      const summaryText = `Adopted ${res.profiles.length} RouterOS profiles (${res.totalSecrets} secrets): updated ${res.syncedCount} active subscriber(s), ${res.adoptedFromCommentCount} from ORIG_PKG comment, ${res.alreadySyncedCount} already synced.`;
+      setLastProfileSyncSummary(summaryText);
+      showNotice(summaryText, 'success');
+      await Promise.all([fetchAllDatabaseState(), fetchMikrotikProfilesList()]);
+    } catch (err: any) {
+      showNotice(`MikroTik Profile Sync error: ${err?.message || 'Unknown error'}`, 'error');
+    } finally {
+      setIsSyncingProfiles(false);
+    }
+  };
+
+  // Bulk Activate (Restore Exact MikroTik Profiles) for selected rows
+  const handleBulkActivateSelected = async () => {
+    if (selectedRowsInActiveTab.length === 0 || isBulkActivating) return;
+    setIsBulkActivating(true);
+    setBulkActivateProgress(`Restoring 0 / ${selectedRowsInActiveTab.length}...`);
+    try {
+      const res = await bulkActivateSubscribers({
+        subscribers: selectedRowsInActiveTab.map((r: any) => ({
+          id: r.id,
+          username: r.username,
+          original_package_profile: r.adoptedProfile || r.original_package_profile,
+          package_name: r.package_name,
+          package_profile_name: r.package_profile_name,
+          package_speed: r.package_speed,
+          isSyntheticRecord: r.isSyntheticRecord,
+        })),
+        activeRouter: activeRouterRef.current,
+        expiryProfileName: settings.expiry_ppp_profile,
+        triggeredBy: 'ADMIN',
+        onProgress: (curr, total, uname) => {
+          setBulkActivateProgress(`Restoring ${curr} / ${total} (@${uname})...`);
+        },
+      });
+
+      setSelectedUsernames({});
+      showNotice(
+        `Bulk Activate complete: Restored ${res.restoredCount} subscriber(s) to their exact MikroTik profiles & kicked ${res.kickedSessions} session(s)${
+          res.failedCount > 0 ? ` (${res.failedCount} failed)` : ''
+        }.`,
+        res.failedCount > 0 && res.restoredCount === 0 ? 'error' : 'success'
+      );
+      await Promise.all([fetchAllDatabaseState(), fetchMikrotikProfilesList()]);
+    } catch (err: any) {
+      showNotice(`Bulk Activate failed: ${err?.message || 'Unknown error'}`, 'error');
+    } finally {
+      setIsBulkActivating(false);
+      setBulkActivateProgress(null);
+    }
+  };
+
+  // Bulk Receive Amount for selected suspended/expiry subscribers + auto-restore MikroTik profiles
+  const bulkReceivePreviewRows = useMemo(() => {
+    const rows: Array<{ key: string; username: string; label: string; amount: number }> = [];
+    for (const sub of selectedRowsInActiveTab) {
+      const uname = String(sub.username || '').trim().toLowerCase();
+      const userOpenInvs = openInvoices.filter(
+        (inv) => String(inv.subscriber_username || '').trim().toLowerCase() === uname
+      );
+      if (userOpenInvs.length > 0) {
+        for (const inv of userOpenInvs) {
+          const bal = Math.max(0, (Number(inv.amount) || 0) - (Number(inv.paid_amount) || 0));
+          if (bal > 0) {
+            rows.push({
+              key: inv.id,
+              username: uname,
+              label: `#${inv.invoice_no}`,
+              amount: bal,
+            });
+          }
+        }
+      } else if ((Number((sub as any).amountDue) || 0) > 0) {
+        rows.push({
+          key: `synthetic-${uname}`,
+          username: uname,
+          label: 'Monthly Package Due',
+          amount: Number((sub as any).amountDue) || 0,
+        });
+      }
+    }
+    return rows;
+  }, [selectedRowsInActiveTab, openInvoices]);
+
+  const bulkReceiveModalTotal = useMemo(
+    () => bulkReceivePreviewRows.reduce((s, r) => s + r.amount, 0),
+    [bulkReceivePreviewRows]
+  );
+
+  const handleConfirmBulkReceive = async (payload: {
+    paymentMethod: string;
+    agentId: string;
+    agentName: string;
+    referenceNote: string;
+  }) => {
+    if (selectedRowsInActiveTab.length === 0) return;
+    setIsBulkReceiving(true);
+    setBulkReceiveProgress(`Preparing ${selectedRowsInActiveTab.length} account(s)...`);
+
+    try {
+      const itemsToCollect: Array<{ invoice: SupabaseInvoice; amountToCollect: number }> = [];
+      const workingInvoices = [...allInvoices];
+      const nowIso = new Date().toISOString();
+
+      for (const sub of selectedRowsInActiveTab) {
+        const uname = String(sub.username || '').trim().toLowerCase();
+        const userOpenInvs = openInvoices.filter(
+          (inv) => String(inv.subscriber_username || '').trim().toLowerCase() === uname
+        );
+        if (userOpenInvs.length > 0) {
+          for (const inv of userOpenInvs) {
+            const bal = Math.max(0, (Number(inv.amount) || 0) - (Number(inv.paid_amount) || 0));
+            if (bal > 0) {
+              itemsToCollect.push({ invoice: inv, amountToCollect: bal });
+            }
+          }
+        } else if ((Number((sub as any).amountDue) || 0) > 0) {
+          const dueAmt = Number((sub as any).amountDue) || 0;
+          const anchorDay = computeBillingAnchorDay(sub);
+          const genNo = `INV-${nowIso.slice(0, 7).replace('-', '')}-${Math.floor(1000 + Math.random() * 9000)}`;
+          const { data: createdInv, error: createErr } = await supabase
+            .from('invoices')
+            .insert([
+              {
+                invoice_no: genNo,
+                subscriber_username: uname,
+                assigned_agent_id: payload.agentId || null,
+                assigned_agent_name: payload.agentId ? payload.agentName : null,
+                amount: dueAmt,
+                paid_amount: 0,
+                due_date: nowIso.slice(0, 10),
+                status: 'DUE',
+                cycle_day: anchorDay,
+                created_at: nowIso,
+              },
+            ])
+            .select()
+            .maybeSingle();
+
+          if (!createErr && createdInv) {
+            workingInvoices.push(createdInv as SupabaseInvoice);
+            itemsToCollect.push({
+              invoice: createdInv as SupabaseInvoice,
+              amountToCollect: dueAmt,
+            });
+          }
+        }
+      }
+
+      const res = await bulkReceivePayments({
+        items: itemsToCollect,
+        allInvoices: workingInvoices,
+        portalClients: subscribers,
+        paymentMethod: payload.paymentMethod,
+        agentId: payload.agentId || null,
+        agentName: payload.agentName,
+        collectedByName: payload.agentName,
+        referenceNote: payload.referenceNote,
+        activeRouter: activeRouterRef.current,
+        expiryProfileName: settings.expiry_ppp_profile,
+        onProgress: (curr, total, label) => {
+          setBulkReceiveProgress(`Settling ${curr} / ${total}: ${label}...`);
+        },
+      });
+
+      setIsBulkReceiveModalOpen(false);
+      setSelectedUsernames({});
+      showNotice(
+        `Bulk Receive Complete: Settled ${res.settledInvoicesCount} invoice(s) totaling ${formatCurrency(
+          res.totalCollected,
+          0
+        )} (${payload.paymentMethod}) & auto-restored ${res.restoredSubscribersCount} subscriber(s) (kicked ${res.kickedSessions} session(s)).`,
+        res.errors.length > 0 && res.settledInvoicesCount === 0 ? 'error' : 'success'
+      );
+      await Promise.all([fetchAllDatabaseState(), fetchMikrotikProfilesList()]);
+    } catch (err: any) {
+      showNotice(`Bulk Receive failed: ${err?.message || 'Error'}`, 'error');
+    } finally {
+      setIsBulkReceiving(false);
+      setBulkReceiveProgress(null);
+    }
+  };
 
   // 1-Click Send WhatsApp Slip + Log to whatsapp_reminder_logs & expiry_audit_logs
   const handleSendWhatsAppSlip = async (
@@ -627,21 +932,25 @@ export const ExpiryAutomationView: React.FC = () => {
         }
       }
 
-      // 2. Atomic DB +30d + MikroTik profile restore + active 16.16.16.x kick + RESTORED_ON_PAYMENT log
+      // 2. Atomic DB +30d + MikroTik exact profile restore + active 16.16.16.x kick + RESTORED_ON_PAYMENT log
       const restoreRes = await restoreSubscriberOnInvoicePaid(uname, {
         triggeredBy: 'ADMIN',
         expiryProfileName: settings.expiry_ppp_profile,
+        activeRouter: activeRouterRef.current,
+        preloadedSecrets: mkSecrets,
+        preloadedProfiles: mikrotikProfiles,
+        preloadedActive: mkActive,
         notes: `1-Click Collect & Restore (${formatCurrency(sub.amountDue, 0)} settled)`,
       });
 
       showNotice(
-        `Restored @${uname} to "${restoreRes.restoredProfile}" (+30d expiry: ${restoreRes.newExpiryIso.slice(
+        `Restored @${uname} to "${restoreRes.restoredProfile}" (+1 mo expiry: ${restoreRes.newExpiryIso.slice(
           0,
           10
         )} · Kicked ${restoreRes.kickedSessions} session${restoreRes.kickedSessions === 1 ? '' : 's'}).`,
         'success'
       );
-      await fetchAllDatabaseState();
+      await Promise.all([fetchAllDatabaseState(), fetchMikrotikProfilesList()]);
     } catch (err: any) {
       showNotice(`Collect & Restore error for @${uname}: ${err?.message}`, 'error');
     } finally {
@@ -667,7 +976,7 @@ export const ExpiryAutomationView: React.FC = () => {
     return Number(extraGracePreset) || 24;
   }, [extraGracePreset, extraGraceCustomHours]);
 
-  // Grant Extra Grace: Set grace_until = NOW + hours, is_suspended = false, restore MikroTik profile & kick 16.16.16.x
+  // Grant Extra Grace: Set grace_until = NOW + hours, is_suspended = false, restore exact MikroTik profile & kick 16.16.16.x
   const handleConfirmExtraGrace = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!extraGraceTarget) return;
@@ -679,35 +988,31 @@ export const ExpiryAutomationView: React.FC = () => {
     const nowMs = Date.now();
     const nowIso = new Date(nowMs).toISOString();
     const graceUntilIso = new Date(nowMs + hours * 3_600_000).toISOString();
-    const expiryProfLower = String(settings.expiry_ppp_profile || 'EXPIRED-16-POOL').trim().toLowerCase();
 
     setIsGrantingExtraGrace(true);
     setBusyUsernames((p) => ({ ...p, [uname]: true }));
 
     try {
-      // 1. Resolve target restored package profile
-      const isPlaceholder = (val?: string | null) => {
-        const low = String(val || '').trim().toLowerCase();
-        return !low || low === 'expire' || low === 'expired' || low.includes('walled') || low.includes('16-pool') || low === expiryProfLower;
-      };
-
-      let restoredProfile = '20Mbps';
-      if (!isPlaceholder(sub.original_package_profile)) {
-        restoredProfile = String(sub.original_package_profile).trim();
-      } else if (!isPlaceholder(sub.package_profile_name)) {
-        restoredProfile = String(sub.package_profile_name).trim();
-      } else if (!isPlaceholder(sub.package_speed)) {
-        restoredProfile = String(sub.package_speed).trim().replace(/\s+/g, '');
-      }
-
-      if (isPlaceholder(sub.original_package_profile) && isPlaceholder(sub.package_profile_name) && mikrotikProfiles.length > 0) {
-        const speedDigits = restoredProfile.match(/\d+/)?.[0];
-        const matched = mikrotikProfiles.find((p) => {
-          if (isPlaceholder(p)) return false;
-          return p.toLowerCase() === restoredProfile.toLowerCase() || Boolean(speedDigits && p.includes(speedDigits));
-        });
-        if (matched) restoredProfile = matched;
-      }
+      // 1. Resolve exact adopted MikroTik profile from ORIG_PKG comment / live secret / Supabase
+      const liveSecret =
+        mkSecrets.find((s) => String(s?.name || '').trim().toLowerCase() === uname) || null;
+      const origCommentPkg = extractOrigPkgFromComment(
+        liveSecret?.comment,
+        settings.expiry_ppp_profile
+      );
+      const restoredProfile = origCommentPkg
+        ? resolveExactSubscriberProfile({
+            liveSecret: { ...liveSecret, profile: origCommentPkg },
+            subscriber: sub,
+            mikrotikProfiles,
+            expiryProfileName: settings.expiry_ppp_profile,
+          }) || origCommentPkg
+        : resolveExactSubscriberProfile({
+            liveSecret,
+            subscriber: sub,
+            mikrotikProfiles,
+            expiryProfileName: settings.expiry_ppp_profile,
+          });
 
       // 2. Find or create portal_users row so grace_until & is_suspended persist reliably
       const { data: existingRow } = await supabase
@@ -902,6 +1207,17 @@ export const ExpiryAutomationView: React.FC = () => {
         <div className="flex flex-wrap items-center gap-2.5 shrink-0">
           <button
             type="button"
+            onClick={handleSyncProfilesFromMikrotik}
+            disabled={isSyncingProfiles}
+            className="px-3.5 py-2 rounded-lg bg-cyan-950/80 hover:bg-cyan-900 text-cyan-200 border border-cyan-700/70 font-semibold text-xs flex items-center gap-1.5 transition cursor-pointer disabled:opacity-50 whitespace-nowrap"
+            title="Fetch live /ppp/profile & /ppp/secret directly from MikroTik and adopt exact speed profiles into Supabase"
+          >
+            <Wifi className={`w-3.5 h-3.5 text-cyan-400 ${isSyncingProfiles ? 'animate-pulse' : ''}`} />
+            <span>{isSyncingProfiles ? 'Syncing Profiles...' : 'Sync Profiles from MikroTik'}</span>
+          </button>
+
+          <button
+            type="button"
             onClick={() => setIsSettingsOpen((v) => !v)}
             className="px-3.5 py-2 rounded-lg bg-slate-900 hover:bg-slate-800 text-slate-200 border border-slate-700 font-semibold text-xs flex items-center gap-1.5 transition cursor-pointer"
           >
@@ -930,6 +1246,30 @@ export const ExpiryAutomationView: React.FC = () => {
           </button>
         </div>
       </div>
+
+      {/* Live Adopted MikroTik RouterOS Profiles Strip */}
+      {(mikrotikProfiles.length > 0 || lastProfileSyncSummary) && (
+        <div className="px-4 py-2.5 rounded-xl bg-slate-950/80 border border-slate-800 flex flex-wrap items-center justify-between gap-2 text-[11px] font-mono">
+          <div className="flex flex-wrap items-center gap-1.5 min-w-0">
+            <span className="text-cyan-400 font-bold shrink-0">
+              Live MikroTik Profiles ({mikrotikProfiles.filter((p) => !isExpiryOrBlockedProfile(p, settings.expiry_ppp_profile)).length}):
+            </span>
+            {mikrotikProfiles
+              .filter((p) => !isExpiryOrBlockedProfile(p, settings.expiry_ppp_profile))
+              .map((prof) => (
+                <span
+                  key={prof}
+                  className="px-2 py-0.5 rounded bg-slate-900 border border-slate-700 text-slate-200"
+                >
+                  {prof}
+                </span>
+              ))}
+          </div>
+          {lastProfileSyncSummary && (
+            <span className="text-emerald-400 truncate max-w-full">{lastProfileSyncSummary}</span>
+          )}
+        </div>
+      )}
 
       {/* Persistent Settings Card (isp_billing_settings) */}
       {isSettingsOpen && (
@@ -1182,12 +1522,77 @@ export const ExpiryAutomationView: React.FC = () => {
           </button>
         </div>
 
+        {/* Sticky Bulk Action Bar when 1+ subscribers are selected in Expiring/Grace/Suspended tabs */}
+        {activeSubTab !== 'audit_logs' && selectedRowsInActiveTab.length > 0 && (
+          <div className="sticky top-2 z-20 p-3 rounded-xl bg-slate-950/95 backdrop-blur-md border border-cyan-600/60 shadow-2xl flex flex-wrap items-center justify-between gap-3">
+            <div className="flex items-center gap-2.5 text-xs">
+              <span className="px-2.5 py-1 rounded-lg bg-cyan-500/20 border border-cyan-500/40 text-cyan-300 font-bold font-mono">
+                {selectedRowsInActiveTab.length} Subscriber{selectedRowsInActiveTab.length === 1 ? '' : 's'} Selected
+              </span>
+              {selectedTotalDueInTab > 0 && (
+                <span className="text-amber-300 font-mono font-bold">
+                  • Total {formatCurrency(selectedTotalDueInTab, 0)}
+                </span>
+              )}
+            </div>
+
+            <div className="flex flex-wrap items-center gap-2">
+              <button
+                type="button"
+                disabled={isBulkActivating || isBulkReceiving}
+                onClick={handleBulkActivateSelected}
+                className="px-3.5 py-2 rounded-lg bg-cyan-500 hover:bg-cyan-400 text-slate-950 font-bold text-xs flex items-center gap-1.5 transition cursor-pointer disabled:opacity-50 whitespace-nowrap shadow"
+              >
+                <Zap className={`w-3.5 h-3.5 ${isBulkActivating ? 'animate-pulse' : ''}`} />
+                <span>
+                  {isBulkActivating
+                    ? bulkActivateProgress || 'Restoring MikroTik Profiles...'
+                    : '⚡ Bulk Activate (Restore MikroTik Profiles)'}
+                </span>
+              </button>
+
+              {(activeSubTab === 'suspended_16' || bulkReceivePreviewRows.length > 0) && (
+                <button
+                  type="button"
+                  disabled={isBulkActivating || isBulkReceiving || bulkReceivePreviewRows.length === 0}
+                  onClick={() => setIsBulkReceiveModalOpen(true)}
+                  className="px-3.5 py-2 rounded-lg bg-emerald-500 hover:bg-emerald-400 text-slate-950 font-bold text-xs flex items-center gap-1.5 transition cursor-pointer disabled:opacity-50 whitespace-nowrap shadow"
+                >
+                  <DollarSign className="w-3.5 h-3.5" />
+                  <span>
+                    💰 Bulk Receive Amount ({selectedRowsInActiveTab.length} Selected • Total{' '}
+                    {formatCurrency(bulkReceiveModalTotal, 0)})
+                  </span>
+                </button>
+              )}
+
+              <button
+                type="button"
+                disabled={isBulkActivating || isBulkReceiving}
+                onClick={() => setSelectedUsernames({})}
+                className="px-3 py-2 rounded-lg bg-slate-800 hover:bg-slate-700 text-slate-300 text-xs font-semibold transition cursor-pointer disabled:opacity-50"
+              >
+                Clear
+              </button>
+            </div>
+          </div>
+        )}
+
         {/* TAB 1: Expiring in 3 Days */}
         {activeSubTab === 'expiring_3d' && (
           <div className="overflow-x-auto">
             <table className="w-full text-left font-mono text-xs tabular-nums">
               <thead>
                 <tr className="border-b border-slate-800 text-slate-400">
+                  <th className="py-2.5 px-3 w-10">
+                    <input
+                      type="checkbox"
+                      checked={allInTabSelected}
+                      onChange={toggleSelectAllInTab}
+                      aria-label="Select all expiring subscribers"
+                      className="w-4 h-4 rounded border-slate-600 bg-slate-900 accent-cyan-500 cursor-pointer"
+                    />
+                  </th>
                   <th className="py-2.5 px-3 font-sans">Subscriber</th>
                   <th className="py-2.5 px-3">Package</th>
                   <th className="py-2.5 px-3">Expiry (2:00 PM PKT)</th>
@@ -1199,15 +1604,25 @@ export const ExpiryAutomationView: React.FC = () => {
               <tbody className="divide-y divide-slate-800/60">
                 {categorizedSubscribers.expiring3d.length === 0 ? (
                   <tr>
-                    <td colSpan={6} className="py-8 text-center text-slate-500 font-sans">
+                    <td colSpan={7} className="py-8 text-center text-slate-500 font-sans">
                       No subscribers expiring within the next 3 days.
                     </td>
                   </tr>
                 ) : (
                   categorizedSubscribers.expiring3d.map((sub) => {
                     const uname = String(sub.username || '').toLowerCase();
+                    const checked = Boolean(selectedUsernames[uname]);
                     return (
-                      <tr key={sub.id} className="hover:bg-slate-900/50">
+                      <tr key={sub.id} className={`hover:bg-slate-900/50 ${checked ? 'bg-cyan-950/20' : ''}`}>
+                        <td className="py-2.5 px-3">
+                          <input
+                            type="checkbox"
+                            checked={checked}
+                            onChange={() => toggleSelectOneUser(uname)}
+                            aria-label={`Select @${uname}`}
+                            className="w-4 h-4 rounded border-slate-600 bg-slate-900 accent-cyan-500 cursor-pointer"
+                          />
+                        </td>
                         <td className="py-2.5 px-3 font-sans">
                           <div className="font-bold text-white">{sub.full_name}</div>
                           <div className="text-[11px] font-mono text-cyan-400">
@@ -1215,7 +1630,7 @@ export const ExpiryAutomationView: React.FC = () => {
                           </div>
                         </td>
                         <td className="py-2.5 px-3 text-slate-300">
-                          {sub.package_speed || sub.package_profile_name || 'Standard'}
+                          {sub.original_package_profile || sub.package_name || sub.package_profile_name || sub.package_speed || '—'}
                         </td>
                         <td className="py-2.5 px-3">
                           <div className="text-amber-300 font-semibold">
@@ -1263,6 +1678,15 @@ export const ExpiryAutomationView: React.FC = () => {
             <table className="w-full text-left font-mono text-xs tabular-nums">
               <thead>
                 <tr className="border-b border-slate-800 text-slate-400">
+                  <th className="py-2.5 px-3 w-10">
+                    <input
+                      type="checkbox"
+                      checked={allInTabSelected}
+                      onChange={toggleSelectAllInTab}
+                      aria-label="Select all grace subscribers"
+                      className="w-4 h-4 rounded border-slate-600 bg-slate-900 accent-cyan-500 cursor-pointer"
+                    />
+                  </th>
                   <th className="py-2.5 px-3 font-sans">Subscriber</th>
                   <th className="py-2.5 px-3">Package</th>
                   <th className="py-2.5 px-3">Grace Ends At</th>
@@ -1274,7 +1698,7 @@ export const ExpiryAutomationView: React.FC = () => {
               <tbody className="divide-y divide-slate-800/60">
                 {categorizedSubscribers.inGrace.length === 0 ? (
                   <tr>
-                    <td colSpan={6} className="py-8 text-center text-slate-500 font-sans">
+                    <td colSpan={7} className="py-8 text-center text-slate-500 font-sans">
                       No subscribers are currently inside the {settings.grace_hours}h grace window.
                     </td>
                   </tr>
@@ -1282,8 +1706,18 @@ export const ExpiryAutomationView: React.FC = () => {
                   categorizedSubscribers.inGrace.map((sub) => {
                     const uname = String(sub.username || '').toLowerCase();
                     const busy = Boolean(busyUsernames[uname]);
+                    const checked = Boolean(selectedUsernames[uname]);
                     return (
-                      <tr key={sub.id} className="hover:bg-slate-900/50">
+                      <tr key={sub.id} className={`hover:bg-slate-900/50 ${checked ? 'bg-cyan-950/20' : ''}`}>
+                        <td className="py-2.5 px-3">
+                          <input
+                            type="checkbox"
+                            checked={checked}
+                            onChange={() => toggleSelectOneUser(uname)}
+                            aria-label={`Select @${uname}`}
+                            className="w-4 h-4 rounded border-slate-600 bg-slate-900 accent-cyan-500 cursor-pointer"
+                          />
+                        </td>
                         <td className="py-2.5 px-3 font-sans">
                           <div className="font-bold text-white">{sub.full_name}</div>
                           <div className="text-[11px] font-mono text-cyan-400">
@@ -1291,7 +1725,7 @@ export const ExpiryAutomationView: React.FC = () => {
                           </div>
                         </td>
                         <td className="py-2.5 px-3 text-slate-300">
-                          {sub.package_speed || sub.package_profile_name || 'Standard'}
+                          {sub.original_package_profile || sub.package_name || sub.package_profile_name || sub.package_speed || '—'}
                         </td>
                         <td className="py-2.5 px-3 text-cyan-300">
                           {formatDateTimePkt(new Date(sub.graceEndsMs).toISOString())}
@@ -1355,8 +1789,17 @@ export const ExpiryAutomationView: React.FC = () => {
             <table className="w-full text-left font-mono text-xs tabular-nums">
               <thead>
                 <tr className="border-b border-slate-800 text-slate-400">
+                  <th className="py-2.5 px-3 w-10">
+                    <input
+                      type="checkbox"
+                      checked={allInTabSelected}
+                      onChange={toggleSelectAllInTab}
+                      aria-label="Select all suspended subscribers"
+                      className="w-4 h-4 rounded border-slate-600 bg-slate-900 accent-cyan-500 cursor-pointer"
+                    />
+                  </th>
                   <th className="py-2.5 px-3 font-sans">Subscriber</th>
-                  <th className="py-2.5 px-3">Backed-Up Profile</th>
+                  <th className="py-2.5 px-3">Adopted MikroTik Profile</th>
                   <th className="py-2.5 px-3">Suspended At</th>
                   <th className="py-2.5 px-3 text-right">Due Amount</th>
                   <th className="py-2.5 px-3 text-right font-sans">Instant 5s Restore</th>
@@ -1365,16 +1808,26 @@ export const ExpiryAutomationView: React.FC = () => {
               <tbody className="divide-y divide-slate-800/60">
                 {categorizedSubscribers.suspended16.length === 0 ? (
                   <tr>
-                    <td colSpan={5} className="py-8 text-center text-slate-500 font-sans">
+                    <td colSpan={6} className="py-8 text-center text-slate-500 font-sans">
                       Zero subscribers currently isolated in the 16.16.16.0/24 expiry pool.
                     </td>
                   </tr>
                 ) : (
-                  categorizedSubscribers.suspended16.map((sub) => {
+                  categorizedSubscribers.suspended16.map((sub: any) => {
                     const uname = String(sub.username || '').toLowerCase();
                     const busy = Boolean(busyUsernames[uname]);
+                    const checked = Boolean(selectedUsernames[uname]);
                     return (
-                      <tr key={sub.id} className="hover:bg-slate-900/50">
+                      <tr key={sub.id} className={`hover:bg-slate-900/50 ${checked ? 'bg-cyan-950/20' : ''}`}>
+                        <td className="py-2.5 px-3">
+                          <input
+                            type="checkbox"
+                            checked={checked}
+                            onChange={() => toggleSelectOneUser(uname)}
+                            aria-label={`Select @${uname}`}
+                            className="w-4 h-4 rounded border-slate-600 bg-slate-900 accent-cyan-500 cursor-pointer"
+                          />
+                        </td>
                         <td className="py-2.5 px-3 font-sans">
                           <div className="font-bold text-white">{sub.full_name}</div>
                           <div className="text-[11px] font-mono text-rose-300">
@@ -1383,10 +1836,11 @@ export const ExpiryAutomationView: React.FC = () => {
                         </td>
                         <td className="py-2.5 px-3">
                           <span className="px-2 py-0.5 rounded bg-slate-900 border border-slate-700 text-cyan-300 font-bold">
-                            {sub.original_package_profile ||
+                            {sub.adoptedProfile ||
+                              sub.original_package_profile ||
+                              sub.package_name ||
                               sub.package_profile_name ||
-                              sub.package_speed ||
-                              '20Mbps'}
+                              'default'}
                           </span>
                           {sub.suspensionReason && (
                             <div className="text-[10px] text-rose-400 mt-1 font-mono">
@@ -1572,10 +2026,11 @@ export const ExpiryAutomationView: React.FC = () => {
                 <div className="flex items-center justify-between">
                   <span className="text-slate-400">Restoring Package</span>
                   <span className="text-cyan-300 font-mono font-bold">
-                    {extraGraceTarget.original_package_profile ||
+                    {(extraGraceTarget as any).adoptedProfile ||
+                      extraGraceTarget.original_package_profile ||
+                      extraGraceTarget.package_name ||
                       extraGraceTarget.package_profile_name ||
-                      extraGraceTarget.package_speed ||
-                      '20Mbps'}
+                      'default'}
                   </span>
                 </div>
               </div>
@@ -1665,6 +2120,19 @@ export const ExpiryAutomationView: React.FC = () => {
           </div>
         </div>
       )}
+      {/* Bulk Receive Amount Confirmation Modal */}
+      <BulkReceiveAmountModal
+        isOpen={isBulkReceiveModalOpen}
+        onClose={() => setIsBulkReceiveModalOpen(false)}
+        title="Bulk Receive & Auto-Restore Subscribers"
+        itemLabel="Dues"
+        previewRows={bulkReceivePreviewRows}
+        totalAmount={bulkReceiveModalTotal}
+        agents={fieldAgents}
+        isProcessing={isBulkReceiving}
+        progressLabel={bulkReceiveProgress}
+        onConfirm={handleConfirmBulkReceive}
+      />
     </div>
   );
 };

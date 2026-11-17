@@ -2,6 +2,12 @@ import { supabase, SupabaseInvoice } from '../services/supabaseClient';
 import { safeMikrotikFetch } from '../services/mikrotikRestClient';
 import { RouterAuthInfo, getActiveRouterAuth, resolveRestHostAndPort } from '../services/apiClient';
 import { addCalendarMonthsYmd, computeBillingAnchorDay, extractYmdString } from './anniversaryBilling';
+import { isMissingTableOrColumnError } from './expiryUtils';
+import {
+  extractOrigPkgFromComment,
+  isExpiryOrBlockedProfile,
+  resolveExactSubscriberProfile,
+} from './mikrotikProfileSync';
 
 export const PARENT_FLEET_ROUTER = 'SADDAR FLEET ROUTER';
 
@@ -202,48 +208,95 @@ export async function updateNetworkArea(
   }
 }
 
+async function safeUpdatePortalUserFields(
+  userId: string,
+  fullFields: Record<string, any>,
+  safeExistingFields: Record<string, any>,
+  minimalFields: Record<string, any>
+): Promise<void> {
+  const { error } = await supabase
+    .from('portal_users')
+    .update(fullFields as any)
+    .eq('id', userId);
+
+  if (error) {
+    if (isMissingTableOrColumnError(error)) {
+      if (Object.keys(safeExistingFields).length > 0) {
+        const res2 = await supabase
+          .from('portal_users')
+          .update(safeExistingFields as any)
+          .eq('id', userId);
+        if (!res2.error) return;
+      }
+      if (Object.keys(minimalFields).length > 0) {
+        await supabase.from('portal_users').update(minimalFields as any).eq('id', userId);
+      }
+    } else {
+      throw new Error(error.message);
+    }
+  }
+}
+
 /**
- * Updates a subscriber's PPPoE secret profile (and optionally disabled flag) on MikroTik RouterOS v7
+ * Updates a subscriber's PPPoE secret profile (and optionally disabled / comment flags) on MikroTik RouterOS v7
  * via /api/mikrotik/ppp/secret/{id} (with /ppp/secret/set fallback).
  */
 export async function syncMikrotikSecretProfile(
   subscriberUsername: string,
   targetProfile: string,
-  options?: { disabled?: 'true' | 'false' },
+  options?: {
+    disabled?: 'true' | 'false';
+    comment?: string;
+    preloadedSecret?: Record<string, any> | null;
+  },
   activeRouter?: RouterAuthInfo
-): Promise<{ ok: boolean; previousProfile?: string | null; secretId?: string | null }> {
+): Promise<{
+  ok: boolean;
+  previousProfile?: string | null;
+  secretId?: string | null;
+  secretComment?: string | null;
+}> {
   const cleanUser = (subscriberUsername || '').trim();
   if (!cleanUser || !targetProfile) return { ok: false };
 
   try {
-    let secretId: string | null = null;
-    let previousProfile: string | null = null;
+    let secretId: string | null = options?.preloadedSecret
+      ? String(options.preloadedSecret['.id'] || options.preloadedSecret.id || '').trim() || null
+      : null;
+    let previousProfile: string | null = options?.preloadedSecret?.profile || null;
+    let secretComment: string | null = options?.preloadedSecret?.comment || null;
 
-    try {
-      const res = await safeMikrotikFetch(
-        `/api/mikrotik/ppp/secret?name=${encodeURIComponent(cleanUser)}`,
-        {},
-        activeRouter
-      );
-      if (res.ok) {
-        const list = await res.json();
-        if (Array.isArray(list)) {
-          const match = list.find(
-            (s: any) => (s?.name || '').toLowerCase() === cleanUser.toLowerCase()
-          );
-          if (match) {
-            secretId = match['.id'] || match.id || null;
-            previousProfile = match.profile || null;
+    if (!secretId) {
+      try {
+        const res = await safeMikrotikFetch(
+          `/api/mikrotik/ppp/secret?name=${encodeURIComponent(cleanUser)}`,
+          {},
+          activeRouter
+        );
+        if (res.ok) {
+          const list = await res.json();
+          if (Array.isArray(list)) {
+            const match = list.find(
+              (s: any) => (s?.name || '').toLowerCase() === cleanUser.toLowerCase()
+            );
+            if (match) {
+              secretId = match['.id'] || match.id || null;
+              previousProfile = match.profile || null;
+              secretComment = match.comment || null;
+            }
           }
         }
-      }
-    } catch {}
+      } catch {}
+    }
 
     const patchFields: Record<string, any> = {
       profile: targetProfile,
     };
     if (options?.disabled !== undefined) {
       patchFields.disabled = options.disabled;
+    }
+    if (options?.comment !== undefined) {
+      patchFields.comment = options.comment;
     }
 
     if (secretId) {
@@ -257,7 +310,7 @@ export async function syncMikrotikSecretProfile(
         activeRouter
       );
       if (patchRes.ok) {
-        return { ok: true, previousProfile, secretId };
+        return { ok: true, previousProfile, secretId, secretComment };
       }
     }
 
@@ -276,7 +329,7 @@ export async function syncMikrotikSecretProfile(
       activeRouter
     );
 
-    return { ok: setRes.ok, previousProfile, secretId };
+    return { ok: setRes.ok, previousProfile, secretId, secretComment };
   } catch {
     return { ok: false };
   }
@@ -288,20 +341,25 @@ export async function syncMikrotikSecretProfile(
  */
 export async function kickMikrotikActiveSessionForUser(
   subscriberUsername: string,
-  activeRouter?: RouterAuthInfo
+  activeRouter?: RouterAuthInfo,
+  preloadedActive?: Array<Record<string, any>>
 ): Promise<number> {
   const cleanUser = (subscriberUsername || '').trim().toLowerCase();
   if (!cleanUser) return 0;
 
   let kicked = 0;
   try {
-    const activeRes = await safeMikrotikFetch('/api/mikrotik/ppp/active', {}, activeRouter);
-    if (!activeRes.ok) return 0;
-    const list = await activeRes.json();
-    if (!Array.isArray(list)) return 0;
+    let list = preloadedActive;
+    if (!Array.isArray(list)) {
+      const activeRes = await safeMikrotikFetch('/api/mikrotik/ppp/active', {}, activeRouter);
+      if (!activeRes.ok) return 0;
+      const json = await activeRes.json();
+      if (!Array.isArray(json)) return 0;
+      list = json;
+    }
 
     const matching = list.filter(
-      (s: any) => String(s?.name || '').trim().toLowerCase() === cleanUser
+      (s: any) => String(s?.name || s?.user || '').trim().toLowerCase() === cleanUser
     );
 
     for (const sess of matching) {
@@ -333,11 +391,161 @@ export async function kickMikrotikActiveSessionForUser(
 }
 
 /**
+ * Adopts live PPPoE profiles (/ppp/profile) & secret profiles (/ppp/secret) directly
+ * from MikroTik RouterOS (Single Source of Truth) into Supabase portal_users
+ * (`original_package_profile`, `package_name`, `package_profile_name`) whenever the
+ * secret's active profile is NOT Expire / EXPIRED-16-POOL (or from ORIG_PKG comment).
+ */
+export async function syncProfilesFromMikrotikToSupabase(
+  activeRouter?: RouterAuthInfo,
+  expiryProfileName: string = 'EXPIRED-16-POOL'
+): Promise<{
+  success: boolean;
+  profiles: string[];
+  totalSecrets: number;
+  syncedCount: number;
+  adoptedFromCommentCount: number;
+  alreadySyncedCount: number;
+  error?: string;
+}> {
+  try {
+    const [profRes, secRes, usersRes] = await Promise.all([
+      safeMikrotikFetch('/api/mikrotik/ppp/profile', {}, activeRouter),
+      safeMikrotikFetch('/api/mikrotik/ppp/secret', {}, activeRouter),
+      supabase.from('portal_users').select('*').eq('role', 'CLIENT'),
+    ]);
+
+    if (!secRes.ok && !profRes.ok) {
+      return {
+        success: false,
+        profiles: [],
+        totalSecrets: 0,
+        syncedCount: 0,
+        adoptedFromCommentCount: 0,
+        alreadySyncedCount: 0,
+        error: `RouterOS returned HTTP ${secRes.status || profRes.status}. Check router connectivity.`,
+      };
+    }
+
+    const rawProfiles = profRes.ok ? await profRes.json().catch(() => []) : [];
+    const profiles: string[] = Array.isArray(rawProfiles)
+      ? Array.from(
+          new Set(
+            rawProfiles.map((p: any) => String(p?.name || '').trim()).filter(Boolean)
+          )
+        )
+      : [];
+
+    const rawSecrets = secRes.ok ? await secRes.json().catch(() => []) : [];
+    const secrets = Array.isArray(rawSecrets) ? rawSecrets : [];
+    const secretByUser = new Map<string, Record<string, any>>();
+    for (const s of secrets) {
+      const key = String(s?.name || '').trim().toLowerCase();
+      if (key) secretByUser.set(key, s);
+    }
+
+    const dbUsers = (usersRes.data || []) as Array<Record<string, any>>;
+    let syncedCount = 0;
+    let adoptedFromCommentCount = 0;
+    let alreadySyncedCount = 0;
+
+    for (const u of dbUsers) {
+      const uname = String(u.username || '').trim().toLowerCase();
+      if (!uname) continue;
+      const secret = secretByUser.get(uname);
+      if (!secret) continue;
+
+      const liveProf = String(secret.profile || '').trim();
+      const isLiveExpired = isExpiryOrBlockedProfile(liveProf, expiryProfileName);
+
+      if (!isLiveExpired && liveProf) {
+        const currentOrig = String(u.original_package_profile || '').trim();
+        const currentPkgProf = String(u.package_profile_name || '').trim();
+        const currentPkgName = String((u as any).package_name || '').trim();
+
+        if (
+          currentOrig === liveProf &&
+          currentPkgProf === liveProf &&
+          (!currentPkgName || currentPkgName === liveProf)
+        ) {
+          alreadySyncedCount++;
+          continue;
+        }
+
+        await safeUpdatePortalUserFields(
+          String(u.id),
+          {
+            original_package_profile: liveProf,
+            package_name: liveProf,
+            package_profile_name: liveProf,
+          },
+          {
+            original_package_profile: liveProf,
+            package_profile_name: liveProf,
+          },
+          { package_profile_name: liveProf }
+        ).catch(() => {});
+        syncedCount++;
+      } else {
+        // Secret currently on Expire / EXPIRED-16-POOL -> adopt ORIG_PKG:<exact_profile> from comment if missing
+        const fromComment = extractOrigPkgFromComment(secret.comment, expiryProfileName);
+        if (fromComment) {
+          const currentOrig = String(u.original_package_profile || '').trim();
+          if (
+            !currentOrig ||
+            isExpiryOrBlockedProfile(currentOrig, expiryProfileName) ||
+            currentOrig !== fromComment
+          ) {
+            await safeUpdatePortalUserFields(
+              String(u.id),
+              {
+                original_package_profile: fromComment,
+                package_name: fromComment,
+                package_profile_name: fromComment,
+              },
+              {
+                original_package_profile: fromComment,
+                package_profile_name: fromComment,
+              },
+              { package_profile_name: fromComment }
+            ).catch(() => {});
+            adoptedFromCommentCount++;
+          } else {
+            alreadySyncedCount++;
+          }
+        }
+      }
+    }
+
+    return {
+      success: true,
+      profiles,
+      totalSecrets: secrets.length,
+      syncedCount,
+      adoptedFromCommentCount,
+      alreadySyncedCount,
+    };
+  } catch (err: any) {
+    return {
+      success: false,
+      profiles: [],
+      totalSecrets: 0,
+      syncedCount: 0,
+      adoptedFromCommentCount: 0,
+      alreadySyncedCount: 0,
+      error: err?.message || 'Failed to sync profiles from MikroTik',
+    };
+  }
+}
+
+/**
  * Instant 5-Second Restore Hook (DB + MikroTik Atomic Sync):
- * 1. Updates Supabase first: +1 calendar month expiry_date/next_billing_date anchored to installation day, billing_status='ACTIVE', grace_ends_at=null, last_restored_at=now
- * 2. Restores MikroTik /rest/ppp/secret/{id} to original_package_profile (disabled: 'false')
- * 3. Kicks any 16.16.16.x / stale active PPPoE session for instant reconnect
- * 4. Inserts 'RESTORED_ON_PAYMENT' into expiry_audit_logs
+ * 1. Reads live MikroTik secret (`ORIG_PKG:<exact_profile>` comment or non-expiry profile) & Supabase backups
+ * 2. Updates Supabase first: +1 calendar month expiry_date/next_billing_date anchored to installation day,
+ *    is_suspended=false, billing_status='ACTIVE', grace_until=null, grace_ends_at=null, last_restored_at=now
+ * 3. Restores MikroTik /rest/ppp/secret/{id} to exact adopted profile (disabled='false')
+ * 4. Kicks any 16.16.16.x / stale active PPPoE session for instant reconnect
+ * 5. Inserts 'RESTORED_ON_PAYMENT' into expiry_audit_logs
  */
 export async function restoreSubscriberOnInvoicePaid(
   subscriberUsername: string,
@@ -345,6 +553,10 @@ export async function restoreSubscriberOnInvoicePaid(
     triggeredBy?: 'ADMIN' | 'AGENT_PAYMENT_SYNC' | 'CRON_2PM';
     notes?: string;
     expiryProfileName?: string;
+    activeRouter?: RouterAuthInfo;
+    preloadedSecrets?: Array<Record<string, any>>;
+    preloadedProfiles?: string[];
+    preloadedActive?: Array<Record<string, any>>;
   }
 ): Promise<{
   success: boolean;
@@ -358,23 +570,58 @@ export async function restoreSubscriberOnInvoicePaid(
 
   if (!cleanUser) {
     const fallbackExpiryIso = `${addCalendarMonthDateString(new Date())}T14:00:00+05:00`;
-    return { success: false, restoredProfile: '20Mbps', kickedSessions: 0, newExpiryIso: fallbackExpiryIso };
+    return { success: false, restoredProfile: 'default', kickedSessions: 0, newExpiryIso: fallbackExpiryIso };
   }
 
-  let restoredProfile = '20Mbps';
+  let restoredProfile = 'default';
   let previousProfile: string | null = null;
   let subscriberId: string | null = null;
   let anchorDay = new Date().getDate();
   let nextAnniversaryYmd = addCalendarMonthDateString(new Date(), anchorDay);
 
   try {
-    // 1. Read current subscriber profile backups from Supabase portal_users
-    const { data: userRecord } = await supabase
-      .from('portal_users')
-      .select('*')
-      .ilike('username', cleanUser)
-      .limit(1)
-      .maybeSingle();
+    // 1. Read subscriber record from Supabase + live MikroTik secret/profiles in parallel
+    let liveSecret: Record<string, any> | null =
+      options?.preloadedSecrets?.find(
+        (s) => String(s?.name || '').trim().toLowerCase() === cleanUser
+      ) || null;
+    let mikrotikProfiles: string[] = options?.preloadedProfiles || [];
+
+    const [userRes, secretRes, profRes] = await Promise.all([
+      supabase
+        .from('portal_users')
+        .select('*')
+        .ilike('username', cleanUser)
+        .limit(1)
+        .maybeSingle(),
+      liveSecret
+        ? Promise.resolve(null)
+        : safeMikrotikFetch(
+            `/api/mikrotik/ppp/secret?name=${encodeURIComponent(cleanUser)}`,
+            {},
+            options?.activeRouter
+          ).catch(() => null),
+      mikrotikProfiles.length > 0
+        ? Promise.resolve(null)
+        : safeMikrotikFetch('/api/mikrotik/ppp/profile', {}, options?.activeRouter).catch(() => null),
+    ]);
+
+    const userRecord = userRes.data;
+    if (!liveSecret && secretRes && secretRes.ok) {
+      const list = await secretRes.json().catch(() => []);
+      if (Array.isArray(list)) {
+        liveSecret =
+          list.find((s: any) => String(s?.name || '').trim().toLowerCase() === cleanUser) || null;
+      }
+    }
+    if (mikrotikProfiles.length === 0 && profRes && profRes.ok) {
+      const profJson = await profRes.json().catch(() => []);
+      if (Array.isArray(profJson)) {
+        mikrotikProfiles = Array.from(
+          new Set(profJson.map((p: any) => String(p?.name || '').trim()).filter(Boolean))
+        );
+      }
+    }
 
     subscriberId = userRecord?.id || null;
     if (userRecord) {
@@ -384,7 +631,6 @@ export async function restoreSubscriberOnInvoicePaid(
         extractYmdString(userRecord.expiry_date) ||
         extractYmdString(new Date().toISOString())!;
       const todayYmd = extractYmdString(new Date().toISOString())!;
-      // Advance +1 calendar month from current cycle/today anchored to installation day
       let candidateNext = addCalendarMonthsYmd(baseAnchor, 1, anchorDay);
       if (candidateNext <= todayYmd) {
         candidateNext = addCalendarMonthsYmd(todayYmd, 1, anchorDay);
@@ -393,107 +639,83 @@ export async function restoreSubscriberOnInvoicePaid(
     }
     const finalExpiryIso = `${nextAnniversaryYmd}T14:00:00+05:00`;
 
-    const rawOriginal = String((userRecord as any)?.original_package_profile || '').trim();
-    const rawProfileName = String(userRecord?.package_profile_name || '').trim();
-    const rawPkgSpeed = String(userRecord?.package_speed || '').trim().replace(/\s+/g, '');
-    const expiryProfLower = String(options?.expiryProfileName || '').trim().toLowerCase();
-
-    const isExpiryPlaceholder = (val: string) => {
-      const low = val.toLowerCase();
-      return !low || low === 'expired' || low.includes('walled') || (expiryProfLower && low === expiryProfLower);
-    };
-
-    if (!isExpiryPlaceholder(rawOriginal)) {
-      restoredProfile = rawOriginal;
-    } else if (!isExpiryPlaceholder(rawProfileName)) {
-      restoredProfile = rawProfileName;
-    } else if (rawPkgSpeed) {
-      restoredProfile = rawPkgSpeed;
+    // Resolve exact MikroTik profile: ORIG_PKG comment -> live non-expiry secret -> Supabase original_package_profile -> live profiles
+    const origCommentPkg = extractOrigPkgFromComment(
+      liveSecret?.comment,
+      options?.expiryProfileName
+    );
+    if (origCommentPkg) {
+      restoredProfile =
+        resolveExactSubscriberProfile({
+          liveSecret: { ...liveSecret, profile: origCommentPkg },
+          subscriber: userRecord as any,
+          mikrotikProfiles,
+          expiryProfileName: options?.expiryProfileName,
+        }) || origCommentPkg;
+    } else {
+      restoredProfile = resolveExactSubscriberProfile({
+        liveSecret,
+        subscriber: userRecord as any,
+        mikrotikProfiles,
+        expiryProfileName: options?.expiryProfileName,
+      });
     }
 
-    // 2. Update Supabase first (+1 calendar month anniversary expiry, ACTIVE status, clear grace)
+    // 2. Update Supabase (+1 calendar month anniversary expiry, ACTIVE status, clear grace/suspension, persist adopted profile)
     if (userRecord?.id) {
-      const fullUpdate = {
-        account_status: 'ACTIVE',
-        billing_status: 'ACTIVE',
-        is_suspended: false,
-        grace_until: null,
-        grace_ends_at: null,
-        last_restored_at: nowIso,
-        expiry_date: finalExpiryIso,
-        billing_anchor_day: anchorDay,
-        next_billing_date: nextAnniversaryYmd,
-      };
-      const { error: updErr } = await supabase
-        .from('portal_users')
-        .update(fullUpdate as any)
-        .eq('id', userRecord.id);
-
-      if (updErr) {
-        // Fallback to guaranteed existing schema columns
-        const { error: midErr } = await supabase
-          .from('portal_users')
-          .update({
-            account_status: 'ACTIVE',
-            billing_status: 'ACTIVE',
-            grace_ends_at: null,
-            last_restored_at: nowIso,
-            expiry_date: finalExpiryIso,
-          })
-          .eq('id', userRecord.id);
-
-        if (midErr) {
-          await supabase
-            .from('portal_users')
-            .update({
-              account_status: 'ACTIVE',
-              expiry_date: nextAnniversaryYmd,
-            })
-            .eq('id', userRecord.id);
+      await safeUpdatePortalUserFields(
+        userRecord.id,
+        {
+          account_status: 'ACTIVE',
+          billing_status: 'ACTIVE',
+          is_suspended: false,
+          grace_until: null,
+          grace_ends_at: null,
+          last_restored_at: nowIso,
+          expiry_date: finalExpiryIso,
+          billing_anchor_day: anchorDay,
+          next_billing_date: nextAnniversaryYmd,
+          original_package_profile: restoredProfile,
+          package_name: restoredProfile,
+          package_profile_name: restoredProfile,
+        },
+        {
+          account_status: 'ACTIVE',
+          billing_status: 'ACTIVE',
+          grace_ends_at: null,
+          last_restored_at: nowIso,
+          expiry_date: finalExpiryIso,
+          original_package_profile: restoredProfile,
+          package_profile_name: restoredProfile,
+        },
+        {
+          account_status: 'ACTIVE',
+          expiry_date: nextAnniversaryYmd,
         }
-      }
+      ).catch(() => {});
     }
 
-    // 3. Resolve exact active PPP profile on MikroTik if we only have package speed
-    if (isExpiryPlaceholder(rawOriginal) && isExpiryPlaceholder(rawProfileName)) {
-      try {
-        const profRes = await safeMikrotikFetch('/api/mikrotik/ppp/profile');
-        if (profRes.ok) {
-          const profiles = await profRes.json();
-          if (Array.isArray(profiles) && profiles.length > 0) {
-            const speedDigits = restoredProfile.match(/\d+/)?.[0];
-            const matched = profiles.find((p: any) => {
-              const pName = String(p?.name || '').toLowerCase();
-              if (isExpiryPlaceholder(pName) || pName.includes('expire') || pName.includes('16.16')) {
-                return false;
-              }
-              return (
-                pName === restoredProfile.toLowerCase() ||
-                Boolean(speedDigits && pName.includes(speedDigits))
-              );
-            });
-            if (matched?.name) {
-              restoredProfile = matched.name;
-            }
-          }
-        }
-      } catch {}
-    }
-
-    // 4. Restore MikroTik secret back to original_package_profile & disabled='false'
-    const syncRes = await syncMikrotikSecretProfile(cleanUser, restoredProfile, {
-      disabled: 'false',
-    });
+    // 3. Restore MikroTik secret back to exact adopted profile & disabled='false'
+    const syncRes = await syncMikrotikSecretProfile(
+      cleanUser,
+      restoredProfile,
+      { disabled: 'false', preloadedSecret: liveSecret },
+      options?.activeRouter
+    );
     previousProfile =
       syncRes.previousProfile ||
       ((userRecord as any)?.billing_status === 'SUSPENDED_EXPIRED'
         ? options?.expiryProfileName || 'EXPIRED-16-POOL'
         : null);
 
-    // 5. Kick any stale or 16.16.16.x active PPPoE session so CPE reconnects in <= 5s
-    const kickedSessions = await kickMikrotikActiveSessionForUser(cleanUser);
+    // 4. Kick any stale or 16.16.16.x active PPPoE session so CPE reconnects immediately on real speed profile
+    const kickedSessions = await kickMikrotikActiveSessionForUser(
+      cleanUser,
+      options?.activeRouter,
+      options?.preloadedActive
+    );
 
-    // 6. Write permanent audit log entry
+    // 5. Write permanent audit log entry
     try {
       await supabase.from('expiry_audit_logs').insert([
         {
@@ -526,6 +748,422 @@ export async function restoreSubscriberOnInvoicePaid(
       newExpiryIso: nextAnniversaryYmd,
     };
   }
+}
+
+export interface BulkActivateSubscriberInput {
+  id?: string | null;
+  username: string;
+  original_package_profile?: string | null;
+  package_name?: string | null;
+  package_profile_name?: string | null;
+  package_speed?: string | null;
+  isSyntheticRecord?: boolean;
+}
+
+/**
+ * Bulk Activate / Restore selected subscribers:
+ * Reads ORIG_PKG:<exact_profile> from live MikroTik secret comment (or Supabase original_package_profile),
+ * restores MikroTik /ppp/secret profile + kicks active 16.16.16.x sessions, sets is_suspended = false in Supabase,
+ * and logs each restoration in expiry_audit_logs.
+ */
+export async function bulkActivateSubscribers(params: {
+  subscribers: BulkActivateSubscriberInput[];
+  activeRouter?: RouterAuthInfo;
+  expiryProfileName?: string;
+  triggeredBy?: 'ADMIN' | 'AGENT_PAYMENT_SYNC' | 'CRON_2PM';
+  notesPrefix?: string;
+  onProgress?: (current: number, total: number, username: string) => void;
+}): Promise<{
+  restoredCount: number;
+  failedCount: number;
+  kickedSessions: number;
+  results: Array<{ username: string; profile: string; ok: boolean; kicked: number; error?: string }>;
+}> {
+  const { subscribers, activeRouter, expiryProfileName, triggeredBy = 'ADMIN', onProgress } = params;
+  const total = subscribers.length;
+  if (total === 0) {
+    return { restoredCount: 0, failedCount: 0, kickedSessions: 0, results: [] };
+  }
+
+  // Prefetch live MikroTik profiles, secrets, and active sessions once
+  const [profRes, secRes, actRes] = await Promise.all([
+    safeMikrotikFetch('/api/mikrotik/ppp/profile', {}, activeRouter).catch(() => null),
+    safeMikrotikFetch('/api/mikrotik/ppp/secret', {}, activeRouter).catch(() => null),
+    safeMikrotikFetch('/api/mikrotik/ppp/active', {}, activeRouter).catch(() => null),
+  ]);
+
+  const rawProfiles = profRes && profRes.ok ? await profRes.json().catch(() => []) : [];
+  const mikrotikProfiles: string[] = Array.isArray(rawProfiles)
+    ? Array.from(new Set(rawProfiles.map((p: any) => String(p?.name || '').trim()).filter(Boolean)))
+    : [];
+
+  const rawSecrets = secRes && secRes.ok ? await secRes.json().catch(() => []) : [];
+  const secretsList = Array.isArray(rawSecrets) ? rawSecrets : [];
+  const secretByUser = new Map<string, Record<string, any>>();
+  for (const s of secretsList) {
+    const key = String(s?.name || '').trim().toLowerCase();
+    if (key) secretByUser.set(key, s);
+  }
+
+  const rawActive = actRes && actRes.ok ? await actRes.json().catch(() => []) : [];
+  const activeList = Array.isArray(rawActive) ? rawActive : [];
+
+  let restoredCount = 0;
+  let failedCount = 0;
+  let totalKicked = 0;
+  const results: Array<{ username: string; profile: string; ok: boolean; kicked: number; error?: string }> = [];
+  const nowIso = new Date().toISOString();
+
+  for (let i = 0; i < total; i++) {
+    const sub = subscribers[i];
+    const uname = String(sub.username || '').trim().toLowerCase();
+    onProgress?.(i + 1, total, uname);
+    if (!uname) continue;
+
+    try {
+      const liveSecret = secretByUser.get(uname) || null;
+      const origCommentPkg = extractOrigPkgFromComment(liveSecret?.comment, expiryProfileName);
+      const targetProfile = origCommentPkg
+        ? resolveExactSubscriberProfile({
+            liveSecret: { ...liveSecret, profile: origCommentPkg },
+            subscriber: sub,
+            mikrotikProfiles,
+            expiryProfileName,
+          }) || origCommentPkg
+        : resolveExactSubscriberProfile({
+            liveSecret,
+            subscriber: sub,
+            mikrotikProfiles,
+            expiryProfileName,
+          });
+
+      // 1. Update MikroTik secret & kick active 16.16.16.x session
+      const mkSync = await syncMikrotikSecretProfile(
+        uname,
+        targetProfile,
+        { disabled: 'false', preloadedSecret: liveSecret },
+        activeRouter
+      );
+      const kicked = await kickMikrotikActiveSessionForUser(uname, activeRouter, activeList);
+      totalKicked += kicked;
+
+      // 2. Find or update Supabase portal_users row (is_suspended = false, ACTIVE)
+      let realId: string | null =
+        !sub.isSyntheticRecord &&
+        sub.id &&
+        /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(String(sub.id))
+          ? String(sub.id)
+          : null;
+
+      if (!realId) {
+        const { data: found } = await supabase
+          .from('portal_users')
+          .select('id')
+          .ilike('username', uname)
+          .limit(1)
+          .maybeSingle();
+        if (found?.id) realId = String(found.id);
+      }
+
+      if (realId) {
+        await safeUpdatePortalUserFields(
+          realId,
+          {
+            is_suspended: false,
+            billing_status: 'ACTIVE',
+            account_status: 'ACTIVE',
+            grace_until: null,
+            grace_ends_at: null,
+            last_restored_at: nowIso,
+            original_package_profile: targetProfile,
+            package_name: targetProfile,
+            package_profile_name: targetProfile,
+          },
+          {
+            billing_status: 'ACTIVE',
+            account_status: 'ACTIVE',
+            grace_ends_at: null,
+            last_restored_at: nowIso,
+            original_package_profile: targetProfile,
+            package_profile_name: targetProfile,
+          },
+          {
+            account_status: 'ACTIVE',
+            package_profile_name: targetProfile,
+          }
+        );
+      }
+
+      // 3. Permanent Audit Log entry
+      await supabase.from('expiry_audit_logs').insert([
+        {
+          subscriber_id: realId,
+          username: uname,
+          action_type: 'RESTORED_ON_PAYMENT',
+          previous_profile: mkSync.previousProfile || expiryProfileName || 'EXPIRED-16-POOL',
+          applied_profile: targetProfile,
+          triggered_by: triggeredBy,
+          notes: `${params.notesPrefix || '[BULK_ACTIVATE]'} Restored exact MikroTik profile "${targetProfile}" (${
+            origCommentPkg ? 'from ORIG_PKG comment' : 'from DB/MikroTik'
+          }), kicked ${kicked} active session(s).`,
+          created_at: nowIso,
+        },
+      ]);
+
+      restoredCount++;
+      results.push({ username: uname, profile: targetProfile, ok: true, kicked });
+    } catch (err: any) {
+      failedCount++;
+      results.push({
+        username: uname,
+        profile: '',
+        ok: false,
+        kicked: 0,
+        error: err?.message || 'Restore failed',
+      });
+    }
+  }
+
+  return { restoredCount, failedCount, kickedSessions: totalKicked, results };
+}
+
+export interface BulkReceiveInvoiceItem {
+  invoice: SupabaseInvoice;
+  amountToCollect: number;
+}
+
+/**
+ * Bulk Amount Receiving Engine:
+ * Marks selected unpaid invoices as PAID in Supabase, logs each entry in payment_transactions
+ * (plus optional billing_ledger), credits the selected receiving agent's cash_in_hand &
+ * agent_cash_transactions, and automatically activates/restores the exact adopted MikroTik
+ * profile for every subscriber whose remaining unpaid due balance reaches 0.
+ */
+export async function bulkReceivePayments(params: {
+  items: BulkReceiveInvoiceItem[];
+  allInvoices: SupabaseInvoice[];
+  portalClients: Array<Record<string, any>>;
+  paymentMethod: string;
+  agentId?: string | null;
+  agentName?: string | null;
+  collectedByName?: string | null;
+  referenceNote?: string;
+  activeRouter?: RouterAuthInfo;
+  expiryProfileName?: string;
+  onProgress?: (current: number, total: number, label: string) => void;
+}): Promise<{
+  settledInvoicesCount: number;
+  totalCollected: number;
+  restoredSubscribersCount: number;
+  kickedSessions: number;
+  errors: string[];
+}> {
+  const {
+    items,
+    allInvoices,
+    portalClients,
+    paymentMethod,
+    agentId,
+    agentName,
+    collectedByName,
+    referenceNote,
+    activeRouter,
+    expiryProfileName,
+    onProgress,
+  } = params;
+
+  const validItems = items.filter((it) => it.amountToCollect > 0);
+  if (validItems.length === 0) {
+    return {
+      settledInvoicesCount: 0,
+      totalCollected: 0,
+      restoredSubscribersCount: 0,
+      kickedSessions: 0,
+      errors: [],
+    };
+  }
+
+  const nowIso = new Date().toISOString();
+  const todayYmd = nowIso.slice(0, 10);
+  const errors: string[] = [];
+
+  // Track open balances per subscriber across all invoices so we only auto-restore once balance hits 0
+  const openBalanceByUser = new Map<string, number>();
+  for (const inv of allInvoices) {
+    const uname = String(inv.subscriber_username || '').trim().toLowerCase();
+    if (!uname) continue;
+    if (String(inv.status || '').toUpperCase() === 'PAID') continue;
+    const rem = Math.max(0, (Number(inv.amount) || 0) - (Number(inv.paid_amount) || 0));
+    if (rem > 0) {
+      openBalanceByUser.set(uname, (openBalanceByUser.get(uname) || 0) + rem);
+    }
+  }
+
+  // Prefetch live MikroTik profiles, secrets, and active sessions once
+  const [profRes, secRes, actRes] = await Promise.all([
+    safeMikrotikFetch('/api/mikrotik/ppp/profile', {}, activeRouter).catch(() => null),
+    safeMikrotikFetch('/api/mikrotik/ppp/secret', {}, activeRouter).catch(() => null),
+    safeMikrotikFetch('/api/mikrotik/ppp/active', {}, activeRouter).catch(() => null),
+  ]);
+  const rawProfiles = profRes && profRes.ok ? await profRes.json().catch(() => []) : [];
+  const preloadedProfiles: string[] = Array.isArray(rawProfiles)
+    ? Array.from(new Set(rawProfiles.map((p: any) => String(p?.name || '').trim()).filter(Boolean)))
+    : [];
+  const rawSecrets = secRes && secRes.ok ? await secRes.json().catch(() => []) : [];
+  const preloadedSecrets: Array<Record<string, any>> = Array.isArray(rawSecrets) ? rawSecrets : [];
+  const rawActive = actRes && actRes.ok ? await actRes.json().catch(() => []) : [];
+  const preloadedActive: Array<Record<string, any>> = Array.isArray(rawActive) ? rawActive : [];
+
+  let settledInvoicesCount = 0;
+  let totalCollected = 0;
+  const affectedUsers = new Set<string>();
+
+  for (let i = 0; i < validItems.length; i++) {
+    const { invoice, amountToCollect } = validItems[i];
+    const uname = String(invoice.subscriber_username || '').trim().toLowerCase();
+    onProgress?.(i + 1, validItems.length, `@${uname} (${invoice.invoice_no})`);
+
+    try {
+      const totalAmount = Number(invoice.amount) || amountToCollect;
+      const clientMatch = portalClients.find(
+        (c) => String(c.username || '').trim().toLowerCase() === uname
+      );
+      const anchorDay = clientMatch
+        ? computeBillingAnchorDay(clientMatch as any)
+        : invoice.cycle_day || new Date().getDate();
+      const renewalBase =
+        invoice.due_date && invoice.due_date >= todayYmd ? invoice.due_date : new Date();
+      const nextDueDate = addCalendarMonthDateString(renewalBase, anchorDay);
+
+      const { error: invErr } = await supabase
+        .from('invoices')
+        .update({
+          status: 'PAID',
+          paid_amount: totalAmount,
+          paid_at: nowIso,
+          cycle_day: anchorDay,
+          due_date: nextDueDate,
+        })
+        .eq('id', invoice.id);
+
+      if (invErr) throw new Error(invErr.message);
+
+      const collectorId = agentId || invoice.assigned_agent_id || null;
+      const collectorLabel =
+        agentName || collectedByName || invoice.assigned_agent_name || 'NOC Bulk Desk';
+      const noteText = `Bulk collection #${invoice.invoice_no} (${paymentMethod})${
+        referenceNote ? ` — ${referenceNote}` : ''
+      }`;
+
+      await supabase.from('payment_transactions').insert([
+        {
+          invoice_id: invoice.id,
+          subscriber_username: uname,
+          collected_by_id: collectorId,
+          collected_by_name: collectorLabel,
+          amount_paid: amountToCollect,
+          payment_mode: paymentMethod,
+          payment_date: nowIso,
+          notes: noteText,
+        },
+      ]);
+
+      // Best-effort billing_ledger insert for deployments using unified ledger
+      try {
+        await supabase.from('billing_ledger').insert([
+          {
+            invoice_id: invoice.id,
+            subscriber_username: uname,
+            agent_id: collectorId,
+            agent_name: collectorLabel,
+            amount: amountToCollect,
+            credit: amountToCollect,
+            payment_method: paymentMethod,
+            notes: noteText,
+            created_at: nowIso,
+          },
+        ]);
+      } catch {}
+
+      settledInvoicesCount++;
+      totalCollected += amountToCollect;
+      if (uname) {
+        const remaining = Math.max(0, (openBalanceByUser.get(uname) || 0) - amountToCollect);
+        openBalanceByUser.set(uname, remaining);
+        affectedUsers.add(uname);
+      }
+    } catch (err: any) {
+      errors.push(`Invoice #${invoice.invoice_no}: ${err?.message || 'Update failed'}`);
+    }
+  }
+
+  // Credit receiving Field Agent's cash_in_hand & agent_cash_transactions once for totalCollected
+  if (agentId && totalCollected > 0) {
+    try {
+      const { data: agentRow } = await supabase
+        .from('portal_users')
+        .select('id, cash_in_hand, full_name, username')
+        .eq('id', agentId)
+        .maybeSingle();
+
+      if (agentRow) {
+        const updatedCash = (Number(agentRow.cash_in_hand) || 0) + totalCollected;
+        await supabase
+          .from('portal_users')
+          .update({ cash_in_hand: updatedCash })
+          .eq('id', agentRow.id);
+
+        try {
+          await supabase.from('agent_cash_transactions').insert([
+            {
+              agent_id: agentRow.id,
+              agent_name: agentRow.full_name || agentName || '',
+              agent_username: agentRow.username || '',
+              amount: totalCollected,
+              transaction_type: 'CASH_COLLECTED',
+              received_by: collectedByName || 'Admin NOC',
+              notes: `Bulk payment collection (${settledInvoicesCount} invoice${
+                settledInvoicesCount === 1 ? '' : 's'
+              }, ${paymentMethod})${referenceNote ? ` — ${referenceNote}` : ''}`,
+              created_at: nowIso,
+            },
+          ]);
+        } catch {}
+      }
+    } catch (err: any) {
+      errors.push(`Agent cash credit notice: ${err?.message || 'Error'}`);
+    }
+  }
+
+  // Automatically restore exact MikroTik profile for every subscriber whose balance is now 0
+  let restoredSubscribersCount = 0;
+  let kickedSessions = 0;
+  for (const uname of affectedUsers) {
+    const remainingDue = openBalanceByUser.get(uname) ?? 0;
+    if (remainingDue > 0) continue;
+
+    const restoreRes = await restoreSubscriberOnInvoicePaid(uname, {
+      triggeredBy: agentId ? 'AGENT_PAYMENT_SYNC' : 'ADMIN',
+      notes: `Auto-restored on Bulk Receive (${paymentMethod})`,
+      expiryProfileName,
+      activeRouter,
+      preloadedSecrets,
+      preloadedProfiles,
+      preloadedActive,
+    });
+    if (restoreRes.success) {
+      restoredSubscribersCount++;
+      kickedSessions += restoreRes.kickedSessions;
+    }
+  }
+
+  return {
+    settledInvoicesCount,
+    totalCollected,
+    restoredSubscribersCount,
+    kickedSessions,
+    errors,
+  };
 }
 
 /**

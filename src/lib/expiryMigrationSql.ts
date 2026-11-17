@@ -26,6 +26,7 @@ ALTER TABLE public.portal_users
     ADD COLUMN IF NOT EXISTS expiry_date TIMESTAMPTZ,
     ADD COLUMN IF NOT EXISTS billing_anchor_day INT,
     ADD COLUMN IF NOT EXISTS next_billing_date DATE,
+    ADD COLUMN IF NOT EXISTS package_name TEXT,
     ADD COLUMN IF NOT EXISTS original_package_profile TEXT,
     ADD COLUMN IF NOT EXISTS billing_status TEXT DEFAULT 'ACTIVE',
     ADD COLUMN IF NOT EXISTS is_suspended BOOLEAN DEFAULT FALSE,

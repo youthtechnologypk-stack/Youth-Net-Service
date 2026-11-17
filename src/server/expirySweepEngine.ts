@@ -10,6 +10,10 @@ import {
   parseExpiryDateWithCutoffMs,
 } from '../lib/expiryUtils';
 import { resolveSubscriberAnniversaryNextDue } from '../lib/anniversaryBilling';
+import {
+  resolveExactSubscriberProfile,
+  upsertOrigPkgComment,
+} from '../lib/mikrotikProfileSync';
 
 export {
   DEFAULT_ISP_BILLING_SETTINGS,
@@ -25,6 +29,7 @@ const DEFAULT_SUPABASE_ANON_KEY = 'sb_publishable_Ce_QIF3wHFISjJtTiYGY-Q_qs6miPT
 
 export interface MikrotikApiAdapter {
   getSecrets(): Promise<Array<Record<string, any>>>;
+  getProfiles?(): Promise<Array<Record<string, any>>>;
   getActiveSessions(): Promise<Array<Record<string, any>>>;
   patchSecret(secretId: string, body: Record<string, any>): Promise<boolean>;
   kickActiveSession(activeId: string): Promise<boolean>;
@@ -102,12 +107,23 @@ export function createMikrotikRestAdapter(options: ExpirySweepOptions): Mikrotik
 
   return {
     async getSecrets() {
-      const res = await doFetch('/ppp/secret?.proplist=.id,name,profile,disabled');
+      const res = await doFetch('/ppp/secret?.proplist=.id,name,profile,disabled,comment');
       if (res.ok) {
         const json = await res.json();
         return Array.isArray(json) ? json : [];
       }
       const fallback = await doFetch('/ppp/secret');
+      if (!fallback.ok) return [];
+      const json = await fallback.json();
+      return Array.isArray(json) ? json : [];
+    },
+    async getProfiles() {
+      const res = await doFetch('/ppp/profile?.proplist=.id,name,rate-limit');
+      if (res.ok) {
+        const json = await res.json();
+        return Array.isArray(json) ? json : [];
+      }
+      const fallback = await doFetch('/ppp/profile');
       if (!fallback.ok) return [];
       const json = await fallback.json();
       return Array.isArray(json) ? json : [];
@@ -393,17 +409,19 @@ export async function runExpirySweep(
     });
   }
 
-  // Lazy-fetch MikroTik secrets & active sessions once only if needed for suspensions
+  // Lazy-fetch MikroTik secrets, profiles & active sessions once only if needed for suspensions
   let cachedMikrotik: {
     secretsCache: Map<string, Record<string, any>>;
     activeCache: Map<string, Array<Record<string, any>>>;
+    profileNames: string[];
   } | null = null;
 
   const ensureMikrotikCaches = async () => {
     if (cachedMikrotik) return cachedMikrotik;
-    const [secretsList, activeList] = await Promise.all([
+    const [secretsList, activeList, profilesList] = await Promise.all([
       mk.getSecrets().catch(() => []),
       mk.getActiveSessions().catch(() => []),
+      mk.getProfiles ? mk.getProfiles().catch(() => []) : Promise.resolve([]),
     ]);
     const secretsCache = new Map<string, Record<string, any>>();
     for (const s of secretsList) {
@@ -418,7 +436,14 @@ export async function runExpirySweep(
       arr.push(a);
       activeCache.set(key, arr);
     }
-    cachedMikrotik = { secretsCache, activeCache };
+    const profileNames = Array.from(
+      new Set(
+        (profilesList || [])
+          .map((p: any) => String(p?.name || '').trim())
+          .filter(Boolean)
+      )
+    );
+    cachedMikrotik = { secretsCache, activeCache, profileNames };
     return cachedMikrotik;
   };
 
@@ -616,7 +641,7 @@ export async function runExpirySweep(
       }
 
       try {
-        const { secretsCache, activeCache } = await ensureMikrotikCaches();
+        const { secretsCache, activeCache, profileNames } = await ensureMikrotikCaches();
         const liveSecret = secretsCache.get(uname);
         const secretId = String(liveSecret?.['.id'] || liveSecret?.id || '').trim();
         const liveProfile = String(liveSecret?.profile || '').trim();
@@ -639,14 +664,16 @@ export async function runExpirySweep(
           continue;
         }
 
-        const backupProfile =
-          String(sub.original_package_profile || '').trim() ||
-          (liveProfile && liveProfile.toLowerCase() !== expiryProfileLower ? liveProfile : '') ||
-          String(sub.package_profile_name || '').trim() ||
-          String(sub.package_speed || '').trim().replace(/\s+/g, '') ||
-          '20Mbps';
+        // Adopt exact live MikroTik profile (never guess/hardcode "20Mbps")
+        const backupProfile = resolveExactSubscriberProfile({
+          liveSecret,
+          subscriber: sub as any,
+          mikrotikProfiles: profileNames,
+          expiryProfileName: settings.expiry_ppp_profile,
+        });
+        const origPkgComment = upsertOrigPkgComment(liveSecret?.comment, backupProfile);
 
-        // Ensure subscriber row exists in portal_users and back up original_package_profile BEFORE altering MikroTik
+        // Ensure subscriber row exists in portal_users and back up exact original_package_profile BEFORE altering MikroTik
         let subscriberId: string | null = sub.id ? String(sub.id) : null;
         if (!subscriberId) {
           subscriberId = await ensurePortalClientForSuspension(
@@ -661,8 +688,15 @@ export async function runExpirySweep(
           await safeUpdateSubscriber(
             supabase,
             subscriberId,
-            { original_package_profile: backupProfile },
-            { original_package_profile: backupProfile },
+            {
+              original_package_profile: backupProfile,
+              package_name: backupProfile,
+              package_profile_name: backupProfile,
+            },
+            {
+              original_package_profile: backupProfile,
+              package_profile_name: backupProfile,
+            },
             { package_profile_name: backupProfile },
             schemaWarningsSet
           );
@@ -670,8 +704,12 @@ export async function runExpirySweep(
 
         if (secretId) {
           const patchPayload = isDisableMode
-            ? { disabled: 'true' }
-            : { profile: settings.expiry_ppp_profile, disabled: 'false' };
+            ? { disabled: 'true', comment: origPkgComment }
+            : {
+                profile: settings.expiry_ppp_profile,
+                disabled: 'false',
+                comment: origPkgComment,
+              };
           const patched = await mk.patchSecret(secretId, patchPayload);
           if (!patched) {
             errors.push(`MikroTik secret patch failed for @${uname}`);
