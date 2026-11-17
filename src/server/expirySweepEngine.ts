@@ -9,6 +9,7 @@ import {
   loadBillingSettingsFromDb,
   parseExpiryDateWithCutoffMs,
 } from '../lib/expiryUtils';
+import { resolveSubscriberAnniversaryNextDue } from '../lib/anniversaryBilling';
 
 export {
   DEFAULT_ISP_BILLING_SETTINGS,
@@ -331,7 +332,9 @@ export async function runExpirySweep(
     if (!uname) continue;
 
     const unpaidInfo = unpaidByUser.get(uname);
-    const rawExpiry = sub.expiry_date || unpaidInfo?.earliestDueDate || null;
+    const { nextBillingDate } = resolveSubscriberAnniversaryNextDue(sub, [], new Date(nowMs));
+    const rawExpiry =
+      sub.next_billing_date || unpaidInfo?.earliestDueDate || sub.expiry_date || nextBillingDate || null;
     const expiryMs = parseExpiryDateWithCutoffMs(rawExpiry, settings.cutoff_time_pkt);
 
     if (!expiryMs) {

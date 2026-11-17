@@ -51,7 +51,7 @@ import {
 import {
   restoreSubscriberOnInvoicePaid,
   enforce31DayAutoExpiry,
-  add31DaysDateString,
+  addCalendarMonthDateString,
 } from '../lib/billingAndNetwork';
 import {
   DEFAULT_SUPPORT_WHATSAPP,
@@ -68,6 +68,7 @@ import {
 import {
   FIELD_STAFF_ROLES,
   LiveFieldAgentLedger,
+  computeBillingAnchorDay,
   fetchLiveFieldStaffWithBalances,
   runAnniversaryInvoicingCron,
 } from '../lib/anniversaryBilling';
@@ -130,14 +131,14 @@ export const BillingView: React.FC<BillingViewProps> = ({
   // Edit Invoice Form State
   const [editAmount, setEditAmount] = useState<number>(0);
   const [editDueDate, setEditDueDate] = useState<string>('');
-  const [editCycleDay, setEditCycleDay] = useState<number>(31);
+  const [editCycleDay, setEditCycleDay] = useState<number>(() => new Date().getDate());
   const [editStatus, setEditStatus] = useState<'DUE' | 'PARTIAL' | 'PAID' | 'OVERDUE'>('DUE');
   const [editAssignedAgentId, setEditAssignedAgentId] = useState<string>('');
 
   // New Invoice Form State
   const [newSubUsername, setNewSubUsername] = useState<string>('');
   const [newAmount, setNewAmount] = useState<number>(2500);
-  const [newDueDate, setNewDueDate] = useState<string>(() => add31DaysDateString());
+  const [newDueDate, setNewDueDate] = useState<string>(() => addCalendarMonthDateString());
   const [newAssignedAgentId, setNewAssignedAgentId] = useState<string>('');
   const [isSubmitting, setIsSubmitting] = useState<boolean>(false);
 
@@ -278,17 +279,22 @@ export const BillingView: React.FC<BillingViewProps> = ({
     setIsSubmitting(true);
     try {
       const selectedAgent = portalAgents.find((a) => a.id === newAssignedAgentId);
+      const subClean = newSubUsername.trim().toLowerCase();
+      const clientMatch = portalClients.find(
+        (c) => (c.username || '').trim().toLowerCase() === subClean
+      );
+      const anchorDay = clientMatch ? computeBillingAnchorDay(clientMatch) : new Date().getDate();
       const generatedInvoiceNo = `INV-${new Date().getFullYear()}${String(new Date().getMonth() + 1).padStart(2, '0')}-${Math.floor(1000 + Math.random() * 9000)}`;
 
       const newInvoicePayload = {
         invoice_no: generatedInvoiceNo,
-        subscriber_username: newSubUsername.trim().toLowerCase(),
+        subscriber_username: subClean,
         assigned_agent_id: newAssignedAgentId || null,
         assigned_agent_name: selectedAgent ? selectedAgent.full_name : null,
         amount: Number(newAmount) || 0,
         due_date: newDueDate,
         status: 'DUE',
-        cycle_day: 31,
+        cycle_day: anchorDay,
         created_at: new Date().toISOString(),
       };
 
@@ -352,15 +358,29 @@ export const BillingView: React.FC<BillingViewProps> = ({
       const finalPaidAmount = remaining <= 0 ? totalAmount : newPaidTotal;
       const nowIso = new Date().toISOString();
 
-      // 1. Update invoice in Supabase: status, paid_amount, paid_at, and extend 31-day expiry when PAID
+      const clientForRenewal = portalClients.find(
+        (c) =>
+          (c.username || '').trim().toLowerCase() ===
+          (selectedInvoice.subscriber_username || '').trim().toLowerCase()
+      );
+      const renewalAnchorDay = clientForRenewal
+        ? computeBillingAnchorDay(clientForRenewal)
+        : selectedInvoice.cycle_day || new Date().getDate();
+      const todayYmd = new Date().toISOString().slice(0, 10);
+      const renewalBase =
+        selectedInvoice.due_date && selectedInvoice.due_date >= todayYmd
+          ? selectedInvoice.due_date
+          : new Date();
+
+      // 1. Update invoice in Supabase: status, paid_amount, paid_at, and extend +1 calendar month when PAID
       const invoiceUpdateData: Partial<SupabaseInvoice> = {
         status: newStatus,
         paid_amount: finalPaidAmount,
         paid_at: newStatus === 'PAID' ? nowIso : (selectedInvoice.paid_at || null),
-        cycle_day: 31,
+        cycle_day: renewalAnchorDay,
       };
       if (newStatus === 'PAID') {
-        invoiceUpdateData.due_date = add31DaysDateString(new Date());
+        invoiceUpdateData.due_date = addCalendarMonthDateString(renewalBase, renewalAnchorDay);
       }
 
       const { error: invError } = await supabase
@@ -430,7 +450,9 @@ export const BillingView: React.FC<BillingViewProps> = ({
           (selectedInvoice.subscriber_username || '').trim().toLowerCase()
       );
       const nextExpiryStr =
-        invoiceUpdateData.due_date || selectedInvoice.due_date || add31DaysDateString(new Date());
+        invoiceUpdateData.due_date ||
+        selectedInvoice.due_date ||
+        addCalendarMonthDateString(new Date(), renewalAnchorDay);
 
       setLastPaidReceiptPayload({
         username: selectedInvoice.subscriber_username,
@@ -467,7 +489,7 @@ export const BillingView: React.FC<BillingViewProps> = ({
     setInvoiceToEdit(inv);
     setEditAmount(Number(inv.amount) || 0);
     setEditDueDate(inv.due_date || '');
-    setEditCycleDay(inv.cycle_day || 31);
+    setEditCycleDay(inv.cycle_day || new Date().getDate());
     setEditStatus((inv.status as any) || 'DUE');
     setEditAssignedAgentId(inv.assigned_agent_id || '');
     setIsEditModalOpen(true);
@@ -484,7 +506,7 @@ export const BillingView: React.FC<BillingViewProps> = ({
       const updatedData: Partial<SupabaseInvoice> = {
         amount: Number(editAmount) || 0,
         due_date: editDueDate,
-        cycle_day: Number(editCycleDay) || 31,
+        cycle_day: Number(editCycleDay) || new Date().getDate(),
         status: editStatus as any,
         assigned_agent_id: editAssignedAgentId || null,
         assigned_agent_name: selectedAgent ? selectedAgent.full_name : null,
@@ -1065,7 +1087,7 @@ export const BillingView: React.FC<BillingViewProps> = ({
                       <span className="font-mono font-semibold text-cyan-400">
                         #{inv.invoice_no}
                       </span>
-                      <span className="text-slate-500">• Cycle: {inv.cycle_day || 31}d</span>
+                      <span className="text-slate-500">• Bill Day: {inv.cycle_day || 'Monthly'}</span>
                     </div>
                   </div>
                   <div className="shrink-0">
@@ -1257,7 +1279,7 @@ export const BillingView: React.FC<BillingViewProps> = ({
                       <td className="py-3 px-4 font-mono font-semibold text-cyan-400">{inv.invoice_no}</td>
                       <td className="py-3 px-4">
                         <div className="font-semibold text-white">@{inv.subscriber_username}</div>
-                        <div className="text-xs text-slate-500">Cycle: {inv.cycle_day || 31} Days</div>
+                        <div className="text-xs text-slate-500">Monthly (Day {inv.cycle_day || 'Auto'})</div>
                       </td>
                       <td className="py-3 px-4">
                         {inv.assigned_agent_name ? (

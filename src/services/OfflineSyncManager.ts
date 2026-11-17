@@ -5,7 +5,7 @@ import {
   SupabaseTicket,
 } from './supabaseClient';
 import {
-  add31DaysDateString,
+  addCalendarMonthDateString,
   restoreSubscriberOnInvoicePaid,
 } from '../lib/billingAndNetwork';
 import { sqliteOfflineAdapter } from '../lib/sqliteOfflineAdapter';
@@ -272,7 +272,7 @@ class OfflineSyncManager {
             status: isFull ? 'PAID' : 'PARTIAL',
             paid_at: isFull ? p.collectedAtIso : inv.paid_at || null,
             due_date: isFull
-              ? add31DaysDateString(new Date(p.collectedAtIso))
+              ? addCalendarMonthDateString(new Date(p.collectedAtIso))
               : inv.due_date,
           };
         });
@@ -537,10 +537,10 @@ class OfflineSyncManager {
               status: newStatus,
               paid_amount: newStatus === 'PAID' ? totalAmount : nextPaidTotal,
               paid_at: newStatus === 'PAID' ? p.collectedAtIso || nowIso : (liveInv?.paid_at || null),
-              cycle_day: 31,
+              cycle_day: new Date().getDate(),
             };
             if (newStatus === 'PAID') {
-              invoiceUpdateData.due_date = add31DaysDateString(new Date());
+              invoiceUpdateData.due_date = addCalendarMonthDateString(new Date());
             }
 
             const { error: invUpdErr } = await supabase

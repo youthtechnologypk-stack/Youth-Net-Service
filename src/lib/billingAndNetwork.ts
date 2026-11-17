@@ -1,6 +1,7 @@
 import { supabase, SupabaseInvoice } from '../services/supabaseClient';
 import { safeMikrotikFetch } from '../services/mikrotikRestClient';
 import { RouterAuthInfo } from '../services/apiClient';
+import { addCalendarMonthsYmd, computeBillingAnchorDay, extractYmdString } from './anniversaryBilling';
 
 export const PARENT_FLEET_ROUTER = 'SADDAR FLEET ROUTER';
 
@@ -317,7 +318,7 @@ export async function kickMikrotikActiveSessionForUser(
 
 /**
  * Instant 5-Second Restore Hook (DB + MikroTik Atomic Sync):
- * 1. Updates Supabase first: +30 days expiry_date, billing_status='ACTIVE', grace_ends_at=null, last_restored_at=now
+ * 1. Updates Supabase first: +1 calendar month expiry_date/next_billing_date anchored to installation day, billing_status='ACTIVE', grace_ends_at=null, last_restored_at=now
  * 2. Restores MikroTik /rest/ppp/secret/{id} to original_package_profile (disabled: 'false')
  * 3. Kicks any 16.16.16.x / stale active PPPoE session for instant reconnect
  * 4. Inserts 'RESTORED_ON_PAYMENT' into expiry_audit_logs
@@ -337,26 +338,45 @@ export async function restoreSubscriberOnInvoicePaid(
 }> {
   const cleanUser = (subscriberUsername || '').trim().toLowerCase();
   const nowIso = new Date().toISOString();
-  const newExpiryIso = new Date(Date.now() + 30 * 86_400_000).toISOString();
   const triggeredBy = options?.triggeredBy || 'AGENT_PAYMENT_SYNC';
 
   if (!cleanUser) {
-    return { success: false, restoredProfile: '20Mbps', kickedSessions: 0, newExpiryIso };
+    const fallbackExpiryIso = `${addCalendarMonthDateString(new Date())}T14:00:00+05:00`;
+    return { success: false, restoredProfile: '20Mbps', kickedSessions: 0, newExpiryIso: fallbackExpiryIso };
   }
 
   let restoredProfile = '20Mbps';
   let previousProfile: string | null = null;
   let subscriberId: string | null = null;
+  let anchorDay = new Date().getDate();
+  let nextAnniversaryYmd = addCalendarMonthDateString(new Date(), anchorDay);
 
   try {
     // 1. Read current subscriber profile backups from Supabase portal_users
     const { data: userRecord } = await supabase
       .from('portal_users')
       .select('*')
-      .eq('username', cleanUser)
+      .ilike('username', cleanUser)
+      .limit(1)
       .maybeSingle();
 
     subscriberId = userRecord?.id || null;
+    if (userRecord) {
+      anchorDay = computeBillingAnchorDay(userRecord);
+      const baseAnchor =
+        extractYmdString((userRecord as any).next_billing_date) ||
+        extractYmdString(userRecord.expiry_date) ||
+        extractYmdString(new Date().toISOString())!;
+      const todayYmd = extractYmdString(new Date().toISOString())!;
+      // Advance +1 calendar month from current cycle/today anchored to installation day
+      let candidateNext = addCalendarMonthsYmd(baseAnchor, 1, anchorDay);
+      if (candidateNext <= todayYmd) {
+        candidateNext = addCalendarMonthsYmd(todayYmd, 1, anchorDay);
+      }
+      nextAnniversaryYmd = candidateNext;
+    }
+    const finalExpiryIso = `${nextAnniversaryYmd}T14:00:00+05:00`;
+
     const rawOriginal = String((userRecord as any)?.original_package_profile || '').trim();
     const rawProfileName = String(userRecord?.package_profile_name || '').trim();
     const rawPkgSpeed = String(userRecord?.package_speed || '').trim().replace(/\s+/g, '');
@@ -375,18 +395,20 @@ export async function restoreSubscriberOnInvoicePaid(
       restoredProfile = rawPkgSpeed;
     }
 
-    // 2. Update Supabase first (+30 days expiry, ACTIVE status, clear grace)
+    // 2. Update Supabase first (+1 calendar month anniversary expiry, ACTIVE status, clear grace)
     if (userRecord?.id) {
       const fullUpdate = {
         account_status: 'ACTIVE',
         billing_status: 'ACTIVE',
         grace_ends_at: null,
         last_restored_at: nowIso,
-        expiry_date: newExpiryIso,
+        expiry_date: finalExpiryIso,
+        billing_anchor_day: anchorDay,
+        next_billing_date: nextAnniversaryYmd,
       };
       const { error: updErr } = await supabase
         .from('portal_users')
-        .update(fullUpdate)
+        .update(fullUpdate as any)
         .eq('id', userRecord.id);
 
       if (updErr) {
@@ -395,7 +417,7 @@ export async function restoreSubscriberOnInvoicePaid(
           .from('portal_users')
           .update({
             account_status: 'ACTIVE',
-            expiry_date: newExpiryIso.split('T')[0],
+            expiry_date: nextAnniversaryYmd,
           })
           .eq('id', userRecord.id);
       }
@@ -452,7 +474,7 @@ export async function restoreSubscriberOnInvoicePaid(
           triggered_by: triggeredBy,
           notes:
             options?.notes ||
-            `Atomic payment restore: +30d expiry (${newExpiryIso.slice(0, 10)}), profile=${restoredProfile}, kicked=${kickedSessions}`,
+            `Atomic payment restore: +1 calendar month expiry (${nextAnniversaryYmd}), profile=${restoredProfile}, kicked=${kickedSessions}`,
           created_at: nowIso,
         },
       ]);
@@ -462,7 +484,7 @@ export async function restoreSubscriberOnInvoicePaid(
       success: true,
       restoredProfile,
       kickedSessions,
-      newExpiryIso,
+      newExpiryIso: nextAnniversaryYmd,
     };
   } catch (err) {
     console.warn('restoreSubscriberOnInvoicePaid notice:', err);
@@ -470,18 +492,26 @@ export async function restoreSubscriberOnInvoicePaid(
       success: false,
       restoredProfile,
       kickedSessions: 0,
-      newExpiryIso,
+      newExpiryIso: nextAnniversaryYmd,
     };
   }
 }
 
 /**
- * Computes +31 days YYYY-MM-DD from a reference date
+ * Computes +1 calendar month YYYY-MM-DD anchored to anchorDay (clamping Feb 28/29 & Apr 30).
  */
-export function add31DaysDateString(baseDate: Date = new Date()): string {
-  const d = new Date(baseDate.getTime());
-  d.setDate(d.getDate() + 31);
-  return d.toISOString().split('T')[0];
+export function addCalendarMonthDateString(
+  baseDate: Date | string = new Date(),
+  anchorDay?: number
+): string {
+  return addCalendarMonthsYmd(baseDate, 1, anchorDay);
+}
+
+/**
+ * Legacy helper name preserved for compatibility; now computes +1 true calendar month.
+ */
+export function add31DaysDateString(baseDate: Date = new Date(), anchorDay?: number): string {
+  return addCalendarMonthsYmd(baseDate, 1, anchorDay);
 }
 
 /**

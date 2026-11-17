@@ -17,6 +17,8 @@ import {
 import { supabase, SupabasePortalUser } from '../services/supabaseClient';
 import { useCurrency } from '../context/CurrencyContext';
 import { safeMikrotikFetch } from '../services/mikrotikRestClient';
+import { addCalendarMonthDateString } from '../lib/billingAndNetwork';
+import { computeBillingAnchorDay } from '../lib/anniversaryBilling';
 
 export interface PPPoESecretOption {
   name: string;
@@ -71,14 +73,11 @@ export const CreateInvoiceModal: React.FC<CreateInvoiceModalProps> = ({
   const lockedSubscriber = defaultSubscriberUsername || defaultCustomerId || '';
   const isLocked = Boolean(lockedSubscriber);
 
-  // Form states - default cycle strictly 31 days
+  // Form states - calendar-month anniversary cycle
   const [selectedSubscriberUsername, setSelectedSubscriberUsername] = useState<string>(lockedSubscriber);
   const [amount, setAmount] = useState<number | string>(2000);
-  const [dueDate, setDueDate] = useState<string>(() => {
-    const d = new Date();
-    d.setDate(d.getDate() + 31);
-    return d.toISOString().split('T')[0];
-  });
+  const [anchorDay, setAnchorDay] = useState<number>(() => new Date().getDate());
+  const [dueDate, setDueDate] = useState<string>(() => addCalendarMonthDateString(new Date()));
   const [selectedAgentId, setSelectedAgentId] = useState<string>('');
 
   // Dropdown & Search states for MikroTik PPPoE secrets
@@ -226,15 +225,21 @@ export const CreateInvoiceModal: React.FC<CreateInvoiceModalProps> = ({
     }
   };
 
-  // Auto-fill rate helper
+  // Auto-fill rate & monthly anniversary due date helper
   const autoFillRateForSubscriber = async (subUsername: string, fallbackProfile?: string) => {
     try {
       const clean = subUsername.trim().toLowerCase();
       const { data } = await supabase
         .from('portal_users')
-        .select('monthly_fee, package_speed')
+        .select('monthly_fee, package_speed, installation_date, created_at, billing_anchor_day, next_billing_date')
         .eq('username', clean)
         .maybeSingle();
+
+      if (data) {
+        const subAnchor = computeBillingAnchorDay(data as any);
+        setAnchorDay(subAnchor);
+        setDueDate((data as any).next_billing_date?.slice(0, 10) || addCalendarMonthDateString(new Date(), subAnchor));
+      }
 
       if (data?.monthly_fee && Number(data.monthly_fee) > 0) {
         setAmount(Number(data.monthly_fee));
@@ -332,7 +337,7 @@ export const CreateInvoiceModal: React.FC<CreateInvoiceModalProps> = ({
       // 2. Identify assigned agent name
       const selectedAgent = portalAgents.find((a) => a.id === selectedAgentId);
 
-      // 3. Exact database schema payload - strictly 31-day cycle
+      // 3. Exact database schema payload - calendar-month anniversary cycle
       const invoicePayload = {
         invoice_no: generatedInvoiceNo,
         subscriber_username: subUsername,
@@ -342,7 +347,7 @@ export const CreateInvoiceModal: React.FC<CreateInvoiceModalProps> = ({
         paid_amount: 0,
         status: 'DUE',
         due_date: dueDate, // YYYY-MM-DD
-        cycle_day: 31,
+        cycle_day: anchorDay,
       };
 
       // 4. Supabase Insert
@@ -576,7 +581,7 @@ export const CreateInvoiceModal: React.FC<CreateInvoiceModalProps> = ({
                 />
               </div>
               <span className="text-[10px] text-slate-500 font-mono mt-0.5 block">
-                Default: 31-day billing cycle
+                Monthly calendar anniversary (Day {anchorDay})
               </span>
             </div>
           </div>
@@ -615,7 +620,7 @@ export const CreateInvoiceModal: React.FC<CreateInvoiceModalProps> = ({
               <span className="px-2 py-0.5 rounded text-[10px] font-mono font-bold bg-rose-950 text-rose-300 border border-rose-800">
                 Initial Status: DUE
               </span>
-              <span className="text-[10px] text-slate-500 font-mono block mt-1">Cycle: 31 Days</span>
+              <span className="text-[10px] text-slate-500 font-mono block mt-1">Monthly (Day {anchorDay})</span>
             </div>
           </div>
 

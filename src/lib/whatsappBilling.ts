@@ -7,7 +7,9 @@ import {
   supabase,
 } from '../services/supabaseClient';
 import { parseFlexibleDate } from './dateFilter';
-import { buildCycleDateString, computeBillingAnchorDay } from './anniversaryBilling';
+import {
+  resolveSubscriberAnniversaryNextDue,
+} from './anniversaryBilling';
 
 export const DEFAULT_SUPPORT_WHATSAPP = '+923234193599';
 export const WHATSAPP_CONFIG_STORAGE_KEY = 'youthnet_whatsapp_billing_config';
@@ -408,17 +410,11 @@ export function buildPreExpiryReminderQueue(params: {
     const unpaidInv = unpaidByUsername[uname];
     if (statusUpper !== 'ACTIVE' && !unpaidInv) continue;
 
-    const now = new Date();
-    const anchorDay = computeBillingAnchorDay(sub);
-    const thisMonthDate = buildCycleDateString(now.getFullYear(), now.getMonth(), anchorDay);
-    const thisMonthDays = computeDaysUntilDate(thisMonthDate);
-    const nextMonthObj = new Date(now.getFullYear(), now.getMonth() + 1, 1);
-    const upcomingAnchorDate =
-      thisMonthDays !== null && thisMonthDays >= 0
-        ? thisMonthDate
-        : buildCycleDateString(nextMonthObj.getFullYear(), nextMonthObj.getMonth(), anchorDay);
-
-    const targetDate = unpaidInv?.due_date || sub.expiry_date || upcomingAnchorDate;
+    const userInvoices = (invoices || []).filter(
+      (i) => String(i.subscriber_username || '').trim().toLowerCase() === uname
+    );
+    const { nextBillingDate } = resolveSubscriberAnniversaryNextDue(sub, userInvoices);
+    const targetDate = unpaidInv?.due_date || nextBillingDate;
     const daysRemaining = computeDaysUntilDate(targetDate);
     if (daysRemaining === null || daysRemaining < 0 || daysRemaining > maxDays) continue;
 

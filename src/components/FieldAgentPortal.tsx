@@ -38,7 +38,7 @@ import {
   SupabasePaymentAccount,
   SupabaseWhatsappBillingConfig,
 } from '../services/supabaseClient';
-import { restoreSubscriberOnInvoicePaid, add31DaysDateString } from '../lib/billingAndNetwork';
+import { restoreSubscriberOnInvoicePaid, addCalendarMonthDateString } from '../lib/billingAndNetwork';
 import {
   DEFAULT_SUPPORT_WHATSAPP,
   WHATSAPP_CONFIG_UPDATED_EVENT,
@@ -462,8 +462,11 @@ export const FieldAgentPortal: React.FC<FieldAgentPortalProps> = ({
     const newStatus: 'PAID' | 'PARTIAL' = remaining <= 0 ? 'PAID' : 'PARTIAL';
     const finalPaidAmount = remaining <= 0 ? totalAmount : newPaidTotal;
     const nowIso = new Date().toISOString();
+    const anchorDay = inv.cycle_day && inv.cycle_day >= 1 && inv.cycle_day <= 31 ? inv.cycle_day : new Date().getDate();
     const nextExpiryDate =
-      newStatus === 'PAID' ? add31DaysDateString(new Date()) : inv.due_date || add31DaysDateString(new Date());
+      newStatus === 'PAID'
+        ? addCalendarMonthDateString(new Date(), anchorDay)
+        : inv.due_date || addCalendarMonthDateString(new Date(), anchorDay);
     const effectiveAgentId = resolvedAgentIdRef.current || currentUser.id;
 
     const applyOptimisticAndReceipt = (offlineSaved: boolean) => {
@@ -533,12 +536,12 @@ export const FieldAgentPortal: React.FC<FieldAgentPortalProps> = ({
         return;
       }
 
-      // 1. Update invoice in Supabase: status, paid_amount, paid_at, and 31-day renewal on PAID
+      // 1. Update invoice in Supabase: status, paid_amount, paid_at, and calendar-month renewal on PAID
       const invoiceUpdateData: Partial<SupabaseInvoice> = {
         status: newStatus,
         paid_amount: finalPaidAmount,
         paid_at: newStatus === 'PAID' ? nowIso : (inv.paid_at || null),
-        cycle_day: 31,
+        cycle_day: anchorDay,
       };
       if (newStatus === 'PAID') {
         invoiceUpdateData.due_date = nextExpiryDate;

@@ -24,6 +24,7 @@ import { useCurrency } from '../context/CurrencyContext';
 import { Invoice, InvoiceStatus, InvoiceLineItem, InvoiceItemCategory } from '../types/isp';
 import { useSubscribers, UnifiedSubscriber, appendStoredBillingLedger } from '../hooks/useSubscribers';
 import { supabase, SupabasePortalUser } from '../services/supabaseClient';
+import { addCalendarMonthDateString } from '../lib/billingAndNetwork';
 
 export interface GenerateInvoiceModalProps {
   isOpen: boolean;
@@ -111,9 +112,7 @@ export const GenerateInvoiceModal: React.FC<GenerateInvoiceModalProps> = ({
   };
 
   const getSevenDaysLater = () => {
-    const d = new Date();
-    d.setDate(d.getDate() + 31);
-    return d.toISOString().split('T')[0];
+    return addCalendarMonthDateString(new Date());
   };
 
   const getCurrentMonthName = () => {
@@ -326,7 +325,7 @@ export const GenerateInvoiceModal: React.FC<GenerateInvoiceModalProps> = ({
               amount: Number(totalAmount) || 0,
               due_date: dueDate,
               status: status === 'paid' ? 'PAID' : 'DUE',
-              cycle_day: 31,
+              cycle_day: dueDate ? Number(dueDate.split('-')[2]) || new Date().getDate() : new Date().getDate(),
               paid_at: status === 'paid' ? new Date().toISOString() : null,
               created_at: new Date().toISOString(),
             },

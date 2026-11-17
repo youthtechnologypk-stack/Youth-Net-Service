@@ -301,13 +301,36 @@ export async function fetchLiveFieldStaffWithBalances(
 }
 
 /**
- * Extracts day-of-month anchor (1..31) from subscriber installation_date || created_at.
+ * Extracts a YYYY-MM-DD string from an ISO date or timestamp string.
+ */
+export function extractYmdString(raw?: string | null): string | null {
+  const clean = String(raw || '').trim();
+  if (!clean) return null;
+  const ymdMatch = clean.match(/^(\d{4})-(\d{2})-(\d{2})/);
+  if (ymdMatch) {
+    return `${ymdMatch[1]}-${ymdMatch[2]}-${ymdMatch[3]}`;
+  }
+  const d = new Date(clean);
+  if (Number.isNaN(d.getTime())) return null;
+  const yyyy = d.getFullYear();
+  const mm = String(d.getMonth() + 1).padStart(2, '0');
+  const dd = String(d.getDate()).padStart(2, '0');
+  return `${yyyy}-${mm}-${dd}`;
+}
+
+/**
+ * Extracts day-of-month anchor (1..31) from billing_anchor_day || installation_date || created_at.
  */
 export function computeBillingAnchorDay(sub: {
+  billing_anchor_day?: number | null;
   installation_date?: string | null;
   created_at?: string | null;
   expiry_date?: string | null;
 }): number {
+  const explicit = Number(sub.billing_anchor_day);
+  if (Number.isFinite(explicit) && explicit >= 1 && explicit <= 31) {
+    return Math.floor(explicit);
+  }
   const raw = String(sub.installation_date || sub.created_at || '').trim();
   const ymdMatch = raw.match(/^(\d{4})-(\d{2})-(\d{2})/);
   if (ymdMatch) {
@@ -328,7 +351,8 @@ export function computeBillingAnchorDay(sub: {
 }
 
 /**
- * Builds YYYY-MM-DD for the given year & 0-indexed month, clamping anchorDay to month's max days.
+ * Builds YYYY-MM-DD for the given year & 0-indexed month, clamping anchorDay to month's max days
+ * (e.g. Jan 31 -> Feb 28/29, Mar 31 -> Apr 30).
  */
 export function buildCycleDateString(year: number, monthIndex0: number, anchorDay: number): string {
   const lastDay = new Date(year, monthIndex0 + 1, 0).getDate();
@@ -336,6 +360,60 @@ export function buildCycleDateString(year: number, monthIndex0: number, anchorDa
   const mm = String(monthIndex0 + 1).padStart(2, '0');
   const dd = String(clampedDay).padStart(2, '0');
   return `${year}-${mm}-${dd}`;
+}
+
+/**
+ * Adds N true calendar months to a date (or YYYY-MM-DD string), anchored to anchorDayOverride
+ * (clamping to the last day of shorter months such as Feb 28/29 or Apr 30).
+ */
+export function addCalendarMonthsYmd(
+  baseDate: string | Date,
+  monthsToAdd: number = 1,
+  anchorDayOverride?: number
+): string {
+  let year: number;
+  let month0: number;
+  let day: number;
+
+  if (typeof baseDate === 'string') {
+    const ymd = extractYmdString(baseDate);
+    if (ymd) {
+      const [yStr, mStr, dStr] = ymd.split('-');
+      year = parseInt(yStr, 10);
+      month0 = parseInt(mStr, 10) - 1;
+      day = parseInt(dStr, 10);
+    } else {
+      const d = new Date();
+      year = d.getFullYear();
+      month0 = d.getMonth();
+      day = d.getDate();
+    }
+  } else {
+    year = baseDate.getFullYear();
+    month0 = baseDate.getMonth();
+    day = baseDate.getDate();
+  }
+
+  const anchorDay =
+    anchorDayOverride && anchorDayOverride >= 1 && anchorDayOverride <= 31
+      ? Math.floor(anchorDayOverride)
+      : day;
+  const totalMonths = year * 12 + month0 + monthsToAdd;
+  const targetYear = Math.floor(totalMonths / 12);
+  const targetMonth0 = ((totalMonths % 12) + 12) % 12;
+  return buildCycleDateString(targetYear, targetMonth0, anchorDay);
+}
+
+/**
+ * Calculates the subscriber's first/next due date as +1 calendar month from installation_date.
+ */
+export function computeNextBillingDateFromInstall(
+  installationDate?: string | null,
+  anchorDayOverride?: number
+): string {
+  const baseYmd = extractYmdString(installationDate) || extractYmdString(new Date().toISOString())!;
+  const anchor = anchorDayOverride ?? computeBillingAnchorDay({ installation_date: baseYmd });
+  return addCalendarMonthsYmd(baseYmd, 1, anchor);
 }
 
 export function getCycleYearMonth(date: Date = new Date()): string {
@@ -349,8 +427,57 @@ export function doesInvoiceCoverMonth(inv: Partial<SupabaseInvoice>, targetYm: s
   if (invNo.startsWith('INV-MAT-')) return false;
   const compactYm = targetYm.replace('-', '');
   if (invNo.startsWith(`INV-${compactYm}-`)) return true;
+  if (String(inv.due_date || '').slice(0, 7) === targetYm) return true;
   if (String(inv.created_at || '').slice(0, 7) === targetYm) return true;
   return false;
+}
+
+/**
+ * Resolves the effective calendar-month anniversary next_billing_date for a subscriber:
+ * - Honors explicit `next_billing_date` if stored on the subscriber record
+ * - Otherwise derives +1 calendar month from `installation_date || created_at`, advancing through
+ *   prior months if installed >1 month ago and adjusting +1 month if the current cycle invoice is already PAID.
+ */
+export function resolveSubscriberAnniversaryNextDue(
+  sub: Partial<SupabasePortalUser>,
+  subscriberInvoices: Array<Partial<SupabaseInvoice>> = [],
+  refDate: Date = new Date()
+): { anchorDay: number; nextBillingDate: string } {
+  const anchorDay = computeBillingAnchorDay(sub);
+  const currentYm = getCycleYearMonth(refDate);
+
+  const explicitNext = extractYmdString((sub as any).next_billing_date);
+  if (explicitNext) {
+    return { anchorDay, nextBillingDate: explicitNext };
+  }
+
+  const hasPaidMonth = (ym: string) =>
+    subscriberInvoices.some((inv) => {
+      const bal = Math.max(0, (Number(inv.amount) || 0) - (Number(inv.paid_amount) || 0));
+      const isPaid = String(inv.status || '').toUpperCase() === 'PAID' || bal <= 0;
+      return isPaid && (doesInvoiceCoverMonth(inv, ym) || String(inv.paid_at || '').slice(0, 7) === ym);
+    });
+
+  const installYmd = extractYmdString(sub.installation_date || sub.created_at);
+  if (installYmd) {
+    const firstDue = addCalendarMonthsYmd(installYmd, 1, anchorDay);
+    const firstYm = firstDue.slice(0, 7);
+
+    // Installed last month or this month: firstDue is this month or next month
+    if (firstYm >= currentYm) {
+      if (hasPaidMonth(firstYm)) {
+        return { anchorDay, nextBillingDate: addCalendarMonthsYmd(firstDue, 1, anchorDay) };
+      }
+      return { anchorDay, nextBillingDate: firstDue };
+    }
+  }
+
+  // Installed > 1 month ago: anchor to current calendar month unless already paid for this month
+  const currentCycleDue = buildCycleDateString(refDate.getFullYear(), refDate.getMonth(), anchorDay);
+  if (hasPaidMonth(currentYm)) {
+    return { anchorDay, nextBillingDate: addCalendarMonthsYmd(currentCycleDue, 1, anchorDay) };
+  }
+  return { anchorDay, nextBillingDate: currentCycleDue };
 }
 
 export interface AnniversaryCronSummary {
@@ -366,17 +493,18 @@ export interface AnniversaryCronSummary {
 let lastAutoAnniversaryRunAt = 0;
 
 /**
- * Creation-Date Anniversary Billing Model:
- * Bills each active subscriber monthly on their exact anchor day (`installation_date || created_at`),
- * skipping any YYYY-MM cycle already present in `invoices`.
- * Note: Supabase `invoices_status_check` allows ('DUE', 'PARTIAL', 'PAID', 'OVERDUE').
+ * Calendar-Month Anniversary Billing Model:
+ * When today >= next_billing_date, bills active subscribers monthly on their exact anchor day
+ * (clamping shorter months like Feb 28/29 and Apr 30), skips YYYY-MM cycles already in `invoices`,
+ * and advances `next_billing_date` by +1 calendar month anchored to `billing_anchor_day`.
  */
 export async function runAnniversaryInvoicingCron(
   supabase: SupabaseClient,
-  options?: { force?: boolean; refDate?: Date; includeMissedDaysInCycle?: boolean }
+  options?: { force?: boolean; refDate?: Date }
 ): Promise<AnniversaryCronSummary> {
   const now = options?.refDate || new Date();
   const cycleMonth = getCycleYearMonth(now);
+  const todayYmd = extractYmdString(now.toISOString()) || getCycleYearMonth(now) + '-01';
 
   if (!options?.force) {
     const ts = Date.now();
@@ -396,7 +524,9 @@ export async function runAnniversaryInvoicingCron(
 
   const [{ data: clients }, { data: existingInvoices }] = await Promise.all([
     supabase.from('portal_users').select('*').eq('role', 'CLIENT'),
-    supabase.from('invoices').select('id, invoice_no, subscriber_username, amount, paid_amount, status, due_date, cycle_day, created_at'),
+    supabase
+      .from('invoices')
+      .select('id, invoice_no, subscriber_username, amount, paid_amount, status, due_date, cycle_day, paid_at, created_at'),
   ]);
 
   const activeClients = ((clients || []) as SupabasePortalUser[]).filter((c) => {
@@ -405,41 +535,63 @@ export async function runAnniversaryInvoicingCron(
   });
 
   const allInvoices = (existingInvoices || []) as SupabaseInvoice[];
-  const invoicedThisMonth = new Set<string>();
+  const invoicesByUser = new Map<string, SupabaseInvoice[]>();
+  const invoicedMonthKeys = new Set<string>();
+
   for (const inv of allInvoices) {
     const uname = String(inv.subscriber_username || '').trim().toLowerCase();
     if (!uname) continue;
+    const arr = invoicesByUser.get(uname) || [];
+    arr.push(inv);
+    invoicesByUser.set(uname, arr);
+
     if (doesInvoiceCoverMonth(inv, cycleMonth)) {
-      invoicedThisMonth.add(uname);
+      invoicedMonthKeys.add(`${uname}::${cycleMonth}`);
+    }
+    const dueYm = String(inv.due_date || '').slice(0, 7);
+    if (dueYm && !String(inv.invoice_no || '').toUpperCase().startsWith('INV-MAT-')) {
+      invoicedMonthKeys.add(`${uname}::${dueYm}`);
     }
   }
 
-  const todayDay = now.getDate();
-  const compactYm = cycleMonth.replace('-', '');
-  const nowIso = now.toISOString();
-  const includeMissed = options?.includeMissedDaysInCycle !== false;
-
   const toInsert: Array<Record<string, any>> = [];
+  const subscriberAdvances: Array<{ id: string; anchorDay: number; nextBillingDate: string }> = [];
   let skippedExisting = 0;
   let skippedUpcomingAnchor = 0;
+  const nowIso = now.toISOString();
 
   for (const sub of activeClients) {
     const uname = String(sub.username || '').trim().toLowerCase();
     if (!uname) continue;
 
-    if (invoicedThisMonth.has(uname)) {
+    const subInvoices = invoicesByUser.get(uname) || [];
+    const { anchorDay, nextBillingDate } = resolveSubscriberAnniversaryNextDue(sub, subInvoices, now);
+    const billingYm = nextBillingDate.slice(0, 7);
+    const compactBillingYm = billingYm.replace('-', '');
+
+    const alreadyInvoicedForPeriod =
+      invoicedMonthKeys.has(`${uname}::${billingYm}`) ||
+      subInvoices.some((inv) => doesInvoiceCoverMonth(inv, billingYm));
+
+    if (alreadyInvoicedForPeriod) {
       skippedExisting++;
+      // If an invoice already exists for nextBillingDate's YYYY-MM but sub.next_billing_date wasn't advanced yet, sync it forward
+      if ((sub as any).next_billing_date && String((sub as any).next_billing_date).slice(0, 10) <= todayYmd && sub.id) {
+        subscriberAdvances.push({
+          id: sub.id,
+          anchorDay,
+          nextBillingDate: addCalendarMonthsYmd(nextBillingDate, 1, anchorDay),
+        });
+      }
       continue;
     }
 
-    const anchorDay = computeBillingAnchorDay(sub);
-    const shouldBill = includeMissed ? anchorDay <= todayDay : anchorDay === todayDay;
-    if (!shouldBill) {
+    // Generate invoice only when today >= next_billing_date
+    if (todayYmd < nextBillingDate) {
       skippedUpcomingAnchor++;
       continue;
     }
 
-    const dueDate = buildCycleDateString(now.getFullYear(), now.getMonth(), anchorDay);
     const rate =
       Number(sub.monthly_fee) > 0
         ? Number(sub.monthly_fee)
@@ -449,8 +601,8 @@ export async function runAnniversaryInvoicingCron(
 
     if (rate <= 0) continue;
 
-    const invoiceNo = `INV-${compactYm}-${Math.floor(1000 + Math.random() * 9000)}`;
-    invoicedThisMonth.add(uname);
+    const invoiceNo = `INV-${compactBillingYm}-${Math.floor(1000 + Math.random() * 9000)}`;
+    invoicedMonthKeys.add(`${uname}::${billingYm}`);
 
     toInsert.push({
       invoice_no: invoiceNo,
@@ -460,10 +612,18 @@ export async function runAnniversaryInvoicingCron(
       amount: rate,
       paid_amount: 0,
       status: 'DUE',
-      due_date: dueDate,
+      due_date: nextBillingDate,
       cycle_day: anchorDay,
       created_at: nowIso,
     });
+
+    if (sub.id) {
+      subscriberAdvances.push({
+        id: sub.id,
+        anchorDay,
+        nextBillingDate: addCalendarMonthsYmd(nextBillingDate, 1, anchorDay),
+      });
+    }
   }
 
   let insertedRows: SupabaseInvoice[] = [];
@@ -476,6 +636,24 @@ export async function runAnniversaryInvoicingCron(
       throw new Error(`Anniversary invoicing insert failed: ${error.message}`);
     }
     insertedRows = (inserted || []) as SupabaseInvoice[];
+  }
+
+  // Advance next_billing_date (+1 calendar month anchored to billing_anchor_day) when columns exist
+  for (const adv of subscriberAdvances) {
+    try {
+      const { error } = await supabase
+        .from('portal_users')
+        .update({
+          billing_anchor_day: adv.anchorDay,
+          next_billing_date: adv.nextBillingDate,
+        } as any)
+        .eq('id', adv.id);
+      if (error && isMissingTableOrColumnError(error)) {
+        break; // Columns not migrated yet; stop cleanly without repeated errors
+      }
+    } catch {
+      break;
+    }
   }
 
   const totalBilled = insertedRows.reduce((sum, i) => sum + (Number(i.amount) || 0), 0);
@@ -497,6 +675,7 @@ export interface EvaluatedSubscriberExpiry {
   subscriber: SupabasePortalUser;
   username: string;
   anchorDay: number;
+  nextBillingDate: string;
   amountDue: number;
   effectiveExpiryMs: number | null;
   graceEndsMs: number | null;
@@ -507,10 +686,9 @@ export interface EvaluatedSubscriberExpiry {
 }
 
 /**
- * Evaluates live expiry & 24h grace period buckets by combining:
- * 1) Creation-date anniversary due dates (installation_date || created_at)
- * 2) Unpaid/partial invoices (including subscribers not yet mirrored into portal_users)
- * 3) Live MikroTik 16.16.16.0/24 / Expire / disabled state
+ * Evaluates live expiry & 24h grace period buckets directly from each subscriber's
+ * calendar-month anniversary next_billing_date (`installation_date` / `billing_anchor_day`),
+ * unpaid/partial invoices, and live MikroTik 16.16.16.0/24 / Expire / disabled state.
  */
 export function evaluateSubscribersExpiryBuckets(params: {
   subscribers: SupabasePortalUser[];
@@ -528,7 +706,6 @@ export function evaluateSubscribersExpiryBuckets(params: {
 } {
   const nowMs = params.nowMs ?? Date.now();
   const nowDate = new Date(nowMs);
-  const currentYm = getCycleYearMonth(nowDate);
   const cutoffPkt = params.cutoffTimePkt || '14:00';
   const graceHours = Math.max(0, Number(params.graceHours ?? 24));
   const threeDaysMs = 3 * 86_400_000;
@@ -539,20 +716,21 @@ export function evaluateSubscribersExpiryBuckets(params: {
     string,
     { amountDue: number; earliestDueDate: string | null; cycleDay?: number | null }
   >();
-  const paidThisMonthUsers = new Set<string>();
+  const invoicesByUser = new Map<string, SupabaseInvoice[]>();
 
   for (const inv of params.allInvoices || []) {
     const uname = String(inv.subscriber_username || '').trim().toLowerCase();
     if (!uname) continue;
+    const list = invoicesByUser.get(uname) || [];
+    list.push(inv);
+    invoicesByUser.set(uname, list);
+
     const total = Number(inv.amount) || 0;
     const paid = Number(inv.paid_amount) || 0;
     const balance = Math.max(0, total - paid);
     const status = String(inv.status || '').toUpperCase();
 
     if (status === 'PAID' || balance <= 0) {
-      if (doesInvoiceCoverMonth(inv, currentYm) || String(inv.paid_at || '').slice(0, 7) === currentYm) {
-        paidThisMonthUsers.add(uname);
-      }
       continue;
     }
 
@@ -675,9 +853,9 @@ export function evaluateSubscribersExpiryBuckets(params: {
 
   for (const [uname, entry] of candidates.entries()) {
     const { sub, isSynthetic } = entry;
+    const subInvoices = invoicesByUser.get(uname) || [];
     const unpaid = unpaidByUser.get(uname);
-    const hasPaidThisMonth = paidThisMonthUsers.has(uname);
-    const anchorDay = computeBillingAnchorDay(sub);
+    const { anchorDay, nextBillingDate } = resolveSubscriberAnniversaryNextDue(sub, subInvoices, nowDate);
     const sec = mkSecretByUser.get(uname);
     const act = mkActiveByUser.get(uname);
 
@@ -694,6 +872,11 @@ export function evaluateSubscribersExpiryBuckets(params: {
     const isMkExpiredProfile = isExpiredProfile(sec?.profile);
     const isMkDisabled = sec?.disabled === 'true' || sec?.disabled === true;
 
+    const effectiveNextBillingDate =
+      unpaid?.earliestDueDate && unpaid.earliestDueDate < nextBillingDate
+        ? unpaid.earliestDueDate
+        : nextBillingDate;
+
     // 1. Check explicit DB or MikroTik suspension state first
     if (
       billingStatus === 'SUSPENDED_EXPIRED' ||
@@ -704,13 +887,14 @@ export function evaluateSubscribersExpiryBuckets(params: {
       isMkDisabled
     ) {
       const fallbackExpMs = parseExpiryDateWithCutoffMs(
-        unpaid?.earliestDueDate || sub.expiry_date || buildCycleDateString(nowDate.getFullYear(), nowDate.getMonth(), anchorDay),
+        unpaid?.earliestDueDate || effectiveNextBillingDate || sub.expiry_date,
         cutoffPkt
       );
       suspended16.push({
         subscriber: sub,
         username: uname,
         anchorDay,
+        nextBillingDate: effectiveNextBillingDate,
         amountDue,
         effectiveExpiryMs: fallbackExpMs,
         graceEndsMs: fallbackExpMs ? fallbackExpMs + graceHours * 3_600_000 : null,
@@ -728,58 +912,8 @@ export function evaluateSubscribersExpiryBuckets(params: {
       continue;
     }
 
-    // 2. Determine effective expiry date using unpaid invoice due_date OR anniversary date
-    const currentAnniversaryDate = buildCycleDateString(
-      nowDate.getFullYear(),
-      nowDate.getMonth(),
-      anchorDay
-    );
-    const nextMonthDateObj = new Date(nowDate.getFullYear(), nowDate.getMonth() + 1, 1);
-    const nextAnniversaryDate = buildCycleDateString(
-      nextMonthDateObj.getFullYear(),
-      nextMonthDateObj.getMonth(),
-      anchorDay
-    );
-
-    const currentAnniversaryMs = parseExpiryDateWithCutoffMs(currentAnniversaryDate, cutoffPkt);
-    const explicitExpiryMs = parseExpiryDateWithCutoffMs(sub.expiry_date, cutoffPkt);
-    const unpaidDueMs = parseExpiryDateWithCutoffMs(unpaid?.earliestDueDate, cutoffPkt);
-
-    let effectiveExpiryMs: number | null = null;
-
-    if (unpaidDueMs !== null) {
-      // Unpaid invoice due date takes precedence when sooner, or use current cycle anniversary if overdue
-      effectiveExpiryMs =
-        explicitExpiryMs !== null && explicitExpiryMs < unpaidDueMs ? explicitExpiryMs : unpaidDueMs;
-    } else if (hasPaidThisMonth) {
-      // Paid current cycle: upcoming due date is explicit expiry_date or next month's anniversary date
-      effectiveExpiryMs =
-        explicitExpiryMs !== null
-          ? explicitExpiryMs
-          : parseExpiryDateWithCutoffMs(nextAnniversaryDate, cutoffPkt);
-    } else {
-      // Active subscriber without current-month payment: check anniversary day!
-      // If installed/created in a prior month OR anniversary is today/upcoming within 3 days, use current anniversary;
-      // otherwise fall back to explicit expiry_date or next month's anniversary.
-      const instYm = String(sub.installation_date || sub.created_at || '').slice(0, 7);
-      const isInstalledThisMonth = instYm === currentYm;
-
-      if (!isInstalledThisMonth && currentAnniversaryMs !== null) {
-        effectiveExpiryMs = currentAnniversaryMs;
-      } else if (
-        currentAnniversaryMs !== null &&
-        Math.abs(currentAnniversaryMs - nowMs) <= threeDaysMs
-      ) {
-        // Installed this month with anchor within +/- 3 days (e.g. today's anniversary batch)
-        effectiveExpiryMs = currentAnniversaryMs;
-      } else {
-        effectiveExpiryMs =
-          explicitExpiryMs !== null
-            ? explicitExpiryMs
-            : parseExpiryDateWithCutoffMs(nextAnniversaryDate, cutoffPkt);
-      }
-    }
-
+    // 2. Compute expiry timestamp directly from anniversary next_billing_date (or earlier unpaid invoice due_date)
+    const effectiveExpiryMs = parseExpiryDateWithCutoffMs(effectiveNextBillingDate, cutoffPkt);
     if (effectiveExpiryMs === null) continue;
 
     const graceEndsMs = sub.grace_ends_at
@@ -794,6 +928,7 @@ export function evaluateSubscribersExpiryBuckets(params: {
         subscriber: sub,
         username: uname,
         anchorDay,
+        nextBillingDate: effectiveNextBillingDate,
         amountDue,
         effectiveExpiryMs,
         graceEndsMs,
@@ -809,6 +944,7 @@ export function evaluateSubscribersExpiryBuckets(params: {
         subscriber: sub,
         username: uname,
         anchorDay,
+        nextBillingDate: effectiveNextBillingDate,
         amountDue,
         effectiveExpiryMs,
         graceEndsMs,
@@ -826,6 +962,7 @@ export function evaluateSubscribersExpiryBuckets(params: {
         subscriber: sub,
         username: uname,
         anchorDay,
+        nextBillingDate: effectiveNextBillingDate,
         amountDue,
         effectiveExpiryMs,
         graceEndsMs,

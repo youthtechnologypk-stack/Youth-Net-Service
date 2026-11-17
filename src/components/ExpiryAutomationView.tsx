@@ -32,7 +32,7 @@ import { useISP } from '../context/ISPContext';
 import { useCurrency } from '../context/CurrencyContext';
 import { safeMikrotikFetch } from '../services/mikrotikRestClient';
 import { getActiveRouterAuth, resolveRestHostAndPort } from '../services/apiClient';
-import { restoreSubscriberOnInvoicePaid } from '../lib/billingAndNetwork';
+import { restoreSubscriberOnInvoicePaid, addCalendarMonthDateString } from '../lib/billingAndNetwork';
 import { openWhatsAppLink } from '../lib/whatsappBilling';
 import { EXPIRY_MIGRATION_SQL } from '../lib/expiryMigrationSql';
 import {
@@ -41,7 +41,7 @@ import {
   isMissingTableOrColumnError,
   loadBillingSettingsFromDb,
 } from '../lib/expiryUtils';
-import { evaluateSubscribersExpiryBuckets } from '../lib/anniversaryBilling';
+import { computeBillingAnchorDay, evaluateSubscribersExpiryBuckets } from '../lib/anniversaryBilling';
 
 type ExpiryTabKey = 'expiring_3d' | 'grace_24h' | 'suspended_16' | 'audit_logs';
 
@@ -548,7 +548,8 @@ export const ExpiryAutomationView: React.FC = () => {
     const uname = String(sub.username || '').trim().toLowerCase();
     setBusyUsernames((p) => ({ ...p, [uname]: true }));
     const nowIso = new Date().toISOString();
-    const nextDueDate = new Date(Date.now() + 30 * 86_400_000).toISOString().split('T')[0];
+    const anchorDay = computeBillingAnchorDay(sub);
+    const nextDueDate = addCalendarMonthDateString(new Date(), anchorDay);
 
     try {
       // 1. Settle any open invoices in Supabase for this subscriber

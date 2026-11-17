@@ -12,6 +12,7 @@ import {
 } from '../lib/billingAndNetwork';
 import { supabase, SupabasePortalUser } from '../services/supabaseClient';
 import { createAgentCommission } from '../services/erpInventoryService';
+import { addCalendarMonthsYmd, extractYmdString } from '../lib/anniversaryBilling';
 
 interface ProvisionSecretModalProps {
   isOpen: boolean;
@@ -127,14 +128,19 @@ export const ProvisionSecretModal: React.FC<ProvisionSecretModalProps> = ({ isOp
         return new Date(now.getTime() + 3 * 24 * 60 * 60 * 1000);
       case '7_days':
         return new Date(now.getTime() + 7 * 24 * 60 * 60 * 1000);
-      case '1_month':
-        return new Date(now.getTime() + 30 * 24 * 60 * 60 * 1000);
+      case '1_month': {
+        const nowYmd = extractYmdString(now.toISOString()) || new Date().toISOString().slice(0, 10);
+        const nextYmd = addCalendarMonthsYmd(nowYmd, 1, now.getDate());
+        const d = new Date(`${nextYmd}T${String(now.getHours()).padStart(2, '0')}:${String(now.getMinutes()).padStart(2, '0')}:00`);
+        return isNaN(d.getTime()) ? new Date(now.getFullYear(), now.getMonth() + 1, now.getDate()) : d;
+      }
       case 'custom': {
         const parsed = new Date(customDateTime);
-        return isNaN(parsed.getTime()) ? new Date(now.getTime() + 30 * 24 * 60 * 60 * 1000) : parsed;
+        if (!isNaN(parsed.getTime())) return parsed;
+        return new Date(now.getFullYear(), now.getMonth() + 1, now.getDate());
       }
       default:
-        return new Date(now.getTime() + 30 * 24 * 60 * 60 * 1000);
+        return new Date(now.getFullYear(), now.getMonth() + 1, now.getDate());
     }
   }, [validityPreset, customDateTime]);
 
@@ -520,7 +526,7 @@ export const ProvisionSecretModal: React.FC<ProvisionSecretModalProps> = ({ isOp
               <span>Automated 5-Step Single-Action Pipeline:</span>
             </div>
             <p className="text-[10px] text-slate-500 leading-relaxed">
-              1. Adds PPPoE Secret with metadata on RouterOS · 2. Creates Client Portal user · 3. Generates Invoice #1 anchored to 31-day cycle · 4. Schedules RouterOS `/system/scheduler` expiry script · 5. Dispatches welcome WhatsApp.
+              1. Adds PPPoE Secret with metadata on RouterOS · 2. Creates Client Portal user · 3. Generates Invoice #1 anchored to monthly anniversary cycle · 4. Schedules RouterOS `/system/scheduler` expiry script · 5. Dispatches welcome WhatsApp.
             </p>
           </div>
 

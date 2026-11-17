@@ -66,7 +66,7 @@ import { AreaNodeSelector } from './AreaNodeSelector';
 import {
   fetchMikrotikInterfaceTrafficOnce,
   restoreSubscriberOnInvoicePaid,
-  add31DaysDateString,
+  addCalendarMonthDateString,
   fetchNetworkAreas,
   resolveAreaFromUsername,
   NetworkAreaNode,
@@ -75,9 +75,13 @@ import {
 import { buildWhatsAppUrl } from '../lib/whatsappBilling';
 import {
   FIELD_STAFF_ROLES,
+  computeBillingAnchorDay,
+  computeNextBillingDateFromInstall,
+  extractYmdString,
   insertTicketSafe,
   normalizeTicketPriority,
 } from '../lib/anniversaryBilling';
+import { isMissingTableOrColumnError } from '../lib/expiryUtils';
 
 export interface SubscriberProfileViewProps {
   username: string;
@@ -172,6 +176,7 @@ export const SubscriberProfileView: React.FC<SubscriberProfileViewProps> = ({
     cnic: '',
     address: '',
     area: '',
+    installationDate: new Date().toISOString().slice(0, 10),
     accountStatus: 'ACTIVE' as 'ACTIVE' | 'EXPIRED' | 'SUSPENDED',
     packageSpeed: '30 Mbps',
     packageVolumeGb: 1500,
@@ -184,6 +189,23 @@ export const SubscriberProfileView: React.FC<SubscriberProfileViewProps> = ({
     patchCordQty: 1,
   });
   const [isSavingEdit, setIsSavingEdit] = useState<boolean>(false);
+
+  const editAnchorDay = useMemo(
+    () =>
+      computeBillingAnchorDay({
+        installation_date: editForm.installationDate || new Date().toISOString().slice(0, 10),
+      }),
+    [editForm.installationDate]
+  );
+
+  const editNextBillingPreview = useMemo(
+    () =>
+      computeNextBillingDateFromInstall(
+        editForm.installationDate || new Date().toISOString().slice(0, 10),
+        editAnchorDay
+      ),
+    [editForm.installationDate, editAnchorDay]
+  );
 
   // Add Material Modal form
   const [materialForm, setMaterialForm] = useState({
@@ -260,12 +282,16 @@ export const SubscriberProfileView: React.FC<SubscriberProfileViewProps> = ({
 
       if (userData) {
         setUser(userData as SupabasePortalUser);
+        const resolvedInstallDate =
+          extractYmdString(userData.installation_date || userData.created_at) ||
+          new Date().toISOString().slice(0, 10);
         setEditForm({
           fullName: userData.full_name || '',
           phone: userData.phone || '',
           cnic: userData.cnic || '',
           address: userData.address || '',
           area: userData.area || '',
+          installationDate: resolvedInstallDate,
           accountStatus: (userData.account_status as any) || 'ACTIVE',
           packageSpeed: userData.package_speed || '30 Mbps',
           packageVolumeGb: userData.package_volume_gb || 1500,
@@ -804,12 +830,19 @@ export const SubscriberProfileView: React.FC<SubscriberProfileViewProps> = ({
     e.preventDefault();
     setIsSavingEdit(true);
     try {
-      const updatePayload: Partial<SupabasePortalUser> = {
+      const normalizedInstallDate =
+        extractYmdString(editForm.installationDate) || new Date().toISOString().slice(0, 10);
+      const anchorDay = computeBillingAnchorDay({ installation_date: normalizedInstallDate });
+      const nextBillingDate = computeNextBillingDateFromInstall(normalizedInstallDate, anchorDay);
+
+      const baseUpdatePayload: Partial<SupabasePortalUser> = {
         full_name: editForm.fullName,
         phone: editForm.phone,
         cnic: editForm.cnic,
         address: editForm.address,
         area: editForm.area,
+        installation_date: normalizedInstallDate,
+        expiry_date: nextBillingDate,
         account_status: editForm.accountStatus,
         package_speed: editForm.packageSpeed,
         package_volume_gb: Number(editForm.packageVolumeGb),
@@ -822,14 +855,28 @@ export const SubscriberProfileView: React.FC<SubscriberProfileViewProps> = ({
         patch_cord_qty: Number(editForm.patchCordQty),
       };
 
-      const updateQuery = user?.id
-        ? supabase.from('portal_users').update(updatePayload).eq('id', user.id)
-        : supabase.from('portal_users').update(updatePayload).ilike('username', cleanUsername);
-      const { error } = await updateQuery;
+      const extendedPayload: Partial<SupabasePortalUser> = {
+        ...baseUpdatePayload,
+        billing_anchor_day: anchorDay,
+        next_billing_date: nextBillingDate,
+      };
+
+      const runUpdate = (payload: Partial<SupabasePortalUser>) =>
+        user?.id
+          ? supabase.from('portal_users').update(payload as any).eq('id', user.id)
+          : supabase.from('portal_users').update(payload as any).ilike('username', cleanUsername);
+
+      let { error } = await runUpdate(extendedPayload);
+      if (error && isMissingTableOrColumnError(error)) {
+        const retry = await runUpdate(baseUpdatePayload);
+        error = retry.error;
+      }
 
       if (error) throw new Error(error.message);
 
-      showToast(`Subscriber @${cleanUsername} profile updated successfully!`);
+      showToast(
+        `Subscriber @${cleanUsername} updated! Billing Day: ${anchorDay} of every month • Next Due: ${nextBillingDate}.`
+      );
       setIsEditUserModalOpen(false);
       await fetchAllProfileData();
     } catch (err: any) {
@@ -872,16 +919,16 @@ export const SubscriberProfileView: React.FC<SubscriberProfileViewProps> = ({
           const newAmount = Number(unpaidInv.amount) + totalCharge;
           await supabase.from('invoices').update({ amount: newAmount }).eq('id', unpaidInv.id);
         } else {
-          const dueD = new Date();
-          dueD.setDate(dueD.getDate() + 31);
+          const anchorDay = user ? computeBillingAnchorDay(user) : new Date().getDate();
+          const nextDue = addCalendarMonthDateString(new Date(), anchorDay);
           await supabase.from('invoices').insert([{
             invoice_no: `INV-MAT-${Math.floor(1000 + Math.random() * 9000)}`,
             subscriber_username: cleanUsername,
             amount: totalCharge,
             paid_amount: 0,
             status: 'DUE',
-            due_date: dueD.toISOString().split('T')[0],
-            cycle_day: 31,
+            due_date: nextDue,
+            cycle_day: anchorDay,
             assigned_agent_name: materialForm.installedByAgent || 'NOC Billing',
           }]);
         }
@@ -976,15 +1023,21 @@ export const SubscriberProfileView: React.FC<SubscriberProfileViewProps> = ({
       const finalPaidAmount = remaining <= 0 ? totalAmount : newPaidTotal;
       const nowIso = new Date().toISOString();
 
-      // 1. Update invoice with 31-day cycle & due_date renewal on PAID
+      // 1. Update invoice with calendar-month anniversary renewal on PAID
+      const anchorDay = user ? computeBillingAnchorDay(user) : (inv.cycle_day || new Date().getDate());
       const invUpdate: Partial<SupabaseInvoice> = {
         status: newStatus,
         paid_amount: finalPaidAmount,
         paid_at: newStatus === 'PAID' ? nowIso : (inv.paid_at || null),
-        cycle_day: 31,
+        cycle_day: anchorDay,
       };
       if (newStatus === 'PAID') {
-        invUpdate.due_date = add31DaysDateString(new Date());
+        invUpdate.due_date = addCalendarMonthDateString(
+          inv.due_date && inv.due_date >= new Date().toISOString().slice(0, 10)
+            ? inv.due_date
+            : new Date(),
+          anchorDay
+        );
       }
       await supabase.from('invoices').update(invUpdate).eq('id', inv.id);
 
@@ -1247,7 +1300,17 @@ export const SubscriberProfileView: React.FC<SubscriberProfileViewProps> = ({
             </div>
             <div className="flex justify-between items-center">
               <span className="text-slate-400 font-sans">Installation Date:</span>
-              <span className="text-slate-300">{user?.installation_date || user?.created_at?.split('T')[0] || 'N/A'}</span>
+              <span className="text-slate-300">
+                {extractYmdString(user?.installation_date || user?.created_at) || 'N/A'}
+              </span>
+            </div>
+            <div className="flex justify-between items-center">
+              <span className="text-slate-400 font-sans">Monthly Billing Cycle:</span>
+              <span className="text-cyan-400 font-bold">
+                Day {computeBillingAnchorDay(user || {})} &bull; Next Due:{' '}
+                {extractYmdString(user?.next_billing_date || user?.expiry_date) ||
+                  computeNextBillingDateFromInstall(user?.installation_date || user?.created_at)}
+              </span>
             </div>
 
             {/* Password Toggle Row */}
@@ -2343,6 +2406,23 @@ export const SubscriberProfileView: React.FC<SubscriberProfileViewProps> = ({
                     <option value="EXPIRED">EXPIRED</option>
                     <option value="SUSPENDED">SUSPENDED</option>
                   </select>
+                </div>
+              </div>
+
+              <div className="p-3 bg-slate-900/90 rounded-xl border border-slate-800 space-y-1.5">
+                <label className="block font-medium text-slate-300">
+                  Installation Date (Monthly Billing Anchor)
+                </label>
+                <input
+                  type="date"
+                  required
+                  value={editForm.installationDate}
+                  onChange={(e) => setEditForm({ ...editForm, installationDate: e.target.value })}
+                  className="w-full px-3 py-2 bg-slate-950 border border-slate-700 rounded-lg text-white font-mono focus:outline-none focus:border-cyan-500"
+                />
+                <div className="text-[11px] font-mono text-cyan-400 pt-0.5">
+                  Monthly Billing Day: <strong className="text-white">{editAnchorDay}</strong> of every month &bull; Next Due Date:{' '}
+                  <strong className="text-emerald-400">{editNextBillingPreview}</strong>
                 </div>
               </div>
 

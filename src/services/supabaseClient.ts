@@ -39,6 +39,8 @@ export interface SupabasePortalUser {
   drop_wire_meters?: number | null;
   patch_cord_qty?: number | null;
   installation_date?: string | null;
+  billing_anchor_day?: number | null;
+  next_billing_date?: string | null;
   expiry_date?: string | null;
   package_profile_name?: string | null;
   original_package_profile?: string | null;
