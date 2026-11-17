@@ -28,6 +28,8 @@ ALTER TABLE public.portal_users
     ADD COLUMN IF NOT EXISTS next_billing_date DATE,
     ADD COLUMN IF NOT EXISTS original_package_profile TEXT,
     ADD COLUMN IF NOT EXISTS billing_status TEXT DEFAULT 'ACTIVE',
+    ADD COLUMN IF NOT EXISTS is_suspended BOOLEAN DEFAULT FALSE,
+    ADD COLUMN IF NOT EXISTS grace_until TIMESTAMPTZ,
     ADD COLUMN IF NOT EXISTS grace_ends_at TIMESTAMPTZ,
     ADD COLUMN IF NOT EXISTS last_reminder_cycle TEXT,
     ADD COLUMN IF NOT EXISTS suspended_at TIMESTAMPTZ,
@@ -36,6 +38,7 @@ ALTER TABLE public.portal_users
 CREATE INDEX IF NOT EXISTS idx_portal_users_role_billing_status ON public.portal_users (role, billing_status);
 CREATE INDEX IF NOT EXISTS idx_portal_users_expiry_date ON public.portal_users (expiry_date);
 CREATE INDEX IF NOT EXISTS idx_portal_users_next_billing_date ON public.portal_users (next_billing_date);
+CREATE INDEX IF NOT EXISTS idx_portal_users_grace_until ON public.portal_users (grace_until);
 CREATE INDEX IF NOT EXISTS idx_portal_users_grace_ends_at ON public.portal_users (grace_ends_at);
 
 CREATE TABLE IF NOT EXISTS public.expiry_audit_logs (

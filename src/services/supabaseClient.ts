@@ -45,6 +45,8 @@ export interface SupabasePortalUser {
   package_profile_name?: string | null;
   original_package_profile?: string | null;
   billing_status?: 'ACTIVE' | 'REMINDER_SENT' | 'GRACE_PERIOD' | 'SUSPENDED_EXPIRED' | string | null;
+  is_suspended?: boolean | null;
+  grace_until?: string | null;
   grace_ends_at?: string | null;
   last_reminder_cycle?: string | null;
   suspended_at?: string | null;

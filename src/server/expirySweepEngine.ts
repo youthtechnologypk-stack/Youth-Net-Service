@@ -153,6 +153,7 @@ async function safeUpdateSubscriber(
   supabase: SupabaseClient,
   subscriberId: string,
   fullPatch: Record<string, any>,
+  existingMigrationPatch: Record<string, any>,
   corePatch: Record<string, any>,
   schemaWarnings: Set<string>
 ): Promise<void> {
@@ -166,6 +167,13 @@ async function safeUpdateSubscriber(
       schemaWarnings.add(
         'portal_users missing one or more expiry automation columns (run SQL migration 20261114_expiry_grace_automation.sql).'
       );
+      if (Object.keys(existingMigrationPatch).length > 0) {
+        const res2 = await supabase
+          .from('portal_users')
+          .update(existingMigrationPatch)
+          .eq('id', subscriberId);
+        if (!res2.error) return;
+      }
       if (Object.keys(corePatch).length > 0) {
         await supabase.from('portal_users').update(corePatch).eq('id', subscriberId);
       }
@@ -225,8 +233,73 @@ async function safeInsertWhatsappReminderLog(
   }
 }
 
+async function ensurePortalClientForSuspension(
+  supabase: SupabaseClient,
+  uname: string,
+  backupProfile: string,
+  amountDue: number,
+  rawExpiry: string | null,
+  schemaWarnings: Set<string>
+): Promise<string | null> {
+  const { data: existing } = await supabase
+    .from('portal_users')
+    .select('id')
+    .ilike('username', uname)
+    .limit(1)
+    .maybeSingle();
+
+  if (existing?.id) return String(existing.id);
+
+  const basePayload = {
+    username: uname,
+    password: `Yn@${Math.floor(1000 + Math.random() * 9000)}`,
+    role: 'CLIENT',
+    full_name: uname,
+    phone: '',
+    area: 'Saddar Node',
+    account_status: 'ACTIVE',
+    billing_status: 'ACTIVE',
+    package_speed: backupProfile,
+    package_profile_name: backupProfile,
+    original_package_profile: backupProfile,
+    monthly_fee: amountDue,
+    expiry_date: rawExpiry ? `${String(rawExpiry).slice(0, 10)}T14:00:00+05:00` : null,
+  };
+
+  const { data: inserted, error } = await supabase
+    .from('portal_users')
+    .insert([basePayload])
+    .select('id')
+    .maybeSingle();
+
+  if (error) {
+    if (isMissingTableOrColumnError(error)) {
+      schemaWarnings.add('portal_users missing expiry columns during invoice-user sync.');
+      const { data: minimal } = await supabase
+        .from('portal_users')
+        .insert([
+          {
+            username: uname,
+            password: basePayload.password,
+            role: 'CLIENT',
+            full_name: uname,
+            phone: '',
+            area: 'Saddar Node',
+            account_status: 'ACTIVE',
+          },
+        ])
+        .select('id')
+        .maybeSingle();
+      return minimal?.id ? String(minimal.id) : null;
+    }
+    return null;
+  }
+
+  return inserted?.id ? String(inserted.id) : null;
+}
+
 /**
- * Full-Stack Automated Expiry, 2:00 PM PKT Cut-Off, 24h Grace Period & 16.16.16.0/24 Sweep Engine.
+ * Full-Stack Automated Expiry, 2:00 PM PKT Cut-Off, Grace / Extra Grace Period & 16.16.16.0/24 Sweep Engine.
  */
 export async function runExpirySweep(
   options: ExpirySweepOptions = {}
@@ -276,7 +349,7 @@ export async function runExpirySweep(
     };
   }
 
-  const subscribers = (clientsRes.data || []) as Array<Record<string, any>>;
+  const dbSubscribers = (clientsRes.data || []) as Array<Record<string, any>>;
   const openInvoices = (invoicesRes.data || []) as Array<Record<string, any>>;
 
   // Index open unpaid dues per lowercase username
@@ -288,10 +361,36 @@ export async function runExpirySweep(
     if (bal <= 0) continue;
     const prev = unpaidByUser.get(uname) || { totalDue: 0, earliestDueDate: null };
     prev.totalDue += bal;
-    if (inv.due_date && (!prev.earliestDueDate || inv.due_date < prev.earliestDueDate)) {
+    if (inv.due_date && (!prev.earliestDueDate || String(inv.due_date) < prev.earliestDueDate)) {
       prev.earliestDueDate = String(inv.due_date);
     }
     unpaidByUser.set(uname, prev);
+  }
+
+  // Merge portal_users (CLIENT) + invoice-only subscribers with unpaid dues (e.g. bmballi, bkranakashif, gbnoman)
+  const candidatesByUser = new Map<string, { sub: Record<string, any>; isSynthetic: boolean }>();
+  for (const sub of dbSubscribers) {
+    const uname = String(sub.username || '').trim().toLowerCase();
+    if (!uname) continue;
+    candidatesByUser.set(uname, { sub, isSynthetic: false });
+  }
+  for (const [uname, unpaid] of unpaidByUser.entries()) {
+    if (candidatesByUser.has(uname) || unpaid.totalDue <= 0) continue;
+    candidatesByUser.set(uname, {
+      isSynthetic: true,
+      sub: {
+        id: null,
+        username: uname,
+        full_name: uname,
+        role: 'CLIENT',
+        account_status: 'ACTIVE',
+        billing_status: 'ACTIVE',
+        is_suspended: false,
+        monthly_fee: unpaid.totalDue,
+        expiry_date: unpaid.earliestDueDate,
+        next_billing_date: unpaid.earliestDueDate,
+      },
+    });
   }
 
   // Lazy-fetch MikroTik secrets & active sessions once only if needed for suspensions
@@ -326,168 +425,193 @@ export async function runExpirySweep(
   const graceHours = Math.max(0, Number(settings.grace_hours) || 24);
   const threeDaysMs = 3 * 86_400_000;
   const supportWhatsapp = waConfig?.support_whatsapp || '+923234193599';
+  const isDisableMode =
+    String(settings.suspension_mode || '').toUpperCase() === 'DISABLE_SECRET';
+  const expiryProfileLower = String(settings.expiry_ppp_profile || 'EXPIRED-16-POOL')
+    .trim()
+    .toLowerCase();
 
-  for (const sub of subscribers) {
-    const uname = String(sub.username || '').trim().toLowerCase();
-    if (!uname) continue;
-
+  for (const [uname, entry] of candidatesByUser.entries()) {
+    const { sub, isSynthetic } = entry;
     const unpaidInfo = unpaidByUser.get(uname);
+    const dueAmount = unpaidInfo?.totalDue || 0;
+
     const { nextBillingDate } = resolveSubscriberAnniversaryNextDue(sub, [], new Date(nowMs));
+    const subNextDue = sub.next_billing_date ? String(sub.next_billing_date).slice(0, 10) : null;
     const rawExpiry =
-      sub.next_billing_date || unpaidInfo?.earliestDueDate || sub.expiry_date || nextBillingDate || null;
+      unpaidInfo?.earliestDueDate && (!subNextDue || unpaidInfo.earliestDueDate < subNextDue)
+        ? unpaidInfo.earliestDueDate
+        : subNextDue || sub.expiry_date || nextBillingDate || null;
     const expiryMs = parseExpiryDateWithCutoffMs(rawExpiry, settings.cutoff_time_pkt);
 
-    if (!expiryMs) {
+    const explicitGraceStr = (sub as any).grace_until || sub.grace_ends_at || null;
+    const explicitGraceMs = explicitGraceStr ? Date.parse(String(explicitGraceStr)) : NaN;
+    const hasExplicitFutureGrace = !Number.isNaN(explicitGraceMs) && explicitGraceMs > nowMs;
+
+    if (!expiryMs && Number.isNaN(explicitGraceMs)) {
       skippedPaid++;
       continue;
     }
 
     const billingStatus = String(sub.billing_status || '').toUpperCase();
     const accountStatus = String(sub.account_status || 'ACTIVE').toUpperCase();
-    const amountDue =
-      unpaidInfo && unpaidInfo.totalDue > 0
-        ? unpaidInfo.totalDue
-        : Number(sub.monthly_fee) || 2500;
+    const amountDue = dueAmount > 0 ? dueAmount : Number(sub.monthly_fee) || 2500;
 
     // -----------------------------------------------------------------------
     // STAGE 1: 3-Day Advance Reminder (now < expiry && expiry <= now + 3 days)
     // -----------------------------------------------------------------------
-    if (nowMs < expiryMs && expiryMs <= nowMs + threeDaysMs) {
+    if (expiryMs && nowMs < expiryMs && expiryMs <= nowMs + threeDaysMs && !hasExplicitFutureGrace) {
       if (billingStatus === 'SUSPENDED_EXPIRED' || billingStatus === 'GRACE_PERIOD') {
         continue;
       }
-      const cycleKey = new Date(expiryMs).toISOString().slice(0, 7);
-      if (sub.last_reminder_cycle === cycleKey || billingStatus === 'REMINDER_SENT') {
-        continue;
-      }
-
-      const packageLabel = String(
-        sub.package_speed || sub.package_profile_name || sub.original_package_profile || 'Fiber Broadband'
-      );
-      const expiryDateLabel = new Date(expiryMs).toISOString().slice(0, 10);
-      const slipText = buildBilingualPaymentSlip({
-        fullName: String(sub.full_name || sub.username),
-        username: uname,
-        packageLabel,
-        amountDue,
-        expiryDateLabel,
-        settings,
-        supportWhatsapp,
-      });
-
-      let sendStatus: 'QUEUED' | 'SENT' | 'FAILED' = 'QUEUED';
-      if (!options.skipExternalWhatsapp && sub.phone && waConfig) {
-        try {
-          const normalizedPhone = normalizeToPlus92(sub.phone);
-          const provider = waConfig.phone_number_id ? 'meta' : 'ultramsg';
-          const sent = await dispatchOutboundWhatsAppReply(
-            provider,
-            normalizedPhone,
-            slipText,
-            waConfig
-          );
-          if (sent) sendStatus = 'SENT';
-        } catch {
-          sendStatus = 'FAILED';
+      if (!isSynthetic && sub.id) {
+        const cycleKey = new Date(expiryMs).toISOString().slice(0, 7);
+        if (sub.last_reminder_cycle === cycleKey || billingStatus === 'REMINDER_SENT') {
+          continue;
         }
+
+        const packageLabel = String(
+          sub.package_speed || sub.package_profile_name || sub.original_package_profile || 'Fiber Broadband'
+        );
+        const expiryDateLabel = new Date(expiryMs).toISOString().slice(0, 10);
+        const slipText = buildBilingualPaymentSlip({
+          fullName: String(sub.full_name || sub.username),
+          username: uname,
+          packageLabel,
+          amountDue,
+          expiryDateLabel,
+          settings,
+          supportWhatsapp,
+        });
+
+        let sendStatus: 'QUEUED' | 'SENT' | 'FAILED' = 'QUEUED';
+        if (!options.skipExternalWhatsapp && sub.phone && waConfig) {
+          try {
+            const normalizedPhone = normalizeToPlus92(sub.phone);
+            const provider = waConfig.phone_number_id ? 'meta' : 'ultramsg';
+            const sent = await dispatchOutboundWhatsAppReply(
+              provider,
+              normalizedPhone,
+              slipText,
+              waConfig
+            );
+            if (sent) sendStatus = 'SENT';
+          } catch {
+            sendStatus = 'FAILED';
+          }
+        }
+
+        await safeInsertWhatsappReminderLog(
+          supabase,
+          {
+            subscriber_id: sub.id,
+            username: uname,
+            phone: sub.phone || null,
+            message_body: slipText,
+            amount_due: amountDue,
+            expiry_date: new Date(expiryMs).toISOString(),
+            status: sendStatus,
+            created_at: nowIso,
+          },
+          schemaWarningsSet
+        );
+
+        await safeUpdateSubscriber(
+          supabase,
+          sub.id,
+          {
+            billing_status: 'REMINDER_SENT',
+            last_reminder_cycle: cycleKey,
+          },
+          {
+            billing_status: 'REMINDER_SENT',
+            last_reminder_cycle: cycleKey,
+          },
+          {},
+          schemaWarningsSet
+        );
+
+        await safeInsertAuditLog(
+          supabase,
+          {
+            subscriber_id: sub.id,
+            username: uname,
+            action_type: 'REMINDER_3D',
+            previous_profile: sub.original_package_profile || sub.package_profile_name || null,
+            applied_profile: sub.package_profile_name || null,
+            triggered_by: triggeredBy,
+            notes: `3-Day advance payment slip (${sendStatus}) for cycle ${cycleKey}, due ${expiryDateLabel}`,
+            created_at: nowIso,
+          },
+          schemaWarningsSet
+        );
+
+        remindersSent++;
       }
-
-      await safeInsertWhatsappReminderLog(
-        supabase,
-        {
-          subscriber_id: sub.id,
-          username: uname,
-          phone: sub.phone || null,
-          message_body: slipText,
-          amount_due: amountDue,
-          expiry_date: new Date(expiryMs).toISOString(),
-          status: sendStatus,
-          created_at: nowIso,
-        },
-        schemaWarningsSet
-      );
-
-      await safeUpdateSubscriber(
-        supabase,
-        sub.id,
-        {
-          billing_status: 'REMINDER_SENT',
-          last_reminder_cycle: cycleKey,
-        },
-        {},
-        schemaWarningsSet
-      );
-
-      await safeInsertAuditLog(
-        supabase,
-        {
-          subscriber_id: sub.id,
-          username: uname,
-          action_type: 'REMINDER_3D',
-          previous_profile: sub.original_package_profile || sub.package_profile_name || null,
-          applied_profile: sub.package_profile_name || null,
-          triggered_by: triggeredBy,
-          notes: `3-Day advance payment slip (${sendStatus}) for cycle ${cycleKey}, due ${expiryDateLabel}`,
-          created_at: nowIso,
-        },
-        schemaWarningsSet
-      );
-
-      remindersSent++;
       continue;
     }
 
     // -----------------------------------------------------------------------
-    // STAGE 2: Expiry Day -> 24h Grace Period (now >= expiry && now < graceEnds)
+    // STAGE 2: Grace / Extra Grace Window (now < graceEndsMs)
     // -----------------------------------------------------------------------
-    const computedGraceEndsMs = sub.grace_ends_at
-      ? Date.parse(String(sub.grace_ends_at))
-      : expiryMs + graceHours * 3_600_000;
-    const graceEndsMs = Number.isNaN(computedGraceEndsMs)
-      ? expiryMs + graceHours * 3_600_000
-      : computedGraceEndsMs;
+    const graceEndsMs = !Number.isNaN(explicitGraceMs)
+      ? explicitGraceMs
+      : (expiryMs ?? nowMs) + graceHours * 3_600_000;
 
-    if (nowMs >= expiryMs && nowMs < graceEndsMs) {
+    if ((expiryMs && nowMs >= expiryMs && nowMs < graceEndsMs) || hasExplicitFutureGrace) {
       if (billingStatus === 'GRACE_PERIOD' || billingStatus === 'SUSPENDED_EXPIRED') {
+        continue;
+      }
+      if (dueAmount <= 0) {
+        skippedPaid++;
         continue;
       }
 
       const graceEndsIso = new Date(graceEndsMs).toISOString();
-      await safeUpdateSubscriber(
-        supabase,
-        sub.id,
-        {
-          billing_status: 'GRACE_PERIOD',
-          grace_ends_at: graceEndsIso,
-        },
-        {},
-        schemaWarningsSet
-      );
+      if (!isSynthetic && sub.id) {
+        await safeUpdateSubscriber(
+          supabase,
+          sub.id,
+          {
+            billing_status: 'GRACE_PERIOD',
+            is_suspended: false,
+            grace_until: graceEndsIso,
+            grace_ends_at: graceEndsIso,
+          },
+          {
+            billing_status: 'GRACE_PERIOD',
+            grace_ends_at: graceEndsIso,
+          },
+          {},
+          schemaWarningsSet
+        );
 
-      await safeInsertAuditLog(
-        supabase,
-        {
-          subscriber_id: sub.id,
-          username: uname,
-          action_type: 'ENTERED_GRACE',
-          previous_profile: sub.package_profile_name || sub.package_speed || null,
-          applied_profile: sub.package_profile_name || sub.package_speed || null,
-          triggered_by: triggeredBy,
-          notes: `Entered ${graceHours}h grace period after ${settings.cutoff_time_pkt} PKT cut-off; ends ${graceEndsIso}`,
-          created_at: nowIso,
-        },
-        schemaWarningsSet
-      );
+        await safeInsertAuditLog(
+          supabase,
+          {
+            subscriber_id: sub.id,
+            username: uname,
+            action_type: 'ENTERED_GRACE',
+            previous_profile: sub.package_profile_name || sub.package_speed || null,
+            applied_profile: sub.package_profile_name || sub.package_speed || null,
+            triggered_by: triggeredBy,
+            notes: `Entered ${graceHours}h grace period after ${settings.cutoff_time_pkt} PKT cut-off; ends ${graceEndsIso}`,
+            created_at: nowIso,
+          },
+          schemaWarningsSet
+        );
+      }
 
       enteredGrace++;
       continue;
     }
 
     // -----------------------------------------------------------------------
-    // STAGE 3: Post-Grace Suspension (now >= graceEndsMs)
+    // STAGE 3: Post-Grace Auto-Expiry Suspension (now >= graceEndsMs AND due_amount > 0)
     // -----------------------------------------------------------------------
     if (nowMs >= graceEndsMs) {
-      if (billingStatus === 'SUSPENDED_EXPIRED' && accountStatus === 'EXPIRED') {
+      if (dueAmount <= 0) {
+        skippedPaid++;
         continue;
       }
 
@@ -496,31 +620,53 @@ export async function runExpirySweep(
         const liveSecret = secretsCache.get(uname);
         const secretId = String(liveSecret?.['.id'] || liveSecret?.id || '').trim();
         const liveProfile = String(liveSecret?.profile || '').trim();
+        const isLiveDisabled = liveSecret?.disabled === 'true' || liveSecret?.disabled === true;
+        const activeSessionsForUser = activeCache.get(uname) || [];
+        const hasNon16Session = activeSessionsForUser.some(
+          (sess) => !String(sess?.address || '').startsWith('16.16.16.')
+        );
+
+        const isDbMarkedSuspended =
+          Boolean((sub as any).is_suspended === true) ||
+          (billingStatus === 'SUSPENDED_EXPIRED' && accountStatus === 'EXPIRED');
+        const isMkAlreadyIsolated = !liveSecret
+          ? true
+          : isDisableMode
+          ? isLiveDisabled
+          : liveProfile.toLowerCase() === expiryProfileLower && !hasNon16Session;
+
+        if (isDbMarkedSuspended && isMkAlreadyIsolated) {
+          continue;
+        }
 
         const backupProfile =
           String(sub.original_package_profile || '').trim() ||
-          (liveProfile && liveProfile.toLowerCase() !== settings.expiry_ppp_profile.toLowerCase()
-            ? liveProfile
-            : '') ||
+          (liveProfile && liveProfile.toLowerCase() !== expiryProfileLower ? liveProfile : '') ||
           String(sub.package_profile_name || '').trim() ||
           String(sub.package_speed || '').trim().replace(/\s+/g, '') ||
           '20Mbps';
 
-        // CRITICAL: Persist backup original_package_profile in Supabase BEFORE altering MikroTik
-        await safeUpdateSubscriber(
-          supabase,
-          sub.id,
-          {
-            original_package_profile: backupProfile,
-          },
-          {
-            package_profile_name: backupProfile,
-          },
-          schemaWarningsSet
-        );
-
-        const isDisableMode =
-          String(settings.suspension_mode || '').toUpperCase() === 'DISABLE_SECRET';
+        // Ensure subscriber row exists in portal_users and back up original_package_profile BEFORE altering MikroTik
+        let subscriberId: string | null = sub.id ? String(sub.id) : null;
+        if (!subscriberId) {
+          subscriberId = await ensurePortalClientForSuspension(
+            supabase,
+            uname,
+            backupProfile,
+            amountDue,
+            rawExpiry,
+            schemaWarningsSet
+          );
+        } else {
+          await safeUpdateSubscriber(
+            supabase,
+            subscriberId,
+            { original_package_profile: backupProfile },
+            { original_package_profile: backupProfile },
+            { package_profile_name: backupProfile },
+            schemaWarningsSet
+          );
+        }
 
         if (secretId) {
           const patchPayload = isDisableMode
@@ -535,7 +681,6 @@ export async function runExpirySweep(
         }
 
         // Kick active PPPoE session so CPE drops & redials into 16.16.16.0/24 immediately
-        const activeSessionsForUser = activeCache.get(uname) || [];
         for (const sess of activeSessionsForUser) {
           const activeId = String(sess?.['.id'] || sess?.id || '').trim();
           if (activeId) {
@@ -544,32 +689,48 @@ export async function runExpirySweep(
           }
         }
 
-        await safeUpdateSubscriber(
-          supabase,
-          sub.id,
-          {
-            billing_status: 'SUSPENDED_EXPIRED',
-            account_status: 'EXPIRED',
-            suspended_at: nowIso,
-            original_package_profile: backupProfile,
-          },
-          {
-            account_status: 'EXPIRED',
-            package_profile_name: backupProfile,
-          },
-          schemaWarningsSet
-        );
+        if (subscriberId) {
+          await safeUpdateSubscriber(
+            supabase,
+            subscriberId,
+            {
+              is_suspended: true,
+              billing_status: 'SUSPENDED_EXPIRED',
+              account_status: 'EXPIRED',
+              suspended_at: nowIso,
+              grace_until: null,
+              grace_ends_at: null,
+              original_package_profile: backupProfile,
+            },
+            {
+              billing_status: 'SUSPENDED_EXPIRED',
+              account_status: 'EXPIRED',
+              suspended_at: nowIso,
+              grace_ends_at: null,
+              original_package_profile: backupProfile,
+            },
+            {
+              account_status: 'EXPIRED',
+              package_profile_name: backupProfile,
+            },
+            schemaWarningsSet
+          );
+        }
 
         await safeInsertAuditLog(
           supabase,
           {
-            subscriber_id: sub.id,
+            subscriber_id: subscriberId,
             username: uname,
             action_type: isDisableMode ? 'DISABLED_SECRET' : 'SUSPENDED_16_POOL',
             previous_profile: backupProfile,
             applied_profile: isDisableMode ? 'DISABLED' : settings.expiry_ppp_profile,
             triggered_by: triggeredBy,
-            notes: `Post-grace suspension executed (${isDisableMode ? 'Secret Disabled' : `Shifted to ${settings.expiry_ppp_profile} 16.16.16.0/24`}). Active sessions kicked: ${activeSessionsForUser.length}.`,
+            notes: `Auto-expiry after grace deadline (Due: Rs. ${Math.round(amountDue).toLocaleString()}). ${
+              isDisableMode
+                ? 'PPPoE Secret Disabled'
+                : `Shifted MikroTik secret to ${settings.expiry_ppp_profile} (16.16.16.0/24)`
+            }. Active sessions kicked: ${activeSessionsForUser.length}.`,
             created_at: nowIso,
           },
           schemaWarningsSet
@@ -587,7 +748,7 @@ export async function runExpirySweep(
 
   return {
     success: true,
-    scanned: subscribers.length,
+    scanned: candidatesByUser.size,
     remindersSent,
     enteredGrace,
     suspendedTo16Pool,

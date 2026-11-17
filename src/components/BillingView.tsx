@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useMemo } from 'react';
+import React, { useState, useEffect, useMemo, useRef } from 'react';
 import ReactDOM from 'react-dom';
 import {
   CreditCard,
@@ -51,6 +51,7 @@ import {
 import {
   restoreSubscriberOnInvoicePaid,
   enforce31DayAutoExpiry,
+  triggerAutoExpirySweep,
   addCalendarMonthDateString,
 } from '../lib/billingAndNetwork';
 import {
@@ -85,7 +86,10 @@ export const BillingView: React.FC<BillingViewProps> = ({
   onOpenReceiptModal,
 }) => {
   const { formatCurrency, currencySymbol } = useCurrency();
-  const { customers, agents } = useISP();
+  const { customers, agents, routers, selectedRouterId } = useISP();
+  const activeRouter = routers.find((r) => r.id === selectedRouterId) || routers[0];
+  const activeRouterRef = useRef(activeRouter);
+  activeRouterRef.current = activeRouter;
 
   const [invoices, setInvoices] = useState<SupabaseInvoice[]>([]);
   const [paymentTransactions, setPaymentTransactions] = useState<SupabasePaymentTransaction[]>([]);
@@ -155,8 +159,18 @@ export const BillingView: React.FC<BillingViewProps> = ({
         console.warn('Error fetching Supabase invoices:', error);
       } else if (data) {
         setInvoices(data as SupabaseInvoice[]);
-        // Enforce 31-day auto-expiry & Walled Garden profile sync asynchronously without dropping active sessions
-        enforce31DayAutoExpiry(data as SupabaseInvoice[]).catch(() => {});
+        // Run unified Grace + MikroTik EXPIRED-16-POOL auto-expiry sweep asynchronously on load
+        enforce31DayAutoExpiry(data as SupabaseInvoice[], activeRouterRef.current)
+          .then((suspendedCount) => {
+            if (suspendedCount > 0) {
+              setActionNotice(
+                `Auto-Expiry Engine: Suspended ${suspendedCount} past-grace unpaid account${
+                  suspendedCount === 1 ? '' : 's'
+                } to EXPIRED-16-POOL.`
+              );
+            }
+          })
+          .catch(() => {});
       }
 
       // Also fetch portal_users field staff/clients, live agent balances, payment_transactions, payment_accounts & whatsapp config
@@ -262,7 +276,18 @@ export const BillingView: React.FC<BillingViewProps> = ({
       })
       .subscribe();
 
+    const periodicExpiryTimer = setInterval(() => {
+      triggerAutoExpirySweep(activeRouterRef.current)
+        .then((res) => {
+          if (res.ran && (res.suspendedTo16Pool > 0 || res.disabledSecrets > 0)) {
+            fetchInvoices();
+          }
+        })
+        .catch(() => {});
+    }, 5 * 60_000);
+
     return () => {
+      clearInterval(periodicExpiryTimer);
       window.removeEventListener(WHATSAPP_CONFIG_UPDATED_EVENT, handleWaConfigUpdated);
       supabase.removeChannel(channel);
     };

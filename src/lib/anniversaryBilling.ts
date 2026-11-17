@@ -682,17 +682,26 @@ export interface EvaluatedSubscriberExpiry {
   daysRemaining: number;
   bucket: ExpiryBucket;
   isSyntheticRecord: boolean;
+  isExtraGrace?: boolean;
+  extraGraceNote?: string | null;
   suspensionReason?: string;
 }
 
 /**
- * Evaluates live expiry & 24h grace period buckets directly from each subscriber's
+ * Evaluates live expiry & 24h / Extra Grace period buckets directly from each subscriber's
  * calendar-month anniversary next_billing_date (`installation_date` / `billing_anchor_day`),
- * unpaid/partial invoices, and live MikroTik 16.16.16.0/24 / Expire / disabled state.
+ * `grace_until` / `grace_ends_at`, unpaid/partial invoices (`due_amount > 0`),
+ * and live MikroTik 16.16.16.0/24 / Expire / disabled state.
  */
 export function evaluateSubscribersExpiryBuckets(params: {
   subscribers: SupabasePortalUser[];
   allInvoices: SupabaseInvoice[];
+  auditLogs?: Array<{
+    username?: string | null;
+    action_type?: string | null;
+    notes?: string | null;
+    created_at?: string | null;
+  }>;
   cutoffTimePkt?: string;
   graceHours?: number;
   expiryProfileName?: string;
@@ -710,6 +719,28 @@ export function evaluateSubscribersExpiryBuckets(params: {
   const graceHours = Math.max(0, Number(params.graceHours ?? 24));
   const threeDaysMs = 3 * 86_400_000;
   const expiryProfLower = String(params.expiryProfileName || 'EXPIRED-16-POOL').trim().toLowerCase();
+
+  // Index latest Extra Grace notes by username from expiry_audit_logs
+  const extraGraceAuditByUser = new Map<string, { note: string | null; createdAtMs: number }>();
+  for (const log of params.auditLogs || []) {
+    const uname = String(log?.username || '').trim().toLowerCase();
+    if (!uname) continue;
+    if (
+      String(log?.action_type || '').toUpperCase() === 'GRACE_EXTENDED' &&
+      String(log?.notes || '').includes('[EXTRA_GRACE')
+    ) {
+      const ts = log?.created_at ? Date.parse(String(log.created_at)) : 0;
+      const existing = extraGraceAuditByUser.get(uname);
+      if (!existing || ts >= existing.createdAtMs) {
+        const rawNote = String(log?.notes || '');
+        const noteMatch = rawNote.match(/Note:\s*(.+)$/i);
+        extraGraceAuditByUser.set(uname, {
+          note: noteMatch ? noteMatch[1].trim() : null,
+          createdAtMs: Number.isNaN(ts) ? 0 : ts,
+        });
+      }
+    }
+  }
 
   // Index invoices by subscriber username
   const unpaidByUser = new Map<
@@ -859,15 +890,16 @@ export function evaluateSubscribersExpiryBuckets(params: {
     const sec = mkSecretByUser.get(uname);
     const act = mkActiveByUser.get(uname);
 
-    const amountDue =
-      unpaid && unpaid.amountDue > 0
-        ? unpaid.amountDue
-        : Number(sub.monthly_fee) > 0
-        ? Number(sub.monthly_fee)
-        : resolvePackageRate(sub.package_profile_name || sub.package_speed || sec?.profile);
+    const hasUnpaidDue = Boolean(unpaid && unpaid.amountDue > 0);
+    const amountDue = hasUnpaidDue
+      ? unpaid!.amountDue
+      : Number(sub.monthly_fee) > 0
+      ? Number(sub.monthly_fee)
+      : resolvePackageRate(sub.package_profile_name || sub.package_speed || sec?.profile);
 
     const billingStatus = String(sub.billing_status || '').toUpperCase();
     const accountStatus = String(sub.account_status || 'ACTIVE').toUpperCase();
+    const isSuspendedFlag = (sub as any).is_suspended === true;
     const isMkSuspendedIp = String(act?.address || '').startsWith('16.16.16.');
     const isMkExpiredProfile = isExpiredProfile(sec?.profile);
     const isMkDisabled = sec?.disabled === 'true' || sec?.disabled === true;
@@ -879,6 +911,7 @@ export function evaluateSubscribersExpiryBuckets(params: {
 
     // 1. Check explicit DB or MikroTik suspension state first
     if (
+      isSuspendedFlag ||
       billingStatus === 'SUSPENDED_EXPIRED' ||
       accountStatus === 'EXPIRED' ||
       accountStatus === 'SUSPENDED' ||
@@ -912,18 +945,52 @@ export function evaluateSubscribersExpiryBuckets(params: {
       continue;
     }
 
-    // 2. Compute expiry timestamp directly from anniversary next_billing_date (or earlier unpaid invoice due_date)
+    // 2. Compute expiry & grace deadline (`grace_until` / `grace_ends_at`, else `next_billing_date + grace_hours`)
     const effectiveExpiryMs = parseExpiryDateWithCutoffMs(effectiveNextBillingDate, cutoffPkt);
-    if (effectiveExpiryMs === null) continue;
+    const explicitGraceRaw = (sub as any).grace_until || sub.grace_ends_at || null;
+    const explicitGraceMs = explicitGraceRaw ? Date.parse(String(explicitGraceRaw)) : NaN;
+    const standardGraceEndsMs =
+      effectiveExpiryMs !== null ? effectiveExpiryMs + graceHours * 3_600_000 : null;
+    const graceEndsMs = !Number.isNaN(explicitGraceMs) ? explicitGraceMs : standardGraceEndsMs;
 
-    const graceEndsMs = sub.grace_ends_at
-      ? Date.parse(String(sub.grace_ends_at))
-      : effectiveExpiryMs + graceHours * 3_600_000;
+    if (effectiveExpiryMs === null && Number.isNaN(explicitGraceMs)) continue;
+
+    const hasActiveExplicitGrace = !Number.isNaN(explicitGraceMs) && explicitGraceMs > nowMs;
+    const extraGraceAudit = extraGraceAuditByUser.get(uname);
 
     if (
+      hasActiveExplicitGrace ||
       billingStatus === 'GRACE_PERIOD' ||
-      (nowMs >= effectiveExpiryMs && nowMs < graceEndsMs)
+      (effectiveExpiryMs !== null &&
+        graceEndsMs !== null &&
+        nowMs >= effectiveExpiryMs &&
+        nowMs < graceEndsMs)
     ) {
+      // If grace_ends_at already expired while DB still shows GRACE_PERIOD, transition to suspended if unpaid
+      if (graceEndsMs !== null && nowMs >= graceEndsMs && hasUnpaidDue) {
+        suspended16.push({
+          subscriber: sub,
+          username: uname,
+          anchorDay,
+          nextBillingDate: effectiveNextBillingDate,
+          amountDue,
+          effectiveExpiryMs,
+          graceEndsMs,
+          daysRemaining: 0,
+          bucket: 'suspended_16',
+          isSyntheticRecord: isSynthetic,
+          suspensionReason: 'Extra / 24h Grace Expired',
+        });
+        continue;
+      }
+
+      const isExtraGrace = Boolean(
+        extraGraceAudit ||
+          (standardGraceEndsMs !== null &&
+            !Number.isNaN(explicitGraceMs) &&
+            (explicitGraceMs > standardGraceEndsMs + 60_000 || nowMs >= standardGraceEndsMs))
+      );
+
       inGrace.push({
         subscriber: sub,
         username: uname,
@@ -931,15 +998,17 @@ export function evaluateSubscribersExpiryBuckets(params: {
         nextBillingDate: effectiveNextBillingDate,
         amountDue,
         effectiveExpiryMs,
-        graceEndsMs,
+        graceEndsMs: graceEndsMs ?? nowMs + graceHours * 3_600_000,
         daysRemaining: 0,
         bucket: 'grace_24h',
         isSyntheticRecord: isSynthetic,
+        isExtraGrace,
+        extraGraceNote: extraGraceAudit?.note || null,
       });
       continue;
     }
 
-    if (nowMs >= graceEndsMs) {
+    if (graceEndsMs !== null && nowMs >= graceEndsMs && hasUnpaidDue) {
       suspended16.push({
         subscriber: sub,
         username: uname,
@@ -956,7 +1025,7 @@ export function evaluateSubscribersExpiryBuckets(params: {
       continue;
     }
 
-    if (nowMs < effectiveExpiryMs && effectiveExpiryMs <= nowMs + threeDaysMs) {
+    if (effectiveExpiryMs !== null && nowMs < effectiveExpiryMs && effectiveExpiryMs <= nowMs + threeDaysMs) {
       const daysRemaining = Math.max(0, Math.ceil((effectiveExpiryMs - nowMs) / 86_400_000));
       expiring3d.push({
         subscriber: sub,

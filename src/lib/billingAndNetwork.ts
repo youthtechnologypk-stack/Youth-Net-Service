@@ -1,6 +1,6 @@
 import { supabase, SupabaseInvoice } from '../services/supabaseClient';
 import { safeMikrotikFetch } from '../services/mikrotikRestClient';
-import { RouterAuthInfo } from '../services/apiClient';
+import { RouterAuthInfo, getActiveRouterAuth, resolveRestHostAndPort } from '../services/apiClient';
 import { addCalendarMonthsYmd, computeBillingAnchorDay, extractYmdString } from './anniversaryBilling';
 
 export const PARENT_FLEET_ROUTER = 'SADDAR FLEET ROUTER';
@@ -209,7 +209,8 @@ export async function updateNetworkArea(
 export async function syncMikrotikSecretProfile(
   subscriberUsername: string,
   targetProfile: string,
-  options?: { disabled?: 'true' | 'false' }
+  options?: { disabled?: 'true' | 'false' },
+  activeRouter?: RouterAuthInfo
 ): Promise<{ ok: boolean; previousProfile?: string | null; secretId?: string | null }> {
   const cleanUser = (subscriberUsername || '').trim();
   if (!cleanUser || !targetProfile) return { ok: false };
@@ -219,7 +220,11 @@ export async function syncMikrotikSecretProfile(
     let previousProfile: string | null = null;
 
     try {
-      const res = await safeMikrotikFetch(`/api/mikrotik/ppp/secret?name=${encodeURIComponent(cleanUser)}`);
+      const res = await safeMikrotikFetch(
+        `/api/mikrotik/ppp/secret?name=${encodeURIComponent(cleanUser)}`,
+        {},
+        activeRouter
+      );
       if (res.ok) {
         const list = await res.json();
         if (Array.isArray(list)) {
@@ -248,7 +253,8 @@ export async function syncMikrotikSecretProfile(
           method: 'PATCH',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify(patchFields),
-        }
+        },
+        activeRouter
       );
       if (patchRes.ok) {
         return { ok: true, previousProfile, secretId };
@@ -260,11 +266,15 @@ export async function syncMikrotikSecretProfile(
       ...(secretId ? { '.id': secretId, numbers: secretId } : { name: cleanUser, numbers: cleanUser }),
     };
 
-    const setRes = await safeMikrotikFetch('/api/mikrotik/ppp/secret/set', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(setPayload),
-    });
+    const setRes = await safeMikrotikFetch(
+      '/api/mikrotik/ppp/secret/set',
+      {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(setPayload),
+      },
+      activeRouter
+    );
 
     return { ok: setRes.ok, previousProfile, secretId };
   } catch {
@@ -277,14 +287,15 @@ export async function syncMikrotikSecretProfile(
  * so their CPE immediately redials within ~5 seconds on the restored profile.
  */
 export async function kickMikrotikActiveSessionForUser(
-  subscriberUsername: string
+  subscriberUsername: string,
+  activeRouter?: RouterAuthInfo
 ): Promise<number> {
   const cleanUser = (subscriberUsername || '').trim().toLowerCase();
   if (!cleanUser) return 0;
 
   let kicked = 0;
   try {
-    const activeRes = await safeMikrotikFetch('/api/mikrotik/ppp/active');
+    const activeRes = await safeMikrotikFetch('/api/mikrotik/ppp/active', {}, activeRouter);
     if (!activeRes.ok) return 0;
     const list = await activeRes.json();
     if (!Array.isArray(list)) return 0;
@@ -299,16 +310,21 @@ export async function kickMikrotikActiveSessionForUser(
 
       const delRes = await safeMikrotikFetch(
         `/api/mikrotik/ppp/active/${encodeURIComponent(activeId)}`,
-        { method: 'DELETE' }
+        { method: 'DELETE' },
+        activeRouter
       );
       if (delRes.ok) {
         kicked++;
       } else {
-        const remRes = await safeMikrotikFetch('/api/mikrotik/ppp/active/remove', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ '.id': activeId, numbers: activeId }),
-        });
+        const remRes = await safeMikrotikFetch(
+          '/api/mikrotik/ppp/active/remove',
+          {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ '.id': activeId, numbers: activeId }),
+          },
+          activeRouter
+        );
         if (remRes.ok) kicked++;
       }
     }
@@ -400,6 +416,8 @@ export async function restoreSubscriberOnInvoicePaid(
       const fullUpdate = {
         account_status: 'ACTIVE',
         billing_status: 'ACTIVE',
+        is_suspended: false,
+        grace_until: null,
         grace_ends_at: null,
         last_restored_at: nowIso,
         expiry_date: finalExpiryIso,
@@ -412,14 +430,27 @@ export async function restoreSubscriberOnInvoicePaid(
         .eq('id', userRecord.id);
 
       if (updErr) {
-        // Fallback if new automation columns have not yet been migrated
-        await supabase
+        // Fallback to guaranteed existing schema columns
+        const { error: midErr } = await supabase
           .from('portal_users')
           .update({
             account_status: 'ACTIVE',
-            expiry_date: nextAnniversaryYmd,
+            billing_status: 'ACTIVE',
+            grace_ends_at: null,
+            last_restored_at: nowIso,
+            expiry_date: finalExpiryIso,
           })
           .eq('id', userRecord.id);
+
+        if (midErr) {
+          await supabase
+            .from('portal_users')
+            .update({
+              account_status: 'ACTIVE',
+              expiry_date: nextAnniversaryYmd,
+            })
+            .eq('id', userRecord.id);
+        }
       }
     }
 
@@ -515,84 +546,118 @@ export function add31DaysDateString(baseDate: Date = new Date(), anchorDay?: num
 }
 
 /**
- * Evaluates all invoices against 31-day auto-expiry:
- * If CURRENT_DATE > due_date and status !== 'PAID' -> mark subscriber EXPIRED in portal_users
- * and switch their MikroTik PPPoE secret profile to EXPIRED / Walled Garden.
+ * Runs the backend Expiry & Grace Period Enforcement Sweep (/api/billing/run-expiry-check),
+ * pushing any unpaid subscribers past their `grace_until` / `grace_ends_at` deadline
+ * into MikroTik's `EXPIRED-16-POOL`, kicking their active session, and writing audit logs.
  */
 let lastAutoExpiryCheckAt = 0;
-export async function enforce31DayAutoExpiry(invoices: SupabaseInvoice[]): Promise<number> {
-  // Throttle to avoid spamming MikroTik REST calls on every render
+let inflightAutoSweep: Promise<any> | null = null;
+
+export async function triggerAutoExpirySweep(
+  activeRouter?: RouterAuthInfo,
+  options?: { force?: boolean; triggeredBy?: 'ADMIN' | 'CRON_2PM' }
+): Promise<{
+  success: boolean;
+  ran: boolean;
+  suspendedTo16Pool: number;
+  disabledSecrets: number;
+  enteredGrace: number;
+  kickedActiveSessions: number;
+  durationMs?: number;
+  errors?: string[];
+  schemaWarnings?: string[];
+}> {
   const now = Date.now();
-  if (now - lastAutoExpiryCheckAt < 30000) return 0;
+  if (!options?.force && now - lastAutoExpiryCheckAt < 60_000) {
+    return {
+      success: true,
+      ran: false,
+      suspendedTo16Pool: 0,
+      disabledSecrets: 0,
+      enteredGrace: 0,
+      kickedActiveSessions: 0,
+    };
+  }
+  if (inflightAutoSweep) {
+    return inflightAutoSweep;
+  }
+
   lastAutoExpiryCheckAt = now;
-
-  if (!Array.isArray(invoices) || invoices.length === 0) return 0;
-
-  const todayStr = new Date().toISOString().split('T')[0];
-
-  // Find subscribers who have overdue/unpaid invoices past their 31-day expiry date
-  const expiredCandidates = new Set<string>();
-  const paidUsernames = new Set<string>();
-
-  for (const inv of invoices) {
-    const uname = (inv?.subscriber_username || '').trim().toLowerCase();
-    if (!uname) continue;
-    const balance = Math.max(0, (Number(inv.amount) || 0) - (Number(inv.paid_amount) || 0));
-    const isPaid = (inv.status || '').toUpperCase() === 'PAID' || balance <= 0;
-
-    if (isPaid) {
-      paidUsernames.add(uname);
-    } else if (inv.due_date && todayStr > inv.due_date) {
-      expiredCandidates.add(uname);
-    }
-  }
-
-  // Filter to users currently ACTIVE in portal_users so we only update those needing transition
-  if (expiredCandidates.size === 0) return 0;
-
-  try {
-    const { data: activeClients } = await supabase
-      .from('portal_users')
-      .select('id, username, account_status')
-      .eq('role', 'CLIENT')
-      .eq('account_status', 'ACTIVE');
-
-    if (!activeClients || activeClients.length === 0) return 0;
-
-    // Resolve EXPIRED or Walled Garden profile name on router if present
-    let expiredProfileName = 'EXPIRED';
+  const run = async () => {
     try {
-      const profRes = await safeMikrotikFetch('/api/mikrotik/ppp/profile');
-      if (profRes.ok) {
-        const profiles = await profRes.json();
-        if (Array.isArray(profiles)) {
-          const match = profiles.find((p: any) => {
-            const name = (p?.name || '').toLowerCase();
-            return name === 'expired' || name.includes('walled') || name.includes('expire');
-          });
-          if (match?.name) expiredProfileName = match.name;
-        }
+      const auth = getActiveRouterAuth(activeRouter);
+      const resolved = resolveRestHostAndPort(activeRouter);
+      const res = await fetch('/api/billing/run-expiry-check', {
+        method: 'POST',
+        credentials: 'omit',
+        headers: {
+          'Content-Type': 'application/json',
+          Accept: 'application/json',
+          Authorization: auth.authHeader,
+          'x-router-host': resolved.host,
+          'x-router-ip': resolved.host,
+          'x-router-port': String(resolved.port),
+          'x-router-ssl': resolved.useSsl ? 'true' : 'false',
+          'x-router-id': activeRouter?.id || '',
+        },
+        body: JSON.stringify({
+          routerHost: resolved.host,
+          routerPort: resolved.port,
+          useSsl: resolved.useSsl,
+          triggeredBy: options?.triggeredBy || 'ADMIN',
+        }),
+      });
+      const contentType = (res.headers.get('content-type') || '').toLowerCase();
+      if (!contentType.includes('application/json')) {
+        return {
+          success: false,
+          ran: true,
+          suspendedTo16Pool: 0,
+          disabledSecrets: 0,
+          enteredGrace: 0,
+          kickedActiveSessions: 0,
+          errors: ['Backend /api/billing/run-expiry-check did not return JSON.'],
+        };
       }
-    } catch {}
-
-    let transitionedCount = 0;
-    for (const client of activeClients) {
-      const uname = (client.username || '').trim().toLowerCase();
-      if (expiredCandidates.has(uname)) {
-        await supabase
-          .from('portal_users')
-          .update({ account_status: 'EXPIRED' })
-          .eq('id', client.id);
-
-        await syncMikrotikSecretProfile(uname, expiredProfileName);
-        transitionedCount++;
-      }
+      const data = await res.json();
+      return {
+        ...data,
+        success: Boolean(res.ok && data.success),
+        ran: true,
+        suspendedTo16Pool: Number(data.suspendedTo16Pool) || 0,
+        disabledSecrets: Number(data.disabledSecrets) || 0,
+        enteredGrace: Number(data.enteredGrace) || 0,
+        kickedActiveSessions: Number(data.kickedActiveSessions) || 0,
+      };
+    } catch (err: any) {
+      return {
+        success: false,
+        ran: true,
+        suspendedTo16Pool: 0,
+        disabledSecrets: 0,
+        enteredGrace: 0,
+        kickedActiveSessions: 0,
+        errors: [err?.message || 'Unable to execute /api/billing/run-expiry-check'],
+      };
+    } finally {
+      inflightAutoSweep = null;
     }
-    return transitionedCount;
-  } catch (err) {
-    console.warn('enforce31DayAutoExpiry notice:', err);
-    return 0;
-  }
+  };
+
+  inflightAutoSweep = run();
+  return inflightAutoSweep;
+}
+
+/**
+ * Legacy helper name retained for BillingView load hook: delegates directly to the unified
+ * Grace + MikroTik EXPIRED-16-POOL auto-expiry sweep engine.
+ */
+export async function enforce31DayAutoExpiry(
+  _invoices: SupabaseInvoice[],
+  activeRouter?: RouterAuthInfo
+): Promise<number> {
+  const res = await triggerAutoExpirySweep(activeRouter);
+  return (res.suspendedTo16Pool || 0) + (res.disabledSecrets || 0);
 }
 
 const prevInterfaceByteCounters: Record<string, { rxBytes: number; txBytes: number; ts: number }> = {};

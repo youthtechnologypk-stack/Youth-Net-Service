@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useCallback, useMemo } from 'react';
+import React, { useState, useEffect, useCallback, useMemo, useRef } from 'react';
 import {
   AlertTriangle,
   Check,
@@ -32,7 +32,13 @@ import { useISP } from '../context/ISPContext';
 import { useCurrency } from '../context/CurrencyContext';
 import { safeMikrotikFetch } from '../services/mikrotikRestClient';
 import { getActiveRouterAuth, resolveRestHostAndPort } from '../services/apiClient';
-import { restoreSubscriberOnInvoicePaid, addCalendarMonthDateString } from '../lib/billingAndNetwork';
+import {
+  restoreSubscriberOnInvoicePaid,
+  addCalendarMonthDateString,
+  syncMikrotikSecretProfile,
+  kickMikrotikActiveSessionForUser,
+  triggerAutoExpirySweep,
+} from '../lib/billingAndNetwork';
 import { openWhatsAppLink } from '../lib/whatsappBilling';
 import { EXPIRY_MIGRATION_SQL } from '../lib/expiryMigrationSql';
 import {
@@ -71,6 +77,8 @@ export const ExpiryAutomationView: React.FC = () => {
   const { routers, selectedRouterId } = useISP();
   const { formatCurrency } = useCurrency();
   const activeRouter = routers.find((r) => r.id === selectedRouterId) || routers[0];
+  const activeRouterRef = useRef(activeRouter);
+  activeRouterRef.current = activeRouter;
 
   const [activeSubTab, setActiveSubTab] = useState<ExpiryTabKey>('expiring_3d');
   const [settings, setSettings] = useState<SupabaseIspBillingSettings>({
@@ -98,6 +106,14 @@ export const ExpiryAutomationView: React.FC = () => {
   const [isSavingSettings, setIsSavingSettings] = useState<boolean>(false);
   const [isRunningSweep, setIsRunningSweep] = useState<boolean>(false);
   const [busyUsernames, setBusyUsernames] = useState<Record<string, boolean>>({});
+  const [nowTickMs, setNowTickMs] = useState<number>(() => Date.now());
+  const [extraGraceTarget, setExtraGraceTarget] = useState<
+    (SupabasePortalUser & { amountDue: number; effectiveExpiryMs?: number | null; isSyntheticRecord?: boolean }) | null
+  >(null);
+  const [extraGracePreset, setExtraGracePreset] = useState<'24' | '48' | '72' | 'custom'>('24');
+  const [extraGraceCustomHours, setExtraGraceCustomHours] = useState<string>('36');
+  const [extraGraceNoteInput, setExtraGraceNoteInput] = useState<string>('');
+  const [isGrantingExtraGrace, setIsGrantingExtraGrace] = useState<boolean>(false);
   const [toast, setToast] = useState<{ text: string; type: 'success' | 'error' } | null>(null);
 
   const showNotice = useCallback((text: string, type: 'success' | 'error' = 'success') => {
@@ -193,6 +209,26 @@ export const ExpiryAutomationView: React.FC = () => {
     fetchAllDatabaseState();
     fetchMikrotikProfilesList();
 
+    // Auto-run grace/expiry enforcement on load & periodically every 5 minutes
+    const runBackgroundSweep = () => {
+      triggerAutoExpirySweep(activeRouterRef.current, { triggeredBy: 'ADMIN' })
+        .then((res) => {
+          if (res.ran && (res.suspendedTo16Pool > 0 || res.disabledSecrets > 0 || res.enteredGrace > 0)) {
+            showNotice(
+              `Auto-Expiry Engine synced: Suspended ${res.suspendedTo16Pool + res.disabledSecrets} past-grace account(s), entered grace ${res.enteredGrace}, kicked ${res.kickedActiveSessions} session(s).`,
+              'success'
+            );
+            fetchAllDatabaseState();
+            fetchMikrotikProfilesList();
+          }
+        })
+        .catch(() => {});
+    };
+
+    runBackgroundSweep();
+    const sweepInterval = setInterval(runBackgroundSweep, 5 * 60_000);
+    const tickInterval = setInterval(() => setNowTickMs(Date.now()), 30_000);
+
     const ch = supabase
       .channel('public:expiry_automation_live')
       .on('postgres_changes', { event: '*', schema: 'public', table: 'portal_users' }, () => {
@@ -210,9 +246,11 @@ export const ExpiryAutomationView: React.FC = () => {
       .subscribe();
 
     return () => {
+      clearInterval(sweepInterval);
+      clearInterval(tickInterval);
       supabase.removeChannel(ch);
     };
-  }, [fetchAllDatabaseState, fetchMikrotikProfilesList]);
+  }, [fetchAllDatabaseState, fetchMikrotikProfilesList, showNotice]);
 
   // Save settings directly to Supabase isp_billing_settings (and sync payment fields to whatsapp_billing_config)
   const handleSaveSettings = async (e: React.FormEvent) => {
@@ -338,7 +376,7 @@ export const ExpiryAutomationView: React.FC = () => {
         `2:00 PM Expiry Sweep Complete (${data.durationMs}ms): Scanned ${data.scanned} · Reminders ${data.remindersSent} · Entered Grace ${data.enteredGrace} · Suspended (16.16.16.0/24) ${data.suspendedTo16Pool} · Disabled ${data.disabledSecrets} · Kicked ${data.kickedActiveSessions}.`,
         data.errors?.length ? 'error' : 'success'
       );
-      await fetchAllDatabaseState();
+      await Promise.all([fetchAllDatabaseState(), fetchMikrotikProfilesList()]);
     } catch (err: any) {
       showNotice(`Sweep error: ${err?.message || 'Unable to execute /api/billing/run-expiry-check'}`, 'error');
     } finally {
@@ -350,11 +388,13 @@ export const ExpiryAutomationView: React.FC = () => {
     const evaluated = evaluateSubscribersExpiryBuckets({
       subscribers,
       allInvoices,
+      auditLogs,
       cutoffTimePkt: settings.cutoff_time_pkt || '14:00',
       graceHours: Math.max(0, Number(settings.grace_hours) || 24),
       expiryProfileName: settings.expiry_ppp_profile,
       mikrotikSecrets: mkSecrets,
       mikrotikActive: mkActive,
+      nowMs: nowTickMs,
     });
 
     return {
@@ -371,6 +411,8 @@ export const ExpiryAutomationView: React.FC = () => {
         effectiveExpiryMs: item.effectiveExpiryMs ?? Date.now(),
         graceEndsMs: item.graceEndsMs ?? Date.now(),
         isSyntheticRecord: item.isSyntheticRecord,
+        isExtraGrace: Boolean(item.isExtraGrace),
+        extraGraceNote: item.extraGraceNote || null,
       })),
       suspended16: evaluated.suspended16.map((item) => ({
         ...item.subscriber,
@@ -383,11 +425,13 @@ export const ExpiryAutomationView: React.FC = () => {
   }, [
     subscribers,
     allInvoices,
+    auditLogs,
     settings.cutoff_time_pkt,
     settings.grace_hours,
     settings.expiry_ppp_profile,
     mkSecrets,
     mkActive,
+    nowTickMs,
   ]);
 
   // 1-Click Send WhatsApp Slip + Log to whatsapp_reminder_logs & expiry_audit_logs
@@ -601,6 +645,179 @@ export const ExpiryAutomationView: React.FC = () => {
     } catch (err: any) {
       showNotice(`Collect & Restore error for @${uname}: ${err?.message}`, 'error');
     } finally {
+      setBusyUsernames((p) => ({ ...p, [uname]: false }));
+    }
+  };
+
+  // Open Extra Grace modal for a suspended subscriber
+  const handleOpenExtraGraceModal = (
+    sub: SupabasePortalUser & { amountDue: number; effectiveExpiryMs?: number | null; isSyntheticRecord?: boolean }
+  ) => {
+    setExtraGraceTarget(sub);
+    setExtraGracePreset('24');
+    setExtraGraceCustomHours('36');
+    setExtraGraceNoteInput('');
+  };
+
+  const resolvedExtraGraceHours = useMemo(() => {
+    if (extraGracePreset === 'custom') {
+      const parsed = Math.floor(Number(extraGraceCustomHours));
+      return Number.isFinite(parsed) && parsed >= 1 ? Math.min(720, parsed) : 24;
+    }
+    return Number(extraGracePreset) || 24;
+  }, [extraGracePreset, extraGraceCustomHours]);
+
+  // Grant Extra Grace: Set grace_until = NOW + hours, is_suspended = false, restore MikroTik profile & kick 16.16.16.x
+  const handleConfirmExtraGrace = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!extraGraceTarget) return;
+
+    const sub = extraGraceTarget;
+    const uname = String(sub.username || '').trim().toLowerCase();
+    const hours = resolvedExtraGraceHours;
+    const note = extraGraceNoteInput.trim();
+    const nowMs = Date.now();
+    const nowIso = new Date(nowMs).toISOString();
+    const graceUntilIso = new Date(nowMs + hours * 3_600_000).toISOString();
+    const expiryProfLower = String(settings.expiry_ppp_profile || 'EXPIRED-16-POOL').trim().toLowerCase();
+
+    setIsGrantingExtraGrace(true);
+    setBusyUsernames((p) => ({ ...p, [uname]: true }));
+
+    try {
+      // 1. Resolve target restored package profile
+      const isPlaceholder = (val?: string | null) => {
+        const low = String(val || '').trim().toLowerCase();
+        return !low || low === 'expire' || low === 'expired' || low.includes('walled') || low.includes('16-pool') || low === expiryProfLower;
+      };
+
+      let restoredProfile = '20Mbps';
+      if (!isPlaceholder(sub.original_package_profile)) {
+        restoredProfile = String(sub.original_package_profile).trim();
+      } else if (!isPlaceholder(sub.package_profile_name)) {
+        restoredProfile = String(sub.package_profile_name).trim();
+      } else if (!isPlaceholder(sub.package_speed)) {
+        restoredProfile = String(sub.package_speed).trim().replace(/\s+/g, '');
+      }
+
+      if (isPlaceholder(sub.original_package_profile) && isPlaceholder(sub.package_profile_name) && mikrotikProfiles.length > 0) {
+        const speedDigits = restoredProfile.match(/\d+/)?.[0];
+        const matched = mikrotikProfiles.find((p) => {
+          if (isPlaceholder(p)) return false;
+          return p.toLowerCase() === restoredProfile.toLowerCase() || Boolean(speedDigits && p.includes(speedDigits));
+        });
+        if (matched) restoredProfile = matched;
+      }
+
+      // 2. Find or create portal_users row so grace_until & is_suspended persist reliably
+      const { data: existingRow } = await supabase
+        .from('portal_users')
+        .select('id')
+        .ilike('username', uname)
+        .limit(1)
+        .maybeSingle();
+
+      let realSubscriberId: string | null = existingRow?.id ? String(existingRow.id) : null;
+
+      if (realSubscriberId) {
+        const { error: fullErr } = await supabase
+          .from('portal_users')
+          .update({
+            is_suspended: false,
+            grace_until: graceUntilIso,
+            grace_ends_at: graceUntilIso,
+            billing_status: 'GRACE_PERIOD',
+            account_status: 'ACTIVE',
+            original_package_profile: restoredProfile,
+            last_restored_at: nowIso,
+          } as any)
+          .eq('id', realSubscriberId);
+
+        if (fullErr) {
+          if (isMissingTableOrColumnError(fullErr)) {
+            const { error: fbErr } = await supabase
+              .from('portal_users')
+              .update({
+                grace_ends_at: graceUntilIso,
+                billing_status: 'GRACE_PERIOD',
+                account_status: 'ACTIVE',
+                original_package_profile: restoredProfile,
+                last_restored_at: nowIso,
+              })
+              .eq('id', realSubscriberId);
+            if (fbErr) throw new Error(fbErr.message);
+          } else {
+            throw new Error(fullErr.message);
+          }
+        }
+      } else {
+        const { data: insertedRow, error: insErr } = await supabase
+          .from('portal_users')
+          .insert([
+            {
+              username: uname,
+              password: `Yn@${Math.floor(1000 + Math.random() * 9000)}`,
+              role: 'CLIENT',
+              full_name: sub.full_name || uname,
+              phone: sub.phone || '',
+              area: sub.area || 'Saddar Node',
+              account_status: 'ACTIVE',
+              billing_status: 'GRACE_PERIOD',
+              grace_ends_at: graceUntilIso,
+              original_package_profile: restoredProfile,
+              package_profile_name: restoredProfile,
+              package_speed: restoredProfile,
+              monthly_fee: sub.amountDue || 0,
+              last_restored_at: nowIso,
+            },
+          ])
+          .select('id')
+          .maybeSingle();
+
+        if (insErr) throw new Error(insErr.message);
+        realSubscriberId = insertedRow?.id ? String(insertedRow.id) : null;
+      }
+
+      // 3. Restore MikroTik PPPoE secret back to original_package_profile & kick 16.16.16.x active session
+      const mkSync = await syncMikrotikSecretProfile(
+        uname,
+        restoredProfile,
+        { disabled: 'false' },
+        activeRouter
+      );
+      const kickedSessions = await kickMikrotikActiveSessionForUser(uname, activeRouter);
+
+      // 4. Write permanent audit log entry
+      const auditNote = `[EXTRA_GRACE +${hours}h] Temporarily restored to ${restoredProfile} until ${graceUntilIso}${
+        note ? ` — Note: ${note}` : ''
+      }`;
+      await supabase.from('expiry_audit_logs').insert([
+        {
+          subscriber_id: realSubscriberId,
+          username: uname,
+          action_type: 'GRACE_EXTENDED',
+          previous_profile: mkSync.previousProfile || settings.expiry_ppp_profile,
+          applied_profile: restoredProfile,
+          triggered_by: 'ADMIN',
+          notes: auditNote,
+          created_at: nowIso,
+        },
+      ]);
+
+      setExtraGraceTarget(null);
+      setActiveSubTab('grace_24h');
+      showNotice(
+        `Extra Grace (+${hours}h) granted to @${uname}! Restored to "${restoredProfile}" (kicked ${kickedSessions} session${
+          kickedSessions === 1 ? '' : 's'
+        }). Auto-suspends again at ${formatDateTimePkt(graceUntilIso)} if unpaid.`,
+        'success'
+      );
+      await fetchAllDatabaseState();
+      await fetchMikrotikProfilesList();
+    } catch (err: any) {
+      showNotice(`Extra Grace failed for @${uname}: ${err?.message || 'Error'}`, 'error');
+    } finally {
+      setIsGrantingExtraGrace(false);
       setBusyUsernames((p) => ({ ...p, [uname]: false }));
     }
   };
@@ -926,7 +1143,7 @@ export const ExpiryAutomationView: React.FC = () => {
             }`}
           >
             <Timer className="w-3.5 h-3.5" />
-            <span>In {settings.grace_hours}h Grace Period</span>
+            <span>In {settings.grace_hours}h / Extra Grace Period</span>
             <span className="px-1.5 py-0.5 rounded bg-slate-950/25 font-mono text-[10px]">
               {categorizedSubscribers.inGrace.length}
             </span>
@@ -1080,9 +1297,23 @@ export const ExpiryAutomationView: React.FC = () => {
                           {formatDateTimePkt(new Date(sub.graceEndsMs).toISOString())}
                         </td>
                         <td className="py-2.5 px-3">
-                          <span className="px-2 py-0.5 rounded bg-cyan-950 border border-cyan-700 text-cyan-300 font-bold text-[11px]">
-                            {formatCountdown(sub.graceEndsMs, Date.now())}
-                          </span>
+                          {sub.isExtraGrace ? (
+                            <div className="space-y-1">
+                              <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded bg-amber-950 border border-amber-600/80 text-amber-300 font-bold text-[11px]">
+                                <Clock className="w-3 h-3 shrink-0" />
+                                <span>Extra Grace: {formatCountdown(sub.graceEndsMs, nowTickMs)}</span>
+                              </span>
+                              {sub.extraGraceNote && (
+                                <div className="text-[10px] font-sans text-slate-400 max-w-[220px] truncate" title={sub.extraGraceNote}>
+                                  {sub.extraGraceNote}
+                                </div>
+                              )}
+                            </div>
+                          ) : (
+                            <span className="px-2 py-0.5 rounded bg-cyan-950 border border-cyan-700 text-cyan-300 font-bold text-[11px]">
+                              {formatCountdown(sub.graceEndsMs, nowTickMs)}
+                            </span>
+                          )}
                         </td>
                         <td className="py-2.5 px-3 text-right text-amber-400 font-bold">
                           {formatCurrency(sub.amountDue, 0)}
@@ -1174,15 +1405,27 @@ export const ExpiryAutomationView: React.FC = () => {
                           {formatCurrency(sub.amountDue, 0)}
                         </td>
                         <td className="py-2.5 px-3 text-right">
-                          <button
-                            type="button"
-                            disabled={busy}
-                            onClick={() => handleCollectAndRestore(sub)}
-                            className="px-3.5 py-1.5 rounded-lg bg-emerald-500 hover:bg-emerald-400 text-slate-950 font-bold text-xs inline-flex items-center gap-1.5 transition cursor-pointer disabled:opacity-50"
-                          >
-                            <RotateCcw className="w-3.5 h-3.5" />
-                            <span>{busy ? 'Restoring...' : 'Collect & Restore'}</span>
-                          </button>
+                          <div className="inline-flex items-center gap-2 justify-end">
+                            <button
+                              type="button"
+                              disabled={busy}
+                              onClick={() => handleOpenExtraGraceModal(sub)}
+                              className="px-3 py-1.5 rounded-lg bg-amber-500/15 hover:bg-amber-500/25 text-amber-300 border border-amber-500/50 font-bold text-xs inline-flex items-center gap-1.5 transition cursor-pointer disabled:opacity-50 whitespace-nowrap"
+                              title="Temporarily restore internet & grant extra hours to pay"
+                            >
+                              <Clock className="w-3.5 h-3.5" />
+                              <span>⏳ Extra Grace</span>
+                            </button>
+                            <button
+                              type="button"
+                              disabled={busy}
+                              onClick={() => handleCollectAndRestore(sub)}
+                              className="px-3.5 py-1.5 rounded-lg bg-emerald-500 hover:bg-emerald-400 text-slate-950 font-bold text-xs inline-flex items-center gap-1.5 transition cursor-pointer disabled:opacity-50 whitespace-nowrap"
+                            >
+                              <RotateCcw className="w-3.5 h-3.5" />
+                              <span>{busy ? 'Restoring...' : 'Collect & Restore'}</span>
+                            </button>
+                          </div>
                         </td>
                       </tr>
                     );
@@ -1294,6 +1537,134 @@ export const ExpiryAutomationView: React.FC = () => {
           </div>
         )}
       </div>
+
+      {/* Extra Grace Period Modal */}
+      {extraGraceTarget && (
+        <div className="fixed inset-0 z-[9999] flex items-center justify-center bg-black/75 backdrop-blur-sm p-3 overflow-y-auto">
+          <div className="w-[95vw] sm:w-full max-w-md rounded-2xl bg-[#111A2E] border border-amber-700/60 shadow-2xl overflow-hidden">
+            <div className="px-5 py-4 bg-slate-950 border-b border-slate-800 flex items-center justify-between">
+              <div className="flex items-center gap-2.5">
+                <div className="p-2 rounded-lg bg-amber-500/15 border border-amber-500/40 text-amber-300">
+                  <Clock className="w-4 h-4" />
+                </div>
+                <div>
+                  <h3 className="text-sm font-bold text-white">Grant Extra Grace Period</h3>
+                  <p className="text-[11px] font-mono text-slate-400">
+                    @{extraGraceTarget.username} · Due {formatCurrency(extraGraceTarget.amountDue || 0, 0)}
+                  </p>
+                </div>
+              </div>
+              <button
+                type="button"
+                onClick={() => setExtraGraceTarget(null)}
+                className="text-slate-400 hover:text-white text-xs px-2 py-1 rounded bg-slate-800 hover:bg-slate-700 cursor-pointer"
+              >
+                Close
+              </button>
+            </div>
+
+            <form onSubmit={handleConfirmExtraGrace} className="p-5 space-y-4">
+              <div className="p-3 rounded-xl bg-slate-950 border border-slate-800 text-[11px] space-y-1">
+                <div className="flex items-center justify-between">
+                  <span className="text-slate-400">Subscriber</span>
+                  <span className="text-white font-bold">{extraGraceTarget.full_name || extraGraceTarget.username}</span>
+                </div>
+                <div className="flex items-center justify-between">
+                  <span className="text-slate-400">Restoring Package</span>
+                  <span className="text-cyan-300 font-mono font-bold">
+                    {extraGraceTarget.original_package_profile ||
+                      extraGraceTarget.package_profile_name ||
+                      extraGraceTarget.package_speed ||
+                      '20Mbps'}
+                  </span>
+                </div>
+              </div>
+
+              <div className="space-y-2">
+                <label className="block text-[11px] font-bold text-slate-300 uppercase tracking-wider">
+                  Select Extra Grace Duration
+                </label>
+                <div className="grid grid-cols-2 gap-2">
+                  {[
+                    { id: '24' as const, label: '+24 Hours (1 Day)' },
+                    { id: '48' as const, label: '+48 Hours (2 Days)' },
+                    { id: '72' as const, label: '+72 Hours (3 Days)' },
+                    { id: 'custom' as const, label: 'Custom Hours' },
+                  ].map((opt) => (
+                    <button
+                      key={opt.id}
+                      type="button"
+                      onClick={() => setExtraGracePreset(opt.id)}
+                      className={`px-3 py-2.5 rounded-xl border text-xs font-bold transition cursor-pointer ${
+                        extraGracePreset === opt.id
+                          ? 'bg-amber-500 text-slate-950 border-amber-400 shadow'
+                          : 'bg-slate-950 text-slate-300 border-slate-800 hover:border-slate-700'
+                      }`}
+                    >
+                      {opt.label}
+                    </button>
+                  ))}
+                </div>
+
+                {extraGracePreset === 'custom' && (
+                  <div className="pt-1">
+                    <label className="block text-[11px] font-mono text-slate-400 mb-1">
+                      Custom Hours (1 – 720)
+                    </label>
+                    <input
+                      type="number"
+                      min={1}
+                      max={720}
+                      required
+                      value={extraGraceCustomHours}
+                      onChange={(e) => setExtraGraceCustomHours(e.target.value)}
+                      className="w-full px-3 py-2 rounded-lg bg-slate-950 border border-slate-700 text-white font-mono text-xs focus:outline-none focus:border-amber-500"
+                    />
+                  </div>
+                )}
+
+                <div className="text-[11px] font-mono text-amber-300 pt-1">
+                  Auto-expires back to {settings.expiry_ppp_profile} at:{' '}
+                  <span className="font-bold text-white">
+                    {formatDateTimePkt(new Date(Date.now() + resolvedExtraGraceHours * 3_600_000).toISOString())}
+                  </span>
+                </div>
+              </div>
+
+              <div>
+                <label className="block text-[11px] font-bold text-slate-300 mb-1">
+                  Admin Note / Promise to Pay (Optional)
+                </label>
+                <input
+                  type="text"
+                  value={extraGraceNoteInput}
+                  onChange={(e) => setExtraGraceNoteInput(e.target.value)}
+                  placeholder="e.g. Promised cash handover tomorrow"
+                  className="w-full px-3 py-2 rounded-lg bg-slate-950 border border-slate-700 text-white text-xs focus:outline-none focus:border-amber-500"
+                />
+              </div>
+
+              <div className="flex items-center justify-end gap-2 pt-2 border-t border-slate-800">
+                <button
+                  type="button"
+                  onClick={() => setExtraGraceTarget(null)}
+                  className="px-4 py-2 rounded-xl bg-slate-800 hover:bg-slate-700 text-slate-300 text-xs font-semibold cursor-pointer"
+                >
+                  Cancel
+                </button>
+                <button
+                  type="submit"
+                  disabled={isGrantingExtraGrace}
+                  className="px-4 py-2 rounded-xl bg-amber-500 hover:bg-amber-400 text-slate-950 font-bold text-xs flex items-center gap-1.5 transition cursor-pointer disabled:opacity-50"
+                >
+                  <Zap className="w-3.5 h-3.5" />
+                  <span>{isGrantingExtraGrace ? 'Restoring & Saving...' : 'Grant Extra Grace'}</span>
+                </button>
+              </div>
+            </form>
+          </div>
+        </div>
+      )}
     </div>
   );
 };
