@@ -563,6 +563,7 @@ export interface SupabaseGisFdbPort {
   subscriber_username?: string | null;
   client_label?: string | null;
   drop_cable_meters: number;
+  rx_power_dbm?: number | null;
   status: GisPortStatus;
   updated_at?: string;
 }

@@ -5,6 +5,7 @@ import { useSubscribers, UnifiedSubscriber } from '../hooks/useSubscribers';
 import { TicketCategory, TicketPriority } from '../types/isp';
 import { supabase, SupabasePortalUser } from '../services/supabaseClient';
 import { safeMikrotikFetch } from '../services/mikrotikRestClient';
+import { FIELD_STAFF_ROLES, insertTicketSafe, normalizeTicketPriority } from '../lib/anniversaryBilling';
 
 export interface CreateTicketModalProps {
   isOpen: boolean;
@@ -19,7 +20,11 @@ export const NewTicketModal: React.FC<CreateTicketModalProps> = ({
   defaultSubscriberUsername,
   onSuccess,
 }) => {
-  const { selectedRouterId, createComplaintTicket } = useISP();
+  const { routers, selectedRouterId, agents, createComplaintTicket } = useISP();
+  const activeRouter = useMemo(
+    () => (routers || []).find((r) => r.id === selectedRouterId) || (routers || [])[0],
+    [routers, selectedRouterId]
+  );
   const { unifiedSubscribers } = useSubscribers();
 
   // Live agents from Supabase portal_users (role === 'AGENT')
@@ -52,14 +57,6 @@ export const NewTicketModal: React.FC<CreateTicketModalProps> = ({
 
   const dropdownRef = useRef<HTMLDivElement>(null);
 
-  // Fallback list of real agents per SLA specification
-  const fallbackRealAgents: Array<{ id: string; full_name: string; username: string; area: string; role: 'AGENT' }> = [
-    { id: 'agent-hassnain-uuid', full_name: 'Hassnain Akram', username: 'hassnain_saddar', area: 'Saddar', role: 'AGENT' },
-    { id: 'agent-zayan-uuid', full_name: 'Zayan Saleem', username: 'zayan_saddar_node', area: 'Saddar Node', role: 'AGENT' },
-    { id: 'agent-ramzan-uuid', full_name: 'Muhammad Ramzan', username: 'ramzan_main_city', area: 'Main City Node', role: 'AGENT' },
-    { id: 'agent-bilal-uuid', full_name: 'Bilal Khan', username: 'bilal_g11_f11', area: 'Sector G-11 & F-11', role: 'AGENT' },
-  ];
-
   const handleSelectSubscriber = useCallback((sub: UnifiedSubscriber) => {
     setSelectedSubscriber(sub);
     setSearchQuery(`${sub.fullName} (@${sub.username})`);
@@ -74,21 +71,30 @@ export const NewTicketModal: React.FC<CreateTicketModalProps> = ({
     setIsDropdownOpen(false);
   }, []);
 
-  // Fetch real technicians directly from Supabase portal_users
+  // Fetch real technicians directly from Supabase portal_users (fallback strictly to live context agents)
   const fetchPortalAgents = async () => {
+    const contextStaffFallback = (agents || []).map((a) => ({
+      id: a.id,
+      full_name: a.name,
+      username: a.name.toLowerCase().replace(/[^a-z0-9]+/g, '_'),
+      area: a.assignedArea || 'Field Sector',
+      role: 'AGENT',
+    }));
+
     try {
       const { data, error } = await supabase
         .from('portal_users')
         .select('id, full_name, username, area, role')
-        .eq('role', 'AGENT');
+        .in('role', [...FIELD_STAFF_ROLES])
+        .order('full_name', { ascending: true });
 
       if (!error && data && data.length > 0) {
         setPortalAgents(data as SupabasePortalUser[]);
       } else {
-        setPortalAgents(fallbackRealAgents as any);
+        setPortalAgents(contextStaffFallback as any);
       }
     } catch {
-      setPortalAgents(fallbackRealAgents as any);
+      setPortalAgents(contextStaffFallback as any);
     }
   };
 
@@ -107,7 +113,7 @@ export const NewTicketModal: React.FC<CreateTicketModalProps> = ({
     try {
       // 2. Query /api/mikrotik/ppp/secret
       try {
-        const secRes = await safeMikrotikFetch('/api/mikrotik/ppp/secret');
+        const secRes = await safeMikrotikFetch('/api/mikrotik/ppp/secret', {}, activeRouter);
         if (secRes.ok) {
           const secrets = await secRes.json();
           if (Array.isArray(secrets)) {
@@ -155,7 +161,7 @@ export const NewTicketModal: React.FC<CreateTicketModalProps> = ({
 
       // 3. Query /api/mikrotik/ppp/active
       try {
-        const actRes = await safeMikrotikFetch('/api/mikrotik/ppp/active');
+        const actRes = await safeMikrotikFetch('/api/mikrotik/ppp/active', {}, activeRouter);
         if (actRes.ok) {
           const actives = await actRes.json();
           if (Array.isArray(actives)) {
@@ -272,7 +278,7 @@ export const NewTicketModal: React.FC<CreateTicketModalProps> = ({
     } finally {
       setIsLoadingSubscribers(false);
     }
-  }, [defaultSubscriberUsername, unifiedSubscribers, handleSelectSubscriber]);
+  }, [defaultSubscriberUsername, unifiedSubscribers, handleSelectSubscriber, activeRouter]);
 
   useEffect(() => {
     if (isOpen) {
@@ -342,23 +348,25 @@ export const NewTicketModal: React.FC<CreateTicketModalProps> = ({
     const createdAtIso = new Date().toISOString();
 
     try {
-      // 1. SINGLE Database Insert strictly inside NewTicketModal with both assigned_agent_id AND assigned_agent_name
-      const { data: insertedRow, error: sbErr } = await supabase
-        .from('tickets')
-        .insert([
-          {
-            ticket_no: ticketNo,
-            subscriber_username: pppoeUsername || customerName.toLowerCase().replace(/\s+/g, '.'),
-            assigned_agent_id: assignedId,
-            assigned_agent_name: assignedName,
-            issue: `[${category.toUpperCase()}] ${title.trim()}: ${description.trim()}`,
-            priority: priority.toUpperCase(),
-            status: specificAgent ? 'IN_PROGRESS' : 'OPEN',
-            created_at: createdAtIso,
-          },
-        ])
-        .select()
-        .single();
+      const normalizedPriority = normalizeTicketPriority(priority);
+      const cleanSubscriberUsername = (
+        pppoeUsername || customerName.toLowerCase().replace(/\s+/g, '.')
+      )
+        .replace(/^@+/, '')
+        .trim()
+        .toLowerCase();
+
+      // 1. SINGLE Database Insert strictly inside NewTicketModal with normalized priority & agent link
+      const { data: insertedRow, error: sbErr } = await insertTicketSafe(supabase, {
+        ticket_no: ticketNo,
+        subscriber_username: cleanSubscriberUsername,
+        assigned_agent_id: assignedId,
+        assigned_agent_name: assignedName,
+        issue: `[${category.toUpperCase()}] ${title.trim()}: ${description.trim()}`,
+        priority: normalizedPriority,
+        status: specificAgent ? 'IN_PROGRESS' : 'OPEN',
+        created_at: createdAtIso,
+      });
 
       if (sbErr) {
         throw new Error(sbErr.message || 'Failed to save ticket to Supabase');

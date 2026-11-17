@@ -65,6 +65,7 @@ import {
   replaceGisNodeEquipment,
   splitCableWithFoscJoint,
   subscribeToGisRealtime,
+  syncFdbPortsOpticalPowerToDb,
   syncOpticalBudgetsToDb,
   updateGisCable,
   updateGisNode,
@@ -81,6 +82,7 @@ import {
   cableCoresToType,
   calculateTopologyOpticalBudgets,
   computePolylineDistanceMeters,
+  computePortLiveRxDbm,
   getTia598Color,
   haversineMeters,
   inferSfpClassFromDbm,
@@ -568,7 +570,20 @@ export const FiberGisMapView: React.FC<FiberGisMapViewProps> = ({
         if (data.nodes.length > 0 && !data.schemaMissing) {
           const portMap: Record<string, SupabaseGisOltPonPort> = {};
           for (const pp of data.ponPorts) portMap[pp.id] = pp;
-          syncOpticalBudgetsToDb(data.nodes, data.cables, portMap).catch(() => {});
+          syncOpticalBudgetsToDb(data.nodes, data.cables, portMap)
+            .then((freshBudgets) =>
+              syncFdbPortsOpticalPowerToDb({
+                nodes: data.nodes,
+                budgetsByNodeId: freshBudgets,
+                splitterOutputs: data.splitterOutputs,
+                fdbPorts: data.ports,
+              })
+            )
+            .then(({ updatedOutputs, updatedPorts }) => {
+              setSplitterOutputs(updatedOutputs);
+              setPorts(updatedPorts);
+            })
+            .catch(() => {});
         }
         setLastSyncedAt(new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' }));
       } catch (err: any) {
@@ -1571,7 +1586,20 @@ export const FiberGisMapView: React.FC<FiberGisMapViewProps> = ({
         setPonPorts(nextPorts);
         const nextPortMap: Record<string, SupabaseGisOltPonPort> = {};
         for (const pp of nextPorts) nextPortMap[pp.id] = pp;
-        syncOpticalBudgetsToDb(nodes, cables, nextPortMap).catch(() => {});
+        syncOpticalBudgetsToDb(nodes, cables, nextPortMap)
+          .then((freshBudgets) =>
+            syncFdbPortsOpticalPowerToDb({
+              nodes,
+              budgetsByNodeId: freshBudgets,
+              splitterOutputs,
+              fdbPorts: ports,
+            })
+          )
+          .then(({ updatedOutputs, updatedPorts }) => {
+            setSplitterOutputs(updatedOutputs);
+            setPorts(updatedPorts);
+          })
+          .catch(() => {});
         showToast(
           `Updated PON-${updatedPort.port_number} TX to +${Number(updatedPort.tx_power_dbm).toFixed(1)} dBm (${updatedPort.sfp_class}).`
         );
@@ -1678,7 +1706,7 @@ export const FiberGisMapView: React.FC<FiberGisMapViewProps> = ({
           }
         }
 
-        // Recalculate downstream optical budgets immediately & persist to gis_nodes + fiber_nodes
+        // Recalculate downstream optical budgets immediately & persist to gis_nodes + fiber_nodes + FDB ports
         const freshBudgets = await syncOpticalBudgetsToDb(nextNodes, cables, ponPortsById);
         const nextNodesWithBudgets = nextNodes.map((n) => {
           if (n.node_type === 'OLT') return n;
@@ -1692,6 +1720,16 @@ export const FiberGisMapView: React.FC<FiberGisMapViewProps> = ({
           };
         });
         setNodes(nextNodesWithBudgets);
+
+        const { updatedOutputs, updatedPorts } = await syncFdbPortsOpticalPowerToDb({
+          nodes: nextNodesWithBudgets,
+          budgetsByNodeId: freshBudgets,
+          splitterOutputs,
+          fdbPorts: ports,
+          targetNodeIds: [nodeId],
+        });
+        setSplitterOutputs(updatedOutputs);
+        setPorts(updatedPorts);
       };
 
       await Promise.race([
@@ -1873,6 +1911,16 @@ export const FiberGisMapView: React.FC<FiberGisMapViewProps> = ({
         });
         setNodes(nextNodesWithBudgets);
 
+        const { updatedOutputs, updatedPorts } = await syncFdbPortsOpticalPowerToDb({
+          nodes: nextNodesWithBudgets,
+          budgetsByNodeId: freshBudgets,
+          splitterOutputs,
+          fdbPorts: ports,
+          targetNodeIds: [params.sourceNode.id, targetNode.id],
+        });
+        setSplitterOutputs(updatedOutputs);
+        setPorts(updatedPorts);
+
         const targetBudget = freshBudgets[targetNode.id];
         const targetRxMsg =
           targetBudget?.ontRxDbm !== null && targetBudget?.ontRxDbm !== undefined
@@ -2002,7 +2050,15 @@ export const FiberGisMapView: React.FC<FiberGisMapViewProps> = ({
   }) => {
     setIsSaving(true);
     try {
-      const savedPort = await upsertFdbPortAssignment(params);
+      const nodeBudget = budgetsByNodeId[params.fdbNodeId];
+      const liveRxPowerDbm = computePortLiveRxDbm(
+        nodeBudget?.ontRxDbm ?? null,
+        params.dropCableMeters
+      );
+      const savedPort = await upsertFdbPortAssignment({
+        ...params,
+        rxPowerDbm: liveRxPowerDbm,
+      });
       setPorts((prev) => applyRealtimePortDelta(prev, 'INSERT', savedPort));
       showToast(`✅ Saved to Supabase DB — Port ${params.portNumber} assignment updated.`);
     } catch (err: any) {
@@ -2011,6 +2067,52 @@ export const FiberGisMapView: React.FC<FiberGisMapViewProps> = ({
       setIsSaving(false);
     }
   };
+
+  const handleRecalculateOpticalPower = useCallback(
+    async (targetNodeId?: string) => {
+      setIsSaving(true);
+      try {
+        const freshBudgets = await syncOpticalBudgetsToDb(nodes, cables, ponPortsById);
+        const nextNodesWithBudgets = nodes.map((n) => {
+          if (n.node_type === 'OLT') return n;
+          const b = freshBudgets[n.id];
+          if (!b) return n;
+          return {
+            ...n,
+            calculated_input_dbm: b.inputDbm,
+            calculated_output_dbm: b.thruOutputDbm,
+            calculated_ont_rx_dbm: b.ontRxDbm,
+          };
+        });
+        setNodes(nextNodesWithBudgets);
+
+        const { updatedOutputs, updatedPorts } = await syncFdbPortsOpticalPowerToDb({
+          nodes: nextNodesWithBudgets,
+          budgetsByNodeId: freshBudgets,
+          splitterOutputs,
+          fdbPorts: ports,
+          targetNodeIds: targetNodeId ? [targetNodeId] : undefined,
+          forceAllNodes: !targetNodeId,
+        });
+        setSplitterOutputs(updatedOutputs);
+        setPorts(updatedPorts);
+
+        const targetNodeName = targetNodeId
+          ? nodes.find((n) => n.id === targetNodeId)?.name
+          : null;
+        showToast(
+          targetNodeName
+            ? `✅ Recalculated optical power for ${targetNodeName} & synced all assigned ports to DB.`
+            : '✅ Recalculated topology optical budgets & synced all FDB ports to DB.'
+        );
+      } catch (err: any) {
+        showToast(err?.message || 'Failed to recalculate optical power', 'err');
+      } finally {
+        setIsSaving(false);
+      }
+    },
+    [nodes, cables, ponPortsById, splitterOutputs, ports, showToast]
+  );
 
   const handleUpsertSplitterOutput = async (params: {
     nodeId: string;
@@ -3332,6 +3434,7 @@ export const FiberGisMapView: React.FC<FiberGisMapViewProps> = ({
           onUpdatePonPort={handleUpdatePonPort}
           onOpenUpgradeModal={(node) => setUpgradeTargetNodeId(node.id)}
           onQuickSpliceAndExtendCore={handleQuickSpliceAndExtendCore}
+          onRecalculateOpticalPower={handleRecalculateOpticalPower}
           onRouteCableFromNode={(node) => {
             setToolMode('connect_cable');
             setConnectSourceNodeId(node.id);

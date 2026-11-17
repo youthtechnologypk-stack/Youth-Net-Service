@@ -40,8 +40,8 @@ import {
   buildBilingualPaymentSlip,
   isMissingTableOrColumnError,
   loadBillingSettingsFromDb,
-  parseExpiryDateWithCutoffMs,
 } from '../lib/expiryUtils';
+import { evaluateSubscribersExpiryBuckets } from '../lib/anniversaryBilling';
 
 type ExpiryTabKey = 'expiring_3d' | 'grace_24h' | 'suspended_16' | 'audit_logs';
 
@@ -78,11 +78,18 @@ export const ExpiryAutomationView: React.FC = () => {
   });
   const [isSettingsOpen, setIsSettingsOpen] = useState<boolean>(true);
   const [mikrotikProfiles, setMikrotikProfiles] = useState<string[]>([]);
+  const [mkSecrets, setMkSecrets] = useState<Array<Record<string, any>>>([]);
+  const [mkActive, setMkActive] = useState<Array<Record<string, any>>>([]);
 
   const [subscribers, setSubscribers] = useState<SupabasePortalUser[]>([]);
-  const [openInvoices, setOpenInvoices] = useState<SupabaseInvoice[]>([]);
+  const [allInvoices, setAllInvoices] = useState<SupabaseInvoice[]>([]);
   const [auditLogs, setAuditLogs] = useState<SupabaseExpiryAuditLog[]>([]);
   const [waLogs, setWaLogs] = useState<SupabaseWhatsappReminderLog[]>([]);
+
+  const openInvoices = useMemo(
+    () => (allInvoices || []).filter((inv) => String(inv.status || '').toUpperCase() !== 'PAID'),
+    [allInvoices]
+  );
 
   const [missingSchemaItems, setMissingSchemaItems] = useState<string[]>([]);
   const [copiedSql, setCopiedSql] = useState<boolean>(false);
@@ -102,14 +109,29 @@ export const ExpiryAutomationView: React.FC = () => {
 
   const fetchMikrotikProfilesList = useCallback(async () => {
     try {
-      const res = await safeMikrotikFetch('/api/mikrotik/ppp/profile', {}, activeRouter);
-      if (res.ok) {
-        const json = await res.json();
+      const [profRes, secRes, actRes] = await Promise.allSettled([
+        safeMikrotikFetch('/api/mikrotik/ppp/profile', {}, activeRouter),
+        safeMikrotikFetch('/api/mikrotik/ppp/secret', {}, activeRouter),
+        safeMikrotikFetch('/api/mikrotik/ppp/active', {}, activeRouter),
+      ]);
+
+      if (profRes.status === 'fulfilled' && profRes.value.ok) {
+        const json = await profRes.value.json();
         if (Array.isArray(json)) {
-          const names = json
-            .map((p: any) => String(p?.name || '').trim())
-            .filter(Boolean);
+          const names = json.map((p: any) => String(p?.name || '').trim()).filter(Boolean);
           setMikrotikProfiles(Array.from(new Set(names)));
+        }
+      }
+      if (secRes.status === 'fulfilled' && secRes.value.ok) {
+        const json = await secRes.value.json();
+        if (Array.isArray(json)) {
+          setMkSecrets(json);
+        }
+      }
+      if (actRes.status === 'fulfilled' && actRes.value.ok) {
+        const json = await actRes.value.json();
+        if (Array.isArray(json)) {
+          setMkActive(json);
         }
       }
     } catch {}
@@ -122,7 +144,7 @@ export const ExpiryAutomationView: React.FC = () => {
       const [settingsRes, clientsRes, invRes, auditRes, waRes] = await Promise.all([
         loadBillingSettingsFromDb(supabase),
         supabase.from('portal_users').select('*').eq('role', 'CLIENT').order('username', { ascending: true }),
-        supabase.from('invoices').select('*').neq('status', 'PAID'),
+        supabase.from('invoices').select('*').order('created_at', { ascending: false }),
         supabase
           .from('expiry_audit_logs')
           .select('*')
@@ -144,7 +166,7 @@ export const ExpiryAutomationView: React.FC = () => {
         setSubscribers(clientsRes.data as SupabasePortalUser[]);
       }
       if (invRes.data) {
-        setOpenInvoices(invRes.data as SupabaseInvoice[]);
+        setAllInvoices(invRes.data as SupabaseInvoice[]);
       }
 
       if (auditRes.error && isMissingTableOrColumnError(auditRes.error)) {
@@ -324,108 +346,59 @@ export const ExpiryAutomationView: React.FC = () => {
     }
   };
 
-  // Compute unpaid map & classify subscribers strictly from live Supabase rows
-  const unpaidByUser = useMemo(() => {
-    const map: Record<string, { amountDue: number; earliestDueDate: string | null; invoiceIds: string[] }> = {};
-    for (const inv of openInvoices) {
-      const uname = String(inv.subscriber_username || '').trim().toLowerCase();
-      if (!uname) continue;
-      const bal = Math.max(0, (Number(inv.amount) || 0) - (Number(inv.paid_amount) || 0));
-      if (bal <= 0) continue;
-      if (!map[uname]) {
-        map[uname] = { amountDue: 0, earliestDueDate: null, invoiceIds: [] };
-      }
-      map[uname].amountDue += bal;
-      map[uname].invoiceIds.push(inv.id);
-      if (inv.due_date && (!map[uname].earliestDueDate || inv.due_date < map[uname].earliestDueDate!)) {
-        map[uname].earliestDueDate = inv.due_date;
-      }
-    }
-    return map;
-  }, [openInvoices]);
-
   const categorizedSubscribers = useMemo(() => {
-    const nowMs = Date.now();
-    const threeDaysMs = 3 * 86_400_000;
-    const graceHours = Math.max(0, Number(settings.grace_hours) || 24);
+    const evaluated = evaluateSubscribersExpiryBuckets({
+      subscribers,
+      allInvoices,
+      cutoffTimePkt: settings.cutoff_time_pkt || '14:00',
+      graceHours: Math.max(0, Number(settings.grace_hours) || 24),
+      expiryProfileName: settings.expiry_ppp_profile,
+      mikrotikSecrets: mkSecrets,
+      mikrotikActive: mkActive,
+    });
 
-    const expiring3d: Array<
-      SupabasePortalUser & { amountDue: number; effectiveExpiryMs: number; daysRemaining: number }
-    > = [];
-    const inGrace: Array<
-      SupabasePortalUser & { amountDue: number; effectiveExpiryMs: number; graceEndsMs: number }
-    > = [];
-    const suspended16: Array<
-      SupabasePortalUser & { amountDue: number; effectiveExpiryMs: number | null }
-    > = [];
-
-    for (const sub of subscribers) {
-      const uname = String(sub.username || '').trim().toLowerCase();
-      const unpaid = unpaidByUser[uname];
-      const amountDue = unpaid?.amountDue || Number(sub.monthly_fee) || 2500;
-      const billingStatus = String(sub.billing_status || '').toUpperCase();
-      const accountStatus = String(sub.account_status || 'ACTIVE').toUpperCase();
-
-      const rawExpiry = sub.expiry_date || unpaid?.earliestDueDate || null;
-      const expiryMs = parseExpiryDateWithCutoffMs(rawExpiry, settings.cutoff_time_pkt || '14:00');
-      const graceEndsMs = sub.grace_ends_at
-        ? Date.parse(String(sub.grace_ends_at))
-        : expiryMs
-        ? expiryMs + graceHours * 3_600_000
-        : null;
-
-      if (
-        billingStatus === 'SUSPENDED_EXPIRED' ||
-        accountStatus === 'EXPIRED' ||
-        accountStatus === 'SUSPENDED'
-      ) {
-        suspended16.push({ ...sub, amountDue, effectiveExpiryMs: expiryMs });
-        continue;
-      }
-
-      if (
-        billingStatus === 'GRACE_PERIOD' ||
-        (expiryMs !== null && graceEndsMs !== null && nowMs >= expiryMs && nowMs < graceEndsMs)
-      ) {
-        inGrace.push({
-          ...sub,
-          amountDue,
-          effectiveExpiryMs: expiryMs || nowMs,
-          graceEndsMs: graceEndsMs || nowMs + graceHours * 3_600_000,
-        });
-        continue;
-      }
-
-      if (expiryMs !== null && nowMs >= expiryMs && graceEndsMs !== null && nowMs >= graceEndsMs) {
-        suspended16.push({ ...sub, amountDue, effectiveExpiryMs: expiryMs });
-        continue;
-      }
-
-      if (
-        expiryMs !== null &&
-        nowMs < expiryMs &&
-        expiryMs <= nowMs + threeDaysMs
-      ) {
-        const daysRemaining = Math.max(0, Math.ceil((expiryMs - nowMs) / 86_400_000));
-        expiring3d.push({
-          ...sub,
-          amountDue,
-          effectiveExpiryMs: expiryMs,
-          daysRemaining,
-        });
-      }
-    }
-
-    return { expiring3d, inGrace, suspended16 };
-  }, [subscribers, unpaidByUser, settings.cutoff_time_pkt, settings.grace_hours]);
+    return {
+      expiring3d: evaluated.expiring3d.map((item) => ({
+        ...item.subscriber,
+        amountDue: item.amountDue,
+        effectiveExpiryMs: item.effectiveExpiryMs ?? Date.now(),
+        daysRemaining: item.daysRemaining,
+        isSyntheticRecord: item.isSyntheticRecord,
+      })),
+      inGrace: evaluated.inGrace.map((item) => ({
+        ...item.subscriber,
+        amountDue: item.amountDue,
+        effectiveExpiryMs: item.effectiveExpiryMs ?? Date.now(),
+        graceEndsMs: item.graceEndsMs ?? Date.now(),
+        isSyntheticRecord: item.isSyntheticRecord,
+      })),
+      suspended16: evaluated.suspended16.map((item) => ({
+        ...item.subscriber,
+        amountDue: item.amountDue,
+        effectiveExpiryMs: item.effectiveExpiryMs,
+        isSyntheticRecord: item.isSyntheticRecord,
+        suspensionReason: item.suspensionReason,
+      })),
+    };
+  }, [
+    subscribers,
+    allInvoices,
+    settings.cutoff_time_pkt,
+    settings.grace_hours,
+    settings.expiry_ppp_profile,
+    mkSecrets,
+    mkActive,
+  ]);
 
   // 1-Click Send WhatsApp Slip + Log to whatsapp_reminder_logs & expiry_audit_logs
   const handleSendWhatsAppSlip = async (
-    sub: SupabasePortalUser & { amountDue: number; effectiveExpiryMs: number }
+    sub: SupabasePortalUser & { amountDue: number; effectiveExpiryMs: number; isSyntheticRecord?: boolean }
   ) => {
     const uname = String(sub.username || '').trim().toLowerCase();
     setBusyUsernames((p) => ({ ...p, [uname]: true }));
     const nowIso = new Date().toISOString();
+    const isUuid = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(String(sub.id || ''));
+    const realSubscriberId = !sub.isSyntheticRecord && isUuid ? sub.id : null;
 
     try {
       const expiryDateLabel = new Date(sub.effectiveExpiryMs).toISOString().slice(0, 10);
@@ -454,7 +427,7 @@ export const ExpiryAutomationView: React.FC = () => {
 
       await supabase.from('whatsapp_reminder_logs').insert([
         {
-          subscriber_id: sub.id,
+          subscriber_id: realSubscriberId,
           username: uname,
           phone: sub.phone || null,
           message_body: slip,
@@ -465,14 +438,16 @@ export const ExpiryAutomationView: React.FC = () => {
         },
       ]);
 
-      await supabase
-        .from('portal_users')
-        .update({ billing_status: 'REMINDER_SENT', last_reminder_cycle: cycleKey })
-        .eq('id', sub.id);
+      if (realSubscriberId) {
+        await supabase
+          .from('portal_users')
+          .update({ billing_status: 'REMINDER_SENT', last_reminder_cycle: cycleKey })
+          .eq('id', realSubscriberId);
+      }
 
       await supabase.from('expiry_audit_logs').insert([
         {
-          subscriber_id: sub.id,
+          subscriber_id: realSubscriberId,
           username: uname,
           action_type: 'REMINDER_3D',
           previous_profile: sub.original_package_profile || sub.package_profile_name || null,
@@ -494,32 +469,59 @@ export const ExpiryAutomationView: React.FC = () => {
 
   // +24h Extend Grace persisted directly to Supabase portal_users & expiry_audit_logs
   const handleExtendGrace24h = async (
-    sub: SupabasePortalUser & { graceEndsMs: number }
+    sub: SupabasePortalUser & { graceEndsMs: number; isSyntheticRecord?: boolean }
   ) => {
     const uname = String(sub.username || '').trim().toLowerCase();
     setBusyUsernames((p) => ({ ...p, [uname]: true }));
     const nowMs = Date.now();
     const nowIso = new Date(nowMs).toISOString();
+    const isUuid = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(String(sub.id || ''));
 
     try {
       const baseMs = Math.max(nowMs, sub.graceEndsMs || nowMs);
       const nextGraceIso = new Date(baseMs + 24 * 3_600_000).toISOString();
+      const nextGraceDateStr = nextGraceIso.slice(0, 10);
 
-      const { error } = await supabase
-        .from('portal_users')
-        .update({
-          billing_status: 'GRACE_PERIOD',
-          grace_ends_at: nextGraceIso,
-        })
-        .eq('id', sub.id);
+      let realSubscriberId: string | null = !sub.isSyntheticRecord && isUuid ? sub.id : null;
+      if (!realSubscriberId) {
+        const { data: foundUser } = await supabase
+          .from('portal_users')
+          .select('id')
+          .ilike('username', uname)
+          .maybeSingle();
+        if (foundUser?.id) {
+          realSubscriberId = foundUser.id;
+        }
+      }
 
-      if (error) {
-        throw new Error(error.message);
+      if (realSubscriberId) {
+        const { error } = await supabase
+          .from('portal_users')
+          .update({
+            billing_status: 'GRACE_PERIOD',
+            grace_ends_at: nextGraceIso,
+          })
+          .eq('id', realSubscriberId);
+
+        if (error) {
+          throw new Error(error.message);
+        }
+      } else {
+        // Subscriber derived from open invoices only: shift unpaid invoice due_date by +1 day
+        const userOpenInvoices = openInvoices.filter(
+          (inv) => String(inv.subscriber_username || '').trim().toLowerCase() === uname
+        );
+        for (const inv of userOpenInvoices) {
+          await supabase
+            .from('invoices')
+            .update({ due_date: nextGraceDateStr })
+            .eq('id', inv.id);
+        }
       }
 
       await supabase.from('expiry_audit_logs').insert([
         {
-          subscriber_id: sub.id,
+          subscriber_id: realSubscriberId,
           username: uname,
           action_type: 'GRACE_EXTENDED',
           previous_profile: sub.package_profile_name || sub.package_speed || null,
@@ -1154,9 +1156,18 @@ export const ExpiryAutomationView: React.FC = () => {
                               sub.package_speed ||
                               '20Mbps'}
                           </span>
+                          {sub.suspensionReason && (
+                            <div className="text-[10px] text-rose-400 mt-1 font-mono">
+                              {sub.suspensionReason}
+                            </div>
+                          )}
                         </td>
                         <td className="py-2.5 px-3 text-slate-300">
-                          {formatDateTimePkt(sub.suspended_at || sub.expiry_date)}
+                          {formatDateTimePkt(
+                            sub.suspended_at ||
+                              sub.expiry_date ||
+                              (sub.effectiveExpiryMs ? new Date(sub.effectiveExpiryMs).toISOString() : null)
+                          )}
                         </td>
                         <td className="py-2.5 px-3 text-right text-rose-400 font-bold">
                           {formatCurrency(sub.amountDue, 0)}

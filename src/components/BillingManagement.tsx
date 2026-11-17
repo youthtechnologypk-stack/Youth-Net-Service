@@ -1809,106 +1809,99 @@ export const BillingManagement: React.FC<BillingManagementProps> = ({
           </div>
 
           {/* Agent Cards */}
-          <div className="grid grid-cols-1 md:grid-cols-3 gap-5">
-            {agents.map((agent) => {
-              const outstandingAdvance = Math.max(0, agent.advanceSalaryTaken - agent.advanceSalaryReturned);
-              const netSalary = Math.max(0, agent.baseSalary - outstandingAdvance);
+          {agents.length === 0 ? (
+            <div className="bg-slate-900 border border-slate-800 rounded-xl p-8 text-center text-slate-400 text-xs font-mono">
+              No active field staff found in Supabase <code className="text-cyan-400">portal_users</code>. Enroll an Agent/Technician above to track recovery &amp; payroll.
+            </div>
+          ) : (
+            <div className="grid grid-cols-1 md:grid-cols-3 gap-5">
+              {agents.map((agent) => {
+                const outstandingAdvance = Math.max(0, agent.advanceSalaryTaken - agent.advanceSalaryReturned);
+                const netSalary = Math.max(0, agent.baseSalary - outstandingAdvance);
 
-              return (
-                <div
-                  key={agent.id}
-                  className="bg-slate-900 border border-slate-800 rounded-xl p-5 shadow-lg space-y-4 hover:border-slate-700 transition"
-                >
-                  <div className="flex items-start justify-between">
-                    <div>
-                      <h4 className="font-bold text-white text-base">{agent.name}</h4>
-                      <div className="text-xs text-slate-400 font-mono">{agent.phone}</div>
-                      <span className="inline-block mt-1 text-[10px] bg-slate-800 text-slate-300 px-2 py-0.5 rounded font-mono">
-                        {agent.assignedArea}
-                      </span>
+                return (
+                  <div
+                    key={agent.id}
+                    className="bg-slate-900 border border-slate-800 rounded-xl p-5 shadow-lg space-y-4 hover:border-slate-700 transition"
+                  >
+                    <div className="flex items-start justify-between">
+                      <div>
+                        <h4 className="font-bold text-white text-base">{agent.name}</h4>
+                        <div className="text-xs text-slate-400 font-mono">{agent.phone || 'No phone on file'}</div>
+                        <span className="inline-block mt-1 text-[10px] bg-slate-800 text-slate-300 px-2 py-0.5 rounded font-mono">
+                          {agent.assignedArea || 'Field Sector'}
+                        </span>
+                      </div>
+                      <div className="flex items-center gap-1.5">
+                        <span
+                          className={`text-[10px] font-semibold px-2 py-0.5 rounded uppercase ${
+                            agent.status === 'active' || agent.status === 'on_field'
+                              ? 'bg-emerald-950 text-emerald-300 border border-emerald-800'
+                              : 'bg-rose-950 text-rose-300 border border-rose-800'
+                          }`}
+                        >
+                          {agent.status}
+                        </span>
+                        <button
+                          onClick={() => {
+                            setSelectedAgentToManage(agent);
+                            setIsAddOrEditAgentModalOpen(true);
+                          }}
+                          className="p-1 rounded-lg bg-slate-800 hover:bg-slate-700 text-slate-400 hover:text-cyan-300 border border-slate-700 transition cursor-pointer"
+                          title="Edit Agent Profile & Salary"
+                        >
+                          <Edit3 className="w-3.5 h-3.5" />
+                        </button>
+                      </div>
                     </div>
-                    <div className="flex items-center gap-1.5">
-                      <span
-                        className={`text-[10px] font-semibold px-2 py-0.5 rounded uppercase ${
-                          agent.status === 'active'
-                            ? 'bg-emerald-950 text-emerald-300 border border-emerald-800'
-                            : 'bg-rose-950 text-rose-300 border border-rose-800'
-                        }`}
-                      >
-                        {agent.status}
-                      </span>
+
+                    <div className="bg-slate-950 p-3 rounded-lg border border-slate-800/80 space-y-1.5 font-mono text-xs">
+                      <div className="flex justify-between">
+                        <span className="text-slate-400">Cash in Hand:</span>
+                        <strong className="text-cyan-400 font-bold">
+                          {formatCurrency(agent.cashInHand || 0)}
+                        </strong>
+                      </div>
+                      <div className="flex justify-between">
+                        <span className="text-slate-400">Base Salary:</span>
+                        <span className="text-white">{formatCurrency(agent.baseSalary || 0)}</span>
+                      </div>
+                      <div className="flex justify-between">
+                        <span className="text-slate-400">Advance Balance:</span>
+                        <span className="text-amber-400">{formatCurrency(outstandingAdvance)}</span>
+                      </div>
+                      <div className="flex justify-between pt-1 border-t border-slate-800 font-bold">
+                        <span className="text-slate-300">Net Payable:</span>
+                        <span className="text-emerald-400">{formatCurrency(netSalary)}</span>
+                      </div>
+                    </div>
+
+                    <div className="grid grid-cols-2 gap-2 pt-1 font-sans">
                       <button
                         onClick={() => {
-                          setSelectedAgentToManage(agent);
-                          setIsAddOrEditAgentModalOpen(true);
+                          setReceiveCashDefaultAgentId(agent.id);
+                          setIsReceiveCashModalOpen(true);
                         }}
-                        className="p-1 rounded-lg bg-slate-800 hover:bg-slate-700 text-slate-400 hover:text-cyan-300 border border-slate-700 transition cursor-pointer"
-                        title="Edit Agent Profile & Salary"
+                        className="bg-cyan-950 hover:bg-cyan-900 text-cyan-300 border border-cyan-800 px-2.5 py-1.5 rounded-lg text-xs font-semibold transition"
                       >
-                        <Edit3 className="w-3.5 h-3.5" />
+                        Receive Cash
+                      </button>
+                      <button
+                        onClick={() => {
+                          setSelectedAgentForSalary(agent);
+                          setSalaryModalMode('disburse_advance');
+                          setIsSalaryModalOpen(true);
+                        }}
+                        className="bg-amber-950 hover:bg-amber-900 text-amber-300 border border-amber-800 px-2.5 py-1.5 rounded-lg text-xs font-semibold transition"
+                      >
+                        Disburse Advance
                       </button>
                     </div>
                   </div>
-
-                  <div className="bg-slate-950 p-3 rounded-lg border border-slate-800/80 space-y-1.5 font-mono text-xs">
-                    {(() => {
-                      const dynamicCash = invoices
-                        .filter(
-                          (inv) =>
-                            (inv.collectedByAgentId === agent.id || (inv as any).agentId === agent.id) &&
-                            inv.status === 'paid'
-                        )
-                        .reduce((sum, inv) => sum + (Number(inv.totalAmount || inv.baseAmount || 0)), 0);
-                      const finalCashInHand = dynamicCash > 0 ? dynamicCash : (agent.cashInHand || 0);
-
-                      return (
-                        <div className="flex justify-between">
-                          <span className="text-slate-400">Cash in Hand:</span>
-                          <strong className="text-cyan-400 font-bold">
-                            {formatCurrency(finalCashInHand)}
-                          </strong>
-                        </div>
-                      );
-                    })()}
-                    <div className="flex justify-between">
-                      <span className="text-slate-400">Base Salary:</span>
-                      <span className="text-white">{formatCurrency(agent.baseSalary)}</span>
-                    </div>
-                    <div className="flex justify-between">
-                      <span className="text-slate-400">Advance Taken:</span>
-                      <span className="text-amber-400">+{formatCurrency(agent.advanceSalaryTaken)}</span>
-                    </div>
-                    <div className="flex justify-between pt-1 border-t border-slate-800 font-bold">
-                      <span className="text-slate-300">Net Payable:</span>
-                      <span className="text-emerald-400">{formatCurrency(netSalary)}</span>
-                    </div>
-                  </div>
-
-                  <div className="grid grid-cols-2 gap-2 pt-1 font-sans">
-                    <button
-                      onClick={() => {
-                        setReceiveCashDefaultAgentId(agent.id);
-                        setIsReceiveCashModalOpen(true);
-                      }}
-                      className="bg-cyan-950 hover:bg-cyan-900 text-cyan-300 border border-cyan-800 px-2.5 py-1.5 rounded-lg text-xs font-semibold transition"
-                    >
-                      Receive Cash
-                    </button>
-                    <button
-                      onClick={() => {
-                        setSelectedAgentForSalary(agent);
-                        setSalaryModalMode('disburse_advance');
-                        setIsSalaryModalOpen(true);
-                      }}
-                      className="bg-amber-950 hover:bg-amber-900 text-amber-300 border border-amber-800 px-2.5 py-1.5 rounded-lg text-xs font-semibold transition"
-                    >
-                      Disburse Advance
-                    </button>
-                  </div>
-                </div>
-              );
-            })}
-          </div>
+                );
+              })}
+            </div>
+          )}
         </div>
       )}
 

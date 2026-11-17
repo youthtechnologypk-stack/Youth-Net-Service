@@ -19,6 +19,7 @@ import {
 import {
   NodeOpticalBudgetResult,
   SPLITTER_SPECS,
+  computePortLiveRxDbm,
   getHealthBadgeColors,
   summarizeCableCores,
 } from '../../lib/fiberOpticEngine';
@@ -979,13 +980,16 @@ export const FiberGisLeafletCanvas: React.FC<FiberGisLeafletCanvasProps> = ({
                 ? `@${sub.username}`
                 : leg.client_label || leg.subscriber_username || `${sp.label} #${leg.legNumber}`;
               const key = sub?.id || `${sp.id}-${leg.legNumber}`;
+              const dropMeters = Number(leg.drop_distance_m ?? 30);
               dropsMap.set(key, {
                 key,
                 label,
                 sub,
-                dropMeters: Number(leg.drop_distance_m ?? 30),
-                estDbm:
+                dropMeters,
+                estDbm: computePortLiveRxDbm(
                   leg.calculated_output_dbm ?? nodeBudget?.ontRxDbm ?? null,
+                  dropMeters
+                ),
                 portInfo: `${sp.label} ${leg.legLabel}`,
               });
             }
@@ -1005,12 +1009,18 @@ export const FiberGisLeafletCanvas: React.FC<FiberGisLeafletCanvasProps> = ({
             : out.client_name_manual || out.subscriber_username || `Port #${out.port_number}`;
           const key = sub?.id || `out-${out.port_number}`;
           if (!dropsMap.has(key)) {
+            const dropMeters = Number(out.drop_distance_m ?? 30);
+            const activeNodeOut =
+              nodeBudget?.ontRxDbm ??
+              (nodeBudget?.healthBand !== 'UNLINKED'
+                ? node.calculated_ont_rx_dbm ?? node.calculated_output_dbm ?? null
+                : null);
             dropsMap.set(key, {
               key,
               label,
               sub,
-              dropMeters: Number(out.drop_distance_m ?? 30),
-              estDbm: out.estimated_rx_dbm ?? nodeBudget?.ontRxDbm ?? null,
+              dropMeters,
+              estDbm: computePortLiveRxDbm(activeNodeOut, dropMeters),
               portInfo: out.leg_label || `Port ${out.port_number}`,
             });
           }
@@ -1029,12 +1039,18 @@ export const FiberGisLeafletCanvas: React.FC<FiberGisLeafletCanvasProps> = ({
             : fp.client_label || fp.subscriber_username || `Port #${fp.port_number}`;
           const key = sub?.id || `port-${fp.port_number}`;
           if (!dropsMap.has(key)) {
+            const dropMeters = Number(fp.drop_cable_meters ?? 30);
+            const activeNodeOut =
+              nodeBudget?.ontRxDbm ??
+              (nodeBudget?.healthBand !== 'UNLINKED'
+                ? node.calculated_ont_rx_dbm ?? node.calculated_output_dbm ?? null
+                : null);
             dropsMap.set(key, {
               key,
               label,
               sub,
-              dropMeters: Number(fp.drop_cable_meters ?? 30),
-              estDbm: nodeBudget?.ontRxDbm ?? null,
+              dropMeters,
+              estDbm: computePortLiveRxDbm(activeNodeOut, dropMeters),
               portInfo: `Port ${fp.port_number}`,
             });
           }

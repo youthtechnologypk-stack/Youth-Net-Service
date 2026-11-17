@@ -23,9 +23,35 @@ import type {
 } from '../services/supabaseClient';
 
 export const FIBER_ATTENUATION_DB_PER_KM = 0.35;
+export const DROP_ATTENUATION_DB_PER_METER = 0.00035;
+export const FAST_CONNECTOR_LOSS_DB = 0.3;
 export const DEFAULT_FUSION_SPLICE_LOSS_DB = 0.5;
 export const DEFAULT_PASS_THROUGH_SPLICE_LOSS_DB = 0.2;
 export const FDB_ENCLOSURE_CAPACITIES = [4, 8, 12, 16, 24, 32, 48] as const;
+
+/**
+ * Computes live optical power (dBm) at a port / ONT from the parent FDB or splitter's
+ * active output power minus drop cable attenuation (dropMeters * 0.00035) and
+ * 0.3 dB fast-connector loss. Returns null when no valid parent output power exists.
+ */
+export function computePortLiveRxDbm(
+  parentOutputDbm: number | null | undefined,
+  dropMeters: number | null | undefined = 0,
+  options?: { includeConnectorLoss?: boolean }
+): number | null {
+  if (
+    parentOutputDbm === null ||
+    parentOutputDbm === undefined ||
+    Number.isNaN(Number(parentOutputDbm))
+  ) {
+    return null;
+  }
+  const safeDrop = Math.max(0, Number(dropMeters || 0));
+  const connectorLoss = options?.includeConnectorLoss === false ? 0 : FAST_CONNECTOR_LOSS_DB;
+  return round2(
+    Number(parentOutputDbm) - safeDrop * DROP_ATTENUATION_DB_PER_METER - connectorLoss
+  );
+}
 
 export function resolveHopSpliceLoss(rawLoss?: number | null): number {
   if (rawLoss === null || rawLoss === undefined || Number.isNaN(Number(rawLoss))) {
@@ -1574,12 +1600,13 @@ export function traceOpticalPathToNode(params: {
       const isThroughLeg =
         spec.isAsymmetricFbt &&
         (out.port_number === 2 || out.utilization_type === 'DOWNSTREAM_AREA_FEED');
+      const activeSplitterOutputDbm = isThroughLeg
+        ? targetBudget.thruOutputDbm
+        : targetBudget.ontRxDbm;
       const estRx =
-        out.estimated_rx_dbm !== null && out.estimated_rx_dbm !== undefined
-          ? Number(out.estimated_rx_dbm)
-          : isThroughLeg
-          ? targetBudget.thruOutputDbm
-          : targetBudget.ontRxDbm;
+        activeSplitterOutputDbm !== null && activeSplitterOutputDbm !== undefined
+          ? computePortLiveRxDbm(activeSplitterOutputDbm, out.drop_distance_m ?? 0)
+          : null;
 
       const labelTitle =
         out.utilization_type === 'CLIENT_ONT'

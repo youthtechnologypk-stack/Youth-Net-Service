@@ -102,50 +102,7 @@ export const INITIAL_ROUTERS: MikrotikRouter[] = [
   },
 ];
 
-export const INITIAL_AGENTS: FieldAgent[] = [
-  {
-    id: 'agent-1',
-    name: 'Bilal Khan',
-    phone: '+92 301 5550192',
-    email: 'bilal.field@netpulse.io',
-    assignedArea: 'Sector G-11 & F-11',
-    status: 'on_field',
-    cashInHand: 0.0,
-    totalCollectedToday: 0.0,
-    activeTicketsAssigned: 0,
-    baseSalary: 650.0,
-    advanceSalaryTaken: 0.0,
-    advanceSalaryReturned: 0.0,
-  },
-  {
-    id: 'agent-2',
-    name: 'Hassnain Akram',
-    phone: '+92 312 8884910',
-    email: 'hassnain.akram@youthnet.pk',
-    assignedArea: 'Saddar Node',
-    status: 'on_field',
-    cashInHand: 0.0,
-    totalCollectedToday: 0.0,
-    activeTicketsAssigned: 0,
-    baseSalary: 600.0,
-    advanceSalaryTaken: 0.0,
-    advanceSalaryReturned: 0.0,
-  },
-  {
-    id: 'agent-3',
-    name: 'Zayan Saleem',
-    phone: '+92 333 4441093',
-    email: 'zayan.saleem@youthnet.pk',
-    assignedArea: 'Saddar Node',
-    status: 'active',
-    cashInHand: 0.0,
-    totalCollectedToday: 0.0,
-    activeTicketsAssigned: 0,
-    baseSalary: 700.0,
-    advanceSalaryTaken: 0.0,
-    advanceSalaryReturned: 0.0,
-  },
-];
+export const INITIAL_AGENTS: FieldAgent[] = [];
 
 export const INITIAL_CUSTOMERS: Customer[] = [];
 

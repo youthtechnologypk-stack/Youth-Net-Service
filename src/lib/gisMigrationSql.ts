@@ -167,10 +167,13 @@ CREATE TABLE IF NOT EXISTS public.gis_fdb_ports (
     subscriber_username TEXT DEFAULT '',
     client_label TEXT DEFAULT '',
     drop_cable_meters INT NOT NULL DEFAULT 30 CHECK (drop_cable_meters >= 0),
+    rx_power_dbm NUMERIC(6, 2) NULL,
     status TEXT NOT NULL DEFAULT 'FREE' CHECK (status IN ('ACTIVE', 'FREE', 'FAULTY')),
     updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     UNIQUE (fdb_node_id, port_number)
 );
+ALTER TABLE IF EXISTS public.gis_fdb_ports
+    ADD COLUMN IF NOT EXISTS rx_power_dbm NUMERIC(6, 2) NULL;
 
 CREATE TABLE IF NOT EXISTS public.gis_splitter_outputs (
     id UUID PRIMARY KEY DEFAULT gen_random_uuid(),

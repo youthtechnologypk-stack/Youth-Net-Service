@@ -22,6 +22,7 @@ import {
   cableCoresToType,
   calculateTopologyOpticalBudgets,
   computePolylineDistanceMeters,
+  computePortLiveRxDbm,
   generateDefaultSpliceTray,
   generateTia598Cores,
   getDefaultMaxOnuLimit,
@@ -527,6 +528,10 @@ export function normalizeGisPortRow(p: any): SupabaseGisFdbPort {
     ...p,
     port_number: Number(p.port_number),
     drop_cable_meters: Number(p.drop_cable_meters ?? 30),
+    rx_power_dbm:
+      p.rx_power_dbm !== null && p.rx_power_dbm !== undefined
+        ? Number(p.rx_power_dbm)
+        : null,
   };
 }
 
@@ -1841,9 +1846,10 @@ export async function upsertFdbPortAssignment(params: {
   subscriberUsername?: string | null;
   clientLabel?: string | null;
   dropCableMeters: number;
+  rxPowerDbm?: number | null;
   status: GisPortStatus;
 }): Promise<SupabaseGisFdbPort> {
-  const payload = {
+  const basePayload = {
     fdb_node_id: params.fdbNodeId,
     port_number: params.portNumber,
     subscriber_id: params.status === 'FREE' ? null : params.subscriberId || null,
@@ -1854,11 +1860,31 @@ export async function upsertFdbPortAssignment(params: {
     updated_at: new Date().toISOString(),
   };
 
-  const { data, error } = await supabase
+  const payloadWithPower =
+    params.rxPowerDbm !== undefined
+      ? {
+          ...basePayload,
+          rx_power_dbm:
+            params.rxPowerDbm !== null && !Number.isNaN(Number(params.rxPowerDbm))
+              ? Number(params.rxPowerDbm)
+              : null,
+        }
+      : basePayload;
+
+  let { data, error } = await supabase
     .from('gis_fdb_ports')
-    .upsert(payload, { onConflict: 'fdb_node_id,port_number' })
+    .upsert(payloadWithPower, { onConflict: 'fdb_node_id,port_number' })
     .select('*')
     .single();
+  if (error && isMissingTableOrColumnError(error) && params.rxPowerDbm !== undefined) {
+    const retry = await supabase
+      .from('gis_fdb_ports')
+      .upsert(basePayload, { onConflict: 'fdb_node_id,port_number' })
+      .select('*')
+      .single();
+    data = retry.data;
+    error = retry.error;
+  }
   if (error) throw error;
   return normalizeGisPortRow(data);
 }
@@ -1938,6 +1964,7 @@ export async function upsertSplitterOutput(params: {
           params.utilizationType === 'CLIENT_ONT' ? params.subscriberUsername || '' : '',
         clientLabel: mappedLabel,
         dropCableMeters: params.dropDistanceMeters || 0,
+        rxPowerDbm: payload.estimated_rx_dbm,
         status: mappedStatus,
       });
     } catch {
@@ -2006,19 +2033,22 @@ export async function initializeSplitterOutputsForNode(params: {
         : prevFdb?.status === 'ACTIVE'
         ? 'CLIENT_ONT'
         : 'FREE_PORT');
-    let estRx: number | null = plcRx;
+    const dropDistance = prev?.drop_distance_m ?? prevFdb?.drop_cable_meters ?? 0;
+    let estRx: number | null = null;
 
     if (spec.isAsymmetricFbt && fbtLegs) {
       if (p === 1) {
         legLabel = `Leg 1 · Drop (${fbtLegs.dropPercent}%)`;
-        estRx = fbtLegs.dropOutputDbm;
+        estRx = computePortLiveRxDbm(fbtLegs.dropOutputDbm, dropDistance);
       } else {
         legLabel = `Leg 2 · Through (${fbtLegs.thruPercent}%)`;
-        estRx = fbtLegs.thruOutputDbm;
+        estRx = computePortLiveRxDbm(fbtLegs.thruOutputDbm, dropDistance);
         if (!prev && (!prevFdb || prevFdb.status === 'FREE')) {
           defaultUtil = 'DOWNSTREAM_AREA_FEED';
         }
       }
+    } else {
+      estRx = computePortLiveRxDbm(plcRx, dropDistance);
     }
 
     const subscriberId =
@@ -2033,7 +2063,6 @@ export async function initializeSplitterOutputsForNode(params: {
       defaultUtil === 'CLIENT_ONT'
         ? prev?.client_name_manual || prevFdb?.client_label || ''
         : '';
-    const dropDistance = prev?.drop_distance_m ?? prevFdb?.drop_cable_meters ?? 0;
 
     rows.push({
       node_id: params.node.id,
@@ -2140,6 +2169,137 @@ export async function syncOpticalBudgetsToDb(
   }
 
   return budgets;
+}
+
+/**
+ * Recalculates and persists per-port `estimated_rx_dbm` (on `gis_splitter_outputs`)
+ * and `rx_power_dbm` (on `gis_fdb_ports`) from each parent FDB/Splitter's live active
+ * output power minus drop cable loss (`dropMeters * 0.00035`) and `-0.3 dB` fast-connector
+ * loss — eliminating stale legacy `-2.3 dBm` port values in Supabase and local state.
+ */
+export async function syncFdbPortsOpticalPowerToDb(params: {
+  nodes: SupabaseGisNode[];
+  budgetsByNodeId: Record<string, NodeOpticalBudgetResult>;
+  splitterOutputs: SupabaseGisSplitterOutput[];
+  fdbPorts: SupabaseGisFdbPort[];
+  targetNodeIds?: string[];
+  forceAllNodes?: boolean;
+}): Promise<{
+  updatedOutputs: SupabaseGisSplitterOutput[];
+  updatedPorts: SupabaseGisFdbPort[];
+}> {
+  const nowIso = new Date().toISOString();
+  const targetSet =
+    Array.isArray(params.targetNodeIds) && params.targetNodeIds.length > 0
+      ? new Set(params.targetNodeIds)
+      : null;
+
+  const nodeById: Record<string, SupabaseGisNode> = {};
+  for (const n of params.nodes) nodeById[n.id] = n;
+
+  const nextOutputs = params.splitterOutputs.slice();
+  const nextPorts = params.fdbPorts.slice();
+  const dbOps: Array<Promise<any>> = [];
+
+  const getActivePortParentOutput = (
+    node: SupabaseGisNode,
+    portNum: number,
+    utilizationType?: SplitterUtilizationType
+  ): number | null => {
+    const b = params.budgetsByNodeId[node.id];
+    const spec = SPLITTER_SPECS[node.splitter_type] || SPLITTER_SPECS['none'];
+    const fbtLegs = spec.isAsymmetricFbt
+      ? getFbtLegOutputs(b?.inputDbm ?? null, spec.type, resolveHopSpliceLoss(node.loss_per_splice))
+      : null;
+
+    if (fbtLegs) {
+      const isThru = portNum === 2 || utilizationType === 'DOWNSTREAM_AREA_FEED';
+      return isThru ? fbtLegs.thruOutputDbm : fbtLegs.dropOutputDbm;
+    }
+
+    if (b?.ontRxDbm !== null && b?.ontRxDbm !== undefined) {
+      return b.ontRxDbm;
+    }
+    if (b?.healthBand !== 'UNLINKED') {
+      if (node.calculated_ont_rx_dbm !== null && node.calculated_ont_rx_dbm !== undefined) {
+        return Number(node.calculated_ont_rx_dbm);
+      }
+      if (node.calculated_output_dbm !== null && node.calculated_output_dbm !== undefined) {
+        return Number(node.calculated_output_dbm);
+      }
+    }
+    return null;
+  };
+
+  for (let i = 0; i < nextOutputs.length; i++) {
+    const out = nextOutputs[i];
+    const node = nodeById[out.node_id];
+    if (!node || node.node_type === 'OLT') continue;
+
+    const parentOutputDbm = getActivePortParentOutput(
+      node,
+      out.port_number,
+      out.utilization_type
+    );
+    const liveRx = computePortLiveRxDbm(parentOutputDbm, out.drop_distance_m ?? 0);
+    if (liveRx === null) continue;
+
+    const isForced = Boolean(params.forceAllNodes || targetSet?.has(node.id));
+    if (!isForced && !numericDiffers(out.estimated_rx_dbm, liveRx)) continue;
+
+    nextOutputs[i] = { ...out, estimated_rx_dbm: liveRx, updated_at: nowIso };
+    dbOps.push(
+      Promise.resolve(
+        supabase
+          .from('gis_splitter_outputs')
+          .update({ estimated_rx_dbm: liveRx, updated_at: nowIso })
+          .eq('node_id', node.id)
+          .eq('port_number', out.port_number)
+      )
+    );
+  }
+
+  for (let i = 0; i < nextPorts.length; i++) {
+    const fp = nextPorts[i];
+    const node = nodeById[fp.fdb_node_id];
+    if (!node || node.node_type === 'OLT') continue;
+
+    const parentOutputDbm = getActivePortParentOutput(node, fp.port_number);
+    const liveRx = computePortLiveRxDbm(parentOutputDbm, fp.drop_cable_meters ?? 30);
+    if (liveRx === null) continue;
+
+    const isForced = Boolean(params.forceAllNodes || targetSet?.has(node.id));
+    if (!isForced && !numericDiffers(fp.rx_power_dbm, liveRx)) continue;
+
+    nextPorts[i] = { ...fp, rx_power_dbm: liveRx, updated_at: nowIso };
+    if (fp.status !== 'FREE' || isForced) {
+      dbOps.push(
+        (async () => {
+          const res = await supabase
+            .from('gis_fdb_ports')
+            .update({ rx_power_dbm: liveRx, updated_at: nowIso })
+            .eq('fdb_node_id', node.id)
+            .eq('port_number', fp.port_number);
+          if (res.error && isMissingTableOrColumnError(res.error)) {
+            return;
+          }
+        })()
+      );
+    }
+  }
+
+  if (dbOps.length > 0) {
+    try {
+      await withTimeout(Promise.allSettled(dbOps), 12000, 'Port optical power sync');
+    } catch {
+      // Non-blocking timeout protection
+    }
+  }
+
+  return {
+    updatedOutputs: nextOutputs,
+    updatedPorts: nextPorts,
+  };
 }
 
 export interface ReplaceGisNodeEquipmentParams {
@@ -2429,11 +2589,12 @@ export async function replaceGisNodeEquipment(
     const b = budgets[n.id];
     if (!b || b.ontRxDbm === null) continue;
     if (numericDiffers(n.calculated_ont_rx_dbm, b.ontRxDbm)) {
+      const portRx = computePortLiveRxDbm(b.ontRxDbm, 0);
       downstreamUpdates.push(
         Promise.resolve(
           supabase
             .from('gis_splitter_outputs')
-            .update({ estimated_rx_dbm: b.ontRxDbm, updated_at: nowIso })
+            .update({ estimated_rx_dbm: portRx, updated_at: nowIso })
             .eq('node_id', n.id)
         )
       );

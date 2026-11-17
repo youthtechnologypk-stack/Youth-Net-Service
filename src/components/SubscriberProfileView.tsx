@@ -73,6 +73,11 @@ import {
   PARENT_FLEET_ROUTER,
 } from '../lib/billingAndNetwork';
 import { buildWhatsAppUrl } from '../lib/whatsappBilling';
+import {
+  FIELD_STAFF_ROLES,
+  insertTicketSafe,
+  normalizeTicketPriority,
+} from '../lib/anniversaryBilling';
 
 export interface SubscriberProfileViewProps {
   username: string;
@@ -88,6 +93,12 @@ export const SubscriberProfileView: React.FC<SubscriberProfileViewProps> = ({
   const { formatCurrency, currencySymbol } = useCurrency();
   const { routers, selectedRouterId, kickSession, resolveTicket } = useISP();
 
+  const cleanUsername = useMemo(() => (username || '').replace(/^@+/, '').trim(), [username]);
+  const activeRouter = useMemo(
+    () => routers.find((r) => r.id === selectedRouterId) || routers[0],
+    [routers, selectedRouterId]
+  );
+
   // Primary Data States
   const [user, setUser] = useState<SupabasePortalUser | null>(null);
   const [invoices, setInvoices] = useState<SupabaseInvoice[]>([]);
@@ -96,6 +107,8 @@ export const SubscriberProfileView: React.FC<SubscriberProfileViewProps> = ({
   const [sessionLogs, setSessionLogs] = useState<SupabaseSubscriberSessionLog[]>([]);
   const [tickets, setTickets] = useState<SupabaseTicket[]>([]);
   const [portalAgents, setPortalAgents] = useState<SupabasePortalUser[]>([]);
+  const [mikrotikSecret, setMikrotikSecret] = useState<Record<string, any> | null>(null);
+  const [gisFdbLocation, setGisFdbLocation] = useState<string>('');
 
   // Active MikroTik session state with live RouterOS v7 transferred bytes
   const [activeSession, setActiveSession] = useState<{
@@ -227,13 +240,18 @@ export const SubscriberProfileView: React.FC<SubscriberProfileViewProps> = ({
 
   // 1. Fetch Complete Profile Data from Supabase & MikroTik
   const fetchAllProfileData = async () => {
+    if (!cleanUsername) {
+      setIsLoading(false);
+      return;
+    }
     setIsLoading(true);
     try {
-      // 1.1 Fetch User Record from portal_users
+      // 1.1 Fetch User Record from portal_users (case-insensitive)
       const { data: userData, error: userError } = await supabase
         .from('portal_users')
         .select('*')
-        .eq('username', username)
+        .ilike('username', cleanUsername)
+        .limit(1)
         .maybeSingle();
 
       if (userError) {
@@ -259,13 +277,15 @@ export const SubscriberProfileView: React.FC<SubscriberProfileViewProps> = ({
           fiberBoxLocation: userData.fiber_box_location || '',
           patchCordQty: userData.patch_cord_qty || 1,
         });
+      } else {
+        setUser(null);
       }
 
       // 1.2 Fetch Invoices
       const { data: invData } = await supabase
         .from('invoices')
         .select('*')
-        .eq('subscriber_username', username)
+        .ilike('subscriber_username', cleanUsername)
         .order('created_at', { ascending: false });
 
       if (invData) {
@@ -276,7 +296,7 @@ export const SubscriberProfileView: React.FC<SubscriberProfileViewProps> = ({
       const { data: txData } = await supabase
         .from('payment_transactions')
         .select('*')
-        .eq('subscriber_username', username)
+        .ilike('subscriber_username', cleanUsername)
         .order('payment_date', { ascending: false });
 
       if (txData) {
@@ -287,7 +307,7 @@ export const SubscriberProfileView: React.FC<SubscriberProfileViewProps> = ({
       const { data: invLogData } = await supabase
         .from('subscriber_inventory_logs')
         .select('*')
-        .eq('subscriber_username', username)
+        .ilike('subscriber_username', cleanUsername)
         .order('created_at', { ascending: false });
 
       if (invLogData) {
@@ -298,7 +318,7 @@ export const SubscriberProfileView: React.FC<SubscriberProfileViewProps> = ({
       const { data: sessLogData } = await supabase
         .from('subscriber_session_logs')
         .select('*')
-        .in('subscriber_username', [username, username.toLowerCase()])
+        .ilike('subscriber_username', cleanUsername)
         .order('recorded_at', { ascending: false })
         .limit(50);
 
@@ -310,7 +330,7 @@ export const SubscriberProfileView: React.FC<SubscriberProfileViewProps> = ({
       const { data: tktData } = await supabase
         .from('tickets')
         .select('*')
-        .eq('subscriber_username', username)
+        .ilike('subscriber_username', cleanUsername)
         .order('created_at', { ascending: false });
 
       if (tktData) {
@@ -327,38 +347,78 @@ export const SubscriberProfileView: React.FC<SubscriberProfileViewProps> = ({
       const { data: agentsData } = await supabase
         .from('portal_users')
         .select('id, full_name, username, area, role')
-        .eq('role', 'AGENT');
+        .in('role', [...FIELD_STAFF_ROLES]);
 
       if (agentsData) {
         setPortalAgents(agentsData as SupabasePortalUser[]);
       }
 
-      // 1.7b Query MikroTik /ppp/secret strictly for this subscriber's actual PPPoE profile
+      // 1.7a Lookup GIS FDB Port & Node assignment for real FAT / DP location
       try {
-        const secRes = await safeMikrotikFetch(`/api/mikrotik/ppp/secret?name=${encodeURIComponent(username)}`);
-        if (secRes.ok) {
-          const secrets = await secRes.json();
-          if (Array.isArray(secrets)) {
-            const secMatch = secrets.find((s: any) => s?.name?.toLowerCase() === username.toLowerCase());
-            if (secMatch?.profile) {
-              setLiveSecretProfile(String(secMatch.profile));
-            }
+        let resolvedFdb = '';
+        const { data: portData } = await supabase
+          .from('gis_fdb_ports')
+          .select('fdb_id')
+          .ilike('pppoe_username', cleanUsername)
+          .limit(1)
+          .maybeSingle();
+
+        if (portData?.fdb_id) {
+          const { data: nodeData } = await supabase
+            .from('gis_nodes')
+            .select('name, label')
+            .eq('id', portData.fdb_id)
+            .maybeSingle();
+          if (nodeData) {
+            resolvedFdb = String(nodeData.label || nodeData.name || '');
           }
         }
-      } catch {}
+        setGisFdbLocation(resolvedFdb);
+      } catch {
+        setGisFdbLocation('');
+      }
+
+      // 1.7b Query MikroTik /ppp/secret strictly for this subscriber's actual PPPoE profile
+      try {
+        let secRes = await safeMikrotikFetch(
+          `/api/mikrotik/ppp/secret?name=${encodeURIComponent(cleanUsername)}`,
+          {},
+          activeRouter
+        );
+        let secrets = secRes.ok ? await secRes.json() : [];
+        if (!Array.isArray(secrets) || secrets.length === 0) {
+          secRes = await safeMikrotikFetch('/api/mikrotik/ppp/secret', {}, activeRouter);
+          secrets = secRes.ok ? await secRes.json() : [];
+        }
+        if (Array.isArray(secrets)) {
+          const secMatch = secrets.find(
+            (s: any) => String(s?.name || '').toLowerCase() === cleanUsername.toLowerCase()
+          );
+          setMikrotikSecret(secMatch || null);
+          setLiveSecretProfile(secMatch?.profile ? String(secMatch.profile) : '');
+        } else {
+          setMikrotikSecret(null);
+          setLiveSecretProfile('');
+        }
+      } catch {
+        setMikrotikSecret(null);
+        setLiveSecretProfile('');
+      }
 
       // 1.8 Query MikroTik for live active session strictly for this username (read-only)
       try {
-        const queryUrl = `/api/mikrotik/ppp/active?name=${encodeURIComponent(username)}`;
-        let res = await safeMikrotikFetch(queryUrl);
+        const queryUrl = `/api/mikrotik/ppp/active?name=${encodeURIComponent(cleanUsername)}`;
+        let res = await safeMikrotikFetch(queryUrl, {}, activeRouter);
         if (!res.ok) {
-          res = await safeMikrotikFetch('/api/mikrotik/ppp/active');
+          res = await safeMikrotikFetch('/api/mikrotik/ppp/active', {}, activeRouter);
         }
 
         if (res.ok) {
           const sessions = await res.json();
           if (Array.isArray(sessions)) {
-            const match = sessions.find((s: any) => s?.name?.toLowerCase() === username.toLowerCase());
+            const match = sessions.find(
+              (s: any) => String(s?.name || '').toLowerCase() === cleanUsername.toLowerCase()
+            );
 
             if (match) {
               let rawBytesIn = 0;
@@ -375,14 +435,16 @@ export const SubscriberProfileView: React.FC<SubscriberProfileViewProps> = ({
               // Check <pppoe-username> interface counters for exact TX/RX byte totals
               try {
                 const ifaceRes = await safeMikrotikFetch(
-                  `/api/mikrotik/interface?name=${encodeURIComponent(`<pppoe-${username}>`)}`
+                  `/api/mikrotik/interface?name=${encodeURIComponent(`<pppoe-${cleanUsername}>`)}`,
+                  {},
+                  activeRouter
                 );
                 if (ifaceRes.ok) {
                   const ifaces = await ifaceRes.json();
                   const ifaceMatch = Array.isArray(ifaces)
                     ? ifaces.find((i: any) => {
                         const n = (i?.name || '').toLowerCase();
-                        return n === `<pppoe-${username.toLowerCase()}>` || n === `pppoe-${username.toLowerCase()}`;
+                        return n === `<pppoe-${cleanUsername.toLowerCase()}>` || n === `pppoe-${cleanUsername.toLowerCase()}`;
                       }) || ifaces[0]
                     : ifaces;
                   if (ifaceMatch) {
@@ -410,7 +472,7 @@ export const SubscriberProfileView: React.FC<SubscriberProfileViewProps> = ({
             } else {
               setActiveSession(null);
               const healedLogs = await sessionSyncEngine.reconcileOfflineSubscriberActiveRows(
-                username,
+                cleanUsername,
                 false
               );
               if (healedLogs) {
@@ -431,16 +493,16 @@ export const SubscriberProfileView: React.FC<SubscriberProfileViewProps> = ({
 
   useEffect(() => {
     fetchAllProfileData();
-  }, [username]);
+  }, [cleanUsername, activeRouter?.id]);
 
   // Real-time Supabase subscription for subscriber_session_logs
   useEffect(() => {
-    if (!username) return;
+    if (!cleanUsername) return;
     const refreshSessionLogsOnly = async () => {
       const { data } = await supabase
         .from('subscriber_session_logs')
         .select('*')
-        .in('subscriber_username', [username, username.toLowerCase()])
+        .ilike('subscriber_username', cleanUsername)
         .order('recorded_at', { ascending: false })
         .limit(50);
       if (Array.isArray(data)) {
@@ -449,7 +511,7 @@ export const SubscriberProfileView: React.FC<SubscriberProfileViewProps> = ({
     };
 
     const channel = supabase
-      .channel(`profile-session-logs-${username.toLowerCase()}`)
+      .channel(`profile-session-logs-${cleanUsername.toLowerCase()}`)
       .on(
         'postgres_changes',
         { event: '*', schema: 'public', table: 'subscriber_session_logs' },
@@ -459,7 +521,7 @@ export const SubscriberProfileView: React.FC<SubscriberProfileViewProps> = ({
             payload?.old?.subscriber_username ||
             ''
           ).toLowerCase();
-          if (changedUser === username.toLowerCase()) {
+          if (changedUser === cleanUsername.toLowerCase()) {
             void refreshSessionLogsOnly();
           }
         }
@@ -469,7 +531,7 @@ export const SubscriberProfileView: React.FC<SubscriberProfileViewProps> = ({
     return () => {
       void supabase.removeChannel(channel);
     };
-  }, [username]);
+  }, [cleanUsername]);
 
   // 2. Real-time Live Speed Gauge Poller (Runs every 15s with single in-flight lock, read-only ?once)
   useEffect(() => {
@@ -477,7 +539,7 @@ export const SubscriberProfileView: React.FC<SubscriberProfileViewProps> = ({
     let inFlight = false;
 
     const pollSpeed = async () => {
-      if (!activeSession) {
+      if (!activeSession || !cleanUsername) {
         if (isMounted) {
           setLiveSpeed({
             rxMbps: 0,
@@ -493,16 +555,49 @@ export const SubscriberProfileView: React.FC<SubscriberProfileViewProps> = ({
 
       try {
         setLiveSpeed((prev) => ({ ...prev, isPolling: true }));
-        let result = await fetchMikrotikInterfaceTrafficOnce(`<pppoe-${username}>`);
+        let result = await fetchMikrotikInterfaceTrafficOnce(`<pppoe-${cleanUsername}>`, activeRouter);
         if (!result.ok) {
-          result = await fetchMikrotikInterfaceTrafficOnce(`pppoe-${username}`);
+          result = await fetchMikrotikInterfaceTrafficOnce(`pppoe-${cleanUsername}`, activeRouter);
+        }
+
+        let rxMbps = result.ok ? result.rxMbps : 0;
+        let txMbps = result.ok ? result.txMbps : 0;
+        let pollingOk = result.ok;
+
+        if (!result.ok || (rxMbps === 0 && txMbps === 0)) {
+          try {
+            const qRes = await safeMikrotikFetch('/api/mikrotik/queue/simple', {}, activeRouter);
+            if (qRes.ok) {
+              const queues = await qRes.json();
+              if (Array.isArray(queues)) {
+                const targetIp = String(activeSession.address || '').trim();
+                const lowerUser = cleanUsername.toLowerCase();
+                const qMatch = queues.find((q: any) => {
+                  const qTarget = String(q?.target || '');
+                  const qName = String(q?.name || '').toLowerCase();
+                  return (
+                    (targetIp && qTarget.includes(targetIp)) ||
+                    qName.includes(lowerUser)
+                  );
+                });
+                if (qMatch && typeof qMatch.rate === 'string' && qMatch.rate.includes('/')) {
+                  const [rawTxBps, rawRxBps] = qMatch.rate.split('/');
+                  const parsedTx = Number(((Number(rawTxBps) || 0) / 1_000_000).toFixed(2));
+                  const parsedRx = Number(((Number(rawRxBps) || 0) / 1_000_000).toFixed(2));
+                  txMbps = Math.max(txMbps, parsedTx);
+                  rxMbps = Math.max(rxMbps, parsedRx);
+                  pollingOk = true;
+                }
+              }
+            }
+          } catch {}
         }
 
         if (isMounted) {
           setLiveSpeed({
-            rxMbps: result.ok ? result.rxMbps : 0,
-            txMbps: result.ok ? result.txMbps : 0,
-            isPolling: result.ok,
+            rxMbps,
+            txMbps,
+            isPolling: pollingOk,
             lastUpdated: new Date(),
           });
         }
@@ -524,7 +619,7 @@ export const SubscriberProfileView: React.FC<SubscriberProfileViewProps> = ({
         clearInterval(speedPollingTimerRef.current);
       }
     };
-  }, [username, Boolean(activeSession)]);
+  }, [cleanUsername, Boolean(activeSession), activeSession?.address, activeRouter?.id]);
 
   // Financial Balances Calculation
   const totalInvoiced = useMemo(() => {
@@ -588,11 +683,17 @@ export const SubscriberProfileView: React.FC<SubscriberProfileViewProps> = ({
       let sessionId = activeSession?.id;
       if (!sessionId) {
         try {
-          const actRes = await safeMikrotikFetch(`/api/mikrotik/ppp/active?name=${encodeURIComponent(username)}`);
+          const actRes = await safeMikrotikFetch(
+            `/api/mikrotik/ppp/active?name=${encodeURIComponent(cleanUsername)}`,
+            {},
+            activeRouter
+          );
           if (actRes.ok) {
             const actData = await actRes.json();
             if (Array.isArray(actData)) {
-              const match = actData.find((s: any) => s.name?.toLowerCase() === username.toLowerCase());
+              const match = actData.find(
+                (s: any) => String(s?.name || '').toLowerCase() === cleanUsername.toLowerCase()
+              );
               if (match) sessionId = match['.id'];
             }
           }
@@ -601,10 +702,10 @@ export const SubscriberProfileView: React.FC<SubscriberProfileViewProps> = ({
 
       // Finalize active session log in Supabase as KICKED before disconnecting on RouterOS
       await sessionSyncEngine.finalizeSessionKick(
-        username,
+        cleanUsername,
         {
           id: sessionId,
-          username,
+          username: cleanUsername,
           address: activeSession?.address,
           callerId: activeSession?.callerId,
           uptime: activeSession?.uptime,
@@ -615,25 +716,33 @@ export const SubscriberProfileView: React.FC<SubscriberProfileViewProps> = ({
 
       if (sessionId) {
         // Call router kick endpoint
-        await safeMikrotikFetch('/api/mikrotik/ppp/active/remove', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ '.id': sessionId }),
-        }).catch(() => {});
+        await safeMikrotikFetch(
+          '/api/mikrotik/ppp/active/remove',
+          {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ '.id': sessionId }),
+          },
+          activeRouter
+        ).catch(() => {});
       }
 
       // Also call server kick helper if configured
       try {
-        await safeMikrotikFetch('/api/mikrotik/kick', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ username, sessionId: sessionId || '*1' }),
-        });
+        await safeMikrotikFetch(
+          '/api/mikrotik/kick',
+          {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ username: cleanUsername, sessionId: sessionId || '*1' }),
+          },
+          activeRouter
+        );
       } catch {}
 
       setActiveSession(null);
       setIsKickModalOpen(false);
-      showToast(`Subscriber @${username} disconnected from MikroTik router.`);
+      showToast(`Subscriber @${cleanUsername} disconnected from MikroTik router.`);
       await fetchAllProfileData();
     } catch (err: any) {
       showToast(`Failed to disconnect: ${err.message}`, 'error');
@@ -655,23 +764,27 @@ export const SubscriberProfileView: React.FC<SubscriberProfileViewProps> = ({
     setIsUpdatingPassword(true);
     try {
       // 1. Update in Supabase portal_users
-      const { error: sbError } = await supabase
-        .from('portal_users')
-        .update({ password: newPassword })
-        .eq('username', username);
+      const updateQuery = user?.id
+        ? supabase.from('portal_users').update({ password: newPassword }).eq('id', user.id)
+        : supabase.from('portal_users').update({ password: newPassword }).ilike('username', cleanUsername);
+      const { error: sbError } = await updateQuery;
 
       if (sbError) throw new Error(sbError.message);
 
       // 2. Dispatch update to MikroTik /ppp/secret/set
       try {
-        await safeMikrotikFetch('/api/mikrotik/ppp/secret/set', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({
-            name: username,
-            password: newPassword,
-          }),
-        });
+        await safeMikrotikFetch(
+          '/api/mikrotik/ppp/secret/set',
+          {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+              name: cleanUsername,
+              password: newPassword,
+            }),
+          },
+          activeRouter
+        );
       } catch {}
 
       showToast(`Password successfully updated & synchronized to MikroTik!`);
@@ -709,14 +822,14 @@ export const SubscriberProfileView: React.FC<SubscriberProfileViewProps> = ({
         patch_cord_qty: Number(editForm.patchCordQty),
       };
 
-      const { error } = await supabase
-        .from('portal_users')
-        .update(updatePayload)
-        .eq('username', username);
+      const updateQuery = user?.id
+        ? supabase.from('portal_users').update(updatePayload).eq('id', user.id)
+        : supabase.from('portal_users').update(updatePayload).ilike('username', cleanUsername);
+      const { error } = await updateQuery;
 
       if (error) throw new Error(error.message);
 
-      showToast(`Subscriber @${username} profile updated successfully!`);
+      showToast(`Subscriber @${cleanUsername} profile updated successfully!`);
       setIsEditUserModalOpen(false);
       await fetchAllProfileData();
     } catch (err: any) {
@@ -741,7 +854,7 @@ export const SubscriberProfileView: React.FC<SubscriberProfileViewProps> = ({
 
       // 1. Insert into subscriber_inventory_logs
       const { error: invErr } = await supabase.from('subscriber_inventory_logs').insert([{
-        subscriber_username: username,
+        subscriber_username: cleanUsername,
         item_name: targetItem,
         quantity: qty,
         unit_cost: cost,
@@ -763,7 +876,7 @@ export const SubscriberProfileView: React.FC<SubscriberProfileViewProps> = ({
           dueD.setDate(dueD.getDate() + 31);
           await supabase.from('invoices').insert([{
             invoice_no: `INV-MAT-${Math.floor(1000 + Math.random() * 9000)}`,
-            subscriber_username: username,
+            subscriber_username: cleanUsername,
             amount: totalCharge,
             paid_amount: 0,
             status: 'DUE',
@@ -814,16 +927,16 @@ export const SubscriberProfileView: React.FC<SubscriberProfileViewProps> = ({
         selectedAgent?.full_name || ticketForm.assignedAgentName || 'NOC Support';
 
       const ticketNo = `TKT-${Math.floor(100000 + Math.random() * 900000)}`;
-      const { error } = await supabase.from('tickets').insert([{
+      const { error } = await insertTicketSafe(supabase, {
         ticket_no: ticketNo,
-        subscriber_username: username,
+        subscriber_username: cleanUsername,
         issue: ticketForm.issue.trim(),
-        priority: ticketForm.priority,
+        priority: normalizeTicketPriority(ticketForm.priority),
         status: resolvedAgentId ? 'IN_PROGRESS' : 'OPEN',
         assigned_agent_id: resolvedAgentId,
         assigned_agent_name: resolvedAgentName,
         created_at: new Date().toISOString(),
-      }]);
+      });
 
       if (error) throw new Error(error.message);
 
@@ -876,7 +989,7 @@ export const SubscriberProfileView: React.FC<SubscriberProfileViewProps> = ({
       await supabase.from('invoices').update(invUpdate).eq('id', inv.id);
 
       if (newStatus === 'PAID') {
-        await restoreSubscriberOnInvoicePaid(username, {
+        await restoreSubscriberOnInvoicePaid(cleanUsername, {
           triggeredBy: 'ADMIN',
           notes: `Payment recorded via 360 Profile on Invoice #${inv.invoice_no}`,
         });
@@ -895,7 +1008,7 @@ export const SubscriberProfileView: React.FC<SubscriberProfileViewProps> = ({
       const agentObj = portalAgents.find(a => a.id === collectingAgentInput);
       await supabase.from('payment_transactions').insert([{
         invoice_id: inv.id,
-        subscriber_username: username,
+        subscriber_username: cleanUsername,
         collected_by_id: collectingAgentInput || null,
         collected_by_name: agentObj?.full_name || 'NOC Billing Desk',
         amount_paid: enteredVal,
@@ -912,7 +1025,13 @@ export const SubscriberProfileView: React.FC<SubscriberProfileViewProps> = ({
     }
   };
 
-  const accountStatus = user?.account_status || 'ACTIVE';
+  const isMikrotikDisabled =
+    mikrotikSecret?.disabled === 'true' || mikrotikSecret?.disabled === true;
+  const accountStatus =
+    user?.account_status || (isMikrotikDisabled ? 'SUSPENDED' : 'ACTIVE');
+  const effectivePackage =
+    liveSecretProfile || mikrotikSecret?.profile || user?.package_speed || 'Standard Plan';
+  const effectivePassword = user?.password || mikrotikSecret?.password || '';
   const isOnline = Boolean(activeSession);
 
   return (
@@ -933,7 +1052,7 @@ export const SubscriberProfileView: React.FC<SubscriberProfileViewProps> = ({
             <span>/</span>
             <span>Subscribers</span>
             <span>/</span>
-            <span className="text-cyan-400 font-bold">@{username}</span>
+            <span className="text-cyan-400 font-bold">@{cleanUsername}</span>
           </div>
         </div>
 
@@ -991,7 +1110,7 @@ export const SubscriberProfileView: React.FC<SubscriberProfileViewProps> = ({
             <div className="flex items-center gap-3.5">
               <div className="relative">
                 <div className="w-14 h-14 rounded-2xl bg-gradient-to-br from-cyan-600 to-indigo-700 flex items-center justify-center font-bold text-xl text-white shadow-lg shadow-cyan-950/40">
-                  {user?.full_name ? user.full_name.slice(0, 2).toUpperCase() : username.slice(0, 2).toUpperCase()}
+                  {(user?.full_name || mikrotikSecret?.comment || cleanUsername || 'YN').slice(0, 2).toUpperCase()}
                 </div>
                 <span
                   className={`absolute -bottom-1 -right-1 w-4 h-4 rounded-full border-2 border-[#111A2E] flex items-center justify-center ${
@@ -1005,12 +1124,12 @@ export const SubscriberProfileView: React.FC<SubscriberProfileViewProps> = ({
 
               <div>
                 <h2 className="text-lg font-bold text-white tracking-tight flex items-center gap-2">
-                  <span>{user?.full_name || 'Subscriber Account'}</span>
+                  <span>{user?.full_name || mikrotikSecret?.comment || mikrotikSecret?.name || cleanUsername || 'Subscriber Account'}</span>
                 </h2>
                 <div className="flex items-center gap-2 mt-0.5">
-                  <span className="text-cyan-400 font-mono font-bold text-xs">@{username}</span>
+                  <span className="text-cyan-400 font-mono font-bold text-xs">@{cleanUsername}</span>
                   <button
-                    onClick={() => copyToClipboard(username, 'Username')}
+                    onClick={() => copyToClipboard(cleanUsername, 'Username')}
                     className="text-slate-500 hover:text-slate-300 transition"
                     title="Copy Username"
                   >
@@ -1136,7 +1255,7 @@ export const SubscriberProfileView: React.FC<SubscriberProfileViewProps> = ({
               <span className="text-slate-400 font-sans">Portal &amp; PPPoE Pass:</span>
               <div className="flex items-center gap-2">
                 <span className="text-white font-bold tracking-wider">
-                  {showPassword ? user?.password || '••••••' : '••••••••'}
+                  {showPassword ? effectivePassword || '••••••' : '••••••••'}
                 </span>
                 <button
                   type="button"
@@ -1148,7 +1267,7 @@ export const SubscriberProfileView: React.FC<SubscriberProfileViewProps> = ({
                 </button>
                 <button
                   type="button"
-                  onClick={() => copyToClipboard(user?.password || '', 'Password')}
+                  onClick={() => copyToClipboard(effectivePassword, 'Password')}
                   className="text-slate-400 hover:text-white"
                   title="Copy Password"
                 >
@@ -1207,13 +1326,13 @@ export const SubscriberProfileView: React.FC<SubscriberProfileViewProps> = ({
               <div className="flex items-center gap-2">
                 <span className="px-3 py-1 rounded-xl bg-indigo-950 text-indigo-300 border border-indigo-800 text-xs font-mono font-bold flex items-center gap-1.5 shadow-sm">
                   <Activity className="w-3.5 h-3.5 text-indigo-400 animate-pulse" />
-                  <span>{liveSecretProfile || user?.package_speed || 'Standard Plan'}</span>
+                  <span>{effectivePackage}</span>
                 </span>
                 <span className="text-slate-400 text-xs font-mono">
                   {formatCurrency(
                     user?.monthly_fee !== undefined && user?.monthly_fee !== null && Number(user.monthly_fee) > 0
                       ? Number(user.monthly_fee)
-                      : resolvePackageRate(liveSecretProfile || user?.package_speed || undefined)
+                      : resolvePackageRate(effectivePackage)
                   )}/mo
                 </span>
               </div>
@@ -1299,7 +1418,7 @@ export const SubscriberProfileView: React.FC<SubscriberProfileViewProps> = ({
                     <div className="w-full bg-slate-800 h-1.5 rounded-full mt-1.5 overflow-hidden">
                       <div
                         className="bg-cyan-400 h-full rounded-full transition-all duration-500"
-                        style={{ width: `${Math.min(100, (liveSpeed.rxMbps / (parseInt(user?.package_speed || '50', 10) || 50)) * 100)}%` }}
+                        style={{ width: `${Math.min(100, (liveSpeed.rxMbps / (parseInt(effectivePackage || '50', 10) || 50)) * 100)}%` }}
                       />
                     </div>
                   </div>
@@ -1314,7 +1433,7 @@ export const SubscriberProfileView: React.FC<SubscriberProfileViewProps> = ({
                     <div className="w-full bg-slate-800 h-1.5 rounded-full mt-1.5 overflow-hidden">
                       <div
                         className="bg-purple-400 h-full rounded-full transition-all duration-500"
-                        style={{ width: `${Math.min(100, (liveSpeed.txMbps / ((parseInt(user?.package_speed || '50', 10) || 50) * 0.3)) * 100)}%` }}
+                        style={{ width: `${Math.min(100, (liveSpeed.txMbps / ((parseInt(effectivePackage || '50', 10) || 50) * 0.3)) * 100)}%` }}
                       />
                     </div>
                   </div>
@@ -1332,15 +1451,15 @@ export const SubscriberProfileView: React.FC<SubscriberProfileViewProps> = ({
           <div className="pt-2 border-t border-slate-800/80 flex flex-wrap items-center justify-between gap-2 text-xs font-mono text-slate-400">
             <div className="flex items-center gap-1.5">
               <HardDrive className="w-3.5 h-3.5 text-cyan-400" />
-              <span>ONU: <strong className="text-white">{user?.onu_device_model || 'Huawei EchoLife (GPON)'}</strong></span>
+              <span>ONU: <strong className="text-white">{user?.onu_device_model || 'Not Recorded'}</strong></span>
             </div>
             <div className="flex items-center gap-1.5">
               <Cpu className="w-3.5 h-3.5 text-indigo-400" />
-              <span>MAC: <strong className="text-white">{user?.onu_mac || '48:8A:D2:7A:3F:12'}</strong></span>
+              <span>MAC: <strong className="text-white">{user?.onu_mac || activeSession?.callerId || mikrotikSecret?.['last-caller-id'] || 'Not Recorded'}</strong></span>
             </div>
             <div className="flex items-center gap-1.5">
               <MapPin className="w-3.5 h-3.5 text-emerald-400" />
-              <span>FAT: <strong className="text-white">{user?.fiber_box_location || 'FAT-DP#04'}</strong></span>
+              <span>FAT: <strong className="text-white">{user?.fiber_box_location || gisFdbLocation || 'Not Assigned'}</strong></span>
             </div>
           </div>
         </div>
@@ -1417,7 +1536,7 @@ export const SubscriberProfileView: React.FC<SubscriberProfileViewProps> = ({
               <div className="p-3 bg-slate-900 rounded-xl border border-slate-800">
                 <span className="text-[10px] text-slate-400 font-mono block">ONU MAC ADDRESS</span>
                 <span className="font-bold text-cyan-400 font-mono text-xs mt-1 block truncate">
-                  {user?.onu_mac || 'N/A'}
+                  {user?.onu_mac || activeSession?.callerId || mikrotikSecret?.['last-caller-id'] || 'N/A'}
                 </span>
               </div>
               <div className="p-3 bg-slate-900 rounded-xl border border-slate-800">
@@ -1435,7 +1554,7 @@ export const SubscriberProfileView: React.FC<SubscriberProfileViewProps> = ({
               <div className="p-3 bg-slate-900 rounded-xl border border-slate-800">
                 <span className="text-[10px] text-slate-400 font-mono block">FIBER BOX (FAT / DP)</span>
                 <span className="font-bold text-amber-400 font-mono text-xs mt-1 block truncate">
-                  {user?.fiber_box_location || 'N/A'}
+                  {user?.fiber_box_location || gisFdbLocation || 'N/A'}
                 </span>
               </div>
               <div className="p-3 bg-slate-900 rounded-xl border border-slate-800">
@@ -1486,7 +1605,7 @@ export const SubscriberProfileView: React.FC<SubscriberProfileViewProps> = ({
                   {inventoryLogs.length === 0 ? (
                     <tr>
                       <td colSpan={7} className="py-8 text-center text-slate-500 font-mono">
-                        No maintenance materials logged yet for @{username}. Click "+ Add Material / Wire Charge" above.
+                        No maintenance materials logged yet for @{cleanUsername}. Click "+ Add Material / Wire Charge" above.
                       </td>
                     </tr>
                   ) : (
@@ -1594,7 +1713,7 @@ export const SubscriberProfileView: React.FC<SubscriberProfileViewProps> = ({
                     {invoices.length === 0 ? (
                       <tr>
                         <td colSpan={8} className="py-8 text-center text-slate-500 font-mono">
-                          No invoices generated yet for @{username}.
+                          No invoices generated yet for @{cleanUsername}.
                         </td>
                       </tr>
                     ) : (
@@ -1810,7 +1929,7 @@ export const SubscriberProfileView: React.FC<SubscriberProfileViewProps> = ({
                 </div>
               ) : (
                 <div className="p-3 bg-slate-950 rounded-lg text-xs text-slate-400 font-mono">
-                  Subscriber @{username} is currently disconnected from the physical BNG router. No active interface lock.
+                  Subscriber @{cleanUsername} is currently disconnected from the physical BNG router. No active interface lock.
                 </div>
               )}
             </div>
@@ -1854,7 +1973,7 @@ export const SubscriberProfileView: React.FC<SubscriberProfileViewProps> = ({
                     {sessionLogs.length === 0 ? (
                       <tr>
                         <td colSpan={7} className="py-8 text-center text-slate-500 font-mono">
-                          No persisted session logs recorded yet for @{username}.
+                          No persisted session logs recorded yet for @{cleanUsername}.
                         </td>
                       </tr>
                     ) : (
@@ -2004,7 +2123,7 @@ export const SubscriberProfileView: React.FC<SubscriberProfileViewProps> = ({
                   {tickets.length === 0 ? (
                     <tr>
                       <td colSpan={6} className="py-8 text-center text-slate-500 font-mono">
-                        No support tickets or complaints recorded for @{username}. All services optimal!
+                        No support tickets or complaints recorded for @{cleanUsername}. All services optimal!
                       </td>
                     </tr>
                   ) : (
@@ -2061,7 +2180,7 @@ export const SubscriberProfileView: React.FC<SubscriberProfileViewProps> = ({
               <h3 className="text-base font-bold text-white">Disconnect PPPoE Session?</h3>
             </div>
             <p className="text-xs text-slate-300 mt-3 leading-relaxed">
-              This will send an instant tear-down signal to the physical MikroTik BNG router for user <strong className="text-white font-mono">@{username}</strong>.
+              This will send an instant tear-down signal to the physical MikroTik BNG router for user <strong className="text-white font-mono">@{cleanUsername}</strong>.
               The active tunnel interface will be terminated, prompting the ONT to re-authenticate.
             </p>
             <div className="flex items-center justify-end gap-2.5 mt-5">
@@ -2767,8 +2886,8 @@ export const SubscriberProfileView: React.FC<SubscriberProfileViewProps> = ({
       <CreateInvoiceModal
         isOpen={isGenerateInvoiceModalOpen}
         onClose={() => setIsGenerateInvoiceModalOpen(false)}
-        defaultCustomerId={username}
-        defaultSubscriberUsername={username}
+        defaultCustomerId={cleanUsername}
+        defaultSubscriberUsername={cleanUsername}
         onSuccess={() => {
           showToast('Invoice created successfully');
           fetchAllProfileData();

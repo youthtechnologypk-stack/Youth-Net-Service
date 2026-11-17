@@ -2,6 +2,7 @@ import React, { useState, useEffect } from 'react';
 import { X, CheckCircle2, AlertTriangle, ShieldCheck, UserCheck, Wrench, Clock } from 'lucide-react';
 import { supabase, SupabasePortalUser } from '../services/supabaseClient';
 import { ComplaintTicket } from '../types/isp';
+import { FIELD_STAFF_ROLES, normalizeTicketPriority, updateTicketSafe } from '../lib/anniversaryBilling';
 
 export interface EditTicketModalProps {
   ticket: ComplaintTicket | null;
@@ -17,7 +18,7 @@ export const EditTicketModal: React.FC<EditTicketModalProps> = ({
   onTicketUpdated,
 }) => {
   const [title, setTitle] = useState('');
-  const [priority, setPriority] = useState<'LOW' | 'NORMAL' | 'HIGH' | 'CRITICAL'>('NORMAL');
+  const [priority, setPriority] = useState<'LOW' | 'MEDIUM' | 'HIGH' | 'CRITICAL'>('MEDIUM');
   const [status, setStatus] = useState<'OPEN' | 'IN_PROGRESS' | 'RESOLVED'>('OPEN');
   const [assignedAgentId, setAssignedAgentId] = useState<string>('');
   const [assignedAgentName, setAssignedAgentName] = useState<string>('');
@@ -33,10 +34,10 @@ export const EditTicketModal: React.FC<EditTicketModalProps> = ({
     const fetchAgents = async () => {
       setIsLoadingAgents(true);
       try {
-        const { data, error } = await supabase
+        const { data } = await supabase
           .from('portal_users')
           .select('id, full_name, username, role, area')
-          .eq('role', 'AGENT')
+          .in('role', [...FIELD_STAFF_ROLES])
           .order('full_name', { ascending: true });
 
         if (data) {
@@ -56,14 +57,7 @@ export const EditTicketModal: React.FC<EditTicketModalProps> = ({
   useEffect(() => {
     if (ticket) {
       setTitle(ticket.title || ticket.description || '');
-      const prio = (ticket.priority || 'NORMAL').toUpperCase();
-      if (prio === 'CRITICAL' || prio === 'HIGH' || prio === 'NORMAL' || prio === 'LOW') {
-        setPriority(prio as any);
-      } else if (prio === 'MEDIUM') {
-        setPriority('NORMAL');
-      } else {
-        setPriority('NORMAL');
-      }
+      setPriority(normalizeTicketPriority(ticket.priority));
 
       const st = (ticket.status || 'OPEN').toUpperCase();
       if (st === 'RESOLVED') {
@@ -102,17 +96,18 @@ export const EditTicketModal: React.FC<EditTicketModalProps> = ({
     setIsSubmitting(true);
     setErrorMsg(null);
     try {
-      // Direct UPDATE to Supabase tickets table
-      const { error: sbError } = await supabase
-        .from('tickets')
-        .update({
+      // Safe UPDATE to Supabase tickets table respecting tickets_priority_check
+      const { error: sbError } = await updateTicketSafe(
+        supabase,
+        `id.eq.${ticket.id},ticket_no.eq.${ticket.ticketNumber || ticket.id}`,
+        {
           issue: title.trim(),
-          priority: priority,
+          priority: normalizeTicketPriority(priority),
           status: status,
           assigned_agent_id: assignedAgentId || null,
           assigned_agent_name: assignedAgentName || null,
-        })
-        .or(`id.eq.${ticket.id},ticket_no.eq.${ticket.ticketNumber || ticket.id}`);
+        }
+      );
 
       if (sbError) throw sbError;
 
@@ -188,7 +183,7 @@ export const EditTicketModal: React.FC<EditTicketModalProps> = ({
                 className="w-full bg-slate-950 border border-slate-700 rounded-xl px-3 py-2 text-white focus:outline-none focus:border-cyan-500 font-mono"
               >
                 <option value="LOW">LOW (Standard)</option>
-                <option value="NORMAL">NORMAL (4h SLA)</option>
+                <option value="MEDIUM">MEDIUM (4h SLA)</option>
                 <option value="HIGH">HIGH (2h SLA)</option>
                 <option value="CRITICAL">CRITICAL (Immediate)</option>
               </select>

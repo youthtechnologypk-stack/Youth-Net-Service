@@ -66,6 +66,7 @@ import {
   buildDefaultLegsForSplitter,
   cableCoresToType,
   calculateTopologyOpticalBudgets,
+  computePortLiveRxDbm,
   coreStatusToLedgerStatus,
   coreStatusToUsageType,
   evaluateEnclosureOpticalState,
@@ -148,6 +149,7 @@ interface FiberGisInspectorPanelProps {
     outgoingCoreNumber: number;
     spliceLossDb: number;
   }) => Promise<void>;
+  onRecalculateOpticalPower?: (nodeId?: string) => Promise<void>;
   onFocusNode?: (node: SupabaseGisNode) => void;
 }
 
@@ -181,6 +183,7 @@ export const FiberGisInspectorPanel: React.FC<FiberGisInspectorPanelProps> = ({
   onOpenUpgradeModal,
   onRouteCableFromNode,
   onQuickSpliceAndExtendCore,
+  onRecalculateOpticalPower,
 }) => {
   const [fdbSubTab, setFdbSubTab] = useState<'ports' | 'splices' | 'signal'>('ports');
   const [confirmDelete, setConfirmDelete] = useState(false);
@@ -950,6 +953,18 @@ export const FiberGisInspectorPanel: React.FC<FiberGisInspectorPanelProps> = ({
                         : 'Add Splitter Inside This FDB'}
                     </span>
                   </button>
+                  {onRecalculateOpticalPower && (
+                    <button
+                      type="button"
+                      disabled={isSaving || localSaving}
+                      onClick={() => onRecalculateOpticalPower(node.id)}
+                      className="min-h-[36px] px-2.5 py-1.5 rounded-lg bg-indigo-950/90 hover:bg-indigo-900 disabled:opacity-50 text-indigo-200 border border-indigo-700/70 font-bold text-[11px] flex items-center gap-1 cursor-pointer"
+                      title="Recalculate FDB optical budget and sync live Rx power to all assigned ports in Supabase"
+                    >
+                      <RefreshCw className={`w-3.5 h-3.5 ${isSaving ? 'animate-spin' : ''}`} />
+                      <span>Recalculate Optical Power</span>
+                    </button>
+                  )}
                   {onRouteCableFromNode && (
                     <button
                       type="button"
@@ -1282,7 +1297,18 @@ export const FiberGisInspectorPanel: React.FC<FiberGisInspectorPanelProps> = ({
                             const isLegEditing =
                               activeLegEditor?.splitterId === unit.id &&
                               activeLegEditor?.legNumber === leg.legNumber;
-                            const legOutDbm = leg.calculated_output_dbm;
+                            const baseLegOutDbm =
+                              leg.calculated_output_dbm ?? unit.calculated_output_dbm ?? null;
+                            const legOutDbm =
+                              leg.status === 'INTERNAL_CASCADE' ||
+                              leg.status === 'OUTGOING_CABLE_FEED'
+                                ? baseLegOutDbm
+                                : computePortLiveRxDbm(
+                                    baseLegOutDbm,
+                                    leg.status === 'SUBSCRIBER_DROP'
+                                      ? Number(leg.drop_distance_m ?? 30)
+                                      : 0
+                                  );
                             const linkedSub =
                               (leg.subscriber_id && subscribersById[leg.subscriber_id]) ||
                               (leg.subscriber_username &&
@@ -1711,6 +1737,10 @@ export const FiberGisInspectorPanel: React.FC<FiberGisInspectorPanelProps> = ({
                         subscribersByUsername[port.subscriber_username.toLowerCase()]) ||
                       null;
 
+                    const displayDistance = out?.drop_distance_m ?? port?.drop_cable_meters ?? 0;
+                    const displayManualName = out?.client_name_manual || port?.client_label || '';
+                    const displayAreaOrNode = out?.target_area_or_node || '';
+
                     const isEditing = editingPortNum === portNum;
                     const legLabel =
                       out?.leg_label ||
@@ -1719,18 +1749,24 @@ export const FiberGisInspectorPanel: React.FC<FiberGisInspectorPanelProps> = ({
                           ? `Leg 1 · Drop (${fbtLegs.dropPercent}%)`
                           : `Leg 2 · Through (${fbtLegs.thruPercent}%)`
                         : `Port ${portNum}`);
-                    const estDbm =
-                      out?.estimated_rx_dbm !== null && out?.estimated_rx_dbm !== undefined
-                        ? Number(out.estimated_rx_dbm)
-                        : fbtLegs
-                        ? portNum === 1
-                          ? fbtLegs.dropOutputDbm
-                          : fbtLegs.thruOutputDbm
-                        : budget?.ontRxDbm ?? null;
 
-                    const displayDistance = out?.drop_distance_m ?? port?.drop_cable_meters ?? 0;
-                    const displayManualName = out?.client_name_manual || port?.client_label || '';
-                    const displayAreaOrNode = out?.target_area_or_node || '';
+                    const activeSplitterOutputDbm = fbtLegs
+                      ? portNum === 1 || util === 'CLIENT_ONT'
+                        ? fbtLegs.dropOutputDbm
+                        : fbtLegs.thruOutputDbm
+                      : budget?.ontRxDbm !== null && budget?.ontRxDbm !== undefined
+                      ? budget.ontRxDbm
+                      : budget?.healthBand !== 'UNLINKED'
+                      ? node.calculated_ont_rx_dbm ?? node.calculated_output_dbm ?? null
+                      : null;
+
+                    const effectiveDropMeters = isEditing
+                      ? Number(portDropMeters || 0)
+                      : Number(displayDistance || 0);
+                    const estDbm = computePortLiveRxDbm(
+                      activeSplitterOutputDbm,
+                      effectiveDropMeters
+                    );
 
                     return (
                       <div
@@ -2656,9 +2692,23 @@ export const FiberGisInspectorPanel: React.FC<FiberGisInspectorPanelProps> = ({
                       </span>
                     )}
                   </div>
-                  <span className={`text-[11px] font-mono font-bold text-right ${healthStyle.textClass}`}>
-                    {healthLabel}
-                  </span>
+                  <div className="flex items-center gap-2 shrink-0">
+                    {onRecalculateOpticalPower && (
+                      <button
+                        type="button"
+                        disabled={isSaving || localSaving}
+                        onClick={() => onRecalculateOpticalPower(node.id)}
+                        className="px-2 py-1 rounded-lg bg-slate-950/80 hover:bg-slate-900 disabled:opacity-50 border border-slate-700 text-[10px] font-mono font-bold text-cyan-300 flex items-center gap-1 cursor-pointer"
+                        title="Recalculate Optical Power & sync all assigned ports"
+                      >
+                        <RefreshCw className={`w-3 h-3 ${isSaving ? 'animate-spin' : ''}`} />
+                        <span>Recalculate</span>
+                      </button>
+                    )}
+                    <span className={`text-[11px] font-mono font-bold text-right ${healthStyle.textClass}`}>
+                      {healthLabel}
+                    </span>
+                  </div>
                 </div>
 
                 {/* Cascaded Link Budget Chain */}

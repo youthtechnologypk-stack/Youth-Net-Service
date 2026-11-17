@@ -65,6 +65,12 @@ import {
   getDefaultWhatsappConfig,
   openWhatsAppLink,
 } from '../lib/whatsappBilling';
+import {
+  FIELD_STAFF_ROLES,
+  LiveFieldAgentLedger,
+  fetchLiveFieldStaffWithBalances,
+  runAnniversaryInvoicingCron,
+} from '../lib/anniversaryBilling';
 
 export interface BillingViewProps {
   currentRole?: SystemRole;
@@ -83,7 +89,9 @@ export const BillingView: React.FC<BillingViewProps> = ({
   const [invoices, setInvoices] = useState<SupabaseInvoice[]>([]);
   const [paymentTransactions, setPaymentTransactions] = useState<SupabasePaymentTransaction[]>([]);
   const [portalAgents, setPortalAgents] = useState<SupabasePortalUser[]>([]);
+  const [liveFieldStaff, setLiveFieldStaff] = useState<LiveFieldAgentLedger[]>([]);
   const [portalClients, setPortalClients] = useState<SupabasePortalUser[]>([]);
+  const [isRunningCron, setIsRunningCron] = useState<boolean>(false);
   const [paymentAccounts, setPaymentAccounts] = useState<SupabasePaymentAccount[]>([]);
   const [whatsappConfig, setWhatsappConfig] = useState<SupabaseWhatsappBillingConfig>(() =>
     getDefaultWhatsappConfig()
@@ -150,23 +158,32 @@ export const BillingView: React.FC<BillingViewProps> = ({
         enforce31DayAutoExpiry(data as SupabaseInvoice[]).catch(() => {});
       }
 
-      // Also fetch portal_users agents/clients, payment_transactions, payment_accounts & whatsapp config
+      // Also fetch portal_users field staff/clients, live agent balances, payment_transactions, payment_accounts & whatsapp config
       const [
         { data: agentUsers },
         { data: clientUsers },
         { data: paymentRows },
         loadedAccounts,
         loadedWaConfig,
+        computedStaff,
       ] = await Promise.all([
-        supabase.from('portal_users').select('*').eq('role', 'AGENT'),
+        supabase
+          .from('portal_users')
+          .select('*')
+          .in('role', [...FIELD_STAFF_ROLES])
+          .order('full_name', { ascending: true }),
         supabase.from('portal_users').select('*').eq('role', 'CLIENT'),
         supabase.from('payment_transactions').select('*').order('payment_date', { ascending: false }),
         fetchPaymentAccounts(),
         fetchWhatsappBillingConfig(),
+        fetchLiveFieldStaffWithBalances(supabase),
       ]);
 
       if (agentUsers) {
         setPortalAgents(agentUsers as SupabasePortalUser[]);
+      }
+      if (Array.isArray(computedStaff)) {
+        setLiveFieldStaff(computedStaff);
       }
       if (clientUsers) {
         setPortalClients(clientUsers as SupabasePortalUser[]);
@@ -183,8 +200,37 @@ export const BillingView: React.FC<BillingViewProps> = ({
     }
   };
 
+  const handleRunAnniversaryCron = async () => {
+    setIsRunningCron(true);
+    try {
+      const summary = await runAnniversaryInvoicingCron(supabase, { force: true });
+      setActionNotice(
+        summary.generatedCount > 0
+          ? `Anniversary Invoicing CRON (${summary.cycleMonth}): Generated ${summary.generatedCount} invoice${summary.generatedCount === 1 ? '' : 's'} totaling ${formatCurrency(summary.totalBilled)}.`
+          : `Anniversary Invoicing CRON (${summary.cycleMonth}): Checked ${summary.scanned} active subscribers — all due anniversary bills (${summary.skippedExisting}) already generated, ${summary.skippedUpcomingAnchor} upcoming.`
+      );
+      await fetchInvoices();
+    } catch (err: any) {
+      setActionNotice(`Invoicing CRON notice: ${err?.message || 'Unable to generate invoices'}`);
+    } finally {
+      setIsRunningCron(false);
+    }
+  };
+
   useEffect(() => {
     fetchInvoices();
+
+    // Auto-run Creation-Date Anniversary Billing check cleanly on load
+    runAnniversaryInvoicingCron(supabase)
+      .then((summary) => {
+        if (summary.generatedCount > 0) {
+          setActionNotice(
+            `Auto-Invoicing (${summary.cycleMonth}): Generated ${summary.generatedCount} anniversary invoice${summary.generatedCount === 1 ? '' : 's'} (${formatCurrency(summary.totalBilled)}).`
+          );
+          fetchInvoices();
+        }
+      })
+      .catch((err) => console.warn('Auto anniversary cron notice:', err));
 
     const handleWaConfigUpdated = (e: Event) => {
       const detail = (e as CustomEvent)?.detail;
@@ -195,18 +241,22 @@ export const BillingView: React.FC<BillingViewProps> = ({
     // 2. Enable Supabase Realtime Subscriptions
     const channel = supabase
       .channel('public:billing_view_invoices')
-      .on('postgres_changes', { event: '*', schema: 'public', table: 'invoices' }, (payload) => {
-        console.log('[Supabase Realtime] Invoices table change detected:', payload);
+      .on('postgres_changes', { event: '*', schema: 'public', table: 'invoices' }, () => {
         fetchInvoices();
       })
       .on('postgres_changes', { event: '*', schema: 'public', table: 'payment_transactions' }, () => {
         fetchInvoices();
       })
+      .on('postgres_changes', { event: '*', schema: 'public', table: 'agent_cash_transactions' }, () => {
+        fetchInvoices();
+      })
+      .on('postgres_changes', { event: '*', schema: 'public', table: 'isp_expenses' }, () => {
+        fetchInvoices();
+      })
       .on('postgres_changes', { event: '*', schema: 'public', table: 'payment_accounts' }, () => {
         fetchPaymentAccounts().then(setPaymentAccounts).catch(() => {});
       })
-      .on('postgres_changes', { event: '*', schema: 'public', table: 'portal_users' }, (payload) => {
-        console.log('[Supabase Realtime] Portal users table change detected:', payload);
+      .on('postgres_changes', { event: '*', schema: 'public', table: 'portal_users' }, () => {
         fetchInvoices();
       })
       .subscribe();
@@ -557,7 +607,10 @@ export const BillingView: React.FC<BillingViewProps> = ({
   );
   const totalDue = dateFilteredInvoices
     .reduce((acc, i) => acc + Math.max(0, (Number(i.amount) || 0) - (Number(i.paid_amount) || 0)), 0);
-  const totalAgentCash = (portalAgents || []).reduce((acc, a) => acc + (Number(a.cash_in_hand) || 0), 0);
+  const totalAgentCash =
+    liveFieldStaff.length > 0
+      ? liveFieldStaff.reduce((acc, a) => acc + (Number(a.cashInHand) || 0), 0)
+      : (portalAgents || []).reduce((acc, a) => acc + (Number(a.cash_in_hand) || 0), 0);
 
   const activePaymentAccounts = useMemo(
     () => (paymentAccounts || []).filter((acc) => acc.is_active !== false),
@@ -689,6 +742,17 @@ export const BillingView: React.FC<BillingViewProps> = ({
 
           <button
             type="button"
+            onClick={handleRunAnniversaryCron}
+            disabled={isRunningCron}
+            className="px-3.5 py-2.5 rounded-xl border border-cyan-700/60 bg-cyan-950/50 hover:bg-cyan-900/60 text-cyan-300 font-semibold text-xs flex items-center gap-2 transition cursor-pointer whitespace-nowrap shrink-0 disabled:opacity-50"
+            title="Generate anniversary-date monthly invoices for active subscribers"
+          >
+            <RefreshCw className={`w-4 h-4 text-cyan-400 shrink-0 ${isRunningCron ? 'animate-spin' : ''}`} />
+            <span>{isRunningCron ? 'Running CRON...' : 'Run Invoicing CRON'}</span>
+          </button>
+
+          <button
+            type="button"
             onClick={fetchInvoices}
             disabled={isLoading}
             className="p-2.5 rounded-xl border border-slate-700 bg-slate-800/80 hover:bg-slate-700 text-slate-300 hover:text-white transition cursor-pointer shrink-0"
@@ -799,7 +863,7 @@ export const BillingView: React.FC<BillingViewProps> = ({
             <Users className="w-4 h-4 text-purple-400" />
           </div>
           <div className="text-2xl font-bold text-purple-400 mt-2 font-mono tabular-nums">{formatCurrency(totalAgentCash)}</div>
-          <div className="text-slate-500 text-xs mt-1 font-mono tabular-nums">{portalAgents.length} active field collection agents</div>
+          <div className="text-slate-500 text-xs mt-1 font-mono tabular-nums">{liveFieldStaff.length || portalAgents.length} active field staff</div>
         </div>
       </div>
 
@@ -1320,22 +1384,57 @@ export const BillingView: React.FC<BillingViewProps> = ({
 
       {/* Field Agents Cash Overview */}
       <div className="p-4 rounded-xl border border-slate-800 bg-[#111A2E]">
-        <h3 className="text-sm font-bold text-white mb-3 flex items-center gap-2">
-          <Users className="w-4 h-4 text-purple-400" />
-          <span>Field Agent Cash Recovery Status (portal_users)</span>
+        <h3 className="text-sm font-bold text-white mb-3 flex items-center justify-between gap-2">
+          <span className="flex items-center gap-2">
+            <Users className="w-4 h-4 text-purple-400" />
+            <span>Field Agent Cash Recovery &amp; Payroll Status (Live portal_users)</span>
+          </span>
+          <span className="text-[11px] font-mono text-slate-400">
+            {liveFieldStaff.length} Active Staff
+          </span>
         </h3>
-        <div className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-4 gap-3">
-          {portalAgents.map((ag) => (
-            <div key={ag.id} className="p-3 bg-slate-900/80 rounded-lg border border-slate-800">
-              <div className="font-semibold text-white text-sm">{ag.full_name}</div>
-              <div className="text-xs text-slate-500">@{ag.username} • {ag.area}</div>
-              <div className="mt-2 text-lg font-mono font-bold text-emerald-400">
-                {formatCurrency(Number(ag.cash_in_hand) || 0)}
+        {liveFieldStaff.length === 0 ? (
+          <div className="p-6 text-center text-xs text-slate-500 font-mono bg-slate-900/50 rounded-lg border border-slate-800">
+            No active field staff found in Supabase portal_users.
+          </div>
+        ) : (
+          <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-5 gap-3">
+            {liveFieldStaff.map((ag) => (
+              <div key={ag.id} className="p-3.5 bg-slate-900/80 rounded-lg border border-slate-800 space-y-2">
+                <div className="flex items-start justify-between gap-2">
+                  <div className="min-w-0">
+                    <div className="font-semibold text-white text-sm truncate">{ag.name}</div>
+                    <div className="text-[11px] text-slate-400 font-mono truncate">
+                      @{ag.username} · {ag.assignedArea}
+                    </div>
+                  </div>
+                  <span className="px-1.5 py-0.5 rounded bg-slate-800 text-cyan-300 border border-slate-700 font-mono text-[10px] shrink-0">
+                    {ag.role}
+                  </span>
+                </div>
+
+                <div className="pt-2 border-t border-slate-800/80 space-y-1 font-mono text-[11px] tabular-nums">
+                  <div className="flex justify-between">
+                    <span className="text-slate-400">Cash in Hand:</span>
+                    <span className="font-bold text-cyan-400">{formatCurrency(ag.cashInHand)}</span>
+                  </div>
+                  <div className="flex justify-between">
+                    <span className="text-slate-400">Advance Balance:</span>
+                    <span className="text-amber-400">{formatCurrency(ag.advanceBalance)}</span>
+                  </div>
+                  <div className="flex justify-between">
+                    <span className="text-slate-400">Base Salary:</span>
+                    <span className="text-white">{formatCurrency(ag.baseSalary)}</span>
+                  </div>
+                  <div className="flex justify-between pt-1 border-t border-slate-800/80 font-bold">
+                    <span className="text-slate-300">Net Payable:</span>
+                    <span className="text-emerald-400">{formatCurrency(ag.netPayable)}</span>
+                  </div>
+                </div>
               </div>
-              <div className="text-[10px] text-slate-500">Cash-in-Hand Balance</div>
-            </div>
-          ))}
-        </div>
+            ))}
+          </div>
+        )}
       </div>
 
       {/* Modal: + Generate Invoice */}

@@ -90,6 +90,14 @@ import {
   subscribeToSupabaseRouters,
   upsertSupabaseRouter,
 } from '../services/routerSyncService';
+import {
+  fetchLiveFieldStaffWithBalances,
+  insertTicketSafe,
+  normalizeTicketPriority,
+  runAnniversaryInvoicingCron,
+} from '../lib/anniversaryBilling';
+
+const UUID_REGEX = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
 interface BandwidthDataPoint {
   time: string;
@@ -525,15 +533,31 @@ function getInitialPortalUsers(): UserAccount[] {
 }
 
 function getInitialAgents(): FieldAgent[] {
-  if (typeof window === 'undefined') return INITIAL_AGENTS;
-  try {
-    const raw = localStorage.getItem(STORAGE_KEY_AGENTS);
-    if (raw) {
-      const parsed = JSON.parse(raw);
-      if (Array.isArray(parsed) && parsed.length > 0) return parsed;
-    }
-  } catch {}
-  return INITIAL_AGENTS;
+  if (typeof window !== 'undefined') {
+    try {
+      const raw = localStorage.getItem(STORAGE_KEY_AGENTS);
+      if (raw) {
+        const parsed = JSON.parse(raw);
+        if (Array.isArray(parsed)) {
+          const cleaned = parsed.filter(
+            (a: any) =>
+              a?.id &&
+              a.id !== 'agent-1' &&
+              a.id !== 'agent-2' &&
+              a.id !== 'agent-3' &&
+              String(a?.name || '').toLowerCase() !== 'bilal khan'
+          );
+          if (cleaned.length !== parsed.length) {
+            localStorage.setItem(STORAGE_KEY_AGENTS, JSON.stringify(cleaned));
+          }
+          if (cleaned.length > 0 && cleaned.every((a: any) => UUID_REGEX.test(String(a.id)))) {
+            return cleaned;
+          }
+        }
+      }
+    } catch {}
+  }
+  return [];
 }
 
 const ISPContext = createContext<ISPContextType | undefined>(undefined);
@@ -786,7 +810,11 @@ export const ISPProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
 
     const fetchSupabaseUsers = async () => {
       try {
-        const { data } = await supabase.from('portal_users').select('*');
+        const [{ data }, liveStaff] = await Promise.all([
+          supabase.from('portal_users').select('*'),
+          fetchLiveFieldStaffWithBalances(supabase),
+        ]);
+
         if (data) {
           const mappedUsers: UserAccount[] = data.map((u: any) => ({
             id: u.id,
@@ -807,23 +835,10 @@ export const ISPProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
             createdAt: u.created_at || new Date().toISOString(),
           }));
           setPortalUsers(mappedUsers);
-
-          // Reconcile agent cash
-          setAgents((prev) =>
-            prev.map((ag) => {
-              const agFirstName = (ag?.name || '').toLowerCase().split(' ')[0];
-              const matched = !agFirstName ? undefined : data.find(
-                (u: any) =>
-                  Boolean(u?.username && (u.username || '').toLowerCase().includes(agFirstName)) ||
-                  Boolean(u?.full_name && (u.full_name || '').toLowerCase().includes(agFirstName))
-              );
-              if (matched && matched.cash_in_hand !== undefined && matched.cash_in_hand !== null) {
-                return { ...ag, cashInHand: Number(matched.cash_in_hand) || 0 };
-              }
-              return ag;
-            })
-          );
         }
+
+        // Replace static/cached agents strictly with live Supabase field staff + calculated ledger balances
+        setAgents(liveStaff);
       } catch (err) {
         console.warn('Supabase fetch users notice:', err);
       }
@@ -870,6 +885,12 @@ export const ISPProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
         }
       })
       .on('postgres_changes', { event: '*', schema: 'public', table: 'portal_users' }, () => {
+        fetchSupabaseUsers();
+      })
+      .on('postgres_changes', { event: '*', schema: 'public', table: 'agent_cash_transactions' }, () => {
+        fetchSupabaseUsers();
+      })
+      .on('postgres_changes', { event: '*', schema: 'public', table: 'isp_expenses' }, () => {
         fetchSupabaseUsers();
       })
       .subscribe();
@@ -2156,7 +2177,7 @@ export const ISPProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
       id: newAutoInvoice.id,
       invoiceNo: newAutoInvoice.invoiceNumber,
       subscriberUsername: username,
-      agentId: assignedAgentId || 'agent-1',
+      agentId: assignedAgentId || '',
       amount: totalAmount,
       dueDate,
       status: 'DUE',
@@ -3306,6 +3327,25 @@ export const ISPProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
     setCashHandovers((prev) => [newHandover, ...prev]);
 
     const remainingCash = Math.max(0, targetAgent.cashInHand - amount);
+
+    if (UUID_REGEX.test(agentId)) {
+      await supabase
+        .from('portal_users')
+        .update({ cash_in_hand: remainingCash })
+        .eq('id', agentId);
+
+      await supabase.from('agent_cash_transactions').insert([
+        {
+          agent_id: agentId,
+          agent_name: targetAgent.name,
+          transaction_type: 'CASH_HANDOVER',
+          amount,
+          notes: `${handoverNum} · ${receiver}: ${notes}`,
+          created_at: now.toISOString(),
+        },
+      ]);
+    }
+
     const handoverWaMsg =
       `💼 *YOUTH NET SERVICE - CASH RECEIVED & CONFIRMED*\n\n` +
       `Boss has directly accepted and verified recovery cash deposit from Agent *${targetAgent.name}*.\n\n` +
@@ -3385,6 +3425,25 @@ export const ISPProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
     });
 
     const outstanding = targetAgent.advanceSalaryTaken + amount - targetAgent.advanceSalaryReturned;
+
+    if (UUID_REGEX.test(agentId)) {
+      await supabase
+        .from('portal_users')
+        .update({ advance_balance: Math.max(0, outstanding) })
+        .eq('id', agentId);
+
+      await supabase.from('agent_cash_transactions').insert([
+        {
+          agent_id: agentId,
+          agent_name: targetAgent.name,
+          transaction_type: 'ADVANCE_TAKEN',
+          amount,
+          notes: `${txNum} (${paymentMethod.toUpperCase()}): ${notes}`,
+          created_at: now.toISOString(),
+        },
+      ]);
+    }
+
     const waMsg =
       `💸 *YOUTH NET SERVICE - ADVANCE SALARY DISBURSED*\n\n` +
       `Dear *${targetAgent.name}*,\n` +
@@ -3456,6 +3515,31 @@ export const ISPProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
     setSalaryTransactions((prev) => [newTx, ...prev]);
 
     const remainingAdvance = Math.max(0, targetAgent.advanceSalaryTaken - (targetAgent.advanceSalaryReturned + amount));
+
+    if (UUID_REGEX.test(agentId)) {
+      const nextCash = deductFromCashInHand
+        ? Math.max(0, targetAgent.cashInHand - amount)
+        : targetAgent.cashInHand;
+      await supabase
+        .from('portal_users')
+        .update({
+          advance_balance: remainingAdvance,
+          ...(deductFromCashInHand ? { cash_in_hand: nextCash } : {}),
+        })
+        .eq('id', agentId);
+
+      await supabase.from('agent_cash_transactions').insert([
+        {
+          agent_id: agentId,
+          agent_name: targetAgent.name,
+          transaction_type: 'ADVANCE_RETURNED',
+          amount,
+          notes: `${txNum} (${paymentMethod.toUpperCase()}): ${notes}`,
+          created_at: now.toISOString(),
+        },
+      ]);
+    }
+
     const waMsg =
       `↩️ *YOUTH NET SERVICE - ADVANCE SALARY REPAYMENT*\n\n` +
       `Dear *${targetAgent.name}*,\n` +
@@ -3542,6 +3626,26 @@ export const ISPProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
       notes: `Net Salary for ${month}. Gross: ${formatCurrency(targetAgent.baseSalary)}, Advance Deducted: ${formatCurrency(deduction)}`,
     });
 
+    if (UUID_REGEX.test(agentId)) {
+      if (deductAdvance) {
+        await supabase
+          .from('portal_users')
+          .update({ advance_balance: 0 })
+          .eq('id', agentId);
+      }
+
+      await supabase.from('agent_cash_transactions').insert([
+        {
+          agent_id: agentId,
+          agent_name: targetAgent.name,
+          transaction_type: 'SALARY_PAYOUT',
+          amount: netAmount,
+          notes: `${txNum} (${month}) · Base ${targetAgent.baseSalary}, Advance Deducted ${deduction}: ${notes}`,
+          created_at: now.toISOString(),
+        },
+      ]);
+    }
+
     const waMsg =
       `💰 *YOUTH NET SERVICE - MONTHLY SALARY PAY-SLIP*\n\n` +
       `Dear *${targetAgent.name}*,\n` +
@@ -3573,11 +3677,21 @@ export const ISPProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
 
   // Update Agent Base Salary
   const updateAgentSalary = (agentId: string, newBaseSalary: number) => {
+    const cleanSalary = Math.max(0, newBaseSalary);
     setAgents((prev) =>
       prev.map((a) =>
-        a.id === agentId ? { ...a, baseSalary: Math.max(0, newBaseSalary) } : a
+        a.id === agentId ? { ...a, baseSalary: cleanSalary } : a
       )
     );
+    if (UUID_REGEX.test(agentId)) {
+      supabase
+        .from('portal_users')
+        .update({ base_salary: cleanSalary })
+        .eq('id', agentId)
+        .then(({ error }) => {
+          if (error) console.warn('Supabase base_salary update notice:', error.message);
+        });
+    }
   };
 
   // Add New Field Recovery Agent (Unified with Portal Users)
@@ -3899,28 +4013,46 @@ export const ISPProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
     });
   };
 
-  // Run Automated Monthly Billing CRON Job
+  // Run Automated Monthly Anniversary Billing CRON Job
   const runMonthlyBillingCron = async (): Promise<string> => {
-    const { summary, generatedInvoices, notificationLogs } = await billingEngine.runMonthlyInvoiceGeneration(
-      customers,
-      packages
-    );
+    const summary = await runAnniversaryInvoicingCron(supabase, { force: true });
 
-    setInvoices((prev) => [...generatedInvoices, ...prev]);
-    setWhatsAppLogs((prev) => [...notificationLogs, ...prev]);
+    // Re-sync live invoices from Supabase into context
+    try {
+      const { data } = await supabase
+        .from('invoices')
+        .select('*')
+        .order('created_at', { ascending: false });
+      if (data) {
+        const mapped: Invoice[] = data.map((inv: any) => ({
+          id: inv.id,
+          invoiceNumber: inv.invoice_no,
+          customerId: inv.subscriber_username,
+          customerName: inv.subscriber_username,
+          customerPhone: '+92 300 0000000',
+          packageId: 'pkg-default',
+          packageName: '20M_Ultra Fiber',
+          billingMonth: 'Current Billing',
+          baseAmount: Number(inv.amount) || 0,
+          taxAmount: 0,
+          discountAmount: 0,
+          totalAmount: Number(inv.amount) || 0,
+          status: (inv.status || 'DUE').toUpperCase() === 'PAID' ? 'paid' : 'unpaid',
+          dueDate: inv.due_date,
+          issuedAt: inv.created_at || new Date().toISOString(),
+          paidAt: inv.paid_at || undefined,
+          collectedByAgentId: inv.assigned_agent_id || undefined,
+          agentName: inv.assigned_agent_name || undefined,
+          whatsappNoticeSent: false,
+        }));
+        setInvoices(mapped);
+      }
+    } catch {}
 
-    // Update customer balances
-    setCustomers((prev) =>
-      prev.map((c) => {
-        const matchingNewInv = generatedInvoices.find((inv) => inv.customerId === c.id);
-        if (matchingNewInv) {
-          return { ...c, balanceDue: c.balanceDue + matchingNewInv.totalAmount };
-        }
-        return c;
-      })
-    );
-
-    const msg = `Billing CRON Completed: Generated ${summary.invoicesGenerated} invoices (${formatCurrency(summary.totalBilledAmount)}) & sent ${summary.whatsAppAlertsDispatched} WhatsApp statements.`;
+    const msg =
+      summary.generatedCount > 0
+        ? `Anniversary Billing CRON (${summary.cycleMonth}): Generated ${summary.generatedCount} invoices totaling ${formatCurrency(summary.totalBilled)} (${summary.skippedExisting} already billed).`
+        : `Anniversary Billing CRON (${summary.cycleMonth}): Scanned ${summary.scanned} active subscribers — all due anniversary bills already generated (${summary.skippedUpcomingAnchor} upcoming).`;
     setLastCronMessage(msg);
     return msg;
   };
@@ -4382,11 +4514,11 @@ export const ISPProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
           assigned_agent_id: assignedAgentId || null,
           assigned_agent_name: assignedAgentName || null,
           issue: `${newTkt.title}: ${newTkt.description}`,
-          priority: (newTkt.priority || 'MEDIUM').toUpperCase(),
+          priority: normalizeTicketPriority(newTkt.priority),
           status: (status || 'OPEN').toUpperCase() === 'RESOLVED' ? 'RESOLVED' : assignedAgentId ? 'IN_PROGRESS' : 'OPEN',
           created_at: now.toISOString(),
         };
-        supabase.from('tickets').insert([newTicketPayload]).then(({ error }) => {
+        insertTicketSafe(supabase, newTicketPayload).then(({ error }) => {
           if (error) console.warn('Supabase ticket insert error:', error);
         });
       } catch (e) {

@@ -28,6 +28,7 @@ import { Invoice } from '../types/isp';
 import { FeatureGate } from './FeatureGate';
 import { PWAInstallPrompt } from './PWAInstallPrompt';
 import { supabase, SupabaseInvoice, SupabaseTicket } from '../services/supabaseClient';
+import { insertTicketSafe } from '../lib/anniversaryBilling';
 
 interface ClientSubscriberPortalProps {
   currentUser: UserAccount;
@@ -266,22 +267,16 @@ export const ClientSubscriberPortal: React.FC<ClientSubscriberPortalProps> = ({
 
     try {
       // 1. Single insert into Supabase tickets table
-      const { data: insertedRow, error } = await supabase
-        .from('tickets')
-        .insert([
-          {
-            ticket_no: newTicketNo,
-            subscriber_username: subscriberUsername,
-            assigned_agent_id: null,
-            assigned_agent_name: null,
-            issue: `${complaintCategory.replace(/_/g, ' ').toUpperCase()}: ${complaintText}`,
-            priority: complaintCategory === 'no_internet' ? 'CRITICAL' : 'MEDIUM',
-            status: 'OPEN',
-            created_at: createdAtIso,
-          },
-        ])
-        .select()
-        .single();
+      const { data: insertedRow, error } = await insertTicketSafe(supabase, {
+        ticket_no: newTicketNo,
+        subscriber_username: subscriberUsername,
+        assigned_agent_id: null,
+        assigned_agent_name: null,
+        issue: `${complaintCategory.replace(/_/g, ' ').toUpperCase()}: ${complaintText}`,
+        priority: complaintCategory === 'no_internet' ? 'CRITICAL' : 'MEDIUM',
+        status: 'OPEN',
+        created_at: createdAtIso,
+      });
 
       if (error) {
         console.warn('Supabase ticket creation failed, recording to local context:', error.message);

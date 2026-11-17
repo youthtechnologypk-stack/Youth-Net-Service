@@ -85,16 +85,16 @@ export const MobileAppSimulator: React.FC<MobileAppSimulatorProps> = ({
   const [ticketSubmittedMsg, setTicketSubmittedMsg] = useState(false);
 
   const fallbackAgent = {
-    id: 'agent-1',
-    name: 'Field Recovery Agent',
-    phone: '+92 300 0000000',
-    email: 'agent@youthnet.pk',
-    assignedArea: 'Central Sector',
-    status: 'active' as const,
+    id: '',
+    name: 'Select Field Agent',
+    phone: '',
+    email: '',
+    assignedArea: 'Unassigned',
+    status: 'offline' as const,
     cashInHand: 0,
     totalCollectedToday: 0,
     activeTicketsAssigned: 0,
-    baseSalary: 35000,
+    baseSalary: 0,
     advanceSalaryTaken: 0,
     advanceSalaryReturned: 0,
   };
