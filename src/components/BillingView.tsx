@@ -54,7 +54,14 @@ import {
   triggerAutoExpirySweep,
   addCalendarMonthDateString,
   bulkReceivePayments,
+  fetchLiveMikrotikProfilesAndSecrets,
+  safeUpdateInvoiceInSupabase,
+  syncSubscriberPackageAndRestoreIfPaid,
 } from '../lib/billingAndNetwork';
+import {
+  buildLiveMikrotikPlanOptions,
+  resolvePreselectedInvoiceProfile,
+} from '../lib/mikrotikProfileSync';
 import { BulkReceiveAmountModal } from './BulkReceiveAmountModal';
 import {
   DEFAULT_SUPPORT_WHATSAPP,
@@ -88,7 +95,7 @@ export const BillingView: React.FC<BillingViewProps> = ({
   onOpenReceiptModal,
 }) => {
   const { formatCurrency, currencySymbol } = useCurrency();
-  const { customers, agents, routers, selectedRouterId } = useISP();
+  const { customers, agents, routers, selectedRouterId, packages, profilePriceMap } = useISP();
   const activeRouter = routers.find((r) => r.id === selectedRouterId) || routers[0];
   const activeRouterRef = useRef(activeRouter);
   activeRouterRef.current = activeRouter;
@@ -134,12 +141,21 @@ export const BillingView: React.FC<BillingViewProps> = ({
   const [paidPaymentMethod, setPaidPaymentMethod] = useState<string>('Cash Handover');
   const [paymentReceivedInput, setPaymentReceivedInput] = useState<number | string>('');
 
+  // Live MikroTik RouterOS Profiles & Secrets (Single Source of Truth)
+  const [liveMikrotikProfiles, setLiveMikrotikProfiles] = useState<
+    Array<{ name: string; rateLimit?: string }>
+  >([]);
+  const [liveMikrotikSecrets, setLiveMikrotikSecrets] = useState<Array<Record<string, any>>>([]);
+  const [isLoadingMkProfiles, setIsLoadingMkProfiles] = useState<boolean>(false);
+
   // Edit Invoice Form State
   const [editAmount, setEditAmount] = useState<number>(0);
   const [editDueDate, setEditDueDate] = useState<string>('');
   const [editCycleDay, setEditCycleDay] = useState<number>(() => new Date().getDate());
   const [editStatus, setEditStatus] = useState<'DUE' | 'PARTIAL' | 'PAID' | 'OVERDUE'>('DUE');
   const [editAssignedAgentId, setEditAssignedAgentId] = useState<string>('');
+  const [editPackageProfile, setEditPackageProfile] = useState<string>('');
+  const [editDetectedMkProfile, setEditDetectedMkProfile] = useState<string | null>(null);
 
   // New Invoice Form State
   const [newSubUsername, setNewSubUsername] = useState<string>('');
@@ -216,6 +232,14 @@ export const BillingView: React.FC<BillingViewProps> = ({
       }
       setPaymentAccounts(loadedAccounts);
       setWhatsappConfig(loadedWaConfig);
+
+      // Refresh live MikroTik /ppp/profile & /ppp/secret in background
+      fetchLiveMikrotikProfilesAndSecrets(activeRouterRef.current)
+        .then((mk) => {
+          if (mk.profiles.length > 0) setLiveMikrotikProfiles(mk.profiles);
+          if (mk.secrets.length > 0) setLiveMikrotikSecrets(mk.secrets);
+        })
+        .catch(() => {});
     } catch (err) {
       console.warn('Supabase fetch invoices failed:', err);
     } finally {
@@ -518,7 +542,7 @@ export const BillingView: React.FC<BillingViewProps> = ({
     }
   };
 
-  // 5. Open Edit Invoice Modal
+  // 5. Open Edit Invoice Modal with auto-preselected live MikroTik secret profile
   const handleOpenEditModal = (inv: SupabaseInvoice) => {
     setInvoiceToEdit(inv);
     setEditAmount(Number(inv.amount) || 0);
@@ -526,10 +550,72 @@ export const BillingView: React.FC<BillingViewProps> = ({
     setEditCycleDay(inv.cycle_day || new Date().getDate());
     setEditStatus((inv.status as any) || 'DUE');
     setEditAssignedAgentId(inv.assigned_agent_id || '');
+
+    const subClean = (inv.subscriber_username || '').trim().toLowerCase();
+    const clientMatch = portalClients.find(
+      (c) => (c.username || '').trim().toLowerCase() === subClean
+    );
+    const initialResolved = resolvePreselectedInvoiceProfile({
+      username: inv.subscriber_username,
+      invoicePackage: inv.package_profile || inv.package_name,
+      secrets: liveMikrotikSecrets,
+      subscriber: clientMatch || null,
+      mikrotikProfiles: liveMikrotikProfiles,
+    });
+    setEditPackageProfile(initialResolved.selectedProfile);
+    setEditDetectedMkProfile(
+      initialResolved.origPkgFromComment || initialResolved.liveSecretProfile || null
+    );
     setIsEditModalOpen(true);
+
+    // Fetch fresh /ppp/profile and /ppp/secret right on modal open so dropdown & preselection are exact
+    setIsLoadingMkProfiles(true);
+    fetchLiveMikrotikProfilesAndSecrets(activeRouterRef.current)
+      .then((mk) => {
+        const nextProfiles = mk.profiles.length > 0 ? mk.profiles : liveMikrotikProfiles;
+        const nextSecrets = mk.secrets.length > 0 ? mk.secrets : liveMikrotikSecrets;
+        if (mk.profiles.length > 0) setLiveMikrotikProfiles(mk.profiles);
+        if (mk.secrets.length > 0) setLiveMikrotikSecrets(mk.secrets);
+
+        const freshResolved = resolvePreselectedInvoiceProfile({
+          username: inv.subscriber_username,
+          invoicePackage: inv.package_profile || inv.package_name,
+          secrets: nextSecrets,
+          subscriber: clientMatch || null,
+          mikrotikProfiles: nextProfiles,
+        });
+        if (freshResolved.selectedProfile) {
+          setEditPackageProfile(freshResolved.selectedProfile);
+        }
+        setEditDetectedMkProfile(
+          freshResolved.origPkgFromComment || freshResolved.liveSecretProfile || null
+        );
+      })
+      .catch(() => {})
+      .finally(() => setIsLoadingMkProfiles(false));
   };
 
-  // 6. Execute Invoice Update in Supabase
+  const editModalPlanOptions = useMemo(() => {
+    return buildLiveMikrotikPlanOptions({
+      mikrotikProfiles: liveMikrotikProfiles,
+      secrets: liveMikrotikSecrets,
+      portalClients,
+      assignedProfileName:
+        editPackageProfile || invoiceToEdit?.package_profile || invoiceToEdit?.package_name || null,
+      profilePriceMap,
+      packages,
+    });
+  }, [
+    liveMikrotikProfiles,
+    liveMikrotikSecrets,
+    portalClients,
+    editPackageProfile,
+    invoiceToEdit,
+    profilePriceMap,
+    packages,
+  ]);
+
+  // 6. Execute Invoice Update in Supabase + Sync Package Profile & Restore MikroTik if PAID
   const handleUpdateInvoice = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!invoiceToEdit) return;
@@ -537,6 +623,7 @@ export const BillingView: React.FC<BillingViewProps> = ({
     setIsSubmitting(true);
     try {
       const selectedAgent = portalAgents.find((a) => a.id === editAssignedAgentId);
+      const selectedProfileClean = (editPackageProfile || '').trim();
       const updatedData: Partial<SupabaseInvoice> = {
         amount: Number(editAmount) || 0,
         due_date: editDueDate,
@@ -545,6 +632,10 @@ export const BillingView: React.FC<BillingViewProps> = ({
         assigned_agent_id: editAssignedAgentId || null,
         assigned_agent_name: selectedAgent ? selectedAgent.full_name : null,
       };
+      if (selectedProfileClean) {
+        updatedData.package_profile = selectedProfileClean;
+        updatedData.package_name = selectedProfileClean;
+      }
 
       if (editStatus === 'PAID') {
         if (!invoiceToEdit.paid_at) {
@@ -553,21 +644,38 @@ export const BillingView: React.FC<BillingViewProps> = ({
         updatedData.paid_amount = Number(editAmount) || Number(invoiceToEdit.amount) || 0;
       }
 
-      const { error } = await supabase
-        .from('invoices')
-        .update(updatedData)
-        .eq('id', invoiceToEdit.id);
+      const { error } = await safeUpdateInvoiceInSupabase(
+        { id: invoiceToEdit.id, invoiceNo: invoiceToEdit.invoice_no },
+        updatedData as Record<string, any>
+      );
 
       if (error) {
         throw new Error(error.message);
       }
 
-      if (editStatus === 'PAID') {
-        await restoreSubscriberOnInvoicePaid(invoiceToEdit.subscriber_username, {
+      let syncNote = '';
+      if (selectedProfileClean) {
+        const syncRes = await syncSubscriberPackageAndRestoreIfPaid({
+          username: invoiceToEdit.subscriber_username,
+          selectedProfile: selectedProfileClean,
+          isPaid: editStatus === 'PAID',
+          invoiceNo: invoiceToEdit.invoice_no,
+          triggeredBy: 'ADMIN',
+          activeRouter: activeRouterRef.current,
+          preloadedSecrets: liveMikrotikSecrets,
+        });
+        if (editStatus === 'PAID') {
+          syncNote = ` MikroTik set to "${syncRes.appliedProfile}" & kicked ${syncRes.kickedSessions} session(s).`;
+        } else {
+          syncNote = ` Package profile "${syncRes.appliedProfile}" synced to subscriber.`;
+        }
+      } else if (editStatus === 'PAID') {
+        const restoreRes = await restoreSubscriberOnInvoicePaid(invoiceToEdit.subscriber_username, {
           triggeredBy: 'ADMIN',
           notes: `Invoice #${invoiceToEdit.invoice_no} updated to PAID`,
           activeRouter: activeRouterRef.current,
         });
+        syncNote = ` Restored to "${restoreRes.restoredProfile}" & kicked ${restoreRes.kickedSessions} session(s).`;
       }
 
       // Update local state immediately
@@ -575,8 +683,8 @@ export const BillingView: React.FC<BillingViewProps> = ({
         prev.map((i) => (i.id === invoiceToEdit.id ? { ...i, ...updatedData } : i))
       );
 
-      setActionNotice(`Invoice ${invoiceToEdit.invoice_no} updated successfully!`);
-      setTimeout(() => setActionNotice(null), 5000);
+      setActionNotice(`Invoice ${invoiceToEdit.invoice_no} updated successfully!${syncNote}`);
+      setTimeout(() => setActionNotice(null), 6000);
       setIsEditModalOpen(false);
       setInvoiceToEdit(null);
       await fetchInvoices();
@@ -1532,7 +1640,14 @@ export const BillingView: React.FC<BillingViewProps> = ({
                       <td className="py-3 px-4 font-mono font-semibold text-cyan-400">{inv.invoice_no}</td>
                       <td className="py-3 px-4">
                         <div className="font-semibold text-white">@{inv.subscriber_username}</div>
-                        <div className="text-xs text-slate-500">Monthly (Day {inv.cycle_day || 'Auto'})</div>
+                        <div className="text-xs text-slate-500">
+                          Monthly (Day {inv.cycle_day || 'Auto'})
+                          {(inv.package_profile || inv.package_name) && (
+                            <span className="ml-1.5 font-mono text-cyan-400">
+                              • {inv.package_profile || inv.package_name}
+                            </span>
+                          )}
+                        </div>
                       </td>
                       <td className="py-3 px-4">
                         {inv.assigned_agent_name ? (
@@ -1983,6 +2098,53 @@ export const BillingView: React.FC<BillingViewProps> = ({
                     value={`@${invoiceToEdit.subscriber_username}`}
                     className="w-full min-w-0 px-3 py-2 bg-slate-950 border border-slate-800 rounded-xl text-base text-slate-400 font-mono cursor-not-allowed"
                   />
+                </div>
+
+                <div className="w-full min-w-0">
+                  <div className="flex items-center justify-between gap-2 mb-1">
+                    <label className="block text-xs font-medium text-slate-300">
+                      Package Plan (Live MikroTik PPPoE Profile)
+                    </label>
+                    {isLoadingMkProfiles && (
+                      <span className="text-[10px] font-mono text-cyan-400 animate-pulse">
+                        Syncing RouterOS...
+                      </span>
+                    )}
+                  </div>
+                  <select
+                    value={editPackageProfile}
+                    onChange={(e) => {
+                      const nextProf = e.target.value;
+                      setEditPackageProfile(nextProf);
+                      const matchedOpt = editModalPlanOptions.find(
+                        (opt) => opt.profileName === nextProf
+                      );
+                      if (matchedOpt && matchedOpt.pricePkr > 0) {
+                        setEditAmount(matchedOpt.pricePkr);
+                      }
+                    }}
+                    className="w-full min-w-0 px-3 py-2 bg-slate-900 border border-slate-700 rounded-xl text-sm text-white font-mono focus:outline-none focus:border-cyan-500"
+                  >
+                    {editModalPlanOptions.length === 0 ? (
+                      <option value="">
+                        {isLoadingMkProfiles
+                          ? 'Loading live MikroTik profiles...'
+                          : 'No live MikroTik profiles found'}
+                      </option>
+                    ) : (
+                      editModalPlanOptions.map((opt) => (
+                        <option key={opt.profileName} value={opt.profileName}>
+                          {opt.profileName} ({formatCurrency(opt.pricePkr, 0)}/mo)
+                          {opt.rateLimit ? ` • ${opt.rateLimit}` : ''}
+                        </option>
+                      ))
+                    )}
+                  </select>
+                  {editDetectedMkProfile && (
+                    <p className="text-[11px] font-mono text-cyan-300/90 mt-1">
+                      MikroTik Secret Profile: <strong>{editDetectedMkProfile}</strong>
+                    </p>
+                  )}
                 </div>
 
                 <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 w-full min-w-0">

@@ -7,6 +7,7 @@ import {
   extractOrigPkgFromComment,
   isExpiryOrBlockedProfile,
   resolveExactSubscriberProfile,
+  upsertOrigPkgComment,
 } from './mikrotikProfileSync';
 
 export const PARENT_FLEET_ROUTER = 'SADDAR FLEET ROUTER';
@@ -748,6 +749,267 @@ export async function restoreSubscriberOnInvoicePaid(
       newExpiryIso: nextAnniversaryYmd,
     };
   }
+}
+
+/**
+ * Fetches live PPPoE profiles (/ppp/profile) & secrets (/ppp/secret) directly from the connected MikroTik RouterOS.
+ */
+export async function fetchLiveMikrotikProfilesAndSecrets(
+  activeRouter?: RouterAuthInfo
+): Promise<{
+  ok: boolean;
+  profiles: Array<{ name: string; rateLimit?: string }>;
+  secrets: Array<Record<string, any>>;
+}> {
+  try {
+    const [profRes, secRes] = await Promise.all([
+      safeMikrotikFetch('/api/mikrotik/ppp/profile', {}, activeRouter).catch(() => null),
+      safeMikrotikFetch('/api/mikrotik/ppp/secret', {}, activeRouter).catch(() => null),
+    ]);
+
+    const rawProfiles = profRes && profRes.ok ? await profRes.json().catch(() => []) : [];
+    const profilesMap = new Map<string, { name: string; rateLimit?: string }>();
+    if (Array.isArray(rawProfiles)) {
+      for (const p of rawProfiles) {
+        const name = String(p?.name || '').trim();
+        if (!name) continue;
+        const low = name.toLowerCase();
+        if (!profilesMap.has(low)) {
+          const rl = String(p?.['rate-limit'] || p?.rateLimit || '').trim();
+          profilesMap.set(low, { name, rateLimit: rl || undefined });
+        }
+      }
+    }
+
+    const rawSecrets = secRes && secRes.ok ? await secRes.json().catch(() => []) : [];
+    const secrets = Array.isArray(rawSecrets) ? rawSecrets : [];
+
+    return {
+      ok: Boolean((profRes && profRes.ok) || (secRes && secRes.ok)),
+      profiles: Array.from(profilesMap.values()),
+      secrets,
+    };
+  } catch {
+    return { ok: false, profiles: [], secrets: [] };
+  }
+}
+
+/**
+ * Updates an invoice row in Supabase, automatically stripping optional `package_profile` / `package_name`
+ * columns if the live PostgreSQL `invoices` table has not run the migration yet.
+ */
+export async function safeUpdateInvoiceInSupabase(
+  matcher: { id?: string; invoiceNo?: string },
+  payload: Record<string, any>
+): Promise<{ error: any }> {
+  const applyMatcher = (q: any) => {
+    if (matcher.id && /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(matcher.id)) {
+      return q.eq('id', matcher.id);
+    }
+    if (matcher.invoiceNo) {
+      return q.eq('invoice_no', matcher.invoiceNo);
+    }
+    if (matcher.id) {
+      return q.eq('id', matcher.id);
+    }
+    return q;
+  };
+
+  const { error } = await applyMatcher(supabase.from('invoices').update(payload as any));
+  if (!error) return { error: null };
+
+  if (isMissingTableOrColumnError(error)) {
+    const stripped = { ...payload };
+    delete stripped.package_profile;
+    delete stripped.package_name;
+    const retry = await applyMatcher(supabase.from('invoices').update(stripped as any));
+    return { error: retry.error };
+  }
+
+  return { error };
+}
+
+/**
+ * Inserts an invoice row into Supabase, automatically stripping optional `package_profile` / `package_name`
+ * columns if the live PostgreSQL `invoices` table lacks them.
+ */
+export async function safeInsertInvoiceInSupabase(
+  payload: Record<string, any>
+): Promise<{ data: any; error: any }> {
+  const { data, error } = await supabase
+    .from('invoices')
+    .insert([payload as any])
+    .select()
+    .maybeSingle();
+
+  if (!error) return { data, error: null };
+
+  if (isMissingTableOrColumnError(error)) {
+    const stripped = { ...payload };
+    delete stripped.package_profile;
+    delete stripped.package_name;
+    const retry = await supabase
+      .from('invoices')
+      .insert([stripped as any])
+      .select()
+      .maybeSingle();
+    return { data: retry.data, error: retry.error };
+  }
+
+  return { data, error };
+}
+
+/**
+ * Saves the selected MikroTik package profile onto the subscriber in Supabase (`original_package_profile`,
+ * `package_name`, `package_profile_name`) and, when the invoice is PAID (changed to Paid or already Paid),
+ * immediately sets the subscriber's MikroTik `/ppp/secret` profile to that exact profile and kicks any active
+ * `16.16.16.0/24` session so their internet runs on that exact package right away.
+ */
+export async function syncSubscriberPackageAndRestoreIfPaid(params: {
+  username: string;
+  selectedProfile: string;
+  isPaid: boolean;
+  invoiceNo?: string;
+  triggeredBy?: 'ADMIN' | 'AGENT_PAYMENT_SYNC' | 'CRON_2PM';
+  activeRouter?: RouterAuthInfo;
+  preloadedSecrets?: Array<Record<string, any>>;
+  preloadedActive?: Array<Record<string, any>>;
+}): Promise<{
+  subscriberUpdated: boolean;
+  mikrotikUpdated: boolean;
+  kickedSessions: number;
+  appliedProfile: string;
+}> {
+  const cleanUser = String(params.username || '').trim().toLowerCase();
+  const cleanProfile = String(params.selectedProfile || '').trim();
+  const nowIso = new Date().toISOString();
+
+  if (!cleanUser || !cleanProfile) {
+    return {
+      subscriberUpdated: false,
+      mikrotikUpdated: false,
+      kickedSessions: 0,
+      appliedProfile: cleanProfile,
+    };
+  }
+
+  let subscriberUpdated = false;
+  let mikrotikUpdated = false;
+  let kickedSessions = 0;
+  let subscriberId: string | null = null;
+
+  try {
+    const { data: userRow } = await supabase
+      .from('portal_users')
+      .select('id, billing_status, account_status')
+      .ilike('username', cleanUser)
+      .limit(1)
+      .maybeSingle();
+
+    if (userRow?.id) {
+      subscriberId = String(userRow.id);
+      const isNonExpiry = !isExpiryOrBlockedProfile(cleanProfile);
+
+      if (params.isPaid) {
+        await safeUpdatePortalUserFields(
+          subscriberId,
+          {
+            original_package_profile: isNonExpiry ? cleanProfile : undefined,
+            package_name: cleanProfile,
+            package_profile_name: cleanProfile,
+            is_suspended: false,
+            billing_status: 'ACTIVE',
+            account_status: 'ACTIVE',
+            grace_until: null,
+            grace_ends_at: null,
+            last_restored_at: nowIso,
+          },
+          {
+            original_package_profile: isNonExpiry ? cleanProfile : undefined,
+            package_profile_name: cleanProfile,
+            billing_status: 'ACTIVE',
+            account_status: 'ACTIVE',
+            grace_ends_at: null,
+            last_restored_at: nowIso,
+          },
+          {
+            package_profile_name: cleanProfile,
+            account_status: 'ACTIVE',
+          }
+        );
+      } else if (isNonExpiry) {
+        await safeUpdatePortalUserFields(
+          subscriberId,
+          {
+            original_package_profile: cleanProfile,
+            package_name: cleanProfile,
+            package_profile_name: cleanProfile,
+          },
+          {
+            original_package_profile: cleanProfile,
+            package_profile_name: cleanProfile,
+          },
+          {
+            package_profile_name: cleanProfile,
+          }
+        );
+      }
+      subscriberUpdated = true;
+    }
+
+    const liveSecret =
+      params.preloadedSecrets?.find(
+        (s) => String(s?.name || '').trim().toLowerCase() === cleanUser
+      ) || null;
+
+    if (params.isPaid) {
+      const updatedComment = !isExpiryOrBlockedProfile(cleanProfile)
+        ? upsertOrigPkgComment(liveSecret?.comment, cleanProfile)
+        : undefined;
+
+      const mkRes = await syncMikrotikSecretProfile(
+        cleanUser,
+        cleanProfile,
+        {
+          disabled: 'false',
+          comment: updatedComment,
+          preloadedSecret: liveSecret,
+        },
+        params.activeRouter
+      );
+      mikrotikUpdated = mkRes.ok;
+
+      kickedSessions = await kickMikrotikActiveSessionForUser(
+        cleanUser,
+        params.activeRouter,
+        params.preloadedActive
+      );
+
+      try {
+        await supabase.from('expiry_audit_logs').insert([
+          {
+            subscriber_id: subscriberId,
+            username: cleanUser,
+            action_type: 'RESTORED_ON_PAYMENT',
+            previous_profile: mkRes.previousProfile || null,
+            applied_profile: cleanProfile,
+            triggered_by: params.triggeredBy || 'ADMIN',
+            notes: `Invoice ${params.invoiceNo ? `#${params.invoiceNo} ` : ''}saved as PAID -> MikroTik set to "${cleanProfile}" (kicked ${kickedSessions} session(s)).`,
+            created_at: nowIso,
+          },
+        ]);
+      } catch {}
+    }
+  } catch (err) {
+    console.warn('syncSubscriberPackageAndRestoreIfPaid notice:', err);
+  }
+
+  return {
+    subscriberUpdated,
+    mikrotikUpdated,
+    kickedSessions,
+    appliedProfile: cleanProfile,
+  };
 }
 
 export interface BulkActivateSubscriberInput {

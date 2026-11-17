@@ -1,8 +1,18 @@
-import React, { useState, useEffect } from 'react';
-import { X, Edit3, DollarSign, Calendar, CheckCircle2, ShieldAlert } from 'lucide-react';
+import React, { useState, useEffect, useMemo } from 'react';
+import { X, Edit3, RefreshCw, Wifi, CheckCircle2 } from 'lucide-react';
 import { Invoice, InvoiceStatus } from '../types/isp';
 import { useISP } from '../context/ISPContext';
 import { useCurrency } from '../context/CurrencyContext';
+import { supabase } from '../services/supabaseClient';
+import {
+  fetchLiveMikrotikProfilesAndSecrets,
+  safeUpdateInvoiceInSupabase,
+  syncSubscriberPackageAndRestoreIfPaid,
+} from '../lib/billingAndNetwork';
+import {
+  buildLiveMikrotikPlanOptions,
+  resolvePreselectedInvoiceProfile,
+} from '../lib/mikrotikProfileSync';
 
 interface EditInvoiceModalProps {
   invoice: Invoice | null;
@@ -15,8 +25,13 @@ export const EditInvoiceModal: React.FC<EditInvoiceModalProps> = ({
   isOpen,
   onClose,
 }) => {
-  const { updateInvoice, packages } = useISP();
+  const { updateInvoice, packages, profilePriceMap, routers, selectedRouterId, customers } = useISP();
   const { formatCurrency, currencySymbol } = useCurrency();
+
+  const activeRouter = useMemo(
+    () => routers.find((r) => r.id === selectedRouterId) || routers[0],
+    [routers, selectedRouterId]
+  );
 
   const [invoiceNumber, setInvoiceNumber] = useState('');
   const [customerName, setCustomerName] = useState('');
@@ -31,31 +46,127 @@ export const EditInvoiceModal: React.FC<EditInvoiceModalProps> = ({
   const [dueDate, setDueDate] = useState('');
   const [receiptNumber, setReceiptNumber] = useState('');
 
+  // Live MikroTik RouterOS state
+  const [liveMikrotikProfiles, setLiveMikrotikProfiles] = useState<
+    Array<{ name: string; rateLimit?: string }>
+  >([]);
+  const [liveMikrotikSecrets, setLiveMikrotikSecrets] = useState<Array<Record<string, any>>>([]);
+  const [portalClients, setPortalClients] = useState<Array<Record<string, any>>>([]);
+  const [isLoadingProfiles, setIsLoadingProfiles] = useState(false);
+  const [detectedMkProfile, setDetectedMkProfile] = useState<string | null>(null);
+  const [resolvedUsername, setResolvedUsername] = useState('');
+  const [isSaving, setIsSaving] = useState(false);
+
   useEffect(() => {
-    if (invoice) {
-      setInvoiceNumber(invoice.invoiceNumber);
-      setCustomerName(invoice.customerName);
-      setCustomerPhone(invoice.customerPhone);
-      setPackageName(invoice.packageName);
-      setBillingMonth(invoice.billingMonth);
-      setBaseAmount(invoice.baseAmount);
-      setTaxAmount(invoice.taxAmount);
-      setDiscountAmount(invoice.discountAmount || 0);
-      setTotalAmount(invoice.totalAmount);
-      setStatus(invoice.status);
-      setDueDate(invoice.dueDate);
-      setReceiptNumber(invoice.receiptNumber || '');
-    }
-  }, [invoice]);
+    if (!isOpen || !invoice) return;
+
+    setInvoiceNumber(invoice.invoiceNumber);
+    setCustomerName(invoice.customerName);
+    setCustomerPhone(invoice.customerPhone);
+    setPackageName(invoice.packageName || '');
+    setBillingMonth(invoice.billingMonth);
+    setBaseAmount(invoice.baseAmount);
+    setTaxAmount(invoice.taxAmount);
+    setDiscountAmount(invoice.discountAmount || 0);
+    setTotalAmount(invoice.totalAmount);
+    setStatus(invoice.status);
+    setDueDate(invoice.dueDate);
+    setReceiptNumber(invoice.receiptNumber || '');
+
+    const custMatch = customers.find(
+      (c) =>
+        c.id === invoice.customerId ||
+        (c.pppoeUsername &&
+          c.pppoeUsername.toLowerCase() === (invoice.customerName || '').trim().toLowerCase()) ||
+        (c.name && c.name.toLowerCase() === (invoice.customerName || '').trim().toLowerCase())
+    );
+    const initialUsername = custMatch?.pppoeUsername || invoice.customerName || '';
+    setResolvedUsername(initialUsername);
+
+    let cancelled = false;
+    setIsLoadingProfiles(true);
+
+    Promise.all([
+      fetchLiveMikrotikProfilesAndSecrets(activeRouter),
+      supabase
+        .from('portal_users')
+        .select(
+          'id, username, full_name, phone, original_package_profile, package_name, package_profile_name, package_speed, monthly_fee'
+        )
+        .eq('role', 'CLIENT'),
+    ])
+      .then(([mk, usersRes]) => {
+        if (cancelled) return;
+        const clients = Array.isArray(usersRes?.data) ? (usersRes.data as Array<Record<string, any>>) : [];
+        setPortalClients(clients);
+        if (mk.profiles.length > 0) setLiveMikrotikProfiles(mk.profiles);
+        if (mk.secrets.length > 0) setLiveMikrotikSecrets(mk.secrets);
+
+        const cleanName = (invoice.customerName || '').trim().toLowerCase();
+        const clientMatch =
+          clients.find(
+            (c) =>
+              String(c.username || '').trim().toLowerCase() === initialUsername.trim().toLowerCase() ||
+              c.id === invoice.customerId ||
+              String(c.full_name || '').trim().toLowerCase() === cleanName ||
+              (invoice.customerPhone && c.phone === invoice.customerPhone)
+          ) || null;
+
+        const effectiveUser = String(clientMatch?.username || initialUsername).trim();
+        setResolvedUsername(effectiveUser);
+
+        const preselected = resolvePreselectedInvoiceProfile({
+          username: effectiveUser,
+          invoicePackage: invoice.packageName,
+          secrets: mk.secrets,
+          subscriber: clientMatch,
+          mikrotikProfiles: mk.profiles,
+        });
+
+        if (preselected.selectedProfile) {
+          setPackageName(preselected.selectedProfile);
+        }
+        setDetectedMkProfile(
+          preselected.origPkgFromComment || preselected.liveSecretProfile || null
+        );
+      })
+      .catch(() => {})
+      .finally(() => {
+        if (!cancelled) setIsLoadingProfiles(false);
+      });
+
+    return () => {
+      cancelled = true;
+    };
+  }, [isOpen, invoice, activeRouter, customers]);
+
+  const planOptions = useMemo(() => {
+    return buildLiveMikrotikPlanOptions({
+      mikrotikProfiles: liveMikrotikProfiles,
+      secrets: liveMikrotikSecrets,
+      portalClients,
+      assignedProfileName: packageName || invoice?.packageName || null,
+      profilePriceMap,
+      packages,
+    });
+  }, [
+    liveMikrotikProfiles,
+    liveMikrotikSecrets,
+    portalClients,
+    packageName,
+    invoice?.packageName,
+    profilePriceMap,
+    packages,
+  ]);
 
   if (!isOpen || !invoice) return null;
 
   // Auto calculate total when base, tax, discount changes
-  const handleBaseChange = (val: number) => {
+  const handleBaseChange = (val: number, recalculateTax = false) => {
     setBaseAmount(val);
-    const tax = Math.round(val * 0.16);
-    setTaxAmount(tax);
-    setTotalAmount(Math.max(0, val + tax - discountAmount));
+    const nextTax = recalculateTax ? Math.round(val * 0.16) : taxAmount;
+    if (recalculateTax) setTaxAmount(nextTax);
+    setTotalAmount(Math.max(0, val + nextTax - discountAmount));
   };
 
   const handleTaxChange = (val: number) => {
@@ -68,24 +179,64 @@ export const EditInvoiceModal: React.FC<EditInvoiceModalProps> = ({
     setTotalAmount(Math.max(0, baseAmount + taxAmount - val));
   };
 
-  const handleSave = (e: React.FormEvent) => {
+  const handleSave = async (e: React.FormEvent) => {
     e.preventDefault();
-    updateInvoice(invoice.id, {
-      invoiceNumber,
-      customerName,
-      customerPhone,
-      packageName,
-      billingMonth,
-      baseAmount,
-      taxAmount,
-      discountAmount,
-      totalAmount,
-      status,
-      dueDate,
-      receiptNumber: receiptNumber || undefined,
-      paidAt: status === 'paid' && !invoice.paidAt ? new Date().toISOString() : invoice.paidAt,
-    });
-    onClose();
+    setIsSaving(true);
+    try {
+      const cleanProfile = (packageName || '').trim();
+      const paidTimestamp =
+        status === 'paid' && !invoice.paidAt ? new Date().toISOString() : invoice.paidAt;
+
+      updateInvoice(invoice.id, {
+        invoiceNumber,
+        customerName,
+        customerPhone,
+        packageId: cleanProfile || invoice.packageId,
+        packageName: cleanProfile || invoice.packageName,
+        billingMonth,
+        baseAmount,
+        taxAmount,
+        discountAmount,
+        totalAmount,
+        status,
+        dueDate,
+        receiptNumber: receiptNumber || undefined,
+        paidAt: paidTimestamp,
+      });
+
+      await safeUpdateInvoiceInSupabase(
+        { id: invoice.id, invoiceNo: invoiceNumber || invoice.invoiceNumber },
+        {
+          amount: totalAmount,
+          due_date: dueDate,
+          status: status === 'paid' ? 'PAID' : status === 'overdue' ? 'OVERDUE' : 'DUE',
+          ...(cleanProfile ? { package_profile: cleanProfile, package_name: cleanProfile } : {}),
+          ...(status === 'paid'
+            ? {
+                paid_at: paidTimestamp || new Date().toISOString(),
+                paid_amount: totalAmount,
+              }
+            : {}),
+        }
+      ).catch(() => {});
+
+      const targetUser = (resolvedUsername || customerName || '').trim();
+      if (cleanProfile && targetUser) {
+        await syncSubscriberPackageAndRestoreIfPaid({
+          username: targetUser,
+          selectedProfile: cleanProfile,
+          isPaid: status === 'paid',
+          invoiceNo: invoiceNumber || invoice.invoiceNumber,
+          triggeredBy: 'ADMIN',
+          activeRouter,
+          preloadedSecrets: liveMikrotikSecrets,
+        });
+      }
+
+      onClose();
+    } finally {
+      setIsSaving(false);
+    }
   };
 
   return (
@@ -102,7 +253,11 @@ export const EditInvoiceModal: React.FC<EditInvoiceModalProps> = ({
               <p className="text-xs text-slate-400 font-mono">Invoice Ref: {invoice.invoiceNumber}</p>
             </div>
           </div>
-          <button onClick={onClose} className="text-slate-400 hover:text-white p-1 rounded-lg">
+          <button
+            type="button"
+            onClick={onClose}
+            className="text-slate-400 hover:text-white p-1 rounded-lg cursor-pointer"
+          >
             <X className="w-4 h-4" />
           </button>
         </div>
@@ -159,24 +314,48 @@ export const EditInvoiceModal: React.FC<EditInvoiceModalProps> = ({
 
           <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
             <div>
-              <label className="block text-slate-400 mb-1">Package Plan</label>
+              <div className="flex items-center justify-between mb-1">
+                <label className="text-slate-400 flex items-center gap-1">
+                  <Wifi className="w-3 h-3 text-cyan-400" />
+                  <span>Package Plan</span>
+                </label>
+                <span className="text-[10px] font-mono text-cyan-400">
+                  {isLoadingProfiles ? 'Syncing MikroTik...' : `${planOptions.length} RouterOS`}
+                </span>
+              </div>
               <select
                 value={packageName}
                 onChange={(e) => {
-                  setPackageName(e.target.value);
-                  const pkg = packages.find((p) => p.name === e.target.value);
-                  if (pkg) {
-                    handleBaseChange(pkg.priceMonthly);
+                  const nextProf = e.target.value;
+                  setPackageName(nextProf);
+                  const opt = planOptions.find((o) => o.profileName === nextProf);
+                  if (opt && opt.pricePkr > 0) {
+                    handleBaseChange(opt.pricePkr, taxAmount > 0);
                   }
                 }}
-                className="w-full bg-slate-950 border border-slate-700 text-slate-100 p-2 rounded focus:outline-none focus:border-cyan-500"
+                className="w-full bg-slate-950 border border-slate-700 text-cyan-200 font-mono p-2 rounded focus:outline-none focus:border-cyan-500"
               >
-                {packages.map((p) => (
-                  <option key={p.id} value={p.name}>
-                    {p.name} (${p.priceMonthly}/mo)
+                {planOptions.length === 0 ? (
+                  <option value={packageName || ''}>
+                    {isLoadingProfiles
+                      ? 'Loading live MikroTik profiles...'
+                      : packageName || 'No MikroTik profiles detected'}
                   </option>
-                ))}
+                ) : (
+                  planOptions.map((opt) => (
+                    <option key={opt.profileName} value={opt.profileName}>
+                      {opt.profileName} ({formatCurrency(opt.pricePkr, 0)}/mo)
+                      {opt.rateLimit ? ` • ${opt.rateLimit}` : ''}
+                    </option>
+                  ))
+                )}
               </select>
+              {detectedMkProfile && (
+                <p className="text-[10px] text-emerald-400 font-mono mt-1 flex items-center gap-1">
+                  <CheckCircle2 className="w-3 h-3 shrink-0" />
+                  MikroTik Secret: {detectedMkProfile}
+                </p>
+              )}
             </div>
 
             <div>
@@ -191,6 +370,11 @@ export const EditInvoiceModal: React.FC<EditInvoiceModalProps> = ({
                 <option value="overdue">Overdue</option>
                 <option value="cancelled">Cancelled</option>
               </select>
+              {status === 'paid' && packageName && (
+                <p className="text-[10px] text-emerald-400 font-mono mt-1">
+                  On Save: sets MikroTik secret to "{packageName}" &amp; kicks 16.x session
+                </p>
+              )}
             </div>
           </div>
 
@@ -204,13 +388,13 @@ export const EditInvoiceModal: React.FC<EditInvoiceModalProps> = ({
                   type="number"
                   step="0.01"
                   value={baseAmount}
-                  onChange={(e) => handleBaseChange(parseFloat(e.target.value) || 0)}
+                  onChange={(e) => handleBaseChange(parseFloat(e.target.value) || 0, taxAmount > 0)}
                   className="w-full bg-slate-900 border border-slate-700 text-slate-100 p-1.5 rounded font-mono text-xs focus:outline-none focus:border-cyan-500"
                 />
               </div>
 
               <div>
-                <label className="block text-slate-400 text-[10px] mb-1 font-mono">Tax 16% ({currencySymbol})</label>
+                <label className="block text-slate-400 text-[10px] mb-1 font-mono">Tax ({currencySymbol})</label>
                 <input
                   type="number"
                   step="0.01"
@@ -268,15 +452,18 @@ export const EditInvoiceModal: React.FC<EditInvoiceModalProps> = ({
             <button
               type="button"
               onClick={onClose}
-              className="px-3.5 py-1.5 rounded-lg bg-slate-800 text-slate-300 hover:bg-slate-700"
+              disabled={isSaving}
+              className="px-3.5 py-1.5 rounded-lg bg-slate-800 text-slate-300 hover:bg-slate-700 cursor-pointer disabled:opacity-50"
             >
               Cancel
             </button>
             <button
               type="submit"
-              className="px-5 py-2 rounded-lg bg-indigo-600 hover:bg-indigo-500 text-white font-bold transition shadow-sm"
+              disabled={isSaving}
+              className="px-5 py-2 rounded-lg bg-indigo-600 hover:bg-indigo-500 text-white font-bold transition shadow-sm flex items-center gap-1.5 cursor-pointer disabled:opacity-50"
             >
-              Save Invoice Changes
+              {isSaving && <RefreshCw className="w-3.5 h-3.5 animate-spin" />}
+              <span>{isSaving ? 'Syncing & Saving...' : 'Save Invoice Changes'}</span>
             </button>
           </div>
         </form>

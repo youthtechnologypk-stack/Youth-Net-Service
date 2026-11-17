@@ -24,7 +24,17 @@ import { useCurrency } from '../context/CurrencyContext';
 import { Invoice, InvoiceStatus, InvoiceLineItem, InvoiceItemCategory } from '../types/isp';
 import { useSubscribers, UnifiedSubscriber, appendStoredBillingLedger } from '../hooks/useSubscribers';
 import { supabase, SupabasePortalUser } from '../services/supabaseClient';
-import { addCalendarMonthDateString } from '../lib/billingAndNetwork';
+import {
+  addCalendarMonthDateString,
+  fetchLiveMikrotikProfilesAndSecrets,
+  safeInsertInvoiceInSupabase,
+  syncSubscriberPackageAndRestoreIfPaid,
+} from '../lib/billingAndNetwork';
+import {
+  buildLiveMikrotikPlanOptions,
+  resolvePreselectedInvoiceProfile,
+  resolvePkrTariffForProfile,
+} from '../lib/mikrotikProfileSync';
 
 export interface GenerateInvoiceModalProps {
   isOpen: boolean;
@@ -39,9 +49,20 @@ export const GenerateInvoiceModal: React.FC<GenerateInvoiceModalProps> = ({
   defaultSubscriberUsername,
   onSuccess,
 }) => {
-  const { setInvoices, packages, bandwidthProfiles, provisionedSecrets, activeSessions } = useISP();
+  const {
+    setInvoices,
+    packages,
+    profilePriceMap,
+    routers,
+    selectedRouterId,
+  } = useISP();
   const { formatCurrency, currencySymbol } = useCurrency();
   const { unifiedSubscribers } = useSubscribers();
+
+  const activeRouter = useMemo(
+    () => routers.find((r) => r.id === selectedRouterId) || routers[0],
+    [routers, selectedRouterId]
+  );
 
   // Search & subscriber picker state
   const [subscriberSearch, setSubscriberSearch] = useState('');
@@ -53,19 +74,25 @@ export const GenerateInvoiceModal: React.FC<GenerateInvoiceModalProps> = ({
   const [invoiceNumber, setInvoiceNumber] = useState('');
   const [billingMonth, setBillingMonth] = useState('');
   const [dueDate, setDueDate] = useState('');
-  const [baseAmount, setBaseAmount] = useState<number>(2500);
+  const [baseAmount, setBaseAmount] = useState<number>(2000);
   const [taxAmount, setTaxAmount] = useState<number>(0);
-  const [taxPercent, setTaxPercent] = useState<number>(0);
   const [applyGst, setApplyGst] = useState(false);
   const [status, setStatus] = useState<InvoiceStatus>('unpaid');
   const [paymentMethod, setPaymentMethod] = useState<string>('agent_cash');
   const [customerName, setCustomerName] = useState('');
   const [customerPhone, setCustomerPhone] = useState('');
-  const [packageName, setPackageName] = useState('Standard-Broadband');
+  const [packageName, setPackageName] = useState('');
   const [sendWhatsApp, setSendWhatsApp] = useState(true);
-  const [notes, setNotes] = useState('');
   const [assignedAgentId, setAssignedAgentId] = useState<string>('');
   const [portalAgents, setPortalAgents] = useState<SupabasePortalUser[]>([]);
+
+  // Live MikroTik profiles, secrets & subscriber records
+  const [liveMikrotikProfiles, setLiveMikrotikProfiles] = useState<
+    Array<{ name: string; rateLimit?: string }>
+  >([]);
+  const [liveMikrotikSecrets, setLiveMikrotikSecrets] = useState<Array<Record<string, any>>>([]);
+  const [portalClients, setPortalClients] = useState<Array<Record<string, any>>>([]);
+  const [isLoadingMkProfiles, setIsLoadingMkProfiles] = useState(false);
 
   // Fetch live agents directly from Supabase portal_users (single source of truth)
   useEffect(() => {
@@ -119,32 +146,89 @@ export const GenerateInvoiceModal: React.FC<GenerateInvoiceModalProps> = ({
     return new Date().toLocaleString('default', { month: 'long', year: 'numeric' });
   };
 
-  // Reset or initialize on open
+  // Reset or initialize on open + fetch live MikroTik profiles & secrets
   useEffect(() => {
-    if (isOpen) {
-      setInvoiceNumber(generateNewInvoiceNumber());
-      setBillingMonth(getCurrentMonthName());
-      setDueDate(getSevenDaysLater());
-      setStatus('unpaid');
-      setToastMessage(null);
+    if (!isOpen) return;
 
-      // Check if defaultSubscriberUsername matches
-      if (defaultSubscriberUsername && unifiedSubscribers.length > 0) {
-        const found = (unifiedSubscribers || []).find(
+    setInvoiceNumber(generateNewInvoiceNumber());
+    setBillingMonth(getCurrentMonthName());
+    setDueDate(getSevenDaysLater());
+    setStatus('unpaid');
+    setToastMessage(null);
+
+    let initialSub: UnifiedSubscriber | null = null;
+    if (defaultSubscriberUsername && unifiedSubscribers.length > 0) {
+      initialSub =
+        (unifiedSubscribers || []).find(
           (s) => (s?.username || '').toLowerCase() === (defaultSubscriberUsername || '').toLowerCase()
-        );
-        if (found) {
-          selectSubscriber(found);
-          return;
-        }
-      }
-
-      // Default to first subscriber if available and none selected yet
-      if (!selectedSub && unifiedSubscribers.length > 0) {
-        selectSubscriber(unifiedSubscribers[0]);
-      }
+        ) || null;
+    } else if (!selectedSub && unifiedSubscribers.length > 0) {
+      initialSub = unifiedSubscribers[0];
+    } else {
+      initialSub = selectedSub;
     }
-  }, [isOpen, defaultSubscriberUsername, unifiedSubscribers.length]);
+
+    if (initialSub) {
+      selectSubscriber(initialSub);
+    }
+
+    let cancelled = false;
+    setIsLoadingMkProfiles(true);
+    Promise.all([
+      fetchLiveMikrotikProfilesAndSecrets(activeRouter),
+      supabase
+        .from('portal_users')
+        .select(
+          'id, username, full_name, phone, original_package_profile, package_name, package_profile_name, package_speed, monthly_fee'
+        )
+        .eq('role', 'CLIENT'),
+    ])
+      .then(([mk, usersRes]) => {
+        if (cancelled) return;
+        const clients = Array.isArray(usersRes?.data)
+          ? (usersRes.data as Array<Record<string, any>>)
+          : [];
+        setPortalClients(clients);
+        if (mk.profiles.length > 0) setLiveMikrotikProfiles(mk.profiles);
+        if (mk.secrets.length > 0) setLiveMikrotikSecrets(mk.secrets);
+
+        const targetUser = initialSub?.username || defaultSubscriberUsername || '';
+        const clientMatch = targetUser
+          ? clients.find(
+              (c) => String(c.username || '').trim().toLowerCase() === targetUser.trim().toLowerCase()
+            ) || null
+          : null;
+
+        const preselected = resolvePreselectedInvoiceProfile({
+          username: targetUser,
+          invoicePackage: initialSub?.profile,
+          secrets: mk.secrets,
+          subscriber: clientMatch,
+          mikrotikProfiles: mk.profiles,
+        });
+
+        if (preselected.selectedProfile) {
+          setPackageName(preselected.selectedProfile);
+          if (!(clientMatch?.monthly_fee && Number(clientMatch.monthly_fee) > 0)) {
+            const tariff = resolvePkrTariffForProfile(preselected.selectedProfile, {
+              profilePriceMap,
+              packages,
+              portalClients: clients,
+            });
+            setBaseAmount(tariff.pricePkr);
+            setTaxAmount(applyGst ? Math.round(tariff.pricePkr * 0.16) : 0);
+          }
+        }
+      })
+      .catch(() => {})
+      .finally(() => {
+        if (!cancelled) setIsLoadingMkProfiles(false);
+      });
+
+    return () => {
+      cancelled = true;
+    };
+  }, [isOpen, defaultSubscriberUsername, unifiedSubscribers.length, activeRouter]);
 
   // Close dropdown on outside click
   useEffect(() => {
@@ -156,6 +240,26 @@ export const GenerateInvoiceModal: React.FC<GenerateInvoiceModalProps> = ({
     document.addEventListener('mousedown', handleClickOutside);
     return () => document.removeEventListener('mousedown', handleClickOutside);
   }, []);
+
+  // Live MikroTik plan options
+  const planOptions = useMemo(() => {
+    return buildLiveMikrotikPlanOptions({
+      mikrotikProfiles: liveMikrotikProfiles,
+      secrets: liveMikrotikSecrets,
+      portalClients,
+      assignedProfileName: packageName || selectedSub?.profile || null,
+      profilePriceMap,
+      packages,
+    });
+  }, [
+    liveMikrotikProfiles,
+    liveMikrotikSecrets,
+    portalClients,
+    packageName,
+    selectedSub?.profile,
+    profilePriceMap,
+    packages,
+  ]);
 
   // Filtered subscribers list
   const filteredSubscribers = useMemo(() => {
@@ -185,31 +289,31 @@ export const GenerateInvoiceModal: React.FC<GenerateInvoiceModalProps> = ({
     setCustomerName(displayName);
     setCustomerPhone(sub.phone && sub.phone !== '+92 ' ? sub.phone : '+92 300 0000000');
 
-    // Auto-fill profile
-    const planProfile = sub.profile || 'Standard-Broadband';
-    setPackageName(planProfile);
+    // Auto-preselect subscriber's exact MikroTik secret profile
+    const clientMatch =
+      portalClients.find(
+        (c) => String(c.username || '').trim().toLowerCase() === (sub.username || '').trim().toLowerCase()
+      ) || null;
+    const preselected = resolvePreselectedInvoiceProfile({
+      username: sub.username,
+      invoicePackage: sub.profile,
+      secrets: liveMikrotikSecrets,
+      subscriber: clientMatch,
+      mikrotikProfiles: liveMikrotikProfiles,
+    });
+    const resolvedProfile = preselected.selectedProfile || '';
+    setPackageName(resolvedProfile);
 
-    // Auto-fill recommended price from package, profile, or subscriber
-    let recommendedPrice = sub.priceMonthly;
-    if (!recommendedPrice || recommendedPrice <= 0) {
-      // Try to find matching package
-      const matchedPkg = (packages || []).find(
-        (p) =>
-          (p?.name || '').toLowerCase() === (planProfile || '').toLowerCase() ||
-          (planProfile || '').toLowerCase().includes((p?.name || '').toLowerCase())
-      );
-      if (matchedPkg) {
-        recommendedPrice = matchedPkg.priceMonthly;
-      } else {
-        // Extract number from profile (e.g. "10M" -> 1500, "20M" -> 2500)
-        const speedMatch = planProfile.match(/(\d+)\s*M/i);
-        if (speedMatch) {
-          const speed = parseInt(speedMatch[1], 10);
-          recommendedPrice = speed >= 50 ? 4500 : speed >= 30 ? 3500 : speed >= 20 ? 2500 : 1800;
-        } else {
-          recommendedPrice = 2500;
-        }
-      }
+    // Auto-fill PKR monthly tariff
+    const clientFee = Number(clientMatch?.monthly_fee);
+    let recommendedPrice = clientFee > 0 ? clientFee : Number(sub.priceMonthly) || 0;
+    if (!recommendedPrice || recommendedPrice <= 0 || recommendedPrice < 100) {
+      const tariff = resolvePkrTariffForProfile(resolvedProfile || sub.profile, {
+        profilePriceMap,
+        packages,
+        portalClients,
+      });
+      recommendedPrice = tariff.pricePkr;
     }
 
     setBaseAmount(recommendedPrice);
@@ -310,27 +414,37 @@ export const GenerateInvoiceModal: React.FC<GenerateInvoiceModalProps> = ({
     // 2. Update React context state so Invoices table immediately renders it at the top
     setInvoices((prev) => [newInvoice, ...prev.filter((i) => i.id !== newInvoice.id)]);
 
-    // 3. Persist directly to Supabase PostgreSQL invoices table
+    // 3. Persist directly to Supabase PostgreSQL invoices table + sync MikroTik package
     const selectedAgent = portalAgents.find((a) => a.id === assignedAgentId);
+    const cleanProfile = (packageName || '').trim();
     (async () => {
       try {
-        const { error: sbErr } = await supabase
-          .from('invoices')
-          .insert([
-            {
-              invoice_no: finalInvoiceNumber,
-              subscriber_username: subUsername,
-              assigned_agent_id: assignedAgentId || null,
-              assigned_agent_name: selectedAgent ? selectedAgent.full_name : null,
-              amount: Number(totalAmount) || 0,
-              due_date: dueDate,
-              status: status === 'paid' ? 'PAID' : 'DUE',
-              cycle_day: dueDate ? Number(dueDate.split('-')[2]) || new Date().getDate() : new Date().getDate(),
-              paid_at: status === 'paid' ? new Date().toISOString() : null,
-              created_at: new Date().toISOString(),
-            },
-          ]);
+        const { error: sbErr } = await safeInsertInvoiceInSupabase({
+          invoice_no: finalInvoiceNumber,
+          subscriber_username: subUsername,
+          assigned_agent_id: assignedAgentId || null,
+          assigned_agent_name: selectedAgent ? selectedAgent.full_name : null,
+          amount: Number(totalAmount) || 0,
+          due_date: dueDate,
+          status: status === 'paid' ? 'PAID' : 'DUE',
+          cycle_day: dueDate ? Number(dueDate.split('-')[2]) || new Date().getDate() : new Date().getDate(),
+          paid_at: status === 'paid' ? new Date().toISOString() : null,
+          created_at: new Date().toISOString(),
+          ...(cleanProfile ? { package_profile: cleanProfile, package_name: cleanProfile } : {}),
+        });
         if (sbErr) console.warn('Supabase invoice insert notice:', sbErr);
+
+        if (cleanProfile) {
+          await syncSubscriberPackageAndRestoreIfPaid({
+            username: subUsername,
+            selectedProfile: cleanProfile,
+            isPaid: status === 'paid',
+            invoiceNo: finalInvoiceNumber,
+            triggeredBy: 'ADMIN',
+            activeRouter,
+            preloadedSecrets: liveMikrotikSecrets,
+          });
+        }
       } catch (err: any) {
         console.warn('Supabase invoice network notice:', err);
       }
@@ -613,8 +727,48 @@ export const GenerateInvoiceModal: React.FC<GenerateInvoiceModalProps> = ({
             </div>
           </div>
 
-          {/* STEP 4: STATUS & PAYMENT DETAILS */}
+          {/* STEP 4: LIVE MIKROTIK PACKAGE PLAN & PAYMENT STATUS */}
           <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+            <div>
+              <div className="flex items-center justify-between mb-1">
+                <label className="text-slate-300 font-medium font-mono flex items-center gap-1">
+                  <Wifi className="w-3 h-3 text-cyan-400" />
+                  <span>Package Plan (MikroTik Profile) *</span>
+                </label>
+                <span className="text-[10px] font-mono text-cyan-400">
+                  {isLoadingMkProfiles ? 'Syncing...' : `${planOptions.length} live`}
+                </span>
+              </div>
+              <select
+                value={packageName}
+                onChange={(e) => {
+                  const nextProf = e.target.value;
+                  setPackageName(nextProf);
+                  const opt = planOptions.find((o) => o.profileName === nextProf);
+                  if (opt && opt.pricePkr > 0) {
+                    setBaseAmount(opt.pricePkr);
+                    setTaxAmount(applyGst ? Math.round(opt.pricePkr * 0.16) : 0);
+                  }
+                }}
+                className="w-full bg-slate-950 border border-slate-700 text-cyan-200 font-mono p-2 rounded-lg text-xs focus:outline-none focus:border-cyan-500 cursor-pointer"
+              >
+                {planOptions.length === 0 ? (
+                  <option value={packageName || ''}>
+                    {isLoadingMkProfiles
+                      ? 'Loading live MikroTik profiles...'
+                      : packageName || 'No MikroTik profiles detected'}
+                  </option>
+                ) : (
+                  planOptions.map((opt) => (
+                    <option key={opt.profileName} value={opt.profileName}>
+                      {opt.profileName} ({formatCurrency(opt.pricePkr, 0)}/mo)
+                      {opt.rateLimit ? ` • ${opt.rateLimit}` : ''}
+                    </option>
+                  ))
+                )}
+              </select>
+            </div>
+
             <div>
               <label className="block text-slate-300 font-medium mb-1 font-mono">Initial Fee Status *</label>
               <select
@@ -626,34 +780,24 @@ export const GenerateInvoiceModal: React.FC<GenerateInvoiceModalProps> = ({
                 <option value="paid">Paid / Cleared (Instant Receipt)</option>
               </select>
             </div>
-
-            {status === 'paid' ? (
-              <div>
-                <label className="block text-slate-300 font-medium mb-1 font-mono">Payment Channel *</label>
-                <select
-                  value={paymentMethod}
-                  onChange={(e) => setPaymentMethod(e.target.value)}
-                  className="w-full bg-slate-950 border border-slate-700 text-emerald-400 font-mono p-2 rounded-lg text-xs font-bold focus:outline-none focus:border-cyan-500 cursor-pointer"
-                >
-                  <option value="agent_cash">Area Agent Cash Collection</option>
-                  <option value="easypaisa">EasyPaisa Digital Transfer</option>
-                  <option value="jazzcash">JazzCash Mobile Wallet</option>
-                  <option value="bank_transfer">Bank Wire / IBFT Online</option>
-                  <option value="online_gateway">Online Broadband Portal Gateway</option>
-                </select>
-              </div>
-            ) : (
-              <div>
-                <label className="block text-slate-300 font-medium mb-1 font-mono">Package Profile Link</label>
-                <input
-                  type="text"
-                  value={packageName}
-                  onChange={(e) => setPackageName(e.target.value)}
-                  className="w-full bg-slate-950 border border-slate-700 text-slate-300 font-mono p-2 rounded-lg text-xs focus:outline-none focus:border-cyan-500"
-                />
-              </div>
-            )}
           </div>
+
+          {status === 'paid' && (
+            <div>
+              <label className="block text-slate-300 font-medium mb-1 font-mono">Payment Channel *</label>
+              <select
+                value={paymentMethod}
+                onChange={(e) => setPaymentMethod(e.target.value)}
+                className="w-full bg-slate-950 border border-slate-700 text-emerald-400 font-mono p-2 rounded-lg text-xs font-bold focus:outline-none focus:border-cyan-500 cursor-pointer"
+              >
+                <option value="agent_cash">Area Agent Cash Collection</option>
+                <option value="easypaisa">EasyPaisa Digital Transfer</option>
+                <option value="jazzcash">JazzCash Mobile Wallet</option>
+                <option value="bank_transfer">Bank Wire / IBFT Online</option>
+                <option value="online_gateway">Online Broadband Portal Gateway</option>
+              </select>
+            </div>
+          )}
 
           {/* Assigned Field Recovery Agent */}
           <div>

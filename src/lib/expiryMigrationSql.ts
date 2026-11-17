@@ -36,6 +36,10 @@ ALTER TABLE public.portal_users
     ADD COLUMN IF NOT EXISTS suspended_at TIMESTAMPTZ,
     ADD COLUMN IF NOT EXISTS last_restored_at TIMESTAMPTZ;
 
+ALTER TABLE IF EXISTS public.invoices
+    ADD COLUMN IF NOT EXISTS package_profile TEXT,
+    ADD COLUMN IF NOT EXISTS package_name TEXT;
+
 CREATE INDEX IF NOT EXISTS idx_portal_users_role_billing_status ON public.portal_users (role, billing_status);
 CREATE INDEX IF NOT EXISTS idx_portal_users_expiry_date ON public.portal_users (expiry_date);
 CREATE INDEX IF NOT EXISTS idx_portal_users_next_billing_date ON public.portal_users (next_billing_date);

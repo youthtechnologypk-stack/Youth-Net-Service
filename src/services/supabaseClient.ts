@@ -61,6 +61,8 @@ export interface SupabaseInvoice {
   subscriber_username: string;
   assigned_agent_id?: string | null;
   assigned_agent_name?: string | null;
+  package_profile?: string | null;
+  package_name?: string | null;
   amount: number;
   paid_amount?: number;
   status: 'DUE' | 'PARTIAL' | 'PAID' | 'OVERDUE';
