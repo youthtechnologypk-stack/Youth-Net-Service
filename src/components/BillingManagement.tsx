@@ -1,4 +1,4 @@
-import React, { useState, useMemo } from 'react';
+import React, { useState, useMemo, useEffect, useCallback } from 'react';
 import {
   Calendar,
   DollarSign,
@@ -32,6 +32,8 @@ import {
   Eye,
   Check,
   Trash2,
+  FastForward,
+  Timer,
 } from 'lucide-react';
 import { Invoice, PaymentMethod, InvoiceStatus, IspExpense, FieldAgent, BillingSubscriber, BillingLedgerEntry } from '../types/isp';
 import { getStoredBillingLedger } from '../hooks/useSubscribers';
@@ -43,7 +45,7 @@ import { RecordPaymentModal } from './RecordPaymentModal';
 import { ReceiptModal } from './ReceiptModal';
 import { CreateInvoiceModal } from './CreateInvoiceModal';
 import { GenerateInvoiceModal } from './GenerateInvoiceModal';
-import { supabase } from '../services/supabaseClient';
+import { supabase, SupabaseInvoice, SupabasePortalUser } from '../services/supabaseClient';
 import { DeleteConfirmDialog } from './DeleteConfirmDialog';
 import { EditInvoiceModal } from './EditInvoiceModal';
 import { AgentSalaryModal, SalaryModalMode } from './AgentSalaryModal';
@@ -51,7 +53,18 @@ import { ReceiveCashHandoverModal } from './ReceiveCashHandoverModal';
 import { AddOrEditAgentModal } from './AddOrEditAgentModal';
 import { RevenueTrendChart } from './RevenueTrendChart';
 import { whatsappBusinessService, WhatsAppAuditRecord } from '../services/whatsappBusinessService';
-import { restoreSubscriberOnInvoicePaid } from '../lib/billingAndNetwork';
+import {
+  restoreSubscriberOnInvoicePaid,
+  safeUpdateInvoiceInSupabase,
+  shiftBillToNextMonth,
+} from '../lib/billingAndNetwork';
+import {
+  formatShortGraceDate,
+  getSubscriberGraceUntilIso,
+  hasSubscriberActiveGrace,
+  isInvoiceOverdueOrGraceExpired,
+  isSubscriberShiftedNextMonth,
+} from '../lib/anniversaryBilling';
 
 export interface BillingManagementProps {
   onOpenReceiptModal?: (invoice: Invoice) => void;
@@ -155,15 +168,90 @@ export const BillingManagement: React.FC<BillingManagementProps> = ({
   const [selectedAuditRecord, setSelectedAuditRecord] = useState<WhatsAppAuditRecord | null>(null);
   const [waCategoryFilter, setWaCategoryFilter] = useState<string>('all');
 
+  // Live portal_users clients for Grace / Suspension / Shifted-Next-Month accuracy
+  const [portalClients, setPortalClients] = useState<SupabasePortalUser[]>([]);
+  const [shiftingInvoiceId, setShiftingInvoiceId] = useState<string | null>(null);
+  const [studioNotice, setStudioNotice] = useState<{ type: 'success' | 'error'; text: string } | null>(null);
+
+  const fetchPortalClients = useCallback(async () => {
+    try {
+      const { data } = await supabase
+        .from('portal_users')
+        .select('*')
+        .eq('role', 'CLIENT');
+      if (Array.isArray(data)) {
+        setPortalClients(data as SupabasePortalUser[]);
+      }
+    } catch {}
+  }, []);
+
+  useEffect(() => {
+    void fetchPortalClients();
+  }, [fetchPortalClients]);
+
   // Customer map for rapid PPPoE lookup
   const customerMap = useMemo(() => {
     const map = new Map<string, (typeof customers)[0]>();
     customers.forEach((c) => {
       map.set(c.id, c);
       map.set(c.name.toLowerCase(), c);
+      if (c.pppoeUsername) {
+        map.set(c.pppoeUsername.toLowerCase(), c);
+      }
     });
     return map;
   }, [customers]);
+
+  const portalClientByKey = useMemo(() => {
+    const map = new Map<string, SupabasePortalUser>();
+    portalClients.forEach((u) => {
+      if (u.id) map.set(String(u.id), u);
+      if (u.username) map.set(u.username.trim().toLowerCase(), u);
+      if (u.full_name) map.set(u.full_name.trim().toLowerCase(), u);
+    });
+    return map;
+  }, [portalClients]);
+
+  const resolvePortalClientForInvoice = useCallback(
+    (inv: Invoice): SupabasePortalUser | null => {
+      const custNameLower = (inv?.customerName || '').trim().toLowerCase();
+      const linkedCust =
+        customerMap.get(inv?.customerId) || (custNameLower ? customerMap.get(custNameLower) : undefined);
+      const pppoeKey = (linkedCust?.pppoeUsername || '').trim().toLowerCase();
+      return (
+        portalClientByKey.get(inv?.customerId) ||
+        (pppoeKey ? portalClientByKey.get(pppoeKey) : undefined) ||
+        (custNameLower ? portalClientByKey.get(custNameLower) : undefined) ||
+        null
+      );
+    },
+    [customerMap, portalClientByKey]
+  );
+
+  const isStudioInvoiceOverdue = useCallback(
+    (inv: Invoice): boolean => {
+      const sub = resolvePortalClientForInvoice(inv);
+      const st = inv.status === 'paid' ? 'PAID' : inv.status === 'cancelled' ? 'CANCELLED' : inv.status === 'overdue' ? 'OVERDUE' : 'DUE';
+      return isInvoiceOverdueOrGraceExpired({
+        status: st,
+        amount: inv.totalAmount,
+        paidAmount: inv.status === 'paid' ? inv.totalAmount : 0,
+        dueDate: inv.dueDate,
+        shiftedToNextMonth: inv.shiftedToNextMonth,
+        subscriber: sub,
+      });
+    },
+    [resolvePortalClientForInvoice]
+  );
+
+  const isStudioInvoiceGraceAssigned = useCallback(
+    (inv: Invoice): boolean => {
+      if (inv.status === 'paid' || inv.status === 'cancelled') return false;
+      const sub = resolvePortalClientForInvoice(inv);
+      return hasSubscriberActiveGrace(sub);
+    },
+    [resolvePortalClientForInvoice]
+  );
 
   // Available unique billing cycle months
   const availableMonths = useMemo(() => {
@@ -219,10 +307,13 @@ export const BillingManagement: React.FC<BillingManagementProps> = ({
       0
     );
 
-    // 3. Overdue Defaulters Count
-    const overdueInvoices = invoices.filter((i) => i.status === 'overdue');
+    // 3. Overdue / Grace Expired Defaulters Count (consistent with Expiry & Grace rules)
+    const overdueInvoices = invoices.filter((i) => isStudioInvoiceOverdue(i));
     const overdueDefaultersCount = overdueInvoices.length;
     const overdueDefaultersAmount = overdueInvoices.reduce((sum, i) => sum + i.totalAmount, 0);
+
+    // 3b. Grace Period Assigned Count
+    const graceAssignedCount = invoices.filter((i) => isStudioInvoiceGraceAssigned(i)).length;
 
     // 4. Paid invoices total
     const paidInvoices = invoices.filter((i) => i.status === 'paid');
@@ -238,13 +329,14 @@ export const BillingManagement: React.FC<BillingManagementProps> = ({
       feesCollectedTodayAmount,
       overdueDefaultersCount,
       overdueDefaultersAmount,
+      graceAssignedCount,
       totalPaidAmount,
       totalBilledAmount,
       paidCount: paidInvoices.length,
       unpaidCount: invoices.filter((i) => i.status === 'unpaid').length,
       allCount: invoices.length,
     };
-  }, [invoices]);
+  }, [invoices, isStudioInvoiceOverdue, isStudioInvoiceGraceAssigned]);
 
   // Unified MRR Subscribers (merging youthnet_billing_subscribers and registered customers)
   const mrrSubscribers = useMemo(() => {
@@ -336,7 +428,8 @@ export const BillingManagement: React.FC<BillingManagementProps> = ({
       const invStatus = (inv?.status || '').toLowerCase();
       if (filterStatus === 'unpaid' && invStatus !== 'unpaid') return false;
       if (filterStatus === 'paid' && invStatus !== 'paid') return false;
-      if (filterStatus === 'overdue' && invStatus !== 'overdue') return false;
+      if (filterStatus === 'overdue' && !isStudioInvoiceOverdue(inv)) return false;
+      if (filterStatus === 'grace' && !isStudioInvoiceGraceAssigned(inv)) return false;
 
       // 3. Invoice Due Date filter
       if (dueDateFilter === 'today') {
@@ -345,7 +438,7 @@ export const BillingManagement: React.FC<BillingManagementProps> = ({
       } else if (dueDateFilter === 'this_week') {
         if (!inv?.dueDate || !isThisWeek(inv.dueDate)) return false;
       } else if (dueDateFilter === 'overdue') {
-        if (invStatus !== 'overdue') return false;
+        if (!isStudioInvoiceOverdue(inv)) return false;
       }
 
       // 4. Payment Arrival Date Range filter
@@ -365,10 +458,11 @@ export const BillingManagement: React.FC<BillingManagementProps> = ({
         const query = searchQuery.toLowerCase().trim();
         const custNameKey = (inv?.customerName || '').toLowerCase();
         const cust = customerMap.get(inv?.customerId) || (custNameKey ? customerMap.get(custNameKey) : undefined);
-        const pppoeUser = cust?.pppoeUsername ? (cust.pppoeUsername || '').toLowerCase() : '';
+        const portalSub = resolvePortalClientForInvoice(inv);
+        const pppoeUser = (cust?.pppoeUsername || portalSub?.username || '').toLowerCase();
         const matchesInv = (inv?.invoiceNumber || (inv as any)?.invoice_no || '').toLowerCase().includes(query);
         const matchesName = (inv?.customerName || (inv as any)?.subscriber_username || '').toLowerCase().includes(query);
-        const matchesPhone = (inv?.customerPhone || '').includes(query);
+        const matchesPhone = (inv?.customerPhone || portalSub?.phone || '').includes(query);
         const matchesPppoe = pppoeUser.includes(query);
 
         if (!matchesInv && !matchesName && !matchesPhone && !matchesPppoe) {
@@ -387,6 +481,9 @@ export const BillingManagement: React.FC<BillingManagementProps> = ({
     paymentEndDate,
     searchQuery,
     customerMap,
+    isStudioInvoiceOverdue,
+    isStudioInvoiceGraceAssigned,
+    resolvePortalClientForInvoice,
   ]);
 
   // Formatter helpers
@@ -504,47 +601,60 @@ export const BillingManagement: React.FC<BillingManagementProps> = ({
       paymentMethod: details.paymentMethod,
       agentName: details.collectorName,
       receiptNumber: rcptNumber,
+      shiftedToNextMonth: false,
       whatsappNoticeSent: Boolean(details.sendWhatsAppReceipt),
       whatsappNoticeTimestamp: details.sendWhatsAppReceipt ? new Date().toISOString() : undefined,
     });
 
+    const custNameKey = (invoice?.customerName || '').toLowerCase();
+    const linkedCust = customerMap.get(invoice?.customerId) || (custNameKey ? customerMap.get(custNameKey) : undefined);
+    const portalSub = resolvePortalClientForInvoice(invoice);
+    const targetUsername =
+      linkedCust?.pppoeUsername ||
+      portalSub?.username ||
+      (invoice?.customerName && !invoice.customerName.includes(' ') ? invoice.customerName : '');
+
     if (details.sendWhatsAppReceipt) {
-      const custNameKey = (invoice?.customerName || '').toLowerCase();
-      const linkedCust = customerMap.get(invoice?.customerId) || (custNameKey ? customerMap.get(custNameKey) : undefined);
       whatsappBusinessService
         .sendAutomatedPaymentReceipt({
           customerName: invoice?.customerName || 'Subscriber',
-          customerPhone: invoice?.customerPhone || linkedCust?.phone || '+92 300 0000000',
+          customerPhone: invoice?.customerPhone || linkedCust?.phone || portalSub?.phone || '+92 300 0000000',
           invoiceNumber: invoice.invoiceNumber,
           receiptNumber: rcptNumber,
           amountPaid: details.amount,
           paymentMethod: String(details.paymentMethod),
           paidDate: details.paidAt,
           planName: invoice.packageName,
-          pppoeUsername: linkedCust?.pppoeUsername,
+          pppoeUsername: targetUsername || undefined,
           collectorName: details.collectorName,
           currencySymbol,
         })
         .catch((err) => console.warn('WhatsApp Business payment receipt dispatch error:', err));
     }
 
-    // Direct Supabase PostgreSQL update
+    // Direct Supabase PostgreSQL update + auto-restore subscriber & clear shifted flag
     try {
-      const isUuid = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(invoice.id);
-      if (isUuid) {
-        supabase.from('invoices').update({ status: 'PAID', paid_at: new Date().toISOString() }).eq('id', invoice.id);
-      } else {
-        supabase.from('invoices').update({ status: 'PAID', paid_at: new Date().toISOString() }).eq('invoice_no', invoice.invoiceNumber);
-      }
-
-      const custNameKey = (invoice?.customerName || '').toLowerCase();
-      const linkedCust = customerMap.get(invoice?.customerId) || (custNameKey ? customerMap.get(custNameKey) : undefined);
-      if (linkedCust?.pppoeUsername) {
-        void restoreSubscriberOnInvoicePaid(linkedCust.pppoeUsername, {
-          triggeredBy: 'ADMIN',
-          notes: `NOC Studio payment recorded for Invoice #${invoice.invoiceNumber}`,
-        });
-      }
+      void safeUpdateInvoiceInSupabase(
+        { id: invoice.id, invoiceNo: invoice.invoiceNumber },
+        {
+          status: 'PAID',
+          paid_amount: details.amount,
+          paid_at: new Date().toISOString(),
+          payment_method: String(details.paymentMethod || 'CASH').toUpperCase(),
+          shifted_to_next_month: false,
+        }
+      ).then(() => {
+        if (targetUsername) {
+          void restoreSubscriberOnInvoicePaid(targetUsername, {
+            triggeredBy: 'ADMIN',
+            notes: `NOC Studio payment recorded for Invoice #${invoice.invoiceNumber}`,
+          }).then(() => {
+            void fetchPortalClients();
+          });
+        } else {
+          void fetchPortalClients();
+        }
+      });
 
       // If collector is an agent, credit cash_in_hand in portal_users
       if (details.collectorName) {
@@ -572,6 +682,69 @@ export const BillingManagement: React.FC<BillingManagementProps> = ({
     setRecordModalInvoice(null);
   };
 
+  // Shift Bill to Next Month handler (advances due date + subscriber cycle +1 calendar month & exempts from expiry)
+  const handleShiftInvoiceNextMonth = async (inv: Invoice) => {
+    const custNameKey = (inv?.customerName || '').trim().toLowerCase();
+    const linkedCust = customerMap.get(inv?.customerId) || (custNameKey ? customerMap.get(custNameKey) : undefined);
+    const portalSub = resolvePortalClientForInvoice(inv);
+    const uname = (
+      linkedCust?.pppoeUsername ||
+      portalSub?.username ||
+      inv.customerName ||
+      inv.customerId ||
+      ''
+    )
+      .trim()
+      .toLowerCase();
+
+    if (!uname) return;
+
+    setShiftingInvoiceId(inv.id);
+    setStudioNotice(null);
+    try {
+      const dueDay = Number((inv.dueDate || '').split('-')[2]) || new Date().getDate();
+      const targetInvoiceRow: SupabaseInvoice = {
+        id: inv.id,
+        invoice_no: inv.invoiceNumber,
+        subscriber_id: portalSub?.id || null,
+        subscriber_username: uname,
+        amount: inv.totalAmount,
+        paid_amount: 0,
+        status: inv.status === 'overdue' ? 'OVERDUE' : 'DUE',
+        due_date: inv.dueDate || new Date().toISOString().slice(0, 10),
+        cycle_day: portalSub?.billing_anchor_day || dueDay,
+        shifted_to_next_month: Boolean(inv.shiftedToNextMonth),
+      };
+
+      const res = await shiftBillToNextMonth({
+        username: uname,
+        subscriberId: portalSub?.id || null,
+        targetInvoice: targetInvoiceRow,
+      });
+
+      updateInvoice(inv.id, {
+        dueDate: res.nextDueDate,
+        status: 'unpaid',
+        shiftedToNextMonth: true,
+      });
+
+      await fetchPortalClients();
+      setStudioNotice({
+        type: 'success',
+        text: `Shifted @${uname} (#${inv.invoiceNumber}) to ${res.nextDueDate} (+1 calendar month). Exempt from expiry pool${
+          res.restoredMikrotik ? ` & restored MikroTik "${res.appliedProfile}"` : ''
+        }.`,
+      });
+    } catch (err: any) {
+      setStudioNotice({
+        type: 'error',
+        text: err?.message || `Failed to shift invoice #${inv.invoiceNumber} to next month.`,
+      });
+    } finally {
+      setShiftingInvoiceId(null);
+    }
+  };
+
   // Revert action (Admin only)
   const handleOpenRevert = (inv: Invoice) => {
     setInvoiceToRevert(inv);
@@ -581,7 +754,9 @@ export const BillingManagement: React.FC<BillingManagementProps> = ({
   const handleConfirmRevert = () => {
     if (!invoiceToRevert) return;
     // Determine whether to set to overdue or unpaid based on due date
-    const isPastDue = new Date(invoiceToRevert.dueDate) < new Date();
+    const todayYmd = new Date().toISOString().slice(0, 10);
+    const dueYmd = (invoiceToRevert.dueDate || '').slice(0, 10);
+    const isPastDue = Boolean(dueYmd && dueYmd < todayYmd);
     const newStatus: InvoiceStatus = isPastDue ? 'overdue' : 'unpaid';
 
     updateInvoice(invoiceToRevert.id, {
@@ -640,6 +815,25 @@ export const BillingManagement: React.FC<BillingManagementProps> = ({
 
   return (
     <div className="space-y-6">
+      {studioNotice && (
+        <div
+          className={`flex items-center justify-between gap-3 px-4 py-3 rounded-xl border text-xs font-medium ${
+            studioNotice.type === 'success'
+              ? 'bg-emerald-950/60 border-emerald-700 text-emerald-200'
+              : 'bg-rose-950/60 border-rose-700 text-rose-200'
+          }`}
+        >
+          <span>{studioNotice.text}</span>
+          <button
+            type="button"
+            onClick={() => setStudioNotice(null)}
+            className="text-slate-400 hover:text-white cursor-pointer"
+          >
+            <X className="w-4 h-4" />
+          </button>
+        </div>
+      )}
+
       {/* 4 INSTANT AUDIT SUMMARY TILES */}
       <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
         {/* Tile 1: Total Due Outstanding */}
@@ -1019,6 +1213,27 @@ export const BillingManagement: React.FC<BillingManagementProps> = ({
                     {auditSummary.overdueDefaultersCount}
                   </span>
                 </button>
+
+                {/* 5. Grace Period Assigned (Indigo/Amber badge) */}
+                <button
+                  type="button"
+                  onClick={() => setFilterStatus('grace')}
+                  className={`px-3 py-1.5 rounded-lg text-xs font-semibold transition flex items-center gap-2 cursor-pointer ${
+                    filterStatus === 'grace'
+                      ? 'bg-indigo-500 text-white shadow-md font-bold ring-2 ring-indigo-400/50'
+                      : 'bg-indigo-950/50 text-indigo-300 hover:bg-indigo-900/60 border border-indigo-800/80'
+                  }`}
+                >
+                  <Timer className="w-3.5 h-3.5" />
+                  <span>Grace Period Assigned</span>
+                  <span
+                    className={`px-1.5 py-0.2 rounded font-mono text-[10px] font-bold ${
+                      filterStatus === 'grace' ? 'bg-indigo-700 text-indigo-100' : 'bg-indigo-900 text-indigo-200'
+                    }`}
+                  >
+                    {auditSummary.graceAssignedCount}
+                  </span>
+                </button>
               </div>
 
               {/* BILLING CYCLE MONTH SELECTOR */}
@@ -1256,8 +1471,14 @@ export const BillingManagement: React.FC<BillingManagementProps> = ({
                       const linkedCustomer =
                         customerMap.get(inv?.customerId) ||
                         (custNameLower ? customerMap.get(custNameLower) : undefined);
-                      const pppoeUsername = linkedCustomer?.pppoeUsername || inv?.customerId || 'N/A';
-                      const isPastDue = inv?.dueDate ? new Date(inv.dueDate) < new Date() : false;
+                      const portalSub = resolvePortalClientForInvoice(inv);
+                      const pppoeUsername = linkedCustomer?.pppoeUsername || portalSub?.username || inv?.customerId || 'N/A';
+                      const isOverdueRow = inv.status !== 'paid' && isStudioInvoiceOverdue(inv);
+                      const graceUntilIso = getSubscriberGraceUntilIso(portalSub);
+                      const hasActiveGrace = inv.status !== 'paid' && hasSubscriberActiveGrace(portalSub);
+                      const isShiftedNext = isSubscriberShiftedNextMonth(portalSub, {
+                        shifted_to_next_month: inv.shiftedToNextMonth,
+                      });
 
                       return (
                         <tr key={inv.id} className="hover:bg-slate-800/60 transition group">
@@ -1277,7 +1498,7 @@ export const BillingManagement: React.FC<BillingManagementProps> = ({
                                 @{pppoeUsername}
                               </span>
                               <span className="text-[10px] text-slate-400 font-sans">
-                                {inv.customerPhone}
+                                {inv.customerPhone || portalSub?.phone || ''}
                               </span>
                             </div>
                             <div className="text-[10px] text-slate-500 font-sans mt-0.5">
@@ -1304,17 +1525,29 @@ export const BillingManagement: React.FC<BillingManagementProps> = ({
                           <td className="py-3 px-4 whitespace-nowrap font-sans">
                             <div
                               className={`font-semibold flex items-center gap-1 ${
-                                inv.status !== 'paid' && isPastDue ? 'text-rose-400' : 'text-slate-200'
+                                isOverdueRow ? 'text-rose-400' : 'text-slate-200'
                               }`}
                             >
                               <Calendar className="w-3 h-3 text-slate-400" />
                               <span>{formatDateDisplay(inv.dueDate)}</span>
                             </div>
-                            {inv.status !== 'paid' && isPastDue && (
-                              <span className="inline-block mt-0.5 px-1.5 py-0.2 rounded bg-rose-950 text-rose-300 border border-rose-800 text-[9px] font-mono uppercase">
-                                Grace Expired
-                              </span>
-                            )}
+                            <div className="flex flex-wrap items-center gap-1 mt-1">
+                              {hasActiveGrace && (
+                                <span className="inline-flex items-center gap-1 px-1.5 py-0.2 rounded bg-indigo-950 text-indigo-300 border border-indigo-700 text-[9px] font-mono">
+                                  ⏳ Grace until {graceUntilIso ? formatShortGraceDate(graceUntilIso) : 'Active'}
+                                </span>
+                              )}
+                              {isShiftedNext && (
+                                <span className="inline-flex items-center gap-1 px-1.5 py-0.2 rounded bg-cyan-950 text-cyan-300 border border-cyan-700 text-[9px] font-mono">
+                                  ⏭ Shifted Next Month
+                                </span>
+                              )}
+                              {isOverdueRow && !hasActiveGrace && (
+                                <span className="inline-block px-1.5 py-0.2 rounded bg-rose-950 text-rose-300 border border-rose-800 text-[9px] font-mono uppercase">
+                                  Grace Expired
+                                </span>
+                              )}
+                            </div>
                           </td>
 
                           {/* Column 4: Payment Received Date */}
@@ -1352,7 +1585,7 @@ export const BillingManagement: React.FC<BillingManagementProps> = ({
                                 <CheckCircle2 className="w-3 h-3 text-emerald-400" />
                                 <span>Paid</span>
                               </span>
-                            ) : inv.status === 'overdue' ? (
+                            ) : isOverdueRow ? (
                               <span className="inline-flex items-center gap-1 px-2.5 py-1 rounded-md text-[11px] font-bold uppercase bg-rose-950 text-rose-300 border border-rose-800 shadow-sm">
                                 <AlertTriangle className="w-3 h-3 text-rose-400" />
                                 <span>Overdue</span>
@@ -1368,17 +1601,33 @@ export const BillingManagement: React.FC<BillingManagementProps> = ({
                           {/* Column 7: Quick Actions */}
                           <td className="py-3 px-4 text-right whitespace-nowrap font-sans">
                             <div className="flex items-center justify-end gap-1.5">
-                              {/* 1-CLICK MARK AS PAID (For Due & Overdue) */}
+                              {/* 1-CLICK MARK AS PAID + SHIFT NEXT MO (For Due & Overdue) */}
                               {inv.status !== 'paid' ? (
-                                <button
-                                  type="button"
-                                  onClick={() => handleOpenMarkPaid(inv)}
-                                  className="bg-emerald-600 hover:bg-emerald-500 text-slate-950 font-bold px-3 py-1.5 rounded-lg text-xs transition shadow-md shadow-emerald-950/40 flex items-center gap-1 active:scale-95 cursor-pointer"
-                                  title="1-Click Mark as Paid & Record Fee Receipt"
-                                >
-                                  <CheckCircle2 className="w-3.5 h-3.5 text-slate-950" />
-                                  <span>Mark Paid</span>
-                                </button>
+                                <>
+                                  <button
+                                    type="button"
+                                    onClick={() => void handleShiftInvoiceNextMonth(inv)}
+                                    disabled={shiftingInvoiceId === inv.id}
+                                    className="bg-cyan-950 hover:bg-cyan-900 text-cyan-300 border border-cyan-700 font-semibold px-2.5 py-1.5 rounded-lg text-xs transition flex items-center gap-1 cursor-pointer disabled:opacity-50"
+                                    title="Shift Bill & Cycle to Next Month (+1 Calendar Month & Exempt from Expiry)"
+                                  >
+                                    {shiftingInvoiceId === inv.id ? (
+                                      <RotateCw className="w-3.5 h-3.5 animate-spin" />
+                                    ) : (
+                                      <FastForward className="w-3.5 h-3.5" />
+                                    )}
+                                    <span>Shift Next Mo</span>
+                                  </button>
+                                  <button
+                                    type="button"
+                                    onClick={() => handleOpenMarkPaid(inv)}
+                                    className="bg-emerald-600 hover:bg-emerald-500 text-slate-950 font-bold px-3 py-1.5 rounded-lg text-xs transition shadow-md shadow-emerald-950/40 flex items-center gap-1 active:scale-95 cursor-pointer"
+                                    title="1-Click Mark as Paid & Record Fee Receipt"
+                                  >
+                                    <CheckCircle2 className="w-3.5 h-3.5 text-slate-950" />
+                                    <span>Mark Paid</span>
+                                  </button>
+                                </>
                               ) : (
                                 <>
                                   {/* RECEIPT BUTTON */}

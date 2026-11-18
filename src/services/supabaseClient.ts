@@ -47,6 +47,7 @@ export interface SupabasePortalUser {
   original_package_profile?: string | null;
   billing_status?: 'ACTIVE' | 'REMINDER_SENT' | 'GRACE_PERIOD' | 'SUSPENDED_EXPIRED' | string | null;
   is_suspended?: boolean | null;
+  shifted_to_next_month?: boolean | null;
   grace_until?: string | null;
   grace_ends_at?: string | null;
   last_reminder_cycle?: string | null;
@@ -58,6 +59,7 @@ export interface SupabasePortalUser {
 export interface SupabaseInvoice {
   id: string;
   invoice_no: string;
+  subscriber_id?: string | null;
   subscriber_username: string;
   assigned_agent_id?: string | null;
   assigned_agent_name?: string | null;
@@ -68,6 +70,7 @@ export interface SupabaseInvoice {
   status: 'DUE' | 'PARTIAL' | 'PAID' | 'OVERDUE';
   due_date: string;
   cycle_day: number;
+  shifted_to_next_month?: boolean | null;
   paid_at?: string | null;
   created_at?: string;
 }
@@ -271,7 +274,9 @@ export type ExpiryAuditActionType =
   | 'SUSPENDED_16_POOL'
   | 'DISABLED_SECRET'
   | 'RESTORED_ON_PAYMENT'
-  | 'GRACE_EXTENDED';
+  | 'GRACE_EXTENDED'
+  | 'GRACE_REMOVED'
+  | 'SHIFTED_NEXT_MONTH';
 
 export type ExpiryTriggeredBy = 'CRON_2PM' | 'ADMIN' | 'AGENT_PAYMENT_SYNC';
 

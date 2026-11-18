@@ -7,6 +7,8 @@ import {
   Copy,
   Database,
   DollarSign,
+  Edit2,
+  FastForward,
   History,
   MessageSquare,
   Play,
@@ -18,6 +20,7 @@ import {
   ShieldAlert,
   Sliders,
   Timer,
+  Trash2,
   Wifi,
   Zap,
 } from 'lucide-react';
@@ -42,6 +45,9 @@ import {
   syncProfilesFromMikrotikToSupabase,
   bulkActivateSubscribers,
   bulkReceivePayments,
+  updateSubscriberGracePeriod,
+  removeSubscriberGracePeriod,
+  shiftBillToNextMonth,
 } from '../lib/billingAndNetwork';
 import { openWhatsAppLink } from '../lib/whatsappBilling';
 import { EXPIRY_MIGRATION_SQL } from '../lib/expiryMigrationSql';
@@ -139,6 +145,21 @@ export const ExpiryAutomationView: React.FC = () => {
   const [extraGraceCustomHours, setExtraGraceCustomHours] = useState<string>('36');
   const [extraGraceNoteInput, setExtraGraceNoteInput] = useState<string>('');
   const [isGrantingExtraGrace, setIsGrantingExtraGrace] = useState<boolean>(false);
+
+  // Edit / Remove Grace modals for Grace tab
+  const [editGraceTarget, setEditGraceTarget] = useState<
+    (SupabasePortalUser & { amountDue: number; graceEndsMs: number; isSyntheticRecord?: boolean; extraGraceNote?: string | null }) | null
+  >(null);
+  const [editGraceDateTimeLocal, setEditGraceDateTimeLocal] = useState<string>('');
+  const [editGraceNote, setEditGraceNote] = useState<string>('');
+  const [isSavingEditGrace, setIsSavingEditGrace] = useState<boolean>(false);
+
+  const [removeGraceTarget, setRemoveGraceTarget] = useState<
+    (SupabasePortalUser & { amountDue: number; graceEndsMs: number; isSyntheticRecord?: boolean }) | null
+  >(null);
+  const [isRemovingGrace, setIsRemovingGrace] = useState<boolean>(false);
+
+  const autoRestoredPaidUsersRef = useRef<Set<string>>(new Set());
   const [toast, setToast] = useState<{ text: string; type: 'success' | 'error' } | null>(null);
 
   const showNotice = useCallback((text: string, type: 'success' | 'error' = 'success') => {
@@ -476,6 +497,7 @@ export const ExpiryAutomationView: React.FC = () => {
           adoptedProfile,
         };
       }),
+      paidSuspendedToRestore: evaluated.paidSuspendedToRestore,
     };
   }, [
     subscribers,
@@ -488,6 +510,54 @@ export const ExpiryAutomationView: React.FC = () => {
     mkActive,
     mikrotikProfiles,
     nowTickMs,
+  ]);
+
+  // Automatically restore any paid subscribers (unpaidInvoiceTotal <= 0) still flagged suspended in DB/MikroTik
+  useEffect(() => {
+    const stuckPaid = categorizedSubscribers.paidSuspendedToRestore || [];
+    if (isLoading || stuckPaid.length === 0) return;
+
+    const pendingToRestore = stuckPaid.filter(
+      (item) => !autoRestoredPaidUsersRef.current.has(item.username)
+    );
+    if (pendingToRestore.length === 0) return;
+
+    for (const item of pendingToRestore) {
+      autoRestoredPaidUsersRef.current.add(item.username);
+    }
+
+    (async () => {
+      let restoredCount = 0;
+      for (const item of pendingToRestore) {
+        const res = await restoreSubscriberOnInvoicePaid(item.username, {
+          triggeredBy: 'ADMIN',
+          notes: `Auto-restored zero-due paid subscriber (${item.reason})`,
+          expiryProfileName: settings.expiry_ppp_profile,
+          activeRouter: activeRouterRef.current,
+          preloadedSecrets: mkSecrets,
+          preloadedProfiles: mikrotikProfiles,
+          preloadedActive: mkActive,
+        });
+        if (res.success) restoredCount++;
+      }
+      if (restoredCount > 0) {
+        showNotice(
+          `Auto-restored ${restoredCount} paid subscriber(s) removed from Suspended 16.16.16.0/24 pool.`,
+          'success'
+        );
+        await Promise.all([fetchAllDatabaseState(), fetchMikrotikProfilesList()]);
+      }
+    })();
+  }, [
+    categorizedSubscribers.paidSuspendedToRestore,
+    isLoading,
+    settings.expiry_ppp_profile,
+    mkSecrets,
+    mikrotikProfiles,
+    mkActive,
+    showNotice,
+    fetchAllDatabaseState,
+    fetchMikrotikProfilesList,
   ]);
 
   const activeTabRows = useMemo(() => {
@@ -816,75 +886,141 @@ export const ExpiryAutomationView: React.FC = () => {
     }
   };
 
-  // +24h Extend Grace persisted directly to Supabase portal_users & expiry_audit_logs
-  const handleExtendGrace24h = async (
-    sub: SupabasePortalUser & { graceEndsMs: number; isSyntheticRecord?: boolean }
+  // Format ISO / ms into `YYYY-MM-DDTHH:mm` for datetime-local input
+  const toDateTimeLocalValue = (ms: number): string => {
+    const d = new Date(ms);
+    if (Number.isNaN(d.getTime())) return '';
+    const pad = (n: number) => String(n).padStart(2, '0');
+    return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}T${pad(d.getHours())}:${pad(
+      d.getMinutes()
+    )}`;
+  };
+
+  // Open Edit Grace modal (allows extending or shortening grace_until / grace_ends_at + note)
+  const handleOpenEditGraceModal = (
+    sub: SupabasePortalUser & { amountDue: number; graceEndsMs: number; isSyntheticRecord?: boolean; extraGraceNote?: string | null }
+  ) => {
+    setEditGraceTarget(sub);
+    setEditGraceDateTimeLocal(toDateTimeLocalValue(sub.graceEndsMs || Date.now() + 24 * 3_600_000));
+    setEditGraceNote(sub.extraGraceNote || '');
+  };
+
+  const applyQuickDeltaToEditGrace = (deltaHours: number) => {
+    const parsedCurrent = editGraceDateTimeLocal ? Date.parse(editGraceDateTimeLocal) : NaN;
+    const baseMs = !Number.isNaN(parsedCurrent)
+      ? Math.max(Date.now(), parsedCurrent)
+      : Math.max(Date.now(), editGraceTarget?.graceEndsMs || Date.now());
+    setEditGraceDateTimeLocal(toDateTimeLocalValue(baseMs + deltaHours * 3_600_000));
+  };
+
+  const handleSaveEditGrace = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!editGraceTarget || !editGraceDateTimeLocal) return;
+    const targetMs = Date.parse(editGraceDateTimeLocal);
+    if (Number.isNaN(targetMs)) {
+      showNotice('Please pick a valid grace deadline date & time.', 'error');
+      return;
+    }
+
+    const uname = String(editGraceTarget.username || '').trim().toLowerCase();
+    setIsSavingEditGrace(true);
+    setBusyUsernames((p) => ({ ...p, [uname]: true }));
+    try {
+      const graceUntilIso = new Date(targetMs).toISOString();
+      const res = await updateSubscriberGracePeriod({
+        subscriberId: editGraceTarget.id,
+        username: uname,
+        graceUntilIso,
+        note: editGraceNote,
+        activeRouter: activeRouterRef.current,
+        expiryProfileName: settings.expiry_ppp_profile,
+        preloadedSecrets: mkSecrets,
+        preloadedProfiles: mikrotikProfiles,
+        preloadedActive: mkActive,
+      });
+      setEditGraceTarget(null);
+      showNotice(
+        `Updated grace period for @${uname} until ${formatDateTimePkt(res.graceUntilIso)}.`,
+        'success'
+      );
+      await Promise.all([fetchAllDatabaseState(), fetchMikrotikProfilesList()]);
+    } catch (err: any) {
+      showNotice(`Unable to update grace for @${uname}: ${err?.message}`, 'error');
+    } finally {
+      setIsSavingEditGrace(false);
+      setBusyUsernames((p) => ({ ...p, [uname]: false }));
+    }
+  };
+
+  // Remove / Cancel Grace Period (suspends immediately if past-due unpaid & not shifted, else restores ACTIVE)
+  const handleConfirmRemoveGrace = async () => {
+    if (!removeGraceTarget) return;
+    const sub = removeGraceTarget;
+    const uname = String(sub.username || '').trim().toLowerCase();
+    setIsRemovingGrace(true);
+    setBusyUsernames((p) => ({ ...p, [uname]: true }));
+
+    try {
+      const res = await removeSubscriberGracePeriod({
+        username: uname,
+        subscriberId: sub.id,
+        allInvoices,
+        expiryProfileName: settings.expiry_ppp_profile,
+        suspensionMode: settings.suspension_mode,
+        activeRouter: activeRouterRef.current,
+        preloadedSecrets: mkSecrets,
+        preloadedProfiles: mikrotikProfiles,
+        preloadedActive: mkActive,
+      });
+      setRemoveGraceTarget(null);
+      showNotice(
+        res.outcome === 'SUSPENDED'
+          ? `Grace removed for @${uname}: unpaid balance (${formatCurrency(
+              res.unpaidTotal,
+              0
+            )}) -> immediately applied ${res.appliedProfile} & kicked ${res.kickedSessions} session(s).`
+          : `Grace cleared for @${uname}: returned cleanly to ACTIVE (${res.appliedProfile}).`,
+        'success'
+      );
+      await Promise.all([fetchAllDatabaseState(), fetchMikrotikProfilesList()]);
+    } catch (err: any) {
+      showNotice(`Unable to remove grace for @${uname}: ${err?.message}`, 'error');
+    } finally {
+      setIsRemovingGrace(false);
+      setBusyUsernames((p) => ({ ...p, [uname]: false }));
+    }
+  };
+
+  // Shift Bill to Next Month (Advances due_date & next_billing_date +1 calendar month, exempts from expiry, restores if suspended)
+  const handleShiftBillToNextMonth = async (
+    sub: SupabasePortalUser & { isSyntheticRecord?: boolean }
   ) => {
     const uname = String(sub.username || '').trim().toLowerCase();
     setBusyUsernames((p) => ({ ...p, [uname]: true }));
-    const nowMs = Date.now();
-    const nowIso = new Date(nowMs).toISOString();
-    const isUuid = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(String(sub.id || ''));
-
     try {
-      const baseMs = Math.max(nowMs, sub.graceEndsMs || nowMs);
-      const nextGraceIso = new Date(baseMs + 24 * 3_600_000).toISOString();
-      const nextGraceDateStr = nextGraceIso.slice(0, 10);
-
-      let realSubscriberId: string | null = !sub.isSyntheticRecord && isUuid ? sub.id : null;
-      if (!realSubscriberId) {
-        const { data: foundUser } = await supabase
-          .from('portal_users')
-          .select('id')
-          .ilike('username', uname)
-          .maybeSingle();
-        if (foundUser?.id) {
-          realSubscriberId = foundUser.id;
-        }
-      }
-
-      if (realSubscriberId) {
-        const { error } = await supabase
-          .from('portal_users')
-          .update({
-            billing_status: 'GRACE_PERIOD',
-            grace_ends_at: nextGraceIso,
-          })
-          .eq('id', realSubscriberId);
-
-        if (error) {
-          throw new Error(error.message);
-        }
-      } else {
-        // Subscriber derived from open invoices only: shift unpaid invoice due_date by +1 day
-        const userOpenInvoices = openInvoices.filter(
-          (inv) => String(inv.subscriber_username || '').trim().toLowerCase() === uname
-        );
-        for (const inv of userOpenInvoices) {
-          await supabase
-            .from('invoices')
-            .update({ due_date: nextGraceDateStr })
-            .eq('id', inv.id);
-        }
-      }
-
-      await supabase.from('expiry_audit_logs').insert([
-        {
-          subscriber_id: realSubscriberId,
-          username: uname,
-          action_type: 'GRACE_EXTENDED',
-          previous_profile: sub.package_profile_name || sub.package_speed || null,
-          applied_profile: sub.package_profile_name || sub.package_speed || null,
-          triggered_by: 'ADMIN',
-          notes: `Grace extended +24h in Supabase until ${nextGraceIso}`,
-          created_at: nowIso,
-        },
-      ]);
-
-      showNotice(`Extended +24h grace for @${uname} until ${formatDateTimePkt(nextGraceIso)}.`, 'success');
-      await fetchAllDatabaseState();
+      const res = await shiftBillToNextMonth({
+        username: uname,
+        subscriberId: sub.id,
+        allInvoices,
+        activeRouter: activeRouterRef.current,
+        expiryProfileName: settings.expiry_ppp_profile,
+        preloadedSecrets: mkSecrets,
+        preloadedProfiles: mikrotikProfiles,
+        preloadedActive: mkActive,
+      });
+      showNotice(
+        `Shifted @${uname}'s bill & cycle to next month (${res.nextDueDate}) · Updated ${
+          res.updatedInvoicesCount
+        } invoice(s)${
+          res.restoredMikrotik
+            ? ` · Restored MikroTik "${res.appliedProfile}" (kicked ${res.kickedSessions} session(s))`
+            : ''
+        }. Exempt from expiry pool.`,
+        'success'
+      );
+      await Promise.all([fetchAllDatabaseState(), fetchMikrotikProfilesList()]);
     } catch (err: any) {
-      showNotice(`Unable to extend grace for @${uname}: ${err?.message}`, 'error');
+      showNotice(`Unable to shift bill for @${uname}: ${err?.message}`, 'error');
     } finally {
       setBusyUsernames((p) => ({ ...p, [uname]: false }));
     }
@@ -1653,15 +1789,27 @@ export const ExpiryAutomationView: React.FC = () => {
                           )}
                         </td>
                         <td className="py-2.5 px-3 text-right">
-                          <button
-                            type="button"
-                            disabled={Boolean(busyUsernames[uname])}
-                            onClick={() => handleSendWhatsAppSlip(sub)}
-                            className="px-3 py-1.5 rounded-lg bg-emerald-600 hover:bg-emerald-500 text-slate-950 font-bold text-xs inline-flex items-center gap-1.5 transition cursor-pointer disabled:opacity-50"
-                          >
-                            <Send className="w-3 h-3" />
-                            <span>Send WhatsApp Slip</span>
-                          </button>
+                          <div className="inline-flex items-center gap-2 justify-end">
+                            <button
+                              type="button"
+                              disabled={Boolean(busyUsernames[uname])}
+                              onClick={() => handleShiftBillToNextMonth(sub)}
+                              className="px-2.5 py-1.5 rounded-lg bg-indigo-950/70 hover:bg-indigo-900/80 text-indigo-300 border border-indigo-700/70 font-semibold text-xs inline-flex items-center gap-1 transition cursor-pointer disabled:opacity-50 whitespace-nowrap"
+                              title="Shift current bill & cycle to next calendar month (exempt from expiry)"
+                            >
+                              <FastForward className="w-3 h-3" />
+                              <span>Shift Next Month</span>
+                            </button>
+                            <button
+                              type="button"
+                              disabled={Boolean(busyUsernames[uname])}
+                              onClick={() => handleSendWhatsAppSlip(sub)}
+                              className="px-3 py-1.5 rounded-lg bg-emerald-600 hover:bg-emerald-500 text-slate-950 font-bold text-xs inline-flex items-center gap-1.5 transition cursor-pointer disabled:opacity-50 whitespace-nowrap"
+                            >
+                              <Send className="w-3 h-3" />
+                              <span>Send WhatsApp Slip</span>
+                            </button>
+                          </div>
                         </td>
                       </tr>
                     );
@@ -1753,21 +1901,42 @@ export const ExpiryAutomationView: React.FC = () => {
                           {formatCurrency(sub.amountDue, 0)}
                         </td>
                         <td className="py-2.5 px-3 text-right">
-                          <div className="inline-flex items-center gap-2">
+                          <div className="inline-flex flex-wrap items-center justify-end gap-1.5">
                             <button
                               type="button"
                               disabled={busy}
-                              onClick={() => handleExtendGrace24h(sub)}
-                              className="px-3 py-1.5 rounded-lg bg-slate-800 hover:bg-slate-700 text-cyan-300 border border-slate-700 font-semibold text-xs inline-flex items-center gap-1 transition cursor-pointer disabled:opacity-50"
+                              onClick={() => handleOpenEditGraceModal(sub)}
+                              className="px-2.5 py-1.5 rounded-lg bg-slate-800 hover:bg-slate-700 text-cyan-300 border border-slate-700 font-semibold text-xs inline-flex items-center gap-1 transition cursor-pointer disabled:opacity-50 whitespace-nowrap"
+                              title="Edit grace deadline (+24h / +48h / +72h / custom date & note)"
                             >
-                              <Clock className="w-3 h-3" />
-                              <span>+24h Extend Grace</span>
+                              <Edit2 className="w-3 h-3" />
+                              <span>Edit Grace</span>
+                            </button>
+                            <button
+                              type="button"
+                              disabled={busy}
+                              onClick={() => setRemoveGraceTarget(sub)}
+                              className="px-2.5 py-1.5 rounded-lg bg-rose-950/70 hover:bg-rose-900/80 text-rose-300 border border-rose-800 font-semibold text-xs inline-flex items-center gap-1 transition cursor-pointer disabled:opacity-50 whitespace-nowrap"
+                              title="Remove / cancel grace period"
+                            >
+                              <Trash2 className="w-3 h-3" />
+                              <span>Remove Grace</span>
+                            </button>
+                            <button
+                              type="button"
+                              disabled={busy}
+                              onClick={() => handleShiftBillToNextMonth(sub)}
+                              className="px-2.5 py-1.5 rounded-lg bg-indigo-950/70 hover:bg-indigo-900/80 text-indigo-300 border border-indigo-700/70 font-semibold text-xs inline-flex items-center gap-1 transition cursor-pointer disabled:opacity-50 whitespace-nowrap"
+                              title="Shift bill to next month & clear grace"
+                            >
+                              <FastForward className="w-3 h-3" />
+                              <span>Shift Next Mo</span>
                             </button>
                             <button
                               type="button"
                               disabled={busy}
                               onClick={() => handleCollectAndRestore(sub)}
-                              className="px-3 py-1.5 rounded-lg bg-emerald-500 hover:bg-emerald-400 text-slate-950 font-bold text-xs inline-flex items-center gap-1 transition cursor-pointer disabled:opacity-50"
+                              className="px-3 py-1.5 rounded-lg bg-emerald-500 hover:bg-emerald-400 text-slate-950 font-bold text-xs inline-flex items-center gap-1 transition cursor-pointer disabled:opacity-50 whitespace-nowrap"
                             >
                               <Zap className="w-3 h-3" />
                               <span>Collect &amp; Restore</span>
@@ -1859,7 +2028,17 @@ export const ExpiryAutomationView: React.FC = () => {
                           {formatCurrency(sub.amountDue, 0)}
                         </td>
                         <td className="py-2.5 px-3 text-right">
-                          <div className="inline-flex items-center gap-2 justify-end">
+                          <div className="inline-flex flex-wrap items-center gap-1.5 justify-end">
+                            <button
+                              type="button"
+                              disabled={busy}
+                              onClick={() => handleShiftBillToNextMonth(sub)}
+                              className="px-2.5 py-1.5 rounded-lg bg-indigo-950/70 hover:bg-indigo-900/80 text-indigo-300 border border-indigo-700/70 font-semibold text-xs inline-flex items-center gap-1 transition cursor-pointer disabled:opacity-50 whitespace-nowrap"
+                              title="Shift bill to next calendar month & restore internet immediately"
+                            >
+                              <FastForward className="w-3.5 h-3.5" />
+                              <span>Shift Next Mo</span>
+                            </button>
                             <button
                               type="button"
                               disabled={busy}
@@ -2120,6 +2299,169 @@ export const ExpiryAutomationView: React.FC = () => {
           </div>
         </div>
       )}
+      {/* Edit Grace Period Modal (Extend / Shorten / Custom Date & Note) */}
+      {editGraceTarget && (
+        <div className="fixed inset-0 z-[9999] flex items-center justify-center bg-black/75 backdrop-blur-sm p-3 overflow-y-auto">
+          <div className="w-[95vw] sm:w-full max-w-md rounded-2xl bg-[#111A2E] border border-cyan-700/60 shadow-2xl overflow-hidden">
+            <div className="px-5 py-4 bg-slate-950 border-b border-slate-800 flex items-center justify-between">
+              <div className="flex items-center gap-2.5">
+                <div className="p-2 rounded-lg bg-cyan-500/15 border border-cyan-500/40 text-cyan-300">
+                  <Edit2 className="w-4 h-4" />
+                </div>
+                <div>
+                  <h3 className="text-sm font-bold text-white">Edit Grace Period Deadline</h3>
+                  <p className="text-[11px] font-mono text-slate-400">
+                    @{editGraceTarget.username} · Due {formatCurrency(editGraceTarget.amountDue || 0, 0)}
+                  </p>
+                </div>
+              </div>
+              <button
+                type="button"
+                onClick={() => setEditGraceTarget(null)}
+                className="text-slate-400 hover:text-white text-xs px-2 py-1 rounded bg-slate-800 hover:bg-slate-700 cursor-pointer"
+              >
+                Close
+              </button>
+            </div>
+
+            <form onSubmit={handleSaveEditGrace} className="p-5 space-y-4">
+              <div className="space-y-2">
+                <label className="block text-[11px] font-bold text-slate-300 uppercase tracking-wider">
+                  Quick Adjust Grace Deadline
+                </label>
+                <div className="grid grid-cols-4 gap-2">
+                  {[
+                    { label: '+24h', hours: 24 },
+                    { label: '+48h', hours: 48 },
+                    { label: '+72h', hours: 72 },
+                    { label: '-12h', hours: -12 },
+                  ].map((btn) => (
+                    <button
+                      key={btn.label}
+                      type="button"
+                      onClick={() => applyQuickDeltaToEditGrace(btn.hours)}
+                      className="px-2.5 py-2 rounded-xl bg-slate-950 hover:bg-slate-800 border border-slate-700 text-cyan-300 font-bold text-xs transition cursor-pointer"
+                    >
+                      {btn.label}
+                    </button>
+                  ))}
+                </div>
+              </div>
+
+              <div>
+                <label className="block text-[11px] font-bold text-slate-300 mb-1">
+                  Exact Grace Expiry Date &amp; Time
+                </label>
+                <input
+                  type="datetime-local"
+                  required
+                  value={editGraceDateTimeLocal}
+                  onChange={(e) => setEditGraceDateTimeLocal(e.target.value)}
+                  className="w-full px-3 py-2 rounded-lg bg-slate-950 border border-slate-700 text-white font-mono text-xs focus:outline-none focus:border-cyan-500"
+                />
+              </div>
+
+              <div>
+                <label className="block text-[11px] font-bold text-slate-300 mb-1">
+                  Admin Note / Promise to Pay (Optional)
+                </label>
+                <input
+                  type="text"
+                  value={editGraceNote}
+                  onChange={(e) => setEditGraceNote(e.target.value)}
+                  placeholder="e.g. Extended until salary arrives"
+                  className="w-full px-3 py-2 rounded-lg bg-slate-950 border border-slate-700 text-white text-xs focus:outline-none focus:border-cyan-500"
+                />
+              </div>
+
+              <div className="flex items-center justify-end gap-2 pt-2 border-t border-slate-800">
+                <button
+                  type="button"
+                  onClick={() => setEditGraceTarget(null)}
+                  className="px-4 py-2 rounded-xl bg-slate-800 hover:bg-slate-700 text-slate-300 text-xs font-semibold cursor-pointer"
+                >
+                  Cancel
+                </button>
+                <button
+                  type="submit"
+                  disabled={isSavingEditGrace}
+                  className="px-4 py-2 rounded-xl bg-cyan-500 hover:bg-cyan-400 text-slate-950 font-bold text-xs flex items-center gap-1.5 transition cursor-pointer disabled:opacity-50"
+                >
+                  <Save className="w-3.5 h-3.5" />
+                  <span>{isSavingEditGrace ? 'Saving...' : 'Save Grace Deadline'}</span>
+                </button>
+              </div>
+            </form>
+          </div>
+        </div>
+      )}
+
+      {/* Remove / Cancel Grace Confirmation Modal */}
+      {removeGraceTarget && (
+        <div className="fixed inset-0 z-[9999] flex items-center justify-center bg-black/75 backdrop-blur-sm p-3 overflow-y-auto">
+          <div className="w-[95vw] sm:w-full max-w-md rounded-2xl bg-[#111A2E] border border-rose-700/60 shadow-2xl overflow-hidden">
+            <div className="px-5 py-4 bg-slate-950 border-b border-slate-800 flex items-center justify-between">
+              <div className="flex items-center gap-2.5">
+                <div className="p-2 rounded-lg bg-rose-500/15 border border-rose-500/40 text-rose-300">
+                  <Trash2 className="w-4 h-4" />
+                </div>
+                <div>
+                  <h3 className="text-sm font-bold text-white">Remove / Cancel Grace Period</h3>
+                  <p className="text-[11px] font-mono text-rose-300">
+                    @{removeGraceTarget.username} · Due {formatCurrency(removeGraceTarget.amountDue || 0, 0)}
+                  </p>
+                </div>
+              </div>
+              <button
+                type="button"
+                onClick={() => setRemoveGraceTarget(null)}
+                className="text-slate-400 hover:text-white text-xs px-2 py-1 rounded bg-slate-800 hover:bg-slate-700 cursor-pointer"
+              >
+                Close
+              </button>
+            </div>
+
+            <div className="p-5 space-y-4">
+              <p className="text-xs text-slate-300 leading-relaxed">
+                This clears <code className="text-white">grace_until</code> for{' '}
+                <strong className="text-white">@{removeGraceTarget.username}</strong>.
+                {removeGraceTarget.amountDue > 0 ? (
+                  <span className="block mt-1.5 text-rose-300">
+                    Because this subscriber still has unpaid past-due invoices (
+                    {formatCurrency(removeGraceTarget.amountDue, 0)}), removing grace will immediately apply the{' '}
+                    <strong className="text-white">{settings.expiry_ppp_profile}</strong> expiry rule &amp; kick
+                    active sessions unless shifted to next month.
+                  </span>
+                ) : (
+                  <span className="block mt-1.5 text-emerald-300">
+                    No unpaid balance found — subscriber will return cleanly to ACTIVE billing state.
+                  </span>
+                )}
+              </p>
+
+              <div className="flex items-center justify-end gap-2 pt-2 border-t border-slate-800">
+                <button
+                  type="button"
+                  onClick={() => setRemoveGraceTarget(null)}
+                  className="px-4 py-2 rounded-xl bg-slate-800 hover:bg-slate-700 text-slate-300 text-xs font-semibold cursor-pointer"
+                >
+                  Cancel
+                </button>
+                <button
+                  type="button"
+                  disabled={isRemovingGrace}
+                  onClick={handleConfirmRemoveGrace}
+                  className="px-4 py-2 rounded-xl bg-rose-600 hover:bg-rose-500 text-white font-bold text-xs flex items-center gap-1.5 transition cursor-pointer disabled:opacity-50"
+                >
+                  <Trash2 className="w-3.5 h-3.5" />
+                  <span>{isRemovingGrace ? 'Removing Grace...' : 'Confirm Remove Grace'}</span>
+                </button>
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
+
       {/* Bulk Receive Amount Confirmation Modal */}
       <BulkReceiveAmountModal
         isOpen={isBulkReceiveModalOpen}

@@ -670,6 +670,7 @@ export async function restoreSubscriberOnInvoicePaid(
           account_status: 'ACTIVE',
           billing_status: 'ACTIVE',
           is_suspended: false,
+          shifted_to_next_month: false,
           grace_until: null,
           grace_ends_at: null,
           last_restored_at: nowIso,
@@ -822,6 +823,7 @@ export async function safeUpdateInvoiceInSupabase(
     const stripped = { ...payload };
     delete stripped.package_profile;
     delete stripped.package_name;
+    delete stripped.shifted_to_next_month;
     const retry = await applyMatcher(supabase.from('invoices').update(stripped as any));
     return { error: retry.error };
   }
@@ -848,6 +850,7 @@ export async function safeInsertInvoiceInSupabase(
     const stripped = { ...payload };
     delete stripped.package_profile;
     delete stripped.package_name;
+    delete stripped.shifted_to_next_month;
     const retry = await supabase
       .from('invoices')
       .insert([stripped as any])
@@ -918,6 +921,7 @@ export async function syncSubscriberPackageAndRestoreIfPaid(params: {
             package_name: cleanProfile,
             package_profile_name: cleanProfile,
             is_suspended: false,
+            shifted_to_next_month: false,
             billing_status: 'ACTIVE',
             account_status: 'ACTIVE',
             grace_until: null,
@@ -1658,4 +1662,610 @@ export async function fetchMikrotikInterfaceTrafficOnce(
   } catch {}
 
   return { rxMbps: 0, txMbps: 0, ok: false };
+}
+
+/**
+ * Inserts into expiry_audit_logs safely, falling back if check constraints haven't migrated
+ * new action types (`GRACE_REMOVED`, `SHIFTED_NEXT_MONTH`) yet.
+ */
+export async function safeInsertExpiryAuditLog(entry: {
+  subscriber_id?: string | null;
+  username: string;
+  action_type: string;
+  previous_profile?: string | null;
+  applied_profile?: string | null;
+  triggered_by?: 'CRON_2PM' | 'ADMIN' | 'AGENT_PAYMENT_SYNC';
+  notes?: string | null;
+  created_at?: string;
+}): Promise<void> {
+  try {
+    const row = {
+      subscriber_id: entry.subscriber_id || null,
+      username: String(entry.username || '').trim().toLowerCase(),
+      action_type: entry.action_type,
+      previous_profile: entry.previous_profile || null,
+      applied_profile: entry.applied_profile || null,
+      triggered_by: entry.triggered_by || 'ADMIN',
+      notes: entry.notes || null,
+      created_at: entry.created_at || new Date().toISOString(),
+    };
+    const { error } = await supabase.from('expiry_audit_logs').insert([row]);
+    if (error) {
+      const code = String(error.code || '');
+      const msg = String(error.message || '').toLowerCase();
+      if (code === '23514' || msg.includes('check constraint')) {
+        const fallbackType =
+          entry.action_type === 'SHIFTED_NEXT_MONTH' ? 'RESTORED_ON_PAYMENT' : 'GRACE_EXTENDED';
+        await supabase.from('expiry_audit_logs').insert([
+          {
+            ...row,
+            action_type: fallbackType,
+            notes: `[${entry.action_type}] ${row.notes || ''}`.trim(),
+          },
+        ]);
+      }
+    }
+  } catch {}
+}
+
+/**
+ * Updates (extends or shortens) a subscriber's grace_until / grace_ends_at timestamp,
+ * clears suspension if active, restores MikroTik secret if currently isolated, and writes audit log.
+ */
+export async function updateSubscriberGracePeriod(params: {
+  subscriberId?: string | null;
+  username: string;
+  graceUntilIso: string;
+  note?: string;
+  activeRouter?: RouterAuthInfo;
+  expiryProfileName?: string;
+  preloadedSecrets?: Array<Record<string, any>>;
+  preloadedProfiles?: string[];
+  preloadedActive?: Array<Record<string, any>>;
+}): Promise<{
+  success: boolean;
+  graceUntilIso: string;
+  restoredProfile: string;
+  kickedSessions: number;
+}> {
+  const uname = String(params.username || '').trim().toLowerCase();
+  const nowIso = new Date().toISOString();
+  const expiryProf = params.expiryProfileName || 'EXPIRED-16-POOL';
+
+  const { data: userRow } = await supabase
+    .from('portal_users')
+    .select('*')
+    .ilike('username', uname)
+    .limit(1)
+    .maybeSingle();
+
+  let subscriberId: string | null = userRow?.id ? String(userRow.id) : null;
+  const liveSecret =
+    params.preloadedSecrets?.find(
+      (s) => String(s?.name || '').trim().toLowerCase() === uname
+    ) || null;
+  const origCommentPkg = extractOrigPkgFromComment(liveSecret?.comment, expiryProf);
+  const restoredProfile = origCommentPkg
+    ? resolveExactSubscriberProfile({
+        liveSecret: { ...liveSecret, profile: origCommentPkg },
+        subscriber: (userRow as any) || { username: uname },
+        mikrotikProfiles: params.preloadedProfiles || [],
+        expiryProfileName: expiryProf,
+      }) || origCommentPkg
+    : resolveExactSubscriberProfile({
+        liveSecret,
+        subscriber: (userRow as any) || { username: uname },
+        mikrotikProfiles: params.preloadedProfiles || [],
+        expiryProfileName: expiryProf,
+      });
+
+  if (subscriberId) {
+    await safeUpdatePortalUserFields(
+      subscriberId,
+      {
+        is_suspended: false,
+        grace_until: params.graceUntilIso,
+        grace_ends_at: params.graceUntilIso,
+        billing_status: 'GRACE_PERIOD',
+        account_status: 'ACTIVE',
+        original_package_profile: restoredProfile,
+      },
+      {
+        grace_ends_at: params.graceUntilIso,
+        billing_status: 'GRACE_PERIOD',
+        account_status: 'ACTIVE',
+        original_package_profile: restoredProfile,
+      },
+      {
+        account_status: 'ACTIVE',
+      }
+    );
+  } else {
+    const { data: inserted } = await supabase
+      .from('portal_users')
+      .insert([
+        {
+          username: uname,
+          password: `Yn@${Math.floor(1000 + Math.random() * 9000)}`,
+          role: 'CLIENT',
+          full_name: uname,
+          phone: '',
+          area: 'Saddar Node',
+          account_status: 'ACTIVE',
+          billing_status: 'GRACE_PERIOD',
+          grace_ends_at: params.graceUntilIso,
+          original_package_profile: restoredProfile,
+          package_profile_name: restoredProfile,
+          package_speed: restoredProfile,
+        },
+      ])
+      .select('id')
+      .maybeSingle();
+    if (inserted?.id) subscriberId = String(inserted.id);
+  }
+
+  let kickedSessions = 0;
+  const liveProfileStr = String(liveSecret?.profile || '').trim();
+  const isIsolatedInMk = Boolean(
+    liveSecret &&
+      (isExpiryOrBlockedProfile(liveProfileStr, expiryProf) ||
+        liveSecret.disabled === 'true' ||
+        liveSecret.disabled === true)
+  );
+  if (isIsolatedInMk || userRow?.is_suspended === true || userRow?.billing_status === 'SUSPENDED_EXPIRED') {
+    await syncMikrotikSecretProfile(
+      uname,
+      restoredProfile,
+      { disabled: 'false', preloadedSecret: liveSecret },
+      params.activeRouter
+    );
+    kickedSessions = await kickMikrotikActiveSessionForUser(
+      uname,
+      params.activeRouter,
+      params.preloadedActive
+    );
+  }
+
+  const noteStr = params.note?.trim()
+    ? `[EXTRA_GRACE] Updated grace deadline to ${params.graceUntilIso} — Note: ${params.note.trim()}`
+    : `[EXTRA_GRACE] Updated grace deadline to ${params.graceUntilIso}`;
+
+  await safeInsertExpiryAuditLog({
+    subscriber_id: subscriberId,
+    username: uname,
+    action_type: 'GRACE_EXTENDED',
+    previous_profile: liveProfileStr || restoredProfile,
+    applied_profile: restoredProfile,
+    triggered_by: 'ADMIN',
+    notes: noteStr,
+    created_at: nowIso,
+  });
+
+  return {
+    success: true,
+    graceUntilIso: params.graceUntilIso,
+    restoredProfile,
+    kickedSessions,
+  };
+}
+
+/**
+ * Removes / Cancels a subscriber's grace period (`grace_until = null`, `grace_ends_at = null`).
+ * - If unpaid past-due invoices exist AND subscriber is NOT shifted to next month -> immediately applies expiry rule.
+ * - If paid (`unpaidTotal <= 0`) or shifted -> returns subscriber cleanly to ACTIVE and restores MikroTik if needed.
+ */
+export async function removeSubscriberGracePeriod(params: {
+  username: string;
+  subscriberId?: string | null;
+  allInvoices?: SupabaseInvoice[];
+  expiryProfileName?: string;
+  suspensionMode?: string;
+  activeRouter?: RouterAuthInfo;
+  preloadedSecrets?: Array<Record<string, any>>;
+  preloadedProfiles?: string[];
+  preloadedActive?: Array<Record<string, any>>;
+}): Promise<{
+  outcome: 'SUSPENDED' | 'RESTORED_ACTIVE';
+  unpaidTotal: number;
+  kickedSessions: number;
+  appliedProfile: string;
+}> {
+  const uname = String(params.username || '').trim().toLowerCase();
+  const nowIso = new Date().toISOString();
+  const todayYmd = nowIso.slice(0, 10);
+  const expiryProf = params.expiryProfileName || 'EXPIRED-16-POOL';
+  const isDisableMode = String(params.suspensionMode || '').toUpperCase() === 'DISABLE_SECRET';
+
+  const [{ data: userRow }, invRes] = await Promise.all([
+    supabase
+      .from('portal_users')
+      .select('*')
+      .ilike('username', uname)
+      .limit(1)
+      .maybeSingle(),
+    params.allInvoices
+      ? Promise.resolve({ data: params.allInvoices })
+      : supabase.from('invoices').select('*').ilike('subscriber_username', uname),
+  ]);
+
+  const subscriberId: string | null = userRow?.id
+    ? String(userRow.id)
+    : params.subscriberId &&
+      /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(String(params.subscriberId))
+    ? String(params.subscriberId)
+    : null;
+
+  const matchingInvoices = ((invRes?.data || []) as SupabaseInvoice[]).filter((inv) => {
+    const invUname = String(inv.subscriber_username || '').trim().toLowerCase();
+    return invUname === uname || (subscriberId && inv.subscriber_id === subscriberId);
+  });
+
+  let unpaidTotal = 0;
+  let hasPastDueUnpaid = false;
+  let allShifted = true;
+  for (const inv of matchingInvoices) {
+    const st = String(inv.status || '').toUpperCase();
+    if (st === 'PAID' || st === 'CANCELLED') continue;
+    const bal = Math.max(0, (Number(inv.amount) || 0) - (Number(inv.paid_amount) || 0));
+    if (bal <= 0) continue;
+    unpaidTotal += bal;
+    if (inv.shifted_to_next_month !== true) allShifted = false;
+    const dueYmd = extractYmdString(inv.due_date);
+    if (!dueYmd || dueYmd <= todayYmd) hasPastDueUnpaid = true;
+  }
+
+  const subNextYmd = extractYmdString((userRow as any)?.next_billing_date);
+  const isShiftedExempt = Boolean(
+    ((userRow as any)?.shifted_to_next_month === true && (!subNextYmd || todayYmd < subNextYmd)) ||
+      (allShifted && unpaidTotal > 0 && !hasPastDueUnpaid)
+  );
+
+  const liveSecret =
+    params.preloadedSecrets?.find(
+      (s) => String(s?.name || '').trim().toLowerCase() === uname
+    ) || null;
+  const origCommentPkg = extractOrigPkgFromComment(liveSecret?.comment, expiryProf);
+  const backupProfile = origCommentPkg
+    ? resolveExactSubscriberProfile({
+        liveSecret: { ...liveSecret, profile: origCommentPkg },
+        subscriber: (userRow as any) || { username: uname },
+        mikrotikProfiles: params.preloadedProfiles || [],
+        expiryProfileName: expiryProf,
+      }) || origCommentPkg
+    : resolveExactSubscriberProfile({
+        liveSecret,
+        subscriber: (userRow as any) || { username: uname },
+        mikrotikProfiles: params.preloadedProfiles || [],
+        expiryProfileName: expiryProf,
+      });
+
+  if (unpaidTotal > 0 && hasPastDueUnpaid && !isShiftedExempt) {
+    const origPkgComment = upsertOrigPkgComment(liveSecret?.comment, backupProfile);
+    await syncMikrotikSecretProfile(
+      uname,
+      isDisableMode ? backupProfile : expiryProf,
+      {
+        disabled: isDisableMode ? 'true' : 'false',
+        comment: origPkgComment,
+        preloadedSecret: liveSecret,
+      },
+      params.activeRouter
+    );
+    const kickedSessions = await kickMikrotikActiveSessionForUser(
+      uname,
+      params.activeRouter,
+      params.preloadedActive
+    );
+
+    if (subscriberId) {
+      await safeUpdatePortalUserFields(
+        subscriberId,
+        {
+          is_suspended: true,
+          billing_status: 'SUSPENDED_EXPIRED',
+          account_status: 'EXPIRED',
+          grace_until: null,
+          grace_ends_at: null,
+          suspended_at: nowIso,
+          original_package_profile: backupProfile,
+        },
+        {
+          billing_status: 'SUSPENDED_EXPIRED',
+          account_status: 'EXPIRED',
+          grace_ends_at: null,
+          suspended_at: nowIso,
+          original_package_profile: backupProfile,
+        },
+        {
+          account_status: 'EXPIRED',
+        }
+      );
+    }
+
+    const appliedProfile = isDisableMode ? 'DISABLED' : expiryProf;
+    await safeInsertExpiryAuditLog({
+      subscriber_id: subscriberId,
+      username: uname,
+      action_type: 'GRACE_REMOVED',
+      previous_profile: backupProfile,
+      applied_profile: appliedProfile,
+      triggered_by: 'ADMIN',
+      notes: `Grace removed by admin with unpaid balance (Rs. ${Math.round(unpaidTotal).toLocaleString()}) -> immediately suspended (${appliedProfile}), kicked ${kickedSessions} session(s).`,
+      created_at: nowIso,
+    });
+
+    return {
+      outcome: 'SUSPENDED',
+      unpaidTotal,
+      kickedSessions,
+      appliedProfile,
+    };
+  }
+
+  // Paid or not past-due or shifted -> clear grace & return cleanly to ACTIVE
+  if (subscriberId) {
+    await safeUpdatePortalUserFields(
+      subscriberId,
+      {
+        is_suspended: false,
+        billing_status: 'ACTIVE',
+        account_status: 'ACTIVE',
+        grace_until: null,
+        grace_ends_at: null,
+      },
+      {
+        billing_status: 'ACTIVE',
+        account_status: 'ACTIVE',
+        grace_ends_at: null,
+      },
+      {
+        account_status: 'ACTIVE',
+      }
+    );
+  }
+
+  let kickedSessions = 0;
+  if (
+    liveSecret &&
+    (isExpiryOrBlockedProfile(liveSecret.profile, expiryProf) ||
+      liveSecret.disabled === 'true' ||
+      liveSecret.disabled === true)
+  ) {
+    await syncMikrotikSecretProfile(
+      uname,
+      backupProfile,
+      { disabled: 'false', preloadedSecret: liveSecret },
+      params.activeRouter
+    );
+    kickedSessions = await kickMikrotikActiveSessionForUser(
+      uname,
+      params.activeRouter,
+      params.preloadedActive
+    );
+  }
+
+  await safeInsertExpiryAuditLog({
+    subscriber_id: subscriberId,
+    username: uname,
+    action_type: 'GRACE_REMOVED',
+    previous_profile: liveSecret?.profile || backupProfile,
+    applied_profile: backupProfile,
+    triggered_by: 'ADMIN',
+    notes: `Grace removed by admin -> returned to ACTIVE (${backupProfile}).`,
+    created_at: nowIso,
+  });
+
+  return {
+    outcome: 'RESTORED_ACTIVE',
+    unpaidTotal,
+    kickedSessions,
+    appliedProfile: backupProfile,
+  };
+}
+
+/**
+ * Shifts a subscriber's current unpaid bill & billing cycle to +1 calendar month:
+ * - Advances unpaid invoice(s)' `due_date` by +1 calendar month (past today if multi-month overdue),
+ *   sets `shifted_to_next_month = true`, and resets `OVERDUE` back to `DUE`.
+ * - Advances subscriber's `next_billing_date` (+ `expiry_date`) by +1 calendar month,
+ *   sets `shifted_to_next_month = true`, clears `is_suspended = false` and `grace_until = null`.
+ * - If currently in `EXPIRED-16-POOL` / `Expire` / disabled, restores their adopted MikroTik PPPoE profile
+ *   and kicks any `16.16.16.0/24` session.
+ */
+export async function shiftBillToNextMonth(params: {
+  username: string;
+  subscriberId?: string | null;
+  targetInvoice?: SupabaseInvoice | null;
+  allInvoices?: SupabaseInvoice[];
+  activeRouter?: RouterAuthInfo;
+  expiryProfileName?: string;
+  preloadedSecrets?: Array<Record<string, any>>;
+  preloadedProfiles?: string[];
+  preloadedActive?: Array<Record<string, any>>;
+}): Promise<{
+  success: boolean;
+  nextDueDate: string;
+  updatedInvoicesCount: number;
+  restoredMikrotik: boolean;
+  kickedSessions: number;
+  appliedProfile: string;
+}> {
+  const uname = String(params.username || '').trim().toLowerCase();
+  const nowIso = new Date().toISOString();
+  const todayYmd = nowIso.slice(0, 10);
+  const expiryProf = params.expiryProfileName || 'EXPIRED-16-POOL';
+
+  const [{ data: userRow }, invRes] = await Promise.all([
+    supabase
+      .from('portal_users')
+      .select('*')
+      .ilike('username', uname)
+      .limit(1)
+      .maybeSingle(),
+    params.targetInvoice
+      ? Promise.resolve({ data: [params.targetInvoice] })
+      : params.allInvoices
+      ? Promise.resolve({ data: params.allInvoices })
+      : supabase.from('invoices').select('*').ilike('subscriber_username', uname),
+  ]);
+
+  const subscriberId: string | null = userRow?.id
+    ? String(userRow.id)
+    : params.subscriberId &&
+      /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(String(params.subscriberId))
+    ? String(params.subscriberId)
+    : null;
+
+  const anchorDay = userRow
+    ? computeBillingAnchorDay(userRow)
+    : params.targetInvoice?.cycle_day || new Date().getDate();
+
+  const advanceNextMonthFutureYmd = (baseRaw?: string | null): string => {
+    let candidate = addCalendarMonthsYmd(extractYmdString(baseRaw) || todayYmd, 1, anchorDay);
+    let safety = 0;
+    while (candidate <= todayYmd && safety < 24) {
+      candidate = addCalendarMonthsYmd(candidate, 1, anchorDay);
+      safety++;
+    }
+    return candidate;
+  };
+
+  const invoicesToShift = params.targetInvoice
+    ? [params.targetInvoice]
+    : ((invRes?.data || []) as SupabaseInvoice[]).filter((inv) => {
+        const invUname = String(inv.subscriber_username || '').trim().toLowerCase();
+        const matchesUser = invUname === uname || (subscriberId && inv.subscriber_id === subscriberId);
+        if (!matchesUser) return false;
+        const st = String(inv.status || '').toUpperCase();
+        const bal = Math.max(0, (Number(inv.amount) || 0) - (Number(inv.paid_amount) || 0));
+        return st !== 'PAID' && st !== 'CANCELLED' && bal > 0;
+      });
+
+  let updatedInvoicesCount = 0;
+  let shiftedInvDueDate = advanceNextMonthFutureYmd(
+    params.targetInvoice?.due_date || (userRow as any)?.next_billing_date || userRow?.expiry_date || todayYmd
+  );
+
+  for (const inv of invoicesToShift) {
+    const nextInvDate = advanceNextMonthFutureYmd(inv.due_date || todayYmd);
+    shiftedInvDueDate = nextInvDate;
+    const upperSt = String(inv.status || '').toUpperCase();
+    const nextStatus = upperSt === 'PARTIAL' ? 'PARTIAL' : 'DUE';
+
+    const { error } = await safeUpdateInvoiceInSupabase(
+      { id: inv.id, invoiceNo: inv.invoice_no },
+      {
+        due_date: nextInvDate,
+        status: nextStatus,
+        shifted_to_next_month: true,
+      }
+    );
+    if (!error) updatedInvoicesCount++;
+  }
+
+  const nextSubscriberBillingDate = advanceNextMonthFutureYmd(
+    (userRow as any)?.next_billing_date || userRow?.expiry_date || params.targetInvoice?.due_date || todayYmd
+  );
+  const finalNextDate =
+    shiftedInvDueDate > nextSubscriberBillingDate ? shiftedInvDueDate : nextSubscriberBillingDate;
+  const finalExpiryIso = `${finalNextDate}T14:00:00+05:00`;
+
+  const liveSecret =
+    params.preloadedSecrets?.find(
+      (s) => String(s?.name || '').trim().toLowerCase() === uname
+    ) || null;
+  const origCommentPkg = extractOrigPkgFromComment(liveSecret?.comment, expiryProf);
+  const restoredProfile = origCommentPkg
+    ? resolveExactSubscriberProfile({
+        liveSecret: { ...liveSecret, profile: origCommentPkg },
+        subscriber: (userRow as any) || { username: uname },
+        mikrotikProfiles: params.preloadedProfiles || [],
+        expiryProfileName: expiryProf,
+      }) || origCommentPkg
+    : resolveExactSubscriberProfile({
+        liveSecret,
+        subscriber: (userRow as any) || { username: uname },
+        mikrotikProfiles: params.preloadedProfiles || [],
+        expiryProfileName: expiryProf,
+      });
+
+  if (subscriberId) {
+    await safeUpdatePortalUserFields(
+      subscriberId,
+      {
+        shifted_to_next_month: true,
+        is_suspended: false,
+        grace_until: null,
+        grace_ends_at: null,
+        billing_status: 'ACTIVE',
+        account_status: 'ACTIVE',
+        billing_anchor_day: anchorDay,
+        next_billing_date: finalNextDate,
+        expiry_date: finalExpiryIso,
+        last_restored_at: nowIso,
+        original_package_profile: restoredProfile,
+      },
+      {
+        billing_status: 'ACTIVE',
+        account_status: 'ACTIVE',
+        grace_ends_at: null,
+        expiry_date: finalExpiryIso,
+        last_restored_at: nowIso,
+        original_package_profile: restoredProfile,
+      },
+      {
+        account_status: 'ACTIVE',
+        expiry_date: finalNextDate,
+      }
+    );
+  }
+
+  let restoredMikrotik = false;
+  let kickedSessions = 0;
+  const wasSuspended = Boolean(
+    userRow?.is_suspended === true ||
+      String(userRow?.billing_status || '').toUpperCase() === 'SUSPENDED_EXPIRED' ||
+      ['EXPIRED', 'SUSPENDED'].includes(String(userRow?.account_status || '').toUpperCase()) ||
+      (liveSecret &&
+        (isExpiryOrBlockedProfile(liveSecret.profile, expiryProf) ||
+          liveSecret.disabled === 'true' ||
+          liveSecret.disabled === true))
+  );
+
+  if (wasSuspended) {
+    const syncRes = await syncMikrotikSecretProfile(
+      uname,
+      restoredProfile,
+      { disabled: 'false', preloadedSecret: liveSecret },
+      params.activeRouter
+    );
+    restoredMikrotik = syncRes.ok;
+    kickedSessions = await kickMikrotikActiveSessionForUser(
+      uname,
+      params.activeRouter,
+      params.preloadedActive
+    );
+  }
+
+  await safeInsertExpiryAuditLog({
+    subscriber_id: subscriberId,
+    username: uname,
+    action_type: 'SHIFTED_NEXT_MONTH',
+    previous_profile: liveSecret?.profile || restoredProfile,
+    applied_profile: restoredProfile,
+    triggered_by: 'ADMIN',
+    notes: `Shifted bill & cycle to next month (${finalNextDate}) · ${updatedInvoicesCount} invoice(s) updated · Exempt from expiry pool${
+      wasSuspended ? ` · Restored MikroTik "${restoredProfile}" (kicked ${kickedSessions})` : ''
+    }.`,
+    created_at: nowIso,
+  });
+
+  return {
+    success: true,
+    nextDueDate: finalNextDate,
+    updatedInvoicesCount,
+    restoredMikrotik,
+    kickedSessions,
+    appliedProfile: restoredProfile,
+  };
 }

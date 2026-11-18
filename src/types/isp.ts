@@ -179,6 +179,7 @@ export interface Invoice {
   receiptNumber?: string;
   whatsappNoticeSent: boolean;
   whatsappNoticeTimestamp?: string;
+  shiftedToNextMonth?: boolean;
   lineItems?: InvoiceLineItem[];
 }
 

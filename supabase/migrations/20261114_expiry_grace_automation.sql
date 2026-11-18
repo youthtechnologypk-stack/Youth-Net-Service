@@ -46,6 +46,7 @@ ALTER TABLE public.portal_users
     ADD COLUMN IF NOT EXISTS original_package_profile TEXT,
     ADD COLUMN IF NOT EXISTS billing_status TEXT DEFAULT 'ACTIVE',
     ADD COLUMN IF NOT EXISTS is_suspended BOOLEAN DEFAULT FALSE,
+    ADD COLUMN IF NOT EXISTS shifted_to_next_month BOOLEAN DEFAULT FALSE,
     ADD COLUMN IF NOT EXISTS grace_until TIMESTAMPTZ,
     ADD COLUMN IF NOT EXISTS grace_ends_at TIMESTAMPTZ,
     ADD COLUMN IF NOT EXISTS last_reminder_cycle TEXT,
@@ -54,7 +55,8 @@ ALTER TABLE public.portal_users
 
 ALTER TABLE IF EXISTS public.invoices
     ADD COLUMN IF NOT EXISTS package_profile TEXT,
-    ADD COLUMN IF NOT EXISTS package_name TEXT;
+    ADD COLUMN IF NOT EXISTS package_name TEXT,
+    ADD COLUMN IF NOT EXISTS shifted_to_next_month BOOLEAN DEFAULT FALSE;
 
 CREATE INDEX IF NOT EXISTS idx_portal_users_role_billing_status
     ON public.portal_users (role, billing_status);
@@ -97,7 +99,9 @@ CREATE TABLE IF NOT EXISTS public.expiry_audit_logs (
             'SUSPENDED_16_POOL',
             'DISABLED_SECRET',
             'RESTORED_ON_PAYMENT',
-            'GRACE_EXTENDED'
+            'GRACE_EXTENDED',
+            'GRACE_REMOVED',
+            'SHIFTED_NEXT_MONTH'
         )
     ),
     previous_profile TEXT,

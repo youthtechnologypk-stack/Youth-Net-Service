@@ -58,6 +58,7 @@ export interface ExpirySweepResult {
   disabledSecrets: number;
   kickedActiveSessions: number;
   skippedPaid: number;
+  restoredPaid?: number;
   errors: string[];
   schemaWarnings: string[];
   durationMs: number;
@@ -336,6 +337,8 @@ export async function runExpirySweep(
   let disabledSecrets = 0;
   let kickedActiveSessions = 0;
   let skippedPaid = 0;
+  let restoredPaid = 0;
+  const todayYmd = new Date(nowMs).toISOString().slice(0, 10);
 
   // 1. Load persistent settings, subscribers, and invoices from Supabase
   const [{ settings, waConfig, tableExists }, clientsRes, invoicesRes] = await Promise.all([
@@ -358,6 +361,7 @@ export async function runExpirySweep(
       disabledSecrets: 0,
       kickedActiveSessions: 0,
       skippedPaid: 0,
+      restoredPaid: 0,
       errors: [`Supabase query failed: ${clientsRes.error.message}`],
       schemaWarnings: Array.from(schemaWarningsSet),
       durationMs: Date.now() - startedAt,
@@ -368,22 +372,41 @@ export async function runExpirySweep(
   const dbSubscribers = (clientsRes.data || []) as Array<Record<string, any>>;
   const openInvoices = (invoicesRes.data || []) as Array<Record<string, any>>;
 
-  // Index open unpaid dues per lowercase username
-  const unpaidByUser = new Map<string, { totalDue: number; earliestDueDate: string | null }>();
+  const usernameBySubId = new Map<string, string>();
+  for (const s of dbSubscribers) {
+    const u = String(s?.username || '').trim().toLowerCase();
+    if (s?.id && u) usernameBySubId.set(String(s.id), u);
+  }
+
+  // Index open unpaid dues per lowercase username (matching subscriber_id or subscriber_username)
+  const unpaidByUser = new Map<
+    string,
+    { totalDue: number; earliestDueDate: string | null; allShiftedNextMonth: boolean }
+  >();
   for (const inv of openInvoices) {
-    const uname = String(inv?.subscriber_username || '').trim().toLowerCase();
+    const matchedFromId = inv?.subscriber_id ? usernameBySubId.get(String(inv.subscriber_id)) : undefined;
+    const uname = matchedFromId || String(inv?.subscriber_username || '').trim().toLowerCase();
     if (!uname) continue;
+    const st = String(inv?.status || '').toUpperCase();
+    if (st === 'PAID' || st === 'CANCELLED') continue;
     const bal = Math.max(0, (Number(inv.amount) || 0) - (Number(inv.paid_amount) || 0));
     if (bal <= 0) continue;
-    const prev = unpaidByUser.get(uname) || { totalDue: 0, earliestDueDate: null };
+    const prev = unpaidByUser.get(uname) || {
+      totalDue: 0,
+      earliestDueDate: null,
+      allShiftedNextMonth: true,
+    };
     prev.totalDue += bal;
+    if (inv.shifted_to_next_month !== true) {
+      prev.allShiftedNextMonth = false;
+    }
     if (inv.due_date && (!prev.earliestDueDate || String(inv.due_date) < prev.earliestDueDate)) {
       prev.earliestDueDate = String(inv.due_date);
     }
     unpaidByUser.set(uname, prev);
   }
 
-  // Merge portal_users (CLIENT) + invoice-only subscribers with unpaid dues (e.g. bmballi, bkranakashif, gbnoman)
+  // Merge portal_users (CLIENT) + invoice-only subscribers with unpaid dues
   const candidatesByUser = new Map<string, { sub: Record<string, any>; isSynthetic: boolean }>();
   for (const sub of dbSubscribers) {
     const uname = String(sub.username || '').trim().toLowerCase();
@@ -402,6 +425,7 @@ export async function runExpirySweep(
         account_status: 'ACTIVE',
         billing_status: 'ACTIVE',
         is_suspended: false,
+        shifted_to_next_month: unpaid.allShiftedNextMonth,
         monthly_fee: unpaid.totalDue,
         expiry_date: unpaid.earliestDueDate,
         next_billing_date: unpaid.earliestDueDate,
@@ -409,7 +433,7 @@ export async function runExpirySweep(
     });
   }
 
-  // Lazy-fetch MikroTik secrets, profiles & active sessions once only if needed for suspensions
+  // Lazy-fetch MikroTik secrets, profiles & active sessions once
   let cachedMikrotik: {
     secretsCache: Map<string, Record<string, any>>;
     activeCache: Map<string, Array<Record<string, any>>>;
@@ -447,6 +471,9 @@ export async function runExpirySweep(
     return cachedMikrotik;
   };
 
+  // Pre-warm MikroTik cache once so paid users stuck in EXPIRED-16-POOL are detected & restored
+  const mkCaches = await ensureMikrotikCaches().catch(() => null);
+
   const graceHours = Math.max(0, Number(settings.grace_hours) || 24);
   const threeDaysMs = 3 * 86_400_000;
   const supportWhatsapp = waConfig?.support_whatsapp || '+923234193599';
@@ -456,13 +483,139 @@ export async function runExpirySweep(
     .trim()
     .toLowerCase();
 
+  const isExpiredMkProfileName = (prof?: string | null) => {
+    const p = String(prof || '').trim().toLowerCase();
+    return Boolean(
+      p &&
+        (p === expiryProfileLower ||
+          p === 'expire' ||
+          p === 'expired' ||
+          p.includes('expired') ||
+          p.includes('16-pool') ||
+          p.includes('walled'))
+    );
+  };
+
   for (const [uname, entry] of candidatesByUser.entries()) {
     const { sub, isSynthetic } = entry;
     const unpaidInfo = unpaidByUser.get(uname);
     const dueAmount = unpaidInfo?.totalDue || 0;
 
+    const billingStatus = String(sub.billing_status || '').toUpperCase();
+    const accountStatus = String(sub.account_status || 'ACTIVE').toUpperCase();
+    const isDbSuspended =
+      sub.is_suspended === true ||
+      billingStatus === 'SUSPENDED_EXPIRED' ||
+      accountStatus === 'EXPIRED' ||
+      accountStatus === 'SUSPENDED';
+
+    const liveSecForCheck = mkCaches?.secretsCache.get(uname);
+    const liveActiveForCheck = mkCaches?.activeCache.get(uname) || [];
+    const isMkSuspended = Boolean(
+      (liveSecForCheck &&
+        (isExpiredMkProfileName(liveSecForCheck.profile) ||
+          liveSecForCheck.disabled === 'true' ||
+          liveSecForCheck.disabled === true)) ||
+        liveActiveForCheck.some((a) => String(a?.address || '').startsWith('16.16.16.'))
+    );
+
+    // -----------------------------------------------------------------------
+    // STAGE 0: Auto-Restore Paid Subscribers (dueAmount <= 0 yet still suspended)
+    // -----------------------------------------------------------------------
+    if (dueAmount <= 0 && (isDbSuspended || isMkSuspended)) {
+      try {
+        const restoreProfile = resolveExactSubscriberProfile({
+          liveSecret: liveSecForCheck,
+          subscriber: sub as any,
+          mikrotikProfiles: mkCaches?.profileNames || [],
+          expiryProfileName: settings.expiry_ppp_profile,
+        });
+        const secretId = String(liveSecForCheck?.['.id'] || liveSecForCheck?.id || '').trim();
+        if (secretId && isMkSuspended) {
+          await mk.patchSecret(secretId, {
+            profile: restoreProfile,
+            disabled: 'false',
+          });
+        }
+        for (const sess of liveActiveForCheck) {
+          const activeId = String(sess?.['.id'] || sess?.id || '').trim();
+          if (activeId) {
+            const kicked = await mk.kickActiveSession(activeId);
+            if (kicked) kickedActiveSessions++;
+          }
+        }
+        if (!isSynthetic && sub.id) {
+          await safeUpdateSubscriber(
+            supabase,
+            String(sub.id),
+            {
+              is_suspended: false,
+              billing_status: 'ACTIVE',
+              account_status: 'ACTIVE',
+              grace_until: null,
+              grace_ends_at: null,
+              last_restored_at: nowIso,
+              original_package_profile: restoreProfile,
+              package_name: restoreProfile,
+              package_profile_name: restoreProfile,
+            },
+            {
+              billing_status: 'ACTIVE',
+              account_status: 'ACTIVE',
+              grace_ends_at: null,
+              last_restored_at: nowIso,
+              original_package_profile: restoreProfile,
+              package_profile_name: restoreProfile,
+            },
+            {
+              account_status: 'ACTIVE',
+              package_profile_name: restoreProfile,
+            },
+            schemaWarningsSet
+          );
+          await safeInsertAuditLog(
+            supabase,
+            {
+              subscriber_id: String(sub.id),
+              username: uname,
+              action_type: 'RESTORED_ON_PAYMENT',
+              previous_profile: liveSecForCheck?.profile || settings.expiry_ppp_profile,
+              applied_profile: restoreProfile,
+              triggered_by: triggeredBy,
+              notes: `Auto-restored zero-due paid subscriber during expiry sweep -> "${restoreProfile}".`,
+              created_at: nowIso,
+            },
+            schemaWarningsSet
+          );
+        }
+        restoredPaid++;
+      } catch (err: any) {
+        errors.push(`Auto-restore error for paid user @${uname}: ${err?.message || 'Unknown error'}`);
+      }
+      skippedPaid++;
+      continue;
+    }
+
     const { nextBillingDate } = resolveSubscriberAnniversaryNextDue(sub, [], new Date(nowMs));
     const subNextDue = sub.next_billing_date ? String(sub.next_billing_date).slice(0, 10) : null;
+
+    // -----------------------------------------------------------------------
+    // STAGE 0B: Exempt "Shifted to Next Month" or future next_billing_date subscribers
+    // -----------------------------------------------------------------------
+    const isShiftedNextMonth = Boolean(
+      (sub.shifted_to_next_month === true && (!subNextDue || todayYmd < subNextDue)) ||
+        (unpaidInfo?.allShiftedNextMonth && (!unpaidInfo.earliestDueDate || todayYmd < unpaidInfo.earliestDueDate))
+    );
+    const hasFutureNextBillingOnly = Boolean(
+      subNextDue &&
+        todayYmd < subNextDue &&
+        (!unpaidInfo?.earliestDueDate || unpaidInfo.earliestDueDate > todayYmd)
+    );
+    if (isShiftedNextMonth || hasFutureNextBillingOnly) {
+      skippedPaid++;
+      continue;
+    }
+
     const rawExpiry =
       unpaidInfo?.earliestDueDate && (!subNextDue || unpaidInfo.earliestDueDate < subNextDue)
         ? unpaidInfo.earliestDueDate
@@ -478,8 +631,6 @@ export async function runExpirySweep(
       continue;
     }
 
-    const billingStatus = String(sub.billing_status || '').toUpperCase();
-    const accountStatus = String(sub.account_status || 'ACTIVE').toUpperCase();
     const amountDue = dueAmount > 0 ? dueAmount : Number(sub.monthly_fee) || 2500;
 
     // -----------------------------------------------------------------------
@@ -793,6 +944,7 @@ export async function runExpirySweep(
     disabledSecrets,
     kickedActiveSessions,
     skippedPaid,
+    restoredPaid,
     errors,
     schemaWarnings: Array.from(schemaWarningsSet),
     durationMs: Date.now() - startedAt,

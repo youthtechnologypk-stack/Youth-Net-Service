@@ -30,6 +30,7 @@ ALTER TABLE public.portal_users
     ADD COLUMN IF NOT EXISTS original_package_profile TEXT,
     ADD COLUMN IF NOT EXISTS billing_status TEXT DEFAULT 'ACTIVE',
     ADD COLUMN IF NOT EXISTS is_suspended BOOLEAN DEFAULT FALSE,
+    ADD COLUMN IF NOT EXISTS shifted_to_next_month BOOLEAN DEFAULT FALSE,
     ADD COLUMN IF NOT EXISTS grace_until TIMESTAMPTZ,
     ADD COLUMN IF NOT EXISTS grace_ends_at TIMESTAMPTZ,
     ADD COLUMN IF NOT EXISTS last_reminder_cycle TEXT,
@@ -38,7 +39,8 @@ ALTER TABLE public.portal_users
 
 ALTER TABLE IF EXISTS public.invoices
     ADD COLUMN IF NOT EXISTS package_profile TEXT,
-    ADD COLUMN IF NOT EXISTS package_name TEXT;
+    ADD COLUMN IF NOT EXISTS package_name TEXT,
+    ADD COLUMN IF NOT EXISTS shifted_to_next_month BOOLEAN DEFAULT FALSE;
 
 CREATE INDEX IF NOT EXISTS idx_portal_users_role_billing_status ON public.portal_users (role, billing_status);
 CREATE INDEX IF NOT EXISTS idx_portal_users_expiry_date ON public.portal_users (expiry_date);
@@ -50,7 +52,7 @@ CREATE TABLE IF NOT EXISTS public.expiry_audit_logs (
     id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
     subscriber_id UUID,
     username TEXT NOT NULL,
-    action_type TEXT NOT NULL CHECK (action_type IN ('REMINDER_3D','ENTERED_GRACE','SUSPENDED_16_POOL','DISABLED_SECRET','RESTORED_ON_PAYMENT','GRACE_EXTENDED')),
+    action_type TEXT NOT NULL CHECK (action_type IN ('REMINDER_3D','ENTERED_GRACE','SUSPENDED_16_POOL','DISABLED_SECRET','RESTORED_ON_PAYMENT','GRACE_EXTENDED','GRACE_REMOVED','SHIFTED_NEXT_MONTH')),
     previous_profile TEXT,
     applied_profile TEXT,
     triggered_by TEXT NOT NULL CHECK (triggered_by IN ('CRON_2PM','ADMIN','AGENT_PAYMENT_SYNC')),
