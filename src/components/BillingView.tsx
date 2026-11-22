@@ -92,17 +92,29 @@ import {
   runAnniversaryInvoicingCron,
 } from '../lib/anniversaryBilling';
 
+import {
+  StaffPermissions,
+  resolveStaffPermissions,
+} from '../lib/staffPermissions';
+
 export interface BillingViewProps {
   currentRole?: SystemRole;
   currentUser?: UserAccount | null;
+  staffPermissions?: StaffPermissions;
   onOpenReceiptModal?: (invoice: any) => void;
 }
 
 export const BillingView: React.FC<BillingViewProps> = ({
   currentRole = 'ADMIN',
   currentUser,
+  staffPermissions,
   onOpenReceiptModal,
 }) => {
+  const perms = useMemo(
+    () => staffPermissions || resolveStaffPermissions(currentUser, currentRole),
+    [staffPermissions, currentUser, currentRole]
+  );
+  const canBulkReceive = perms.bulk_billing && perms.collect_fee;
   const { formatCurrency, currencySymbol } = useCurrency();
   const { customers, agents, routers, selectedRouterId, packages, profilePriceMap } = useISP();
   const activeRouter = routers.find((r) => r.id === selectedRouterId) || routers[0];
@@ -389,6 +401,7 @@ export const BillingView: React.FC<BillingViewProps> = ({
 
   // Helper to open Record Payment modal with accurate remaining balance
   const handleOpenMarkPaid = (inv: SupabaseInvoice) => {
+    if (!perms.collect_fee) return;
     setSelectedInvoice(inv);
     const alreadyPaid = Number(inv.paid_amount) || 0;
     const remainingDue = Math.max(0, (Number(inv.amount) || 0) - alreadyPaid);
@@ -403,6 +416,7 @@ export const BillingView: React.FC<BillingViewProps> = ({
 
   // 4. "Record Payment / Mark Paid" Direct Supabase UPDATE & Agent cash_in_hand Increment
   const handleConfirmMarkPaid = async () => {
+    if (!perms.collect_fee) return;
     if (!selectedInvoice) return;
 
     const enteredVal = Number(paymentReceivedInput);
@@ -555,6 +569,7 @@ export const BillingView: React.FC<BillingViewProps> = ({
 
   // 5. Open Edit Invoice Modal with auto-preselected live MikroTik secret profile
   const handleOpenEditModal = (inv: SupabaseInvoice) => {
+    if (!perms.edit_delete_invoice) return;
     setInvoiceToEdit(inv);
     setEditAmount(Number(inv.amount) || 0);
     setEditDueDate(inv.due_date || '');
@@ -629,6 +644,7 @@ export const BillingView: React.FC<BillingViewProps> = ({
   // 6. Execute Invoice Update in Supabase + Sync Package Profile & Restore MikroTik if PAID
   const handleUpdateInvoice = async (e: React.FormEvent) => {
     e.preventDefault();
+    if (!perms.edit_delete_invoice) return;
     if (!invoiceToEdit) return;
 
     setIsSubmitting(true);
@@ -708,6 +724,7 @@ export const BillingView: React.FC<BillingViewProps> = ({
 
   // 7. Execute Invoice Delete in Supabase
   const handleDeleteInvoice = async () => {
+    if (!perms.edit_delete_invoice) return;
     if (!invoiceToDelete) return;
 
     setIsSubmitting(true);
@@ -914,6 +931,7 @@ export const BillingView: React.FC<BillingViewProps> = ({
     agentName: string;
     referenceNote: string;
   }) => {
+    if (!canBulkReceive) return;
     if (selectedInvoices.length === 0 || isBulkReceiving) return;
     setIsBulkReceiving(true);
     setBulkReceiveProgress(`Processing 0 / ${selectedInvoices.length}...`);
@@ -977,6 +995,7 @@ export const BillingView: React.FC<BillingViewProps> = ({
   );
 
   const handleShiftInvoiceNextMonth = async (inv: SupabaseInvoice) => {
+    if (!perms.grace_and_shift) return;
     const uname = String(inv.subscriber_username || '').trim().toLowerCase();
     const client = clientByUsername[uname] || null;
     setShiftingInvoiceId(inv.id);
@@ -1436,7 +1455,7 @@ export const BillingView: React.FC<BillingViewProps> = ({
       </div>
 
       {/* Sticky Bulk Payment Action Bar */}
-      {selectedInvoices.length > 0 && (
+      {canBulkReceive && selectedInvoices.length > 0 && (
         <div className="sticky top-2 z-30 rounded-xl border border-emerald-500/60 bg-slate-950/95 backdrop-blur-md px-3.5 py-2.5 shadow-2xl flex flex-wrap items-center justify-between gap-2.5">
           <div className="flex items-center gap-2 text-xs">
             <span className="px-2.5 py-1 rounded-md bg-emerald-500/20 text-emerald-300 border border-emerald-500/40 font-mono font-bold">
@@ -1471,7 +1490,7 @@ export const BillingView: React.FC<BillingViewProps> = ({
 
       {/* Mobile Invoice Card List (< 768px) */}
       <div className="flex flex-col gap-3 md:hidden w-full max-w-full">
-        {selectableUnpaidInvoices.length > 0 && (
+        {canBulkReceive && selectableUnpaidInvoices.length > 0 && (
           <div className="flex items-center justify-between px-3 py-2 rounded-xl border border-slate-800 bg-[#111A2E] text-xs">
             <label className="inline-flex items-center gap-2 font-semibold text-slate-200 cursor-pointer">
               <input
@@ -1522,7 +1541,7 @@ export const BillingView: React.FC<BillingViewProps> = ({
                 {/* Row 1: Checkbox + @username (bold) + INV-# + Status Badge */}
                 <div className="flex items-start justify-between gap-2 min-w-0">
                   <div className="flex items-start gap-2.5 min-w-0 flex-1">
-                    {isSelectable && (
+                    {canBulkReceive && isSelectable && (
                       <input
                         type="checkbox"
                         checked={isChecked}
@@ -1617,26 +1636,30 @@ export const BillingView: React.FC<BillingViewProps> = ({
                 <div className="flex flex-col gap-2 w-full min-w-0">
                   {balanceDue > 0 && displayStatus !== 'PAID' ? (
                     <>
-                      <button
-                        type="button"
-                        onClick={() => handleOpenMarkPaid(inv)}
-                        className="w-full py-2.5 px-3 bg-emerald-600 hover:bg-emerald-500 text-white font-bold rounded-xl text-sm flex items-center justify-center gap-1.5 transition active:scale-[0.99] shadow cursor-pointer"
-                      >
-                        <DollarSign className="w-4 h-4 shrink-0" />
-                        <span>$ Add Payment</span>
-                      </button>
-                      <div className="flex flex-wrap items-center gap-2 w-full min-w-0">
+                      {perms.collect_fee && (
                         <button
                           type="button"
-                          disabled={shiftingInvoiceId === inv.id}
-                          onClick={() => handleShiftInvoiceNextMonth(inv)}
-                          className="flex-1 min-w-0 py-2 px-2.5 bg-indigo-950/70 hover:bg-indigo-900/80 text-indigo-300 border border-indigo-700/70 rounded-xl text-xs font-semibold flex items-center justify-center gap-1 transition cursor-pointer disabled:opacity-50"
+                          onClick={() => handleOpenMarkPaid(inv)}
+                          className="w-full py-2.5 px-3 bg-emerald-600 hover:bg-emerald-500 text-white font-bold rounded-xl text-sm flex items-center justify-center gap-1.5 transition active:scale-[0.99] shadow cursor-pointer"
                         >
-                          <FastForward className="w-3.5 h-3.5 shrink-0" />
-                          <span className="truncate">
-                            {shiftingInvoiceId === inv.id ? 'Shifting...' : 'Shift Next Mo'}
-                          </span>
+                          <DollarSign className="w-4 h-4 shrink-0" />
+                          <span>$ Add Payment</span>
                         </button>
+                      )}
+                      <div className="flex flex-wrap items-center gap-2 w-full min-w-0">
+                        {perms.grace_and_shift && (
+                          <button
+                            type="button"
+                            disabled={shiftingInvoiceId === inv.id}
+                            onClick={() => handleShiftInvoiceNextMonth(inv)}
+                            className="flex-1 min-w-0 py-2 px-2.5 bg-indigo-950/70 hover:bg-indigo-900/80 text-indigo-300 border border-indigo-700/70 rounded-xl text-xs font-semibold flex items-center justify-center gap-1 transition cursor-pointer disabled:opacity-50"
+                          >
+                            <FastForward className="w-3.5 h-3.5 shrink-0" />
+                            <span className="truncate">
+                              {shiftingInvoiceId === inv.id ? 'Shifting...' : 'Shift Next Mo'}
+                            </span>
+                          </button>
+                        )}
                         <button
                           type="button"
                           onClick={() => handleSendInvoiceWhatsApp(inv)}
@@ -1645,7 +1668,7 @@ export const BillingView: React.FC<BillingViewProps> = ({
                           <Send className="w-3.5 h-3.5 shrink-0" />
                           <span className="truncate">WA Receipt</span>
                         </button>
-                        {(currentRole === 'ADMIN' || currentRole === 'MANAGER') && (
+                        {perms.edit_delete_invoice && (
                           <>
                             <button
                               type="button"
@@ -1687,7 +1710,7 @@ export const BillingView: React.FC<BillingViewProps> = ({
                         <Printer className="w-3.5 h-3.5 shrink-0" />
                         <span className="truncate">Receipt</span>
                       </button>
-                      {(currentRole === 'ADMIN' || currentRole === 'MANAGER') && (
+                      {perms.edit_delete_invoice && (
                         <>
                           <button
                             type="button"
@@ -1724,17 +1747,19 @@ export const BillingView: React.FC<BillingViewProps> = ({
           <table className="hidden md:table w-full text-left text-sm text-slate-300">
             <thead className="bg-slate-900/80 text-xs uppercase tracking-wider text-slate-400 border-b border-slate-800">
               <tr>
-                <th className="py-3 px-3 w-10 text-center">
-                  <input
-                    type="checkbox"
-                    checked={allUnpaidSelected}
-                    disabled={selectableUnpaidInvoices.length === 0}
-                    onChange={toggleSelectAllInvoices}
-                    title="Select All Unpaid Invoices"
-                    aria-label="Select All Unpaid Invoices"
-                    className="w-4 h-4 rounded border-slate-600 bg-slate-900 text-emerald-500 focus:ring-emerald-500 cursor-pointer disabled:opacity-30"
-                  />
-                </th>
+                {canBulkReceive && (
+                  <th className="py-3 px-3 w-10 text-center">
+                    <input
+                      type="checkbox"
+                      checked={allUnpaidSelected}
+                      disabled={selectableUnpaidInvoices.length === 0}
+                      onChange={toggleSelectAllInvoices}
+                      title="Select All Unpaid Invoices"
+                      aria-label="Select All Unpaid Invoices"
+                      className="w-4 h-4 rounded border-slate-600 bg-slate-900 text-emerald-500 focus:ring-emerald-500 cursor-pointer disabled:opacity-30"
+                    />
+                  </th>
+                )}
                 <th className="py-3 px-4">Invoice #</th>
                 <th className="py-3 px-4">Subscriber</th>
                 <th className="py-3 px-4">Assigned Agent</th>
@@ -1747,7 +1772,7 @@ export const BillingView: React.FC<BillingViewProps> = ({
             <tbody className="divide-y divide-slate-800/60 font-sans">
               {filteredInvoices.length === 0 ? (
                 <tr>
-                  <td colSpan={8} className="py-12 text-center text-slate-500">
+                  <td colSpan={canBulkReceive ? 8 : 7} className="py-12 text-center text-slate-500">
                     <FileText className="w-10 h-10 text-slate-600 mx-auto mb-2 opacity-50" />
                     <p className="text-base font-semibold text-slate-400">No invoices found</p>
                     <p className="text-xs text-slate-500 mt-1">
@@ -1777,19 +1802,21 @@ export const BillingView: React.FC<BillingViewProps> = ({
                         isChecked ? 'bg-emerald-950/20 hover:bg-emerald-950/30' : 'hover:bg-slate-800/30'
                       }`}
                     >
-                      <td className="py-3 px-3 text-center">
-                        {isSelectable ? (
-                          <input
-                            type="checkbox"
-                            checked={isChecked}
-                            onChange={() => toggleSelectOneInvoice(inv.id)}
-                            aria-label={`Select invoice ${inv.invoice_no}`}
-                            className="w-4 h-4 rounded border-slate-600 bg-slate-900 text-emerald-500 focus:ring-emerald-500 cursor-pointer"
-                          />
-                        ) : (
-                          <Check className="w-3.5 h-3.5 text-emerald-600/60 mx-auto" />
-                        )}
-                      </td>
+                      {canBulkReceive && (
+                        <td className="py-3 px-3 text-center">
+                          {isSelectable ? (
+                            <input
+                              type="checkbox"
+                              checked={isChecked}
+                              onChange={() => toggleSelectOneInvoice(inv.id)}
+                              aria-label={`Select invoice ${inv.invoice_no}`}
+                              className="w-4 h-4 rounded border-slate-600 bg-slate-900 text-emerald-500 focus:ring-emerald-500 cursor-pointer"
+                            />
+                          ) : (
+                            <Check className="w-3.5 h-3.5 text-emerald-600/60 mx-auto" />
+                          )}
+                        </td>
+                      )}
                       <td className="py-3 px-4 font-mono font-semibold text-cyan-400">{inv.invoice_no}</td>
                       <td className="py-3 px-4">
                         <div className="font-semibold text-white">@{inv.subscriber_username}</div>
@@ -1857,25 +1884,29 @@ export const BillingView: React.FC<BillingViewProps> = ({
                         <div className="flex items-center justify-end gap-1.5">
                           {balanceDue > 0 && displayStatus !== 'PAID' ? (
                             <div className="flex items-center gap-1.5">
-                              <button
-                                type="button"
-                                onClick={() => handleOpenMarkPaid(inv)}
-                                className="px-2.5 py-1.5 bg-emerald-600 hover:bg-emerald-500 text-white font-bold rounded-lg text-xs flex items-center gap-1 transition active:scale-95 shadow cursor-pointer"
-                                title="Record Payment & Credit Field Agent"
-                              >
-                                <DollarSign className="w-3.5 h-3.5" />
-                                <span>{isPartial ? 'Add Payment' : 'Mark Paid'}</span>
-                              </button>
-                              <button
-                                type="button"
-                                disabled={shiftingInvoiceId === inv.id}
-                                onClick={() => handleShiftInvoiceNextMonth(inv)}
-                                className="px-2 py-1.5 bg-indigo-950/70 hover:bg-indigo-900/80 text-indigo-300 border border-indigo-700/70 rounded-lg text-xs font-semibold flex items-center gap-1 transition cursor-pointer disabled:opacity-50"
-                                title="Shift bill to next calendar month & exempt from expiry pool"
-                              >
-                                <FastForward className="w-3 h-3" />
-                                <span>{shiftingInvoiceId === inv.id ? 'Shifting...' : 'Shift Next Mo'}</span>
-                              </button>
+                              {perms.collect_fee && (
+                                <button
+                                  type="button"
+                                  onClick={() => handleOpenMarkPaid(inv)}
+                                  className="px-2.5 py-1.5 bg-emerald-600 hover:bg-emerald-500 text-white font-bold rounded-lg text-xs flex items-center gap-1 transition active:scale-95 shadow cursor-pointer"
+                                  title="Record Payment & Credit Field Agent"
+                                >
+                                  <DollarSign className="w-3.5 h-3.5" />
+                                  <span>{isPartial ? 'Add Payment' : 'Mark Paid'}</span>
+                                </button>
+                              )}
+                              {perms.grace_and_shift && (
+                                <button
+                                  type="button"
+                                  disabled={shiftingInvoiceId === inv.id}
+                                  onClick={() => handleShiftInvoiceNextMonth(inv)}
+                                  className="px-2 py-1.5 bg-indigo-950/70 hover:bg-indigo-900/80 text-indigo-300 border border-indigo-700/70 rounded-lg text-xs font-semibold flex items-center gap-1 transition cursor-pointer disabled:opacity-50"
+                                  title="Shift bill to next calendar month & exempt from expiry pool"
+                                >
+                                  <FastForward className="w-3 h-3" />
+                                  <span>{shiftingInvoiceId === inv.id ? 'Shifting...' : 'Shift Next Mo'}</span>
+                                </button>
+                              )}
                               <button
                                 type="button"
                                 onClick={() => handleSendInvoiceWhatsApp(inv)}
@@ -1913,8 +1944,8 @@ export const BillingView: React.FC<BillingViewProps> = ({
                             </div>
                           )}
 
-                          {/* Edit Invoice Button (Admin/Manager) */}
-                          {(currentRole === 'ADMIN' || currentRole === 'MANAGER') && (
+                          {/* Edit Invoice Button (RBAC edit_delete_invoice) */}
+                          {perms.edit_delete_invoice && (
                             <button
                               type="button"
                               onClick={() => handleOpenEditModal(inv)}
@@ -1926,8 +1957,8 @@ export const BillingView: React.FC<BillingViewProps> = ({
                             </button>
                           )}
 
-                          {/* Delete Invoice Button (Admin/Manager) */}
-                          {(currentRole === 'ADMIN' || currentRole === 'MANAGER') && (
+                          {/* Delete Invoice Button (RBAC edit_delete_invoice) */}
+                          {perms.edit_delete_invoice && (
                             <button
                               type="button"
                               onClick={() => setInvoiceToDelete(inv)}

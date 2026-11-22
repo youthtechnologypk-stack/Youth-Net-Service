@@ -2,6 +2,7 @@ import { SystemRole, UserAccount } from '../types/auth';
 import { storageService } from '../services/storageService';
 import { supabase } from '../services/supabaseClient';
 import { normalizeGisMapPermission } from './gisAccessControl';
+import { resolveStaffPermissions } from './staffPermissions';
 import {
   USERS_STORAGE_KEY,
   AUTH_STORAGE_KEY,
@@ -94,16 +95,33 @@ export function getPathFromTab(tab: string): string {
 /**
  * Checks if a given role is permitted to access a specific feature/tab
  */
-export function isRouteAllowedForRole(role: SystemRole, routeOrTab: string): boolean {
+export function isRouteAllowedForRole(
+  role: SystemRole,
+  routeOrTab: string,
+  user?: UserAccount | null
+): boolean {
   if (role === 'ADMIN') {
     return true; // Complete unrestricted access
   }
 
   const clean = routeOrTab.toLowerCase().replace(/^\//, '');
+  const perms = resolveStaffPermissions(user, role);
+
+  // Granular RBAC checks for feature-gated modules
+  if (clean === 'mikrotik' || clean.includes('mikrotik')) {
+    return perms.mikrotik_panel;
+  }
+  if (clean === 'olt' || clean === '/olt') {
+    return perms.olt_panel;
+  }
+  if (clean === 'fiber_gis' || clean === 'fiber-gis' || clean === 'gis' || clean === 'map') {
+    return perms.gis_map !== 'none';
+  }
+  if (clean === 'profit_expenses' || clean === 'profit-expenses') {
+    return perms.expenses_ledger;
+  }
 
   if (role === 'MANAGER') {
-    // Allowed: NOC Command Center, Complaints & Ticketing SLA, Subscribers, Cash Overview, Activity Logs
-    // Strictly Hidden: hardware credentials/passwords, router deletion, system settings, global currency configs
     const managerAllowed = [
       'noc',
       'capacity',
@@ -111,29 +129,21 @@ export function isRouteAllowedForRole(role: SystemRole, routeOrTab: string): boo
       'dashboard/operations',
       'complaints',
       'subscribers',
-      'billing', // Can view collections & agent cash
-      'profit_expenses',
-      'profit-expenses',
+      'billing',
       'inventory',
-      'olt', // Can view optical status
-      'fiber_gis',
-      'fiber-gis',
-      'logs', // Can view audit trail
+      'logs',
     ];
-    // Explicitly forbidden for Manager
-    const managerForbidden = ['settings', 'mikrotik', 'architecture'];
+    const managerForbidden = ['settings', 'architecture', 'users', 'permissions'];
     if (managerForbidden.some((f) => clean.includes(f))) return false;
     return managerAllowed.some((a) => clean.includes(a));
   }
 
   if (role === 'AGENT') {
-    // Allowed: /agent/portal, mobile simulator, tickets, cash collection, ont checker, fiber gis
-    const agentAllowed = ['agent', 'agent/portal', 'agent_portal', 'mobile', 'tickets', 'collections', 'ont_checker', 'fiber_gis', 'fiber-gis'];
+    const agentAllowed = ['agent', 'agent/portal', 'agent_portal', 'mobile', 'tickets', 'collections', 'ont_checker'];
     return agentAllowed.some((a) => clean === a || clean.includes(a));
   }
 
   if (role === 'CLIENT') {
-    // Allowed: /client/portal, connection status, invoices, speed test, support
     const clientAllowed = ['client', 'client/portal', 'client_portal', 'my_connection', 'my_invoices', 'my_support'];
     return clientAllowed.some((a) => clean === a || clean.includes(a));
   }
@@ -189,6 +199,8 @@ export function getStoredUser(): UserAccount | null {
         gis_map_permission: u.gis_map_permission
           ? normalizeGisMapPermission(u.gis_map_permission, u.can_access_gis_map, u.role)
           : undefined,
+        permissions:
+          u.permissions && typeof u.permissions === 'object' ? u.permissions : undefined,
         createdAt: u.createdAt || new Date().toISOString(),
       };
     }
@@ -370,6 +382,19 @@ export async function apiLogin(
           user.can_access_gis_map,
           user.role
         ),
+        permissions:
+          user.permissions && typeof user.permissions === 'object'
+            ? user.permissions
+            : resolveStaffPermissions(
+                {
+                  id: user.id,
+                  username: user.username,
+                  role: user.role,
+                  can_access_gis_map: user.can_access_gis_map,
+                  gis_map_permission: user.gis_map_permission,
+                },
+                user.role
+              ),
         createdAt: user.created_at || new Date().toISOString(),
       };
 

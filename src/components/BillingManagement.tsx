@@ -66,11 +66,17 @@ import {
   isSubscriberShiftedNextMonth,
 } from '../lib/anniversaryBilling';
 
+import {
+  StaffPermissions,
+  resolveStaffPermissions,
+} from '../lib/staffPermissions';
+
 export interface BillingManagementProps {
   onOpenReceiptModal?: (invoice: Invoice) => void;
   onOpenPaymentModal?: (invoice: Invoice) => void;
   currentRole?: SystemRole;
   currentUser?: UserAccount | null;
+  staffPermissions?: StaffPermissions;
 }
 
 export const BillingManagement: React.FC<BillingManagementProps> = ({
@@ -78,6 +84,7 @@ export const BillingManagement: React.FC<BillingManagementProps> = ({
   onOpenPaymentModal,
   currentRole,
   currentUser,
+  staffPermissions,
 }) => {
   const {
     invoices,
@@ -98,10 +105,14 @@ export const BillingManagement: React.FC<BillingManagementProps> = ({
   } = useISP();
   const { formatCurrency, currencySymbol, currencyCode } = useCurrency();
 
-  // Determine current user & admin rights
+  // Determine current user & granular RBAC rights
   const activeUser = currentUser || getStoredUser();
   const role = currentRole || activeUser?.role || 'ADMIN';
   const isAdmin = role === 'ADMIN';
+  const perms = useMemo(
+    () => staffPermissions || resolveStaffPermissions(activeUser, role),
+    [staffPermissions, activeUser, role]
+  );
 
   // Sub-tabs: Invoices, Recurring MRR, Ledger History, Agents, Expenses, WhatsApp
   const [activeTab, setActiveTab] = useState<'invoices' | 'recurring' | 'ledger' | 'agents' | 'expenses' | 'whatsapp'>('invoices');
@@ -132,6 +143,7 @@ export const BillingManagement: React.FC<BillingManagementProps> = ({
   const [isDeleteModalOpen, setIsDeleteModalOpen] = useState<boolean>(false);
 
   const handleConfirmDeleteInvoice = () => {
+    if (!perms.edit_delete_invoice) return;
     if (!invoiceToDelete) return;
     deleteInvoice(invoiceToDelete.id);
     try {
@@ -577,6 +589,7 @@ export const BillingManagement: React.FC<BillingManagementProps> = ({
 
   // Quick Action Handlers
   const handleOpenMarkPaid = (inv: Invoice) => {
+    if (!perms.collect_fee) return;
     setRecordModalInvoice(inv);
     setIsRecordPaymentOpen(true);
   };
@@ -592,6 +605,7 @@ export const BillingManagement: React.FC<BillingManagementProps> = ({
       sendWhatsAppReceipt?: boolean;
     }
   ) => {
+    if (!perms.collect_fee) return;
     const rcptNumber = `RCPT-${invoice.invoiceNumber.replace('INV-', '')}-${Date.now().toString().slice(-4)}`;
 
     updateInvoice(invoice.id, {
@@ -697,6 +711,7 @@ export const BillingManagement: React.FC<BillingManagementProps> = ({
       .trim()
       .toLowerCase();
 
+    if (!perms.grace_and_shift) return;
     if (!uname) return;
 
     setShiftingInvoiceId(inv.id);
@@ -796,6 +811,7 @@ export const BillingManagement: React.FC<BillingManagementProps> = ({
   // Add Expense handler
   const handleCreateExpense = (e: React.FormEvent) => {
     e.preventDefault();
+    if (!perms.expenses_ledger) return;
     if (!newExpTitle || !newExpAmount) return;
 
     addExpense({
@@ -1043,24 +1059,26 @@ export const BillingManagement: React.FC<BillingManagementProps> = ({
             </span>
           </button>
 
-          <button
-            onClick={() => setActiveTab('expenses')}
-            className={`px-3.5 py-2 rounded-lg text-xs font-semibold flex items-center gap-2 transition cursor-pointer shrink-0 border ${
-              activeTab === 'expenses'
-                ? 'bg-sky-600 text-white border-sky-600 font-bold shadow-sm dark:bg-sky-500/20 dark:text-sky-300 dark:border-sky-400/60 dark:shadow-[0_0_15px_rgba(56,189,248,0.18)]'
-                : 'text-slate-700 hover:text-slate-900 hover:bg-slate-100 border-transparent dark:text-slate-300 dark:hover:text-white dark:hover:bg-slate-800'
-            }`}
-          >
-            <Briefcase className="w-4 h-4" />
-            <span>ISP Expenses</span>
-            <span
-              className={`text-[10px] px-1.5 py-0.2 rounded-full font-mono ${
-                activeTab === 'expenses' ? 'bg-white/20 text-white dark:bg-sky-500/30 dark:text-sky-200' : 'bg-slate-200 text-slate-700 dark:bg-slate-800 dark:text-slate-300'
+          {perms.expenses_ledger && (
+            <button
+              onClick={() => setActiveTab('expenses')}
+              className={`px-3.5 py-2 rounded-lg text-xs font-semibold flex items-center gap-2 transition cursor-pointer shrink-0 border ${
+                activeTab === 'expenses'
+                  ? 'bg-sky-600 text-white border-sky-600 font-bold shadow-sm dark:bg-sky-500/20 dark:text-sky-300 dark:border-sky-400/60 dark:shadow-[0_0_15px_rgba(56,189,248,0.18)]'
+                  : 'text-slate-700 hover:text-slate-900 hover:bg-slate-100 border-transparent dark:text-slate-300 dark:hover:text-white dark:hover:bg-slate-800'
               }`}
             >
-              {expenses.length}
-            </span>
-          </button>
+              <Briefcase className="w-4 h-4" />
+              <span>ISP Expenses</span>
+              <span
+                className={`text-[10px] px-1.5 py-0.2 rounded-full font-mono ${
+                  activeTab === 'expenses' ? 'bg-white/20 text-white dark:bg-sky-500/30 dark:text-sky-200' : 'bg-slate-200 text-slate-700 dark:bg-slate-800 dark:text-slate-300'
+                }`}
+              >
+                {expenses.length}
+              </span>
+            </button>
+          )}
 
           <button
             onClick={() => setActiveTab('whatsapp')}
@@ -1604,29 +1622,33 @@ export const BillingManagement: React.FC<BillingManagementProps> = ({
                               {/* 1-CLICK MARK AS PAID + SHIFT NEXT MO (For Due & Overdue) */}
                               {inv.status !== 'paid' ? (
                                 <>
-                                  <button
-                                    type="button"
-                                    onClick={() => void handleShiftInvoiceNextMonth(inv)}
-                                    disabled={shiftingInvoiceId === inv.id}
-                                    className="bg-cyan-950 hover:bg-cyan-900 text-cyan-300 border border-cyan-700 font-semibold px-2.5 py-1.5 rounded-lg text-xs transition flex items-center gap-1 cursor-pointer disabled:opacity-50"
-                                    title="Shift Bill & Cycle to Next Month (+1 Calendar Month & Exempt from Expiry)"
-                                  >
-                                    {shiftingInvoiceId === inv.id ? (
-                                      <RotateCw className="w-3.5 h-3.5 animate-spin" />
-                                    ) : (
-                                      <FastForward className="w-3.5 h-3.5" />
-                                    )}
-                                    <span>Shift Next Mo</span>
-                                  </button>
-                                  <button
-                                    type="button"
-                                    onClick={() => handleOpenMarkPaid(inv)}
-                                    className="bg-emerald-600 hover:bg-emerald-500 text-slate-950 font-bold px-3 py-1.5 rounded-lg text-xs transition shadow-md shadow-emerald-950/40 flex items-center gap-1 active:scale-95 cursor-pointer"
-                                    title="1-Click Mark as Paid & Record Fee Receipt"
-                                  >
-                                    <CheckCircle2 className="w-3.5 h-3.5 text-slate-950" />
-                                    <span>Mark Paid</span>
-                                  </button>
+                                  {perms.grace_and_shift && (
+                                    <button
+                                      type="button"
+                                      onClick={() => void handleShiftInvoiceNextMonth(inv)}
+                                      disabled={shiftingInvoiceId === inv.id}
+                                      className="bg-cyan-950 hover:bg-cyan-900 text-cyan-300 border border-cyan-700 font-semibold px-2.5 py-1.5 rounded-lg text-xs transition flex items-center gap-1 cursor-pointer disabled:opacity-50"
+                                      title="Shift Bill & Cycle to Next Month (+1 Calendar Month & Exempt from Expiry)"
+                                    >
+                                      {shiftingInvoiceId === inv.id ? (
+                                        <RotateCw className="w-3.5 h-3.5 animate-spin" />
+                                      ) : (
+                                        <FastForward className="w-3.5 h-3.5" />
+                                      )}
+                                      <span>Shift Next Mo</span>
+                                    </button>
+                                  )}
+                                  {perms.collect_fee && (
+                                    <button
+                                      type="button"
+                                      onClick={() => handleOpenMarkPaid(inv)}
+                                      className="bg-emerald-600 hover:bg-emerald-500 text-slate-950 font-bold px-3 py-1.5 rounded-lg text-xs transition shadow-md shadow-emerald-950/40 flex items-center gap-1 active:scale-95 cursor-pointer"
+                                      title="1-Click Mark as Paid & Record Fee Receipt"
+                                    >
+                                      <CheckCircle2 className="w-3.5 h-3.5 text-slate-950" />
+                                      <span>Mark Paid</span>
+                                    </button>
+                                  )}
                                 </>
                               ) : (
                                 <>
@@ -1657,30 +1679,34 @@ export const BillingManagement: React.FC<BillingManagementProps> = ({
                               )}
 
                               {/* EDIT INVOICE */}
-                              <button
-                                type="button"
-                                onClick={() => {
-                                  setSelectedInvoiceToEdit(inv);
-                                  setIsEditModalOpen(true);
-                                }}
-                                className="bg-slate-800 hover:bg-slate-700 text-slate-300 hover:text-white border border-slate-700 p-1.5 rounded-lg text-xs transition cursor-pointer"
-                                title="Edit Line Items or Package Details"
-                              >
-                                <Edit3 className="w-3.5 h-3.5 text-slate-400" />
-                              </button>
+                              {perms.edit_delete_invoice && (
+                                <button
+                                  type="button"
+                                  onClick={() => {
+                                    setSelectedInvoiceToEdit(inv);
+                                    setIsEditModalOpen(true);
+                                  }}
+                                  className="bg-slate-800 hover:bg-slate-700 text-slate-300 hover:text-white border border-slate-700 p-1.5 rounded-lg text-xs transition cursor-pointer"
+                                  title="Edit Line Items or Package Details"
+                                >
+                                  <Edit3 className="w-3.5 h-3.5 text-slate-400" />
+                                </button>
+                              )}
 
                               {/* DELETE INVOICE */}
-                              <button
-                                type="button"
-                                onClick={() => {
-                                  setInvoiceToDelete(inv);
-                                  setIsDeleteModalOpen(true);
-                                }}
-                                className="bg-slate-800 hover:bg-rose-950 text-slate-400 hover:text-rose-400 border border-slate-700 hover:border-rose-800/80 p-1.5 rounded-lg text-xs transition cursor-pointer"
-                                title="Delete Invoice from Ledger"
-                              >
-                                <Trash2 className="w-3.5 h-3.5 text-slate-400 hover:text-rose-400" />
-                              </button>
+                              {perms.edit_delete_invoice && (
+                                <button
+                                  type="button"
+                                  onClick={() => {
+                                    setInvoiceToDelete(inv);
+                                    setIsDeleteModalOpen(true);
+                                  }}
+                                  className="bg-slate-800 hover:bg-rose-950 text-slate-400 hover:text-rose-400 border border-slate-700 hover:border-rose-800/80 p-1.5 rounded-lg text-xs transition cursor-pointer"
+                                  title="Delete Invoice from Ledger"
+                                >
+                                  <Trash2 className="w-3.5 h-3.5 text-slate-400 hover:text-rose-400" />
+                                </button>
+                              )}
                             </div>
                           </td>
                         </tr>
@@ -2126,25 +2152,29 @@ export const BillingManagement: React.FC<BillingManagementProps> = ({
                     </div>
 
                     <div className="grid grid-cols-2 gap-2 pt-1 font-sans">
-                      <button
-                        onClick={() => {
-                          setReceiveCashDefaultAgentId(agent.id);
-                          setIsReceiveCashModalOpen(true);
-                        }}
-                        className="bg-cyan-950 hover:bg-cyan-900 text-cyan-300 border border-cyan-800 px-2.5 py-1.5 rounded-lg text-xs font-semibold transition"
-                      >
-                        Receive Cash
-                      </button>
-                      <button
-                        onClick={() => {
-                          setSelectedAgentForSalary(agent);
-                          setSalaryModalMode('disburse_advance');
-                          setIsSalaryModalOpen(true);
-                        }}
-                        className="bg-amber-950 hover:bg-amber-900 text-amber-300 border border-amber-800 px-2.5 py-1.5 rounded-lg text-xs font-semibold transition"
-                      >
-                        Disburse Advance
-                      </button>
+                      {perms.collect_fee && (
+                        <button
+                          onClick={() => {
+                            setReceiveCashDefaultAgentId(agent.id);
+                            setIsReceiveCashModalOpen(true);
+                          }}
+                          className="bg-cyan-950 hover:bg-cyan-900 text-cyan-300 border border-cyan-800 px-2.5 py-1.5 rounded-lg text-xs font-semibold transition"
+                        >
+                          Receive Cash
+                        </button>
+                      )}
+                      {perms.expenses_ledger && (
+                        <button
+                          onClick={() => {
+                            setSelectedAgentForSalary(agent);
+                            setSalaryModalMode('disburse_advance');
+                            setIsSalaryModalOpen(true);
+                          }}
+                          className="bg-amber-950 hover:bg-amber-900 text-amber-300 border border-amber-800 px-2.5 py-1.5 rounded-lg text-xs font-semibold transition"
+                        >
+                          Disburse Advance
+                        </button>
+                      )}
                     </div>
                   </div>
                 );
@@ -2155,7 +2185,7 @@ export const BillingManagement: React.FC<BillingManagementProps> = ({
       )}
 
       {/* TAB 3: ISP EXPENSES */}
-      {activeTab === 'expenses' && (
+      {activeTab === 'expenses' && perms.expenses_ledger && (
         <div className="space-y-4">
           <div className="flex items-center justify-between bg-slate-900 border border-slate-800 p-4 rounded-xl shadow-lg">
             <div>

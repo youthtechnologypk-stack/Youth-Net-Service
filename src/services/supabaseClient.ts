@@ -55,6 +55,7 @@ export interface SupabasePortalUser {
   last_restored_at?: string | null;
   can_access_gis_map?: boolean | null;
   gis_map_permission?: 'none' | 'view' | 'edit' | string | null;
+  permissions?: Record<string, any> | null;
   created_at?: string;
 }
 

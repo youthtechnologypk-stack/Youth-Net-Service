@@ -68,8 +68,20 @@ import {
   resolveExactSubscriberProfile,
 } from '../lib/mikrotikProfileSync';
 import { BulkReceiveAmountModal } from './BulkReceiveAmountModal';
+import { SystemRole, UserAccount } from '../types/auth';
+import { getStoredUser } from '../lib/auth';
+import {
+  StaffPermissions,
+  resolveStaffPermissions,
+} from '../lib/staffPermissions';
 
 type ExpiryTabKey = 'expiring_3d' | 'grace_24h' | 'suspended_16' | 'audit_logs';
+
+export interface ExpiryAutomationViewProps {
+  currentRole?: SystemRole;
+  currentUser?: UserAccount | null;
+  staffPermissions?: StaffPermissions;
+}
 
 function formatCountdown(targetMs: number, nowMs: number): string {
   const diff = targetMs - nowMs;
@@ -93,7 +105,17 @@ function formatDateTimePkt(iso?: string | null): string {
   });
 }
 
-export const ExpiryAutomationView: React.FC = () => {
+export const ExpiryAutomationView: React.FC<ExpiryAutomationViewProps> = ({
+  currentRole,
+  currentUser,
+  staffPermissions,
+}) => {
+  const perms = useMemo(
+    () => staffPermissions || resolveStaffPermissions(currentUser || getStoredUser(), currentRole),
+    [staffPermissions, currentUser, currentRole]
+  );
+  const canBulkActivate = perms.bulk_billing;
+  const canBulkReceive = perms.bulk_billing && perms.collect_fee;
   const { routers, selectedRouterId } = useISP();
   const { formatCurrency } = useCurrency();
   const activeRouter = routers.find((r) => r.id === selectedRouterId) || routers[0];
@@ -640,6 +662,7 @@ export const ExpiryAutomationView: React.FC = () => {
 
   // Bulk Activate (Restore Exact MikroTik Profiles) for selected rows
   const handleBulkActivateSelected = async () => {
+    if (!canBulkActivate) return;
     if (selectedRowsInActiveTab.length === 0 || isBulkActivating) return;
     setIsBulkActivating(true);
     setBulkActivateProgress(`Restoring 0 / ${selectedRowsInActiveTab.length}...`);
@@ -721,6 +744,7 @@ export const ExpiryAutomationView: React.FC = () => {
     agentName: string;
     referenceNote: string;
   }) => {
+    if (!canBulkReceive) return;
     if (selectedRowsInActiveTab.length === 0) return;
     setIsBulkReceiving(true);
     setBulkReceiveProgress(`Preparing ${selectedRowsInActiveTab.length} account(s)...`);
@@ -900,6 +924,7 @@ export const ExpiryAutomationView: React.FC = () => {
   const handleOpenEditGraceModal = (
     sub: SupabasePortalUser & { amountDue: number; graceEndsMs: number; isSyntheticRecord?: boolean; extraGraceNote?: string | null }
   ) => {
+    if (!perms.grace_and_shift) return;
     setEditGraceTarget(sub);
     setEditGraceDateTimeLocal(toDateTimeLocalValue(sub.graceEndsMs || Date.now() + 24 * 3_600_000));
     setEditGraceNote(sub.extraGraceNote || '');
@@ -915,6 +940,7 @@ export const ExpiryAutomationView: React.FC = () => {
 
   const handleSaveEditGrace = async (e: React.FormEvent) => {
     e.preventDefault();
+    if (!perms.grace_and_shift) return;
     if (!editGraceTarget || !editGraceDateTimeLocal) return;
     const targetMs = Date.parse(editGraceDateTimeLocal);
     if (Number.isNaN(targetMs)) {
@@ -954,6 +980,7 @@ export const ExpiryAutomationView: React.FC = () => {
 
   // Remove / Cancel Grace Period (suspends immediately if past-due unpaid & not shifted, else restores ACTIVE)
   const handleConfirmRemoveGrace = async () => {
+    if (!perms.grace_and_shift) return;
     if (!removeGraceTarget) return;
     const sub = removeGraceTarget;
     const uname = String(sub.username || '').trim().toLowerCase();
@@ -995,6 +1022,7 @@ export const ExpiryAutomationView: React.FC = () => {
   const handleShiftBillToNextMonth = async (
     sub: SupabasePortalUser & { isSyntheticRecord?: boolean }
   ) => {
+    if (!perms.grace_and_shift) return;
     const uname = String(sub.username || '').trim().toLowerCase();
     setBusyUsernames((p) => ({ ...p, [uname]: true }));
     try {
@@ -1030,6 +1058,7 @@ export const ExpiryAutomationView: React.FC = () => {
   const handleCollectAndRestore = async (
     sub: SupabasePortalUser & { amountDue: number }
   ) => {
+    if (!perms.collect_fee) return;
     const uname = String(sub.username || '').trim().toLowerCase();
     setBusyUsernames((p) => ({ ...p, [uname]: true }));
     const nowIso = new Date().toISOString();
@@ -1098,6 +1127,7 @@ export const ExpiryAutomationView: React.FC = () => {
   const handleOpenExtraGraceModal = (
     sub: SupabasePortalUser & { amountDue: number; effectiveExpiryMs?: number | null; isSyntheticRecord?: boolean }
   ) => {
+    if (!perms.grace_and_shift) return;
     setExtraGraceTarget(sub);
     setExtraGracePreset('24');
     setExtraGraceCustomHours('36');
@@ -1115,6 +1145,7 @@ export const ExpiryAutomationView: React.FC = () => {
   // Grant Extra Grace: Set grace_until = NOW + hours, is_suspended = false, restore exact MikroTik profile & kick 16.16.16.x
   const handleConfirmExtraGrace = async (e: React.FormEvent) => {
     e.preventDefault();
+    if (!perms.grace_and_shift) return;
     if (!extraGraceTarget) return;
 
     const sub = extraGraceTarget;
@@ -1659,7 +1690,7 @@ export const ExpiryAutomationView: React.FC = () => {
         </div>
 
         {/* Sticky Bulk Action Bar when 1+ subscribers are selected in Expiring/Grace/Suspended tabs */}
-        {activeSubTab !== 'audit_logs' && selectedRowsInActiveTab.length > 0 && (
+        {canBulkActivate && activeSubTab !== 'audit_logs' && selectedRowsInActiveTab.length > 0 && (
           <div className="sticky top-2 z-20 p-3 rounded-xl bg-slate-950/95 backdrop-blur-md border border-cyan-600/60 shadow-2xl flex flex-wrap items-center justify-between gap-3">
             <div className="flex items-center gap-2.5 text-xs">
               <span className="px-2.5 py-1 rounded-lg bg-cyan-500/20 border border-cyan-500/40 text-cyan-300 font-bold font-mono">
@@ -1687,7 +1718,7 @@ export const ExpiryAutomationView: React.FC = () => {
                 </span>
               </button>
 
-              {(activeSubTab === 'suspended_16' || bulkReceivePreviewRows.length > 0) && (
+              {canBulkReceive && (activeSubTab === 'suspended_16' || bulkReceivePreviewRows.length > 0) && (
                 <button
                   type="button"
                   disabled={isBulkActivating || isBulkReceiving || bulkReceivePreviewRows.length === 0}
@@ -1720,15 +1751,17 @@ export const ExpiryAutomationView: React.FC = () => {
             <table className="w-full text-left font-mono text-xs tabular-nums">
               <thead>
                 <tr className="border-b border-slate-800 text-slate-400">
-                  <th className="py-2.5 px-3 w-10">
-                    <input
-                      type="checkbox"
-                      checked={allInTabSelected}
-                      onChange={toggleSelectAllInTab}
-                      aria-label="Select all expiring subscribers"
-                      className="w-4 h-4 rounded border-slate-600 bg-slate-900 accent-cyan-500 cursor-pointer"
-                    />
-                  </th>
+                  {canBulkActivate && (
+                    <th className="py-2.5 px-3 w-10">
+                      <input
+                        type="checkbox"
+                        checked={allInTabSelected}
+                        onChange={toggleSelectAllInTab}
+                        aria-label="Select all expiring subscribers"
+                        className="w-4 h-4 rounded border-slate-600 bg-slate-900 accent-cyan-500 cursor-pointer"
+                      />
+                    </th>
+                  )}
                   <th className="py-2.5 px-3 font-sans">Subscriber</th>
                   <th className="py-2.5 px-3">Package</th>
                   <th className="py-2.5 px-3">Expiry (2:00 PM PKT)</th>
@@ -1740,7 +1773,7 @@ export const ExpiryAutomationView: React.FC = () => {
               <tbody className="divide-y divide-slate-800/60">
                 {categorizedSubscribers.expiring3d.length === 0 ? (
                   <tr>
-                    <td colSpan={7} className="py-8 text-center text-slate-500 font-sans">
+                    <td colSpan={canBulkActivate ? 7 : 6} className="py-8 text-center text-slate-500 font-sans">
                       No subscribers expiring within the next 3 days.
                     </td>
                   </tr>
@@ -1750,15 +1783,17 @@ export const ExpiryAutomationView: React.FC = () => {
                     const checked = Boolean(selectedUsernames[uname]);
                     return (
                       <tr key={sub.id} className={`hover:bg-slate-900/50 ${checked ? 'bg-cyan-950/20' : ''}`}>
-                        <td className="py-2.5 px-3">
-                          <input
-                            type="checkbox"
-                            checked={checked}
-                            onChange={() => toggleSelectOneUser(uname)}
-                            aria-label={`Select @${uname}`}
-                            className="w-4 h-4 rounded border-slate-600 bg-slate-900 accent-cyan-500 cursor-pointer"
-                          />
-                        </td>
+                        {canBulkActivate && (
+                          <td className="py-2.5 px-3">
+                            <input
+                              type="checkbox"
+                              checked={checked}
+                              onChange={() => toggleSelectOneUser(uname)}
+                              aria-label={`Select @${uname}`}
+                              className="w-4 h-4 rounded border-slate-600 bg-slate-900 accent-cyan-500 cursor-pointer"
+                            />
+                          </td>
+                        )}
                         <td className="py-2.5 px-3 font-sans">
                           <div className="font-bold text-white">{sub.full_name}</div>
                           <div className="text-[11px] font-mono text-cyan-400">
@@ -1790,16 +1825,18 @@ export const ExpiryAutomationView: React.FC = () => {
                         </td>
                         <td className="py-2.5 px-3 text-right">
                           <div className="inline-flex items-center gap-2 justify-end">
-                            <button
-                              type="button"
-                              disabled={Boolean(busyUsernames[uname])}
-                              onClick={() => handleShiftBillToNextMonth(sub)}
-                              className="px-2.5 py-1.5 rounded-lg bg-indigo-950/70 hover:bg-indigo-900/80 text-indigo-300 border border-indigo-700/70 font-semibold text-xs inline-flex items-center gap-1 transition cursor-pointer disabled:opacity-50 whitespace-nowrap"
-                              title="Shift current bill & cycle to next calendar month (exempt from expiry)"
-                            >
-                              <FastForward className="w-3 h-3" />
-                              <span>Shift Next Month</span>
-                            </button>
+                            {perms.grace_and_shift && (
+                              <button
+                                type="button"
+                                disabled={Boolean(busyUsernames[uname])}
+                                onClick={() => handleShiftBillToNextMonth(sub)}
+                                className="px-2.5 py-1.5 rounded-lg bg-indigo-950/70 hover:bg-indigo-900/80 text-indigo-300 border border-indigo-700/70 font-semibold text-xs inline-flex items-center gap-1 transition cursor-pointer disabled:opacity-50 whitespace-nowrap"
+                                title="Shift current bill & cycle to next calendar month (exempt from expiry)"
+                              >
+                                <FastForward className="w-3 h-3" />
+                                <span>Shift Next Month</span>
+                              </button>
+                            )}
                             <button
                               type="button"
                               disabled={Boolean(busyUsernames[uname])}
@@ -1826,15 +1863,17 @@ export const ExpiryAutomationView: React.FC = () => {
             <table className="w-full text-left font-mono text-xs tabular-nums">
               <thead>
                 <tr className="border-b border-slate-800 text-slate-400">
-                  <th className="py-2.5 px-3 w-10">
-                    <input
-                      type="checkbox"
-                      checked={allInTabSelected}
-                      onChange={toggleSelectAllInTab}
-                      aria-label="Select all grace subscribers"
-                      className="w-4 h-4 rounded border-slate-600 bg-slate-900 accent-cyan-500 cursor-pointer"
-                    />
-                  </th>
+                  {canBulkActivate && (
+                    <th className="py-2.5 px-3 w-10">
+                      <input
+                        type="checkbox"
+                        checked={allInTabSelected}
+                        onChange={toggleSelectAllInTab}
+                        aria-label="Select all grace subscribers"
+                        className="w-4 h-4 rounded border-slate-600 bg-slate-900 accent-cyan-500 cursor-pointer"
+                      />
+                    </th>
+                  )}
                   <th className="py-2.5 px-3 font-sans">Subscriber</th>
                   <th className="py-2.5 px-3">Package</th>
                   <th className="py-2.5 px-3">Grace Ends At</th>
@@ -1846,7 +1885,7 @@ export const ExpiryAutomationView: React.FC = () => {
               <tbody className="divide-y divide-slate-800/60">
                 {categorizedSubscribers.inGrace.length === 0 ? (
                   <tr>
-                    <td colSpan={7} className="py-8 text-center text-slate-500 font-sans">
+                    <td colSpan={canBulkActivate ? 7 : 6} className="py-8 text-center text-slate-500 font-sans">
                       No subscribers are currently inside the {settings.grace_hours}h grace window.
                     </td>
                   </tr>
@@ -1857,15 +1896,17 @@ export const ExpiryAutomationView: React.FC = () => {
                     const checked = Boolean(selectedUsernames[uname]);
                     return (
                       <tr key={sub.id} className={`hover:bg-slate-900/50 ${checked ? 'bg-cyan-950/20' : ''}`}>
-                        <td className="py-2.5 px-3">
-                          <input
-                            type="checkbox"
-                            checked={checked}
-                            onChange={() => toggleSelectOneUser(uname)}
-                            aria-label={`Select @${uname}`}
-                            className="w-4 h-4 rounded border-slate-600 bg-slate-900 accent-cyan-500 cursor-pointer"
-                          />
-                        </td>
+                        {canBulkActivate && (
+                          <td className="py-2.5 px-3">
+                            <input
+                              type="checkbox"
+                              checked={checked}
+                              onChange={() => toggleSelectOneUser(uname)}
+                              aria-label={`Select @${uname}`}
+                              className="w-4 h-4 rounded border-slate-600 bg-slate-900 accent-cyan-500 cursor-pointer"
+                            />
+                          </td>
+                        )}
                         <td className="py-2.5 px-3 font-sans">
                           <div className="font-bold text-white">{sub.full_name}</div>
                           <div className="text-[11px] font-mono text-cyan-400">
@@ -1902,45 +1943,54 @@ export const ExpiryAutomationView: React.FC = () => {
                         </td>
                         <td className="py-2.5 px-3 text-right">
                           <div className="inline-flex flex-wrap items-center justify-end gap-1.5">
-                            <button
-                              type="button"
-                              disabled={busy}
-                              onClick={() => handleOpenEditGraceModal(sub)}
-                              className="px-2.5 py-1.5 rounded-lg bg-slate-800 hover:bg-slate-700 text-cyan-300 border border-slate-700 font-semibold text-xs inline-flex items-center gap-1 transition cursor-pointer disabled:opacity-50 whitespace-nowrap"
-                              title="Edit grace deadline (+24h / +48h / +72h / custom date & note)"
-                            >
-                              <Edit2 className="w-3 h-3" />
-                              <span>Edit Grace</span>
-                            </button>
-                            <button
-                              type="button"
-                              disabled={busy}
-                              onClick={() => setRemoveGraceTarget(sub)}
-                              className="px-2.5 py-1.5 rounded-lg bg-rose-950/70 hover:bg-rose-900/80 text-rose-300 border border-rose-800 font-semibold text-xs inline-flex items-center gap-1 transition cursor-pointer disabled:opacity-50 whitespace-nowrap"
-                              title="Remove / cancel grace period"
-                            >
-                              <Trash2 className="w-3 h-3" />
-                              <span>Remove Grace</span>
-                            </button>
-                            <button
-                              type="button"
-                              disabled={busy}
-                              onClick={() => handleShiftBillToNextMonth(sub)}
-                              className="px-2.5 py-1.5 rounded-lg bg-indigo-950/70 hover:bg-indigo-900/80 text-indigo-300 border border-indigo-700/70 font-semibold text-xs inline-flex items-center gap-1 transition cursor-pointer disabled:opacity-50 whitespace-nowrap"
-                              title="Shift bill to next month & clear grace"
-                            >
-                              <FastForward className="w-3 h-3" />
-                              <span>Shift Next Mo</span>
-                            </button>
-                            <button
-                              type="button"
-                              disabled={busy}
-                              onClick={() => handleCollectAndRestore(sub)}
-                              className="px-3 py-1.5 rounded-lg bg-emerald-500 hover:bg-emerald-400 text-slate-950 font-bold text-xs inline-flex items-center gap-1 transition cursor-pointer disabled:opacity-50 whitespace-nowrap"
-                            >
-                              <Zap className="w-3 h-3" />
-                              <span>Collect &amp; Restore</span>
-                            </button>
+                            {perms.grace_and_shift && (
+                              <>
+                                <button
+                                  type="button"
+                                  disabled={busy}
+                                  onClick={() => handleOpenEditGraceModal(sub)}
+                                  className="px-2.5 py-1.5 rounded-lg bg-slate-800 hover:bg-slate-700 text-cyan-300 border border-slate-700 font-semibold text-xs inline-flex items-center gap-1 transition cursor-pointer disabled:opacity-50 whitespace-nowrap"
+                                  title="Edit grace deadline (+24h / +48h / +72h / custom date & note)"
+                                >
+                                  <Edit2 className="w-3 h-3" />
+                                  <span>Edit Grace</span>
+                                </button>
+                                <button
+                                  type="button"
+                                  disabled={busy}
+                                  onClick={() => setRemoveGraceTarget(sub)}
+                                  className="px-2.5 py-1.5 rounded-lg bg-rose-950/70 hover:bg-rose-900/80 text-rose-300 border border-rose-800 font-semibold text-xs inline-flex items-center gap-1 transition cursor-pointer disabled:opacity-50 whitespace-nowrap"
+                                  title="Remove / cancel grace period"
+                                >
+                                  <Trash2 className="w-3 h-3" />
+                                  <span>Remove Grace</span>
+                                </button>
+                                <button
+                                  type="button"
+                                  disabled={busy}
+                                  onClick={() => handleShiftBillToNextMonth(sub)}
+                                  className="px-2.5 py-1.5 rounded-lg bg-indigo-950/70 hover:bg-indigo-900/80 text-indigo-300 border border-indigo-700/70 font-semibold text-xs inline-flex items-center gap-1 transition cursor-pointer disabled:opacity-50 whitespace-nowrap"
+                                  title="Shift bill to next month & clear grace"
+                                >
+                                  <FastForward className="w-3 h-3" />
+                                  <span>Shift Next Mo</span>
+                                </button>
+                              </>
+                            )}
+                            {perms.collect_fee && (
+                              <button
+                                type="button"
+                                disabled={busy}
+                                onClick={() => handleCollectAndRestore(sub)}
+                                className="px-3 py-1.5 rounded-lg bg-emerald-500 hover:bg-emerald-400 text-slate-950 font-bold text-xs inline-flex items-center gap-1 transition cursor-pointer disabled:opacity-50 whitespace-nowrap"
+                              >
+                                <Zap className="w-3 h-3" />
+                                <span>Collect &amp; Restore</span>
+                              </button>
+                            )}
+                            {!perms.grace_and_shift && !perms.collect_fee && (
+                              <span className="text-[11px] font-mono text-slate-500">View-only</span>
+                            )}
                           </div>
                         </td>
                       </tr>
@@ -1958,15 +2008,17 @@ export const ExpiryAutomationView: React.FC = () => {
             <table className="w-full text-left font-mono text-xs tabular-nums">
               <thead>
                 <tr className="border-b border-slate-800 text-slate-400">
-                  <th className="py-2.5 px-3 w-10">
-                    <input
-                      type="checkbox"
-                      checked={allInTabSelected}
-                      onChange={toggleSelectAllInTab}
-                      aria-label="Select all suspended subscribers"
-                      className="w-4 h-4 rounded border-slate-600 bg-slate-900 accent-cyan-500 cursor-pointer"
-                    />
-                  </th>
+                  {canBulkActivate && (
+                    <th className="py-2.5 px-3 w-10">
+                      <input
+                        type="checkbox"
+                        checked={allInTabSelected}
+                        onChange={toggleSelectAllInTab}
+                        aria-label="Select all suspended subscribers"
+                        className="w-4 h-4 rounded border-slate-600 bg-slate-900 accent-cyan-500 cursor-pointer"
+                      />
+                    </th>
+                  )}
                   <th className="py-2.5 px-3 font-sans">Subscriber</th>
                   <th className="py-2.5 px-3">Adopted MikroTik Profile</th>
                   <th className="py-2.5 px-3">Suspended At</th>
@@ -1977,7 +2029,7 @@ export const ExpiryAutomationView: React.FC = () => {
               <tbody className="divide-y divide-slate-800/60">
                 {categorizedSubscribers.suspended16.length === 0 ? (
                   <tr>
-                    <td colSpan={6} className="py-8 text-center text-slate-500 font-sans">
+                    <td colSpan={canBulkActivate ? 6 : 5} className="py-8 text-center text-slate-500 font-sans">
                       Zero subscribers currently isolated in the 16.16.16.0/24 expiry pool.
                     </td>
                   </tr>
@@ -1988,15 +2040,17 @@ export const ExpiryAutomationView: React.FC = () => {
                     const checked = Boolean(selectedUsernames[uname]);
                     return (
                       <tr key={sub.id} className={`hover:bg-slate-900/50 ${checked ? 'bg-cyan-950/20' : ''}`}>
-                        <td className="py-2.5 px-3">
-                          <input
-                            type="checkbox"
-                            checked={checked}
-                            onChange={() => toggleSelectOneUser(uname)}
-                            aria-label={`Select @${uname}`}
-                            className="w-4 h-4 rounded border-slate-600 bg-slate-900 accent-cyan-500 cursor-pointer"
-                          />
-                        </td>
+                        {canBulkActivate && (
+                          <td className="py-2.5 px-3">
+                            <input
+                              type="checkbox"
+                              checked={checked}
+                              onChange={() => toggleSelectOneUser(uname)}
+                              aria-label={`Select @${uname}`}
+                              className="w-4 h-4 rounded border-slate-600 bg-slate-900 accent-cyan-500 cursor-pointer"
+                            />
+                          </td>
+                        )}
                         <td className="py-2.5 px-3 font-sans">
                           <div className="font-bold text-white">{sub.full_name}</div>
                           <div className="text-[11px] font-mono text-rose-300">
@@ -2029,35 +2083,44 @@ export const ExpiryAutomationView: React.FC = () => {
                         </td>
                         <td className="py-2.5 px-3 text-right">
                           <div className="inline-flex flex-wrap items-center gap-1.5 justify-end">
-                            <button
-                              type="button"
-                              disabled={busy}
-                              onClick={() => handleShiftBillToNextMonth(sub)}
-                              className="px-2.5 py-1.5 rounded-lg bg-indigo-950/70 hover:bg-indigo-900/80 text-indigo-300 border border-indigo-700/70 font-semibold text-xs inline-flex items-center gap-1 transition cursor-pointer disabled:opacity-50 whitespace-nowrap"
-                              title="Shift bill to next calendar month & restore internet immediately"
-                            >
-                              <FastForward className="w-3.5 h-3.5" />
-                              <span>Shift Next Mo</span>
-                            </button>
-                            <button
-                              type="button"
-                              disabled={busy}
-                              onClick={() => handleOpenExtraGraceModal(sub)}
-                              className="px-3 py-1.5 rounded-lg bg-amber-500/15 hover:bg-amber-500/25 text-amber-300 border border-amber-500/50 font-bold text-xs inline-flex items-center gap-1.5 transition cursor-pointer disabled:opacity-50 whitespace-nowrap"
-                              title="Temporarily restore internet & grant extra hours to pay"
-                            >
-                              <Clock className="w-3.5 h-3.5" />
-                              <span>⏳ Extra Grace</span>
-                            </button>
-                            <button
-                              type="button"
-                              disabled={busy}
-                              onClick={() => handleCollectAndRestore(sub)}
-                              className="px-3.5 py-1.5 rounded-lg bg-emerald-500 hover:bg-emerald-400 text-slate-950 font-bold text-xs inline-flex items-center gap-1.5 transition cursor-pointer disabled:opacity-50 whitespace-nowrap"
-                            >
-                              <RotateCcw className="w-3.5 h-3.5" />
-                              <span>{busy ? 'Restoring...' : 'Collect & Restore'}</span>
-                            </button>
+                            {perms.grace_and_shift && (
+                              <>
+                                <button
+                                  type="button"
+                                  disabled={busy}
+                                  onClick={() => handleShiftBillToNextMonth(sub)}
+                                  className="px-2.5 py-1.5 rounded-lg bg-indigo-950/70 hover:bg-indigo-900/80 text-indigo-300 border border-indigo-700/70 font-semibold text-xs inline-flex items-center gap-1 transition cursor-pointer disabled:opacity-50 whitespace-nowrap"
+                                  title="Shift bill to next calendar month & restore internet immediately"
+                                >
+                                  <FastForward className="w-3.5 h-3.5" />
+                                  <span>Shift Next Mo</span>
+                                </button>
+                                <button
+                                  type="button"
+                                  disabled={busy}
+                                  onClick={() => handleOpenExtraGraceModal(sub)}
+                                  className="px-3 py-1.5 rounded-lg bg-amber-500/15 hover:bg-amber-500/25 text-amber-300 border border-amber-500/50 font-bold text-xs inline-flex items-center gap-1.5 transition cursor-pointer disabled:opacity-50 whitespace-nowrap"
+                                  title="Temporarily restore internet & grant extra hours to pay"
+                                >
+                                  <Clock className="w-3.5 h-3.5" />
+                                  <span>⏳ Extra Grace</span>
+                                </button>
+                              </>
+                            )}
+                            {perms.collect_fee && (
+                              <button
+                                type="button"
+                                disabled={busy}
+                                onClick={() => handleCollectAndRestore(sub)}
+                                className="px-3.5 py-1.5 rounded-lg bg-emerald-500 hover:bg-emerald-400 text-slate-950 font-bold text-xs inline-flex items-center gap-1.5 transition cursor-pointer disabled:opacity-50 whitespace-nowrap"
+                              >
+                                <RotateCcw className="w-3.5 h-3.5" />
+                                <span>{busy ? 'Restoring...' : 'Collect & Restore'}</span>
+                              </button>
+                            )}
+                            {!perms.grace_and_shift && !perms.collect_fee && (
+                              <span className="text-[11px] font-mono text-slate-500">View-only</span>
+                            )}
                           </div>
                         </td>
                       </tr>

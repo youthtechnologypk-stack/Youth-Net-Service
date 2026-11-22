@@ -34,7 +34,7 @@ import { GlobalSearchBar } from './GlobalSearchBar';
 import { PWAInstallPrompt } from './PWAInstallPrompt';
 import { ThemeToggle } from './ThemeToggle';
 import { getStoredUser } from '../lib/auth';
-import { resolveUserGisAccess } from '../lib/gisAccessControl';
+import { StaffPermissions, resolveStaffPermissions } from '../lib/staffPermissions';
 
 export type ActiveTab =
   | 'noc'
@@ -72,6 +72,7 @@ interface HeaderProps {
   isSidebarOpen?: boolean;
   onToggleSidebar?: () => void;
   canAccessGisMap?: boolean;
+  staffPermissions?: StaffPermissions;
   offlineModeStatus?: {
     isOfflineOrBlocked: boolean;
     isAutoSyncing: boolean;
@@ -96,12 +97,12 @@ export const Header: React.FC<HeaderProps> = ({
   isSidebarOpen,
   onToggleSidebar,
   canAccessGisMap,
+  staffPermissions,
   offlineModeStatus,
 }) => {
+  const perms = staffPermissions || resolveStaffPermissions(currentUser, currentRole);
   const effectiveCanAccessGisMap =
-    canAccessGisMap !== undefined
-      ? canAccessGisMap
-      : resolveUserGisAccess(currentUser, currentRole).canAccess;
+    canAccessGisMap !== undefined ? canAccessGisMap : perms.gis_map !== 'none';
   const {
     routers,
     selectedRouterId,
@@ -433,27 +434,27 @@ export const Header: React.FC<HeaderProps> = ({
               )}
             </div>
 
-            {currentRole === 'ADMIN' && (
-              <>
-                <button
-                  onClick={() => onOpenProvisionModal()}
-                  className="flex items-center gap-1 bg-sky-600 hover:bg-sky-500 text-white font-bold px-2.5 py-1.5 rounded text-xs transition shadow-sm shrink-0 cursor-pointer"
-                  title="Provision PPPoE Customer"
-                >
-                  <PlusCircle className="w-3.5 h-3.5 shrink-0" />
-                  <span>+ Provision</span>
-                  <span className="hidden sm:inline">PPPoE</span>
-                </button>
+            {perms.provision_pppoe && (
+              <button
+                onClick={() => onOpenProvisionModal()}
+                className="flex items-center gap-1 bg-sky-600 hover:bg-sky-500 text-white font-bold px-2.5 py-1.5 rounded text-xs transition shadow-sm shrink-0 cursor-pointer"
+                title="Provision PPPoE Customer"
+              >
+                <PlusCircle className="w-3.5 h-3.5 shrink-0" />
+                <span>+ Provision</span>
+                <span className="hidden sm:inline">PPPoE</span>
+              </button>
+            )}
 
-                <button
-                  onClick={() => onOpenOutageModal()}
-                  className="hidden sm:flex items-center gap-1.5 bg-rose-600/90 hover:bg-rose-500 text-white font-medium px-2.5 py-1.5 rounded text-xs transition shrink-0 cursor-pointer"
-                  title="Broadcast Emergency Outage Alert"
-                >
-                  <Megaphone className="w-3.5 h-3.5" />
-                  <span>Outage Broadcast</span>
-                </button>
-              </>
+            {perms.outage_broadcast && (
+              <button
+                onClick={() => onOpenOutageModal()}
+                className="hidden sm:flex items-center gap-1.5 bg-rose-600/90 hover:bg-rose-500 text-white font-medium px-2.5 py-1.5 rounded text-xs transition shrink-0 cursor-pointer"
+                title="Broadcast Emergency Outage Alert"
+              >
+                <Megaphone className="w-3.5 h-3.5" />
+                <span>Outage Broadcast</span>
+              </button>
             )}
 
             {/* PWA Install Button (Admin only) */}
@@ -668,13 +669,25 @@ export const Header: React.FC<HeaderProps> = ({
                 )}
               </button>
 
-              <button
-                onClick={() => setActiveTab('olt')}
-                className={`shrink-0 whitespace-nowrap snap-start flex items-center gap-2 px-3 py-2 text-xs sm:text-sm font-medium rounded-xl transition cursor-pointer ${getTabClassName('olt', 'indigo')}`}
-              >
-                <Layers className={`w-4 h-4 shrink-0 ${activeTab === 'olt' ? 'text-white dark:text-indigo-300' : 'text-cyan-600 dark:text-cyan-400'}`} />
-                <span>VSOL OLT</span>
-              </button>
+              {perms.mikrotik_panel && (
+                <button
+                  onClick={() => setActiveTab('mikrotik')}
+                  className={`shrink-0 whitespace-nowrap snap-start flex items-center gap-2 px-3 py-2 text-xs sm:text-sm font-medium rounded-xl transition cursor-pointer ${getTabClassName('mikrotik', 'indigo')}`}
+                >
+                  <Radio className="w-4 h-4 shrink-0" />
+                  <span>MikroTik RouterOS v7</span>
+                </button>
+              )}
+
+              {perms.olt_panel && (
+                <button
+                  onClick={() => setActiveTab('olt')}
+                  className={`shrink-0 whitespace-nowrap snap-start flex items-center gap-2 px-3 py-2 text-xs sm:text-sm font-medium rounded-xl transition cursor-pointer ${getTabClassName('olt', 'indigo')}`}
+                >
+                  <Layers className={`w-4 h-4 shrink-0 ${activeTab === 'olt' ? 'text-white dark:text-indigo-300' : 'text-cyan-600 dark:text-cyan-400'}`} />
+                  <span>VSOL OLT</span>
+                </button>
+              )}
 
               {effectiveCanAccessGisMap && (
                 <button
@@ -694,13 +707,15 @@ export const Header: React.FC<HeaderProps> = ({
                 <span>Agent Cash &amp; Billing</span>
               </button>
 
-              <button
-                onClick={() => setActiveTab('profit_expenses')}
-                className={`shrink-0 whitespace-nowrap snap-start flex items-center gap-2 px-3 py-2 text-xs sm:text-sm font-medium rounded-xl transition cursor-pointer ${getTabClassName('profit_expenses', 'indigo')}`}
-              >
-                <Wallet className={`w-4 h-4 shrink-0 ${activeTab === 'profit_expenses' ? 'text-white dark:text-indigo-300' : 'text-emerald-500 dark:text-emerald-400'}`} />
-                <span>Profit &amp; Expenses</span>
-              </button>
+              {perms.expenses_ledger && (
+                <button
+                  onClick={() => setActiveTab('profit_expenses')}
+                  className={`shrink-0 whitespace-nowrap snap-start flex items-center gap-2 px-3 py-2 text-xs sm:text-sm font-medium rounded-xl transition cursor-pointer ${getTabClassName('profit_expenses', 'indigo')}`}
+                >
+                  <Wallet className={`w-4 h-4 shrink-0 ${activeTab === 'profit_expenses' ? 'text-white dark:text-indigo-300' : 'text-emerald-500 dark:text-emerald-400'}`} />
+                  <span>Profit &amp; Expenses</span>
+                </button>
+              )}
 
               <button
                 onClick={() => setActiveTab('inventory')}

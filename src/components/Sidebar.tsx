@@ -30,7 +30,7 @@ import { useISP } from '../context/ISPContext';
 import { useCurrency } from '../context/CurrencyContext';
 import { isOriginalAdminSession } from '../lib/auth';
 import { ThemeToggle } from './ThemeToggle';
-import { resolveUserGisAccess } from '../lib/gisAccessControl';
+import { StaffPermissions, resolveStaffPermissions } from '../lib/staffPermissions';
 
 export interface SidebarProps {
   isOpen: boolean;
@@ -45,6 +45,7 @@ export interface SidebarProps {
   currentUser?: UserAccount | null;
   onLogout?: () => void;
   canAccessGisMap?: boolean;
+  staffPermissions?: StaffPermissions;
 }
 
 export const Sidebar: React.FC<SidebarProps> = ({
@@ -60,11 +61,11 @@ export const Sidebar: React.FC<SidebarProps> = ({
   currentUser,
   onLogout,
   canAccessGisMap,
+  staffPermissions,
 }) => {
+  const perms = staffPermissions || resolveStaffPermissions(currentUser, currentRole);
   const effectiveCanAccessGisMap =
-    canAccessGisMap !== undefined
-      ? canAccessGisMap
-      : resolveUserGisAccess(currentUser, currentRole).canAccess;
+    canAccessGisMap !== undefined ? canAccessGisMap : perms.gis_map !== 'none';
   const { complaints, customers, onus, activeSessions, outages } = useISP();
   const { currencySymbol } = useCurrency();
 
@@ -141,7 +142,7 @@ export const Sidebar: React.FC<SidebarProps> = ({
       icon: Radio,
       badge: 'v7 Live',
       badgeColor: 'bg-cyan-950 text-cyan-300 border-cyan-800',
-      roles: ['ADMIN'], // Strictly hidden for Manager, Agent, Client
+      roles: ['ADMIN', 'MANAGER', 'AGENT'],
     },
     {
       id: 'olt' as ActiveTab,
@@ -247,10 +248,13 @@ export const Sidebar: React.FC<SidebarProps> = ({
     },
   ];
 
-  // Filter menu strictly by role + per-user GIS map access permission
+  // Filter menu strictly by role + granular RBAC feature switches
   const menuItems = allMenuItems.filter((item) => {
     if (!item.roles.includes(currentRole)) return false;
     if (item.id === 'fiber_gis' && !effectiveCanAccessGisMap) return false;
+    if (item.id === 'mikrotik' && !perms.mikrotik_panel) return false;
+    if (item.id === 'olt' && !perms.olt_panel) return false;
+    if (item.id === 'profit_expenses' && !perms.expenses_ledger) return false;
     return true;
   });
 
@@ -316,7 +320,7 @@ export const Sidebar: React.FC<SidebarProps> = ({
             <span className="text-slate-500 dark:text-slate-400">{(customers || []).length} Subscribers</span>
           </div>
 
-          {(activeOutages || []).length > 0 && (
+          {(activeOutages || []).length > 0 && perms.outage_broadcast && (
             <div
               onClick={() => {
                 onOpenOutageModal();
@@ -334,18 +338,20 @@ export const Sidebar: React.FC<SidebarProps> = ({
         </div>
 
         {/* Quick Actions Strip */}
-        <div className="px-3 pt-3 pb-2 border-b border-slate-200 dark:border-slate-800/80 grid grid-cols-2 gap-1.5 text-[11px] font-mono">
-          <button
-            onClick={() => {
-              onOpenProvisionModal();
-              onClose();
-            }}
-            className="px-2 py-1.5 bg-sky-600 hover:bg-sky-500 text-white font-bold rounded-lg transition flex items-center justify-center gap-1 shadow-sm cursor-pointer"
-            title="Fast Provision PPPoE Secret & Customer"
-          >
-            <PlusCircle className="w-3 h-3" />
-            <span>+ PPPoE</span>
-          </button>
+        <div className={`px-3 pt-3 pb-2 border-b border-slate-200 dark:border-slate-800/80 grid ${perms.provision_pppoe ? 'grid-cols-2' : 'grid-cols-1'} gap-1.5 text-[11px] font-mono`}>
+          {perms.provision_pppoe && (
+            <button
+              onClick={() => {
+                onOpenProvisionModal();
+                onClose();
+              }}
+              className="px-2 py-1.5 bg-sky-600 hover:bg-sky-500 text-white font-bold rounded-lg transition flex items-center justify-center gap-1 shadow-sm cursor-pointer"
+              title="Fast Provision PPPoE Secret & Customer"
+            >
+              <PlusCircle className="w-3 h-3" />
+              <span>+ PPPoE</span>
+            </button>
+          )}
 
           <button
             onClick={() => {

@@ -24,13 +24,17 @@ import {
 import { supabase } from '../services/supabaseClient';
 import { buildStandardWhatsAppCredentialText, getPortalUrlForRole } from '../services/authUtils';
 import {
-  GIS_ACCESS_MIGRATION_SQL,
   GIS_PERMISSION_OPTIONS,
   GisMapPermission,
   isStaffRoleEligibleForGisControl,
   resolveUserGisAccess,
   updatePortalUserGisPermission,
 } from '../lib/gisAccessControl';
+import {
+  STAFF_PERMISSIONS_MIGRATION_SQL,
+  countEnabledPermissions,
+  resolveStaffPermissions,
+} from '../lib/staffPermissions';
 
 export type TabType = 'ALL' | 'CLIENT' | 'AGENT' | 'MANAGER' | 'ADMIN';
 
@@ -61,6 +65,7 @@ export interface PortalUserRow {
   base_salary?: number;
   can_access_gis_map?: boolean | null;
   gis_map_permission?: GisMapPermission | string | null;
+  permissions?: Record<string, any> | null;
 }
 
 export interface UsersTableProps {
@@ -303,7 +308,7 @@ export const UsersTable: React.FC<UsersTableProps> = ({
           <button
             type="button"
             onClick={() => {
-              navigator.clipboard?.writeText(GIS_ACCESS_MIGRATION_SQL);
+              navigator.clipboard?.writeText(STAFF_PERMISSIONS_MIGRATION_SQL);
               setCopiedGisSql(true);
               setTimeout(() => setCopiedGisSql(false), 3000);
             }}
@@ -384,7 +389,7 @@ export const UsersTable: React.FC<UsersTableProps> = ({
                 <th className="py-3.5 px-4">Full Name</th>
                 <th className="py-3.5 px-4">Username / Account ID</th>
                 <th className="py-3.5 px-4">Role Badge</th>
-                <th className="py-3.5 px-4">Fiber GIS &amp; Map</th>
+                <th className="py-3.5 px-4">RBAC &amp; Fiber GIS</th>
                 <th className="py-3.5 px-4">Phone Number</th>
                 <th className="py-3.5 px-4">Status</th>
                 <th className="py-3.5 px-4 text-right">Actions</th>
@@ -518,64 +523,80 @@ export const UsersTable: React.FC<UsersTableProps> = ({
                           </span>
                         ) : isStaffRoleEligibleForGisControl(userRole) ? (() => {
                           const resolvedGis = resolveUserGisAccess(user, userRole);
+                          const resolvedPerms = resolveStaffPermissions(user, userRole);
+                          const enabledFeaturesCount = countEnabledPermissions(resolvedPerms);
                           const isBusy = updatingGisUserId === user.id;
                           return (
-                            <div className="flex items-center gap-2">
-                              {/* Quick 1-Click Enable / Disable Switch */}
-                              <button
-                                type="button"
-                                role="switch"
-                                aria-checked={resolvedGis.canAccess}
-                                disabled={isBusy}
-                                onClick={() =>
-                                  handleUpdateGisPermission(
-                                    user,
-                                    resolvedGis.canAccess ? 'none' : 'view'
-                                  )
-                                }
-                                title={
-                                  resolvedGis.canAccess
-                                    ? `Click to immediately disable Fiber GIS & Map for @${user.username}`
-                                    : `Click to enable Fiber GIS & Map (View & Trace Only) for @${user.username}`
-                                }
-                                className={`relative inline-flex h-5 w-9 shrink-0 items-center rounded-full border transition cursor-pointer disabled:opacity-50 ${
-                                  resolvedGis.canAccess
-                                    ? resolvedGis.canEdit
-                                      ? 'bg-emerald-600 border-emerald-400'
-                                      : 'bg-sky-600 border-sky-400'
-                                    : 'bg-slate-800 border-slate-700'
-                                }`}
-                              >
-                                <span
-                                  className={`inline-block h-3.5 w-3.5 transform rounded-full bg-white shadow transition ${
-                                    resolvedGis.canAccess ? 'translate-x-4' : 'translate-x-0.5'
+                            <div className="space-y-1.5">
+                              <div className="flex items-center gap-2">
+                                {/* Quick 1-Click Enable / Disable Switch */}
+                                <button
+                                  type="button"
+                                  role="switch"
+                                  aria-checked={resolvedGis.canAccess}
+                                  disabled={isBusy}
+                                  onClick={() =>
+                                    handleUpdateGisPermission(
+                                      user,
+                                      resolvedGis.canAccess ? 'none' : 'view'
+                                    )
+                                  }
+                                  title={
+                                    resolvedGis.canAccess
+                                      ? `Click to immediately disable Fiber GIS & Map for @${user.username}`
+                                      : `Click to enable Fiber GIS & Map (View & Trace Only) for @${user.username}`
+                                  }
+                                  className={`relative inline-flex h-5 w-9 shrink-0 items-center rounded-full border transition cursor-pointer disabled:opacity-50 ${
+                                    resolvedGis.canAccess
+                                      ? resolvedGis.canEdit
+                                        ? 'bg-emerald-600 border-emerald-400'
+                                        : 'bg-sky-600 border-sky-400'
+                                      : 'bg-slate-800 border-slate-700'
                                   }`}
-                                />
-                              </button>
+                                >
+                                  <span
+                                    className={`inline-block h-3.5 w-3.5 transform rounded-full bg-white shadow transition ${
+                                      resolvedGis.canAccess ? 'translate-x-4' : 'translate-x-0.5'
+                                    }`}
+                                  />
+                                </button>
 
-                              {/* Granular 3-State Selector */}
-                              <select
-                                value={resolvedGis.permission}
-                                disabled={isBusy}
-                                aria-label={`Fiber GIS & Map access for ${user.username}`}
-                                onChange={(e) =>
-                                  handleUpdateGisPermission(
-                                    user,
-                                    e.target.value as GisMapPermission
-                                  )
-                                }
-                                className={`text-[10px] font-mono font-bold rounded-lg px-2 py-1 border focus:outline-none cursor-pointer transition disabled:opacity-50 ${
-                                  resolvedGis.permission === 'edit'
-                                    ? 'bg-emerald-950/90 border-emerald-700 text-emerald-300'
-                                    : resolvedGis.permission === 'view'
-                                    ? 'bg-sky-950/90 border-sky-700 text-sky-300'
-                                    : 'bg-rose-950/80 border-rose-800 text-rose-300'
-                                }`}
-                              >
-                                <option value="none">Disabled (No Access)</option>
-                                <option value="view">View &amp; Trace Only</option>
-                                <option value="edit">Full Edit &amp; Splice</option>
-                              </select>
+                                {/* Granular 3-State Selector */}
+                                <select
+                                  value={resolvedGis.permission}
+                                  disabled={isBusy}
+                                  aria-label={`Fiber GIS & Map access for ${user.username}`}
+                                  onChange={(e) =>
+                                    handleUpdateGisPermission(
+                                      user,
+                                      e.target.value as GisMapPermission
+                                    )
+                                  }
+                                  className={`text-[10px] font-mono font-bold rounded-lg px-2 py-1 border focus:outline-none cursor-pointer transition disabled:opacity-50 ${
+                                    resolvedGis.permission === 'edit'
+                                      ? 'bg-emerald-950/90 border-emerald-700 text-emerald-300'
+                                      : resolvedGis.permission === 'view'
+                                      ? 'bg-sky-950/90 border-sky-700 text-sky-300'
+                                      : 'bg-rose-950/80 border-rose-800 text-rose-300'
+                                  }`}
+                                >
+                                  <option value="none">GIS: Disabled</option>
+                                  <option value="view">GIS: View &amp; Trace</option>
+                                  <option value="edit">GIS: Full Edit</option>
+                                </select>
+                              </div>
+                              {onEditUser && (
+                                <button
+                                  type="button"
+                                  onClick={() => onEditUser(user)}
+                                  className="inline-flex items-center gap-1.5 px-2 py-0.5 rounded-md bg-slate-950 hover:bg-cyan-950/70 border border-slate-800 hover:border-cyan-700 text-[10px] font-mono text-cyan-300 transition cursor-pointer"
+                                  title="Configure all 12 granular feature switches & presets"
+                                >
+                                  <Shield className="w-2.5 h-2.5 text-cyan-400" />
+                                  <span>{enabledFeaturesCount}/12 Switches</span>
+                                  <span className="text-slate-500">&bull; Edit</span>
+                                </button>
+                              )}
                             </div>
                           );
                         })() : (

@@ -24,6 +24,8 @@ import {
   subscribeToGisRealtime,
 } from '../services/fiberGisService';
 import { getDefaultMaxOnuLimit } from '../lib/fiberOpticEngine';
+import { getStoredUser } from '../lib/auth';
+import { StaffPermissions, resolveStaffPermissions } from '../lib/staffPermissions';
 
 export interface NocCommandCenterProps {
   onNavigateTab: (tab: ActiveTab) => void;
@@ -31,12 +33,18 @@ export interface NocCommandCenterProps {
   onOpenTicketModal: () => void;
   onOpenAddRouterModal?: () => void;
   initialSection?: 'overview' | 'capacity';
+  staffPermissions?: StaffPermissions;
 }
 
 export const NocCommandCenter: React.FC<NocCommandCenterProps> = ({
   initialSection = 'overview',
+  staffPermissions,
   ...props
 }) => {
+  const perms = useMemo(
+    () => staffPermissions || resolveStaffPermissions(getStoredUser()),
+    [staffPermissions]
+  );
   const [section, setSection] = useState<'overview' | 'capacity'>(initialSection);
   const [isAreaManagerOpen, setIsAreaManagerOpen] = useState<boolean>(false);
   const [isOltManagerOpen, setIsOltManagerOpen] = useState<boolean>(false);
@@ -146,17 +154,19 @@ export const NocCommandCenter: React.FC<NocCommandCenterProps> = ({
         </div>
 
         <div className="grid grid-cols-2 sm:flex sm:flex-wrap items-center gap-2 w-full sm:w-auto min-w-0">
-          <button
-            type="button"
-            onClick={() => {
-              setEditingOltId(null);
-              setIsOltManagerOpen(true);
-            }}
-            className="px-3 py-2 rounded-xl bg-sky-950/80 hover:bg-sky-900/80 text-sky-300 border border-sky-700/80 font-semibold text-xs flex items-center justify-center gap-1.5 transition cursor-pointer min-w-0"
-          >
-            <Server className="w-3.5 h-3.5 text-sky-400 shrink-0" />
-            <span className="truncate">Manage OLTs</span>
-          </button>
+          {perms.olt_panel && (
+            <button
+              type="button"
+              onClick={() => {
+                setEditingOltId(null);
+                setIsOltManagerOpen(true);
+              }}
+              className="px-3 py-2 rounded-xl bg-sky-950/80 hover:bg-sky-900/80 text-sky-300 border border-sky-700/80 font-semibold text-xs flex items-center justify-center gap-1.5 transition cursor-pointer min-w-0"
+            >
+              <Server className="w-3.5 h-3.5 text-sky-400 shrink-0" />
+              <span className="truncate">Manage OLTs</span>
+            </button>
+          )}
 
           <button
             type="button"
@@ -201,17 +211,19 @@ export const NocCommandCenter: React.FC<NocCommandCenterProps> = ({
                     className={`w-3.5 h-3.5 ${isLoadingOlts ? 'animate-spin text-cyan-400' : ''}`}
                   />
                 </button>
-                <button
-                  type="button"
-                  onClick={() => {
-                    setEditingOltId(null);
-                    setIsOltManagerOpen(true);
-                  }}
-                  className="px-3 py-1.5 rounded-lg bg-sky-600 hover:bg-sky-500 text-white font-mono font-bold text-xs flex items-center gap-1 cursor-pointer shadow-sm"
-                >
-                  <Plus className="w-3.5 h-3.5" />
-                  <span>Add OLT</span>
-                </button>
+                {perms.olt_panel && (
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setEditingOltId(null);
+                      setIsOltManagerOpen(true);
+                    }}
+                    className="px-3 py-1.5 rounded-lg bg-sky-600 hover:bg-sky-500 text-white font-mono font-bold text-xs flex items-center gap-1 cursor-pointer shadow-sm"
+                  >
+                    <Plus className="w-3.5 h-3.5" />
+                    <span>Add OLT</span>
+                  </button>
+                )}
               </div>
             </div>
 

@@ -33,10 +33,12 @@ import {
 } from '../services/storageService';
 import { useISP } from '../context/ISPContext';
 import { getStoredUser } from '../lib/auth';
+import { resolveStaffPermissions } from '../lib/staffPermissions';
 
 export const ActivityLogsStudio: React.FC = () => {
   const { routers, selectedRouterId } = useISP();
   const currentUser = getStoredUser();
+  const perms = useMemo(() => resolveStaffPermissions(currentUser), [currentUser]);
 
   const [logs, setLogs] = useState<AuditLogEntry[]>(() => storageService.getAuditLogs());
   const [searchQuery, setSearchQuery] = useState('');
@@ -185,6 +187,7 @@ export const ActivityLogsStudio: React.FC = () => {
 
   // Export handlers
   const handleExportCsv = () => {
+    if (!perms.export_reports) return;
     const csv = storageService.exportAuditLogsCsv();
     const blob = new Blob([csv], { type: 'text/csv;charset=utf-8;' });
     const url = URL.createObjectURL(blob);
@@ -197,6 +200,7 @@ export const ActivityLogsStudio: React.FC = () => {
   };
 
   const handleExportJson = () => {
+    if (!perms.export_reports) return;
     const json = storageService.exportAuditLogsJson();
     const blob = new Blob([json], { type: 'application/json' });
     const url = URL.createObjectURL(blob);
@@ -298,13 +302,15 @@ export const ActivityLogsStudio: React.FC = () => {
               <RefreshCw className="w-4 h-4" />
             </button>
 
-            <button
-              onClick={handleExportCsv}
-              className="px-3 py-1.5 rounded-lg bg-slate-800 hover:bg-slate-700 text-slate-200 hover:text-white border border-slate-700 text-xs font-semibold flex items-center gap-1.5 transition cursor-pointer"
-            >
-              <Download className="w-3.5 h-3.5" />
-              <span>Export CSV</span>
-            </button>
+            {perms.export_reports && (
+              <button
+                onClick={handleExportCsv}
+                className="px-3 py-1.5 rounded-lg bg-slate-800 hover:bg-slate-700 text-slate-200 hover:text-white border border-slate-700 text-xs font-semibold flex items-center gap-1.5 transition cursor-pointer"
+              >
+                <Download className="w-3.5 h-3.5" />
+                <span>Export CSV</span>
+              </button>
+            )}
 
             <button
               onClick={() => setIsManualModalOpen(true)}

@@ -65,12 +65,17 @@ import {
   computeDatabaseLedgerTotals,
 } from '../lib/ledgerAuditPersistence';
 import { LEDGER_AUDIT_MIGRATION_SQL } from '../lib/ledgerMigrationSql';
+import {
+  StaffPermissions,
+  resolveStaffPermissions,
+} from '../lib/staffPermissions';
 
 interface ManagerOperationsDashboardProps {
   onOpenTicketModal: () => void;
   onOpenOutageModal: () => void;
   onSelectCustomer?: (customer: Customer) => void;
   currentUser?: UserAccount;
+  staffPermissions?: StaffPermissions;
 }
 
 interface LiveMikrotikSession {
@@ -100,6 +105,7 @@ export const ManagerOperationsDashboard: React.FC<ManagerOperationsDashboardProp
   onOpenTicketModal,
   onOpenOutageModal,
   currentUser,
+  staffPermissions,
 }) => {
   const {
     outages,
@@ -111,6 +117,10 @@ export const ManagerOperationsDashboard: React.FC<ManagerOperationsDashboardProp
   const { currentUser: authUser } = useAuth();
 
   const activeManager = currentUser || authUser;
+  const perms = useMemo(
+    () => staffPermissions || resolveStaffPermissions(activeManager),
+    [staffPermissions, activeManager]
+  );
   const managerName = activeManager?.fullName || 'NOC Operations Manager';
   const managerUsername = activeManager?.username || 'manager';
   const managerArea = activeManager?.area || 'All Coverage Sectors';
@@ -1785,13 +1795,15 @@ export const ManagerOperationsDashboard: React.FC<ManagerOperationsDashboardProp
                 Acknowledge line fractures, assign emergency field teams, and trigger restoration.
               </p>
             </div>
-            <button
-              onClick={onOpenOutageModal}
-              className="bg-rose-600 hover:bg-rose-500 text-white font-bold px-3 py-1.5 rounded-lg text-xs flex items-center gap-1.5 transition cursor-pointer"
-            >
-              <AlertTriangle className="w-3.5 h-3.5" />
-              <span>Broadcast Outage Alert</span>
-            </button>
+            {perms.outage_broadcast && (
+              <button
+                onClick={onOpenOutageModal}
+                className="bg-rose-600 hover:bg-rose-500 text-white font-bold px-3 py-1.5 rounded-lg text-xs flex items-center gap-1.5 transition cursor-pointer"
+              >
+                <AlertTriangle className="w-3.5 h-3.5" />
+                <span>Broadcast Outage Alert</span>
+              </button>
+            )}
           </div>
 
           <div className="space-y-3">

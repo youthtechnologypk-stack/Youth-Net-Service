@@ -16,13 +16,15 @@ import {
 } from 'lucide-react';
 import { supabase } from '../services/supabaseClient';
 import { AreaNodeSelector } from './AreaNodeSelector';
+import { GisMapPermission } from '../lib/gisAccessControl';
 import {
-  GIS_PERMISSION_OPTIONS,
-  GisMapPermission,
-  isMissingGisPermissionColumnError,
-  resolveUserGisAccess,
-  updatePortalUserGisPermission,
-} from '../lib/gisAccessControl';
+  StaffPermissions,
+  getDefaultPermissionsForRole,
+  isMissingPermissionsColumnError,
+  resolveStaffPermissions,
+  updatePortalUserPermissions,
+} from '../lib/staffPermissions';
+import { StaffPermissionsEditor } from './StaffPermissionsEditor';
 
 export interface StaffUserRecord {
   id: string;
@@ -42,6 +44,7 @@ export interface StaffUserRecord {
   advance_balance?: number;
   can_access_gis_map?: boolean | null;
   gis_map_permission?: GisMapPermission | string | null;
+  permissions?: Record<string, any> | null;
 }
 
 export interface EditStaffModalProps {
@@ -76,7 +79,9 @@ export const EditStaffModal: React.FC<EditStaffModalProps> = ({
   const [baseSalary, setBaseSalary] = useState<string>('0');
   const [role, setRole] = useState<'AGENT' | 'MANAGER'>('AGENT');
   const [accountStatus, setAccountStatus] = useState<'ACTIVE' | 'SUSPENDED'>('ACTIVE');
-  const [gisPermission, setGisPermission] = useState<GisMapPermission>('view');
+  const [staffPermissions, setStaffPermissions] = useState<StaffPermissions>(() =>
+    getDefaultPermissionsForRole('AGENT')
+  );
   const [newPassword, setNewPassword] = useState('');
   const [showPassword, setShowPassword] = useState(false);
 
@@ -100,8 +105,8 @@ export const EditStaffModal: React.FC<EditStaffModalProps> = ({
         staff.isActive === false;
       setAccountStatus(isSuspended ? 'SUSPENDED' : 'ACTIVE');
 
-      const resolvedGis = resolveUserGisAccess(staff, roleUpper);
-      setGisPermission(resolvedGis.permission);
+      const resolvedPerms = resolveStaffPermissions(staff, roleUpper);
+      setStaffPermissions(resolvedPerms);
 
       setNewPassword('');
       setShowPassword(false);
@@ -134,8 +139,9 @@ export const EditStaffModal: React.FC<EditStaffModalProps> = ({
       base_salary: salaryNum,
       role: role,
       account_status: accountStatus,
-      can_access_gis_map: gisPermission !== 'none',
-      gis_map_permission: gisPermission,
+      can_access_gis_map: staffPermissions.gis_map !== 'none',
+      gis_map_permission: staffPermissions.gis_map,
+      permissions: staffPermissions,
     };
 
     if (newPassword && newPassword.trim() !== '') {
@@ -150,8 +156,13 @@ export const EditStaffModal: React.FC<EditStaffModalProps> = ({
         .eq('id', staff.id);
 
       if (sbError) {
-        if (isMissingGisPermissionColumnError(sbError)) {
-          const { can_access_gis_map: _c, gis_map_permission: _p, ...legacyPayload } = updatePayload;
+        if (isMissingPermissionsColumnError(sbError)) {
+          const {
+            can_access_gis_map: _c,
+            gis_map_permission: _p,
+            permissions: _perms,
+            ...legacyPayload
+          } = updatePayload;
           const { error: retryErr } = await supabase
             .from('portal_users')
             .update(legacyPayload)
@@ -159,20 +170,20 @@ export const EditStaffModal: React.FC<EditStaffModalProps> = ({
           if (retryErr) {
             throw new Error(retryErr.message || 'Supabase database update failed.');
           }
-          await updatePortalUserGisPermission({
+          await updatePortalUserPermissions({
             userId: staff.id,
             username: staff.username,
-            permission: gisPermission,
+            permissions: staffPermissions,
           });
         } else {
           throw new Error(sbError.message || 'Supabase database update failed.');
         }
       } else {
         // Broadcast permission change so any live sessions sync immediately
-        await updatePortalUserGisPermission({
+        await updatePortalUserPermissions({
           userId: staff.id,
           username: staff.username,
-          permission: gisPermission,
+          permissions: staffPermissions,
         });
       }
 
@@ -221,7 +232,7 @@ export const EditStaffModal: React.FC<EditStaffModalProps> = ({
 
   return (
     <div className="fixed inset-0 z-[9999] flex items-center justify-center bg-black/75 backdrop-blur-sm p-3 overflow-y-auto animate-fadeIn font-sans">
-      <div className="w-[95vw] sm:w-full max-w-lg max-h-[90vh] overflow-y-auto mx-auto my-auto rounded-2xl box-border bg-[#0f172a] border border-slate-800 shadow-2xl shadow-cyan-950/40 flex flex-col">
+      <div className="w-[95vw] sm:w-full max-w-2xl max-h-[92vh] overflow-y-auto mx-auto my-auto rounded-2xl box-border bg-[#0f172a] border border-slate-800 shadow-2xl shadow-cyan-950/40 flex flex-col">
         {/* Header */}
         <div className="bg-slate-950/90 border-b border-slate-800 p-5 flex items-center justify-between shrink-0">
           <div className="flex items-center gap-3">
@@ -363,71 +374,13 @@ export const EditStaffModal: React.FC<EditStaffModalProps> = ({
             </div>
           </div>
 
-          {/* Fiber GIS & Map Access Control (3-State Selector) */}
-          <div className="bg-slate-950 p-4 rounded-xl border border-slate-800 space-y-2.5">
-            <div className="flex items-center justify-between gap-2">
-              <label className="text-slate-200 font-semibold flex items-center gap-1.5">
-                <MapPin className="w-3.5 h-3.5 text-sky-400" />
-                <span>Fiber GIS &amp; Map Access</span>
-              </label>
-              <span
-                className={`text-[10px] font-mono font-bold px-2 py-0.5 rounded-full border ${
-                  gisPermission === 'edit'
-                    ? 'bg-emerald-950 text-emerald-300 border-emerald-800'
-                    : gisPermission === 'view'
-                    ? 'bg-sky-950 text-sky-300 border-sky-800'
-                    : 'bg-rose-950 text-rose-300 border-rose-800'
-                }`}
-              >
-                {gisPermission === 'edit'
-                  ? 'Full Edit & Splice'
-                  : gisPermission === 'view'
-                  ? 'View & Trace Only'
-                  : 'Disabled'}
-              </span>
-            </div>
-
-            <div className="grid grid-cols-1 gap-2">
-              {GIS_PERMISSION_OPTIONS.map((opt) => {
-                const isSelected = gisPermission === opt.value;
-                return (
-                  <button
-                    key={opt.value}
-                    type="button"
-                    onClick={() => setGisPermission(opt.value)}
-                    className={`w-full text-left p-2.5 rounded-xl border transition cursor-pointer flex items-start gap-2.5 ${
-                      isSelected
-                        ? opt.value === 'edit'
-                          ? 'bg-emerald-950/60 border-emerald-500/80 text-emerald-100'
-                          : opt.value === 'view'
-                          ? 'bg-sky-950/60 border-sky-500/80 text-sky-100'
-                          : 'bg-rose-950/60 border-rose-500/80 text-rose-100'
-                        : 'bg-slate-900/70 border-slate-800 text-slate-300 hover:border-slate-700'
-                    }`}
-                  >
-                    <span
-                      className={`mt-0.5 w-3.5 h-3.5 rounded-full border flex items-center justify-center shrink-0 ${
-                        isSelected
-                          ? opt.value === 'edit'
-                            ? 'border-emerald-400 bg-emerald-400'
-                            : opt.value === 'view'
-                            ? 'border-sky-400 bg-sky-400'
-                            : 'border-rose-400 bg-rose-400'
-                          : 'border-slate-600'
-                      }`}
-                    >
-                      {isSelected && <span className="w-1.5 h-1.5 rounded-full bg-slate-950" />}
-                    </span>
-                    <div className="min-w-0">
-                      <div className="font-bold text-xs leading-tight">{opt.label}</div>
-                      <div className="text-[10px] text-slate-400 mt-0.5 leading-snug">
-                        {opt.description}
-                      </div>
-                    </div>
-                  </button>
-                );
-              })}
-            </div>
+          {/* Granular RBAC Feature Permission Switches & 1-Click Presets */}
+          <div className="bg-slate-900/60 p-4 rounded-xl border border-slate-800">
+            <StaffPermissionsEditor
+              value={staffPermissions}
+              onChange={setStaffPermissions}
+              disabled={isSubmitting}
+            />
           </div>
 
           {/* New Password (Optional) */}

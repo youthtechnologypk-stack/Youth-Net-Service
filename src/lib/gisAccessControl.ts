@@ -15,6 +15,7 @@ export interface GisPermissionUserLike {
   id?: string | null;
   username?: string | null;
   role?: string | null;
+  permissions?: Record<string, any> | null;
   can_access_gis_map?: boolean | null;
   gis_map_permission?: string | null;
 }
@@ -107,6 +108,29 @@ function writeLocalGisOverride(
   } catch {}
 }
 
+export function saveLocalGisPermissionOverride(
+  keys: Array<string | null | undefined>,
+  permission: GisMapPermission
+): void {
+  keys.forEach((k) => {
+    const clean = String(k || '').trim();
+    if (clean) writeLocalGisOverride(clean, permission);
+  });
+}
+
+export function normalizeGisPermission(
+  rawPermission?: string | null,
+  fallback: GisMapPermission = 'view'
+): GisMapPermission {
+  const normalized = (rawPermission || '').trim().toLowerCase();
+  if (normalized === 'none' || normalized === 'disabled') return 'none';
+  if (normalized === 'edit' || normalized === 'full') return 'edit';
+  if (normalized === 'view' || normalized === 'readonly' || normalized === 'read_only') {
+    return 'view';
+  }
+  return fallback;
+}
+
 export function getLocalGisOverride(
   user?: GisPermissionUserLike | null
 ): LocalGisOverrideEntry | null {
@@ -182,16 +206,26 @@ export function resolveUserGisAccess(
     };
   }
 
+  const permsGisRaw =
+    user && typeof (user as any).permissions === 'object' && (user as any).permissions
+      ? (user as any).permissions.gis_map
+      : undefined;
+  const hasExplicitJsonbGis = isValidGisPermission(permsGisRaw);
+
   const hasExplicitDbFields =
-    typeof user?.can_access_gis_map === 'boolean' || isValidGisPermission(user?.gis_map_permission);
+    hasExplicitJsonbGis ||
+    typeof user?.can_access_gis_map === 'boolean' ||
+    isValidGisPermission(user?.gis_map_permission);
 
   const localOverride = !hasExplicitDbFields ? getLocalGisOverride(user) : null;
 
-  const permission = normalizeGisMapPermission(
-    hasExplicitDbFields ? user?.gis_map_permission : localOverride?.gis_map_permission,
-    hasExplicitDbFields ? user?.can_access_gis_map : localOverride?.can_access_gis_map,
-    roleUpper || 'AGENT'
-  );
+  const permission = hasExplicitJsonbGis
+    ? (permsGisRaw as GisMapPermission)
+    : normalizeGisMapPermission(
+        hasExplicitDbFields ? user?.gis_map_permission : localOverride?.gis_map_permission,
+        hasExplicitDbFields ? user?.can_access_gis_map : localOverride?.can_access_gis_map,
+        roleUpper || 'AGENT'
+      );
 
   return {
     canAccess: permission !== 'none',
@@ -256,12 +290,32 @@ export async function updatePortalUserGisPermission(params: {
   };
 
   try {
+    // Also keep permissions.gis_map JSONB key in sync if column exists
+    let nextPermissions: Record<string, any> | undefined;
+    try {
+      const { data: existingRow } = await supabase
+        .from('portal_users')
+        .select('permissions')
+        .eq('id', params.userId)
+        .maybeSingle();
+      if (existingRow && typeof existingRow.permissions === 'object' && existingRow.permissions !== null) {
+        nextPermissions = { ...existingRow.permissions, gis_map: safePermission };
+      }
+    } catch {
+      // permissions column might not exist yet; proceed with GIS columns
+    }
+
+    const updatePayload: Record<string, any> = {
+      can_access_gis_map: canAccess,
+      gis_map_permission: safePermission,
+    };
+    if (nextPermissions) {
+      updatePayload.permissions = nextPermissions;
+    }
+
     const query = supabase
       .from('portal_users')
-      .update({
-        can_access_gis_map: canAccess,
-        gis_map_permission: safePermission,
-      })
+      .update(updatePayload)
       .eq('id', params.userId);
 
     const { error } = await query;

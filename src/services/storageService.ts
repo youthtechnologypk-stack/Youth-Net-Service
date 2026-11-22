@@ -26,6 +26,7 @@ export interface PortalUser {
   linkedCustomerId?: string;
   can_access_gis_map?: boolean;
   gis_map_permission?: 'none' | 'view' | 'edit';
+  permissions?: Record<string, any>;
   createdAt: string;
 }
 
@@ -385,6 +386,8 @@ class StorageService {
               su.gis_map_permission === 'edit'
                 ? su.gis_map_permission
                 : undefined,
+            permissions:
+              su.permissions && typeof su.permissions === 'object' ? su.permissions : undefined,
             createdAt: su.created_at || new Date().toISOString(),
             isActive: true,
           };
@@ -673,12 +676,15 @@ class StorageService {
       if (user.gis_map_permission) {
         payload.gis_map_permission = user.gis_map_permission;
       }
+      if (user.permissions && typeof user.permissions === 'object') {
+        payload.permissions = user.permissions;
+      }
       if (/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(user.id)) {
         payload.id = user.id;
       }
       const { error: upsertErr } = await supabase.from('portal_users').upsert([payload], { onConflict: 'username' });
-      if (upsertErr && (String(upsertErr.message || '').includes('gis_map') || upsertErr.code === '42703' || upsertErr.code === 'PGRST204')) {
-        const { can_access_gis_map: _a, gis_map_permission: _b, ...legacyPayload } = payload;
+      if (upsertErr && (String(upsertErr.message || '').includes('gis_map') || String(upsertErr.message || '').includes('permissions') || upsertErr.code === '42703' || upsertErr.code === 'PGRST204')) {
+        const { can_access_gis_map: _a, gis_map_permission: _b, permissions: _p, ...legacyPayload } = payload;
         await supabase.from('portal_users').upsert([legacyPayload], { onConflict: 'username' });
       }
     } catch (err) {

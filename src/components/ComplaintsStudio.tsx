@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useMemo } from 'react';
 import {
   AlertTriangle,
   Clock,
@@ -30,15 +30,27 @@ import {
   matchesDateFilter,
 } from '../lib/dateFilter';
 
+import { getStoredUser } from '../lib/auth';
+import {
+  StaffPermissions,
+  resolveStaffPermissions,
+} from '../lib/staffPermissions';
+
 interface ComplaintsStudioProps {
   onOpenTicketModal: () => void;
   onOpenOutageModal: () => void;
+  staffPermissions?: StaffPermissions;
 }
 
 export const ComplaintsStudio: React.FC<ComplaintsStudioProps> = ({
   onOpenTicketModal,
   onOpenOutageModal,
+  staffPermissions,
 }) => {
+  const perms = useMemo(
+    () => staffPermissions || resolveStaffPermissions(getStoredUser()),
+    [staffPermissions]
+  );
   const {
     complaints,
     agents,
@@ -266,13 +278,15 @@ export const ComplaintsStudio: React.FC<ComplaintsStudioProps> = ({
               <span>+ Raise Ticket</span>
             </button>
 
-            <button
-              onClick={onOpenOutageModal}
-              className="flex items-center gap-1.5 bg-rose-600 hover:bg-rose-500 text-white font-semibold text-xs px-3.5 py-2 rounded-lg transition cursor-pointer"
-            >
-              <Megaphone className="w-3.5 h-3.5" />
-              <span>Broadcast Area Outage</span>
-            </button>
+            {perms.outage_broadcast && (
+              <button
+                onClick={onOpenOutageModal}
+                className="flex items-center gap-1.5 bg-rose-600 hover:bg-rose-500 text-white font-semibold text-xs px-3.5 py-2 rounded-lg transition cursor-pointer"
+              >
+                <Megaphone className="w-3.5 h-3.5" />
+                <span>Broadcast Area Outage</span>
+              </button>
+            )}
           </div>
         </div>
 

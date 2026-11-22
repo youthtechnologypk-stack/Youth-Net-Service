@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useMemo } from 'react';
 import {
   Server,
   Radio,
@@ -56,15 +56,27 @@ import {
   computeExactSessionUptimeSeconds,
 } from '../services/sessionSyncEngine';
 
+import { getStoredUser } from '../lib/auth';
+import {
+  StaffPermissions,
+  resolveStaffPermissions,
+} from '../lib/staffPermissions';
+
 interface MikrotikStudioProps {
   onOpenProvisionModal: () => void;
   onOpenAddRouterModal?: () => void;
+  staffPermissions?: StaffPermissions;
 }
 
 export const MikrotikStudio: React.FC<MikrotikStudioProps> = ({
   onOpenProvisionModal,
   onOpenAddRouterModal,
+  staffPermissions,
 }) => {
+  const perms = useMemo(
+    () => staffPermissions || resolveStaffPermissions(getStoredUser()),
+    [staffPermissions]
+  );
   const {
     routers,
     selectedRouterId,
@@ -786,21 +798,23 @@ export const MikrotikStudio: React.FC<MikrotikStudioProps> = ({
                 Manage credentials, speed profiles, and trigger automated Walled-Garden isolation.
               </p>
             </div>
-            <div className="flex flex-wrap items-center gap-2 shrink-0">
-              <button
-                onClick={() => setIsAddUserModalOpen(true)}
-                className="bg-sky-600 hover:bg-sky-500 text-white font-bold text-xs px-3 py-1.5 rounded-lg transition flex items-center gap-1 shadow-sm cursor-pointer"
-              >
-                <Plus className="w-3.5 h-3.5" />
-                <span>+ Add PPPoE User</span>
-              </button>
-              <button
-                onClick={onOpenProvisionModal}
-                className="bg-slate-800 hover:bg-slate-700 text-slate-200 border border-slate-700 font-semibold text-xs px-3 py-1.5 rounded-lg transition cursor-pointer"
-              >
-                Provision Wizard
-              </button>
-            </div>
+            {perms.provision_pppoe && (
+              <div className="flex flex-wrap items-center gap-2 shrink-0">
+                <button
+                  onClick={() => setIsAddUserModalOpen(true)}
+                  className="bg-sky-600 hover:bg-sky-500 text-white font-bold text-xs px-3 py-1.5 rounded-lg transition flex items-center gap-1 shadow-sm cursor-pointer"
+                >
+                  <Plus className="w-3.5 h-3.5" />
+                  <span>+ Add PPPoE User</span>
+                </button>
+                <button
+                  onClick={onOpenProvisionModal}
+                  className="bg-slate-800 hover:bg-slate-700 text-slate-200 border border-slate-700 font-semibold text-xs px-3 py-1.5 rounded-lg transition cursor-pointer"
+                >
+                  Provision Wizard
+                </button>
+              </div>
+            )}
           </div>
 
           <div className="overflow-x-auto">

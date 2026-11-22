@@ -27,11 +27,14 @@ import { buildStandardWhatsAppCredentialText, getPortalUrlForRole } from '../ser
 import { RealMikrotikSubscriber, fetchLiveMikrotikSubscribers } from '../services/mikrotikSubscriberSync';
 import { supabase } from '../services/supabaseClient';
 import {
-  isMissingGisPermissionColumnError,
   isStaffRoleEligibleForGisControl,
   normalizeGisMapPermission,
-  updatePortalUserGisPermission,
 } from '../lib/gisAccessControl';
+import {
+  isMissingPermissionsColumnError,
+  resolveStaffPermissions,
+  updatePortalUserPermissions,
+} from '../lib/staffPermissions';
 
 export interface UserAccountsViewProps {
   currentSimulatedRole?: SystemRole;
@@ -160,17 +163,15 @@ export const UserAccountsView: React.FC<UserAccountsViewProps> = ({
         row.can_access_gis_map,
         roleUpper
       ),
+      permissions:
+        row.permissions && typeof row.permissions === 'object' ? row.permissions : undefined,
       createdAt: row.created_at || row.createdAt || new Date().toISOString(),
     };
   };
 
   // Handlers
   const handleAccountCreated = async (newUser: UserAccount, plainPassword: string, sendWhatsApp: boolean) => {
-    const resolvedPermission = normalizeGisMapPermission(
-      newUser.gis_map_permission,
-      newUser.can_access_gis_map,
-      newUser.role
-    );
+    const resolvedPerms = resolveStaffPermissions(newUser, newUser.role);
     const insertPayload: Record<string, any> = {
       id: newUser.id,
       username: (newUser.username || '').trim().toLowerCase(),
@@ -180,20 +181,26 @@ export const UserAccountsView: React.FC<UserAccountsViewProps> = ({
       area: newUser.area || 'Saddar Node',
       account_status: newUser.isActive ? 'ACTIVE' : 'SUSPENDED',
       password: plainPassword,
-      can_access_gis_map: resolvedPermission !== 'none',
-      gis_map_permission: resolvedPermission,
+      can_access_gis_map: resolvedPerms.gis_map !== 'none',
+      gis_map_permission: resolvedPerms.gis_map,
+      permissions: resolvedPerms,
       created_at: new Date().toISOString(),
     };
     // Insert directly into Supabase portal_users
     try {
       const { error: upsertErr } = await supabase.from('portal_users').upsert([insertPayload]);
-      if (upsertErr && isMissingGisPermissionColumnError(upsertErr)) {
-        const { can_access_gis_map: _c, gis_map_permission: _p, ...legacyPayload } = insertPayload;
+      if (upsertErr && isMissingPermissionsColumnError(upsertErr)) {
+        const {
+          can_access_gis_map: _c,
+          gis_map_permission: _p,
+          permissions: _perms,
+          ...legacyPayload
+        } = insertPayload;
         await supabase.from('portal_users').upsert([legacyPayload]);
-        await updatePortalUserGisPermission({
+        await updatePortalUserPermissions({
           userId: newUser.id,
           username: newUser.username,
-          permission: resolvedPermission,
+          permissions: resolvedPerms,
         });
       }
     } catch (err) {
@@ -229,32 +236,34 @@ export const UserAccountsView: React.FC<UserAccountsViewProps> = ({
 
   const handleSaveEditedUser = async (updatedUser: UserAccount) => {
     try {
-      const resolvedPermission = normalizeGisMapPermission(
-        updatedUser.gis_map_permission,
-        updatedUser.can_access_gis_map,
-        updatedUser.role
-      );
+      const resolvedPerms = resolveStaffPermissions(updatedUser, updatedUser.role);
       const updatePayload: Record<string, any> = {
         full_name: updatedUser.fullName,
         phone: updatedUser.phone,
         role: updatedUser.role,
         area: updatedUser.area,
         account_status: updatedUser.isActive ? 'ACTIVE' : 'SUSPENDED',
-        can_access_gis_map: resolvedPermission !== 'none',
-        gis_map_permission: resolvedPermission,
+        can_access_gis_map: resolvedPerms.gis_map !== 'none',
+        gis_map_permission: resolvedPerms.gis_map,
+        permissions: resolvedPerms,
       };
       const { error: updateErr } = await supabase
         .from('portal_users')
         .update(updatePayload)
         .eq('id', updatedUser.id);
-      if (updateErr && isMissingGisPermissionColumnError(updateErr)) {
-        const { can_access_gis_map: _c, gis_map_permission: _p, ...legacyPayload } = updatePayload;
+      if (updateErr && isMissingPermissionsColumnError(updateErr)) {
+        const {
+          can_access_gis_map: _c,
+          gis_map_permission: _p,
+          permissions: _perms,
+          ...legacyPayload
+        } = updatePayload;
         await supabase.from('portal_users').update(legacyPayload).eq('id', updatedUser.id);
       }
-      await updatePortalUserGisPermission({
+      await updatePortalUserPermissions({
         userId: updatedUser.id,
         username: updatedUser.username,
-        permission: resolvedPermission,
+        permissions: resolvedPerms,
       });
 
       await fetch(`/api/auth/users/${updatedUser.id}`, {

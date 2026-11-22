@@ -66,6 +66,17 @@ import {
   getExpenseCategoryMeta,
   parseExpenseNotes,
 } from '../lib/profitLoss';
+import { SystemRole, UserAccount } from '../types/auth';
+import {
+  StaffPermissions,
+  resolveStaffPermissions,
+} from '../lib/staffPermissions';
+
+export interface ProfitLossLedgerViewProps {
+  currentUser?: UserAccount | null;
+  currentRole?: SystemRole;
+  staffPermissions?: StaffPermissions;
+}
 
 interface UnifiedLedgerRow {
   uid: string;
@@ -104,10 +115,18 @@ const createInitialExpenseForm = (): ExpenseFormState => ({
   notes: '',
 });
 
-export const ProfitLossLedgerView: React.FC = () => {
+export const ProfitLossLedgerView: React.FC<ProfitLossLedgerViewProps> = ({
+  currentUser: propUser,
+  currentRole,
+  staffPermissions,
+}) => {
   const { formatCurrency } = useCurrency();
-  const currentUser = getStoredUser();
-  const isAdmin = (currentUser?.role || 'ADMIN') === 'ADMIN';
+  const currentUser = propUser || getStoredUser();
+  const perms = useMemo(
+    () => staffPermissions || resolveStaffPermissions(currentUser, currentRole),
+    [staffPermissions, currentUser, currentRole]
+  );
+  const canManageExpenses = perms.expenses_ledger;
 
   const [dateFilter, setDateFilter] = useState<DateFilterState>(() =>
     createDefaultDateFilter('month')
@@ -364,6 +383,7 @@ export const ProfitLossLedgerView: React.FC = () => {
   );
 
   const openCreateModal = () => {
+    if (!canManageExpenses) return;
     setEditingExpense(null);
     setFormState(createInitialExpenseForm());
     setFormError(null);
@@ -371,6 +391,7 @@ export const ProfitLossLedgerView: React.FC = () => {
   };
 
   const openEditModal = (exp: SupabaseIspExpense) => {
+    if (!canManageExpenses) return;
     const { vendor, cleanNotes } = parseExpenseNotes(exp.notes);
     setEditingExpense(exp);
     setFormState({
@@ -390,6 +411,7 @@ export const ProfitLossLedgerView: React.FC = () => {
 
   const handleSaveExpense = async (e: React.FormEvent) => {
     e.preventDefault();
+    if (!canManageExpenses) return;
     setFormError(null);
 
     const cleanTitle = formState.title.trim();
@@ -444,6 +466,7 @@ export const ProfitLossLedgerView: React.FC = () => {
   };
 
   const handleConfirmDelete = async () => {
+    if (!canManageExpenses) return;
     if (!pendingDeleteExpense?.id) return;
     setIsDeleting(true);
     try {
@@ -560,14 +583,16 @@ export const ProfitLossLedgerView: React.FC = () => {
             <span>Refresh</span>
           </button>
 
-          <button
-            type="button"
-            onClick={openCreateModal}
-            className="px-3.5 py-2 rounded-lg bg-sky-600 hover:bg-sky-500 text-white font-bold text-xs flex items-center gap-1.5 transition shadow-sm cursor-pointer whitespace-nowrap shrink-0"
-          >
-            <PlusCircle className="w-4 h-4" />
-            <span>+ Record Expense</span>
-          </button>
+          {canManageExpenses && (
+            <button
+              type="button"
+              onClick={openCreateModal}
+              className="px-3.5 py-2 rounded-lg bg-sky-600 hover:bg-sky-500 text-white font-bold text-xs flex items-center gap-1.5 transition shadow-sm cursor-pointer whitespace-nowrap shrink-0"
+            >
+              <PlusCircle className="w-4 h-4" />
+              <span>+ Record Expense</span>
+            </button>
+          )}
         </div>
       </div>
 
@@ -1300,7 +1325,7 @@ export const ProfitLossLedgerView: React.FC = () => {
                     </td>
                     <td className="py-3 px-4 text-right whitespace-nowrap">
                       {row.sourceType === 'EXPENSE' && row.expenseRecord ? (
-                        isAdmin ? (
+                        canManageExpenses ? (
                           <div className="inline-flex items-center gap-1.5">
                             <button
                               type="button"

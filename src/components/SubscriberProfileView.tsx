@@ -82,18 +82,30 @@ import {
   normalizeTicketPriority,
 } from '../lib/anniversaryBilling';
 import { isMissingTableOrColumnError } from '../lib/expiryUtils';
+import { getStoredUser } from '../lib/auth';
+import {
+  StaffPermissions,
+  maskSensitiveCnic,
+  resolveStaffPermissions,
+} from '../lib/staffPermissions';
 
 export interface SubscriberProfileViewProps {
   username: string;
   onBack: () => void;
   onOpenReceiptModal?: (invoice: any) => void;
+  staffPermissions?: StaffPermissions;
 }
 
 export const SubscriberProfileView: React.FC<SubscriberProfileViewProps> = ({
   username,
   onBack,
   onOpenReceiptModal,
+  staffPermissions,
 }) => {
+  const perms = useMemo(
+    () => staffPermissions || resolveStaffPermissions(getStoredUser()),
+    [staffPermissions]
+  );
   const { formatCurrency, currencySymbol } = useCurrency();
   const { routers, selectedRouterId, kickSession, resolveTicket } = useISP();
 
@@ -778,6 +790,10 @@ export const SubscriberProfileView: React.FC<SubscriberProfileViewProps> = ({
   // Action 2: Change Password
   const handleUpdatePassword = async (e: React.FormEvent) => {
     e.preventDefault();
+    if (!perms.view_passwords) {
+      showToast('Permission required: Reveal & manage subscriber PPPoE passwords is disabled for your account.', 'error');
+      return;
+    }
     if (!newPassword || newPassword.length < 4) {
       showToast('Password must be at least 4 characters long', 'error');
       return;
@@ -838,7 +854,7 @@ export const SubscriberProfileView: React.FC<SubscriberProfileViewProps> = ({
       const baseUpdatePayload: Partial<SupabasePortalUser> = {
         full_name: editForm.fullName,
         phone: editForm.phone,
-        cnic: editForm.cnic,
+        cnic: perms.view_passwords ? editForm.cnic : (user?.cnic || ''),
         address: editForm.address,
         area: editForm.area,
         installation_date: normalizedInstallDate,
@@ -1004,6 +1020,10 @@ export const SubscriberProfileView: React.FC<SubscriberProfileViewProps> = ({
 
   // Action 6: Record Payment on an Invoice
   const handleConfirmPayment = async () => {
+    if (!perms.collect_fee) {
+      showToast('Permission required: Receive Cash / Mark Invoice Paid is disabled for your account.', 'error');
+      return;
+    }
     if (!selectedInvoiceForPayment) return;
     const enteredVal = Number(paymentAmountInput);
     if (isNaN(enteredVal) || enteredVal <= 0) {
@@ -1269,7 +1289,13 @@ export const SubscriberProfileView: React.FC<SubscriberProfileViewProps> = ({
           <div className="bg-slate-900/90 rounded-xl p-3.5 border border-slate-800 space-y-2.5 text-xs font-mono">
             <div className="flex justify-between items-center">
               <span className="text-slate-400 font-sans">CNIC:</span>
-              <span className="text-white font-bold">{user?.cnic || 'N/A'}</span>
+              <span className="text-white font-bold">
+                {perms.view_passwords
+                  ? user?.cnic || 'N/A'
+                  : user?.cnic
+                  ? maskSensitiveCnic(user.cnic)
+                  : 'N/A'}
+              </span>
             </div>
             <div className="flex justify-between items-center">
               <span className="text-slate-400 font-sans">Phone / WhatsApp:</span>
@@ -1317,31 +1343,42 @@ export const SubscriberProfileView: React.FC<SubscriberProfileViewProps> = ({
             <div className="pt-2 border-t border-slate-800 flex justify-between items-center">
               <span className="text-slate-400 font-sans">Portal &amp; PPPoE Pass:</span>
               <div className="flex items-center gap-2">
-                <span className="text-white font-bold tracking-wider">
-                  {showPassword ? effectivePassword || '••••••' : '••••••••'}
-                </span>
-                <button
-                  type="button"
-                  onClick={() => setShowPassword(!showPassword)}
-                  className="text-slate-400 hover:text-white"
-                  title={showPassword ? 'Hide Password' : 'Show Password'}
-                >
-                  {showPassword ? <EyeOff className="w-3.5 h-3.5" /> : <Eye className="w-3.5 h-3.5" />}
-                </button>
-                <button
-                  type="button"
-                  onClick={() => copyToClipboard(effectivePassword, 'Password')}
-                  className="text-slate-400 hover:text-white"
-                  title="Copy Password"
-                >
-                  {copiedField === 'Password' ? <Check className="w-3 h-3 text-emerald-400" /> : <Copy className="w-3 h-3" />}
-                </button>
+                {perms.view_passwords ? (
+                  <>
+                    <span className="text-white font-bold tracking-wider">
+                      {showPassword ? effectivePassword || '••••••' : '••••••••'}
+                    </span>
+                    <button
+                      type="button"
+                      onClick={() => setShowPassword(!showPassword)}
+                      className="text-slate-400 hover:text-white cursor-pointer"
+                      title={showPassword ? 'Hide Password' : 'Show Password'}
+                    >
+                      {showPassword ? <EyeOff className="w-3.5 h-3.5" /> : <Eye className="w-3.5 h-3.5" />}
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => copyToClipboard(effectivePassword, 'Password')}
+                      className="text-slate-400 hover:text-white cursor-pointer"
+                      title="Copy Password"
+                    >
+                      {copiedField === 'Password' ? <Check className="w-3 h-3 text-emerald-400" /> : <Copy className="w-3 h-3" />}
+                    </button>
+                  </>
+                ) : (
+                  <span
+                    className="text-slate-500 font-bold tracking-wider"
+                    title="Reveal Subscriber PPPoE Passwords & CNIC permission is disabled"
+                  >
+                    ••••••••
+                  </span>
+                )}
               </div>
             </div>
           </div>
 
           {/* THREE ACTION BUTTONS */}
-          <div className="grid grid-cols-3 gap-2 pt-1">
+          <div className={`grid gap-2 pt-1 ${perms.view_passwords ? 'grid-cols-3' : 'grid-cols-2'}`}>
             <button
               type="button"
               onClick={() => setIsKickModalOpen(true)}
@@ -1352,15 +1389,17 @@ export const SubscriberProfileView: React.FC<SubscriberProfileViewProps> = ({
               <span>Kick Session</span>
             </button>
 
-            <button
-              type="button"
-              onClick={() => setIsPasswordModalOpen(true)}
-              className="px-2.5 py-2 rounded-xl bg-amber-950/80 hover:bg-amber-900 text-amber-300 border border-amber-800 text-xs font-bold transition flex items-center justify-center gap-1.5 cursor-pointer shadow-sm active:scale-95"
-              title="Update secret password in Supabase and MikroTik"
-            >
-              <Key className="w-3.5 h-3.5 text-amber-400" />
-              <span>Passwd</span>
-            </button>
+            {perms.view_passwords && (
+              <button
+                type="button"
+                onClick={() => setIsPasswordModalOpen(true)}
+                className="px-2.5 py-2 rounded-xl bg-amber-950/80 hover:bg-amber-900 text-amber-300 border border-amber-800 text-xs font-bold transition flex items-center justify-center gap-1.5 cursor-pointer shadow-sm active:scale-95"
+                title="Update secret password in Supabase and MikroTik"
+              >
+                <Key className="w-3.5 h-3.5 text-amber-400" />
+                <span>Passwd</span>
+              </button>
+            )}
 
             <button
               type="button"
@@ -1821,17 +1860,21 @@ export const SubscriberProfileView: React.FC<SubscriberProfileViewProps> = ({
                             </td>
                             <td className="py-3 px-4 text-right">
                               {balance > 0 && displayStatus !== 'PAID' ? (
-                                <button
-                                  type="button"
-                                  onClick={() => {
-                                    setSelectedInvoiceForPayment(inv);
-                                    setPaymentAmountInput(balance);
-                                    setIsRecordPaymentModalOpen(true);
-                                  }}
-                                  className="px-2.5 py-1 rounded bg-emerald-600 hover:bg-emerald-500 text-slate-950 font-bold text-[11px] transition cursor-pointer"
-                                >
-                                  Record Payment
-                                </button>
+                                perms.collect_fee ? (
+                                  <button
+                                    type="button"
+                                    onClick={() => {
+                                      setSelectedInvoiceForPayment(inv);
+                                      setPaymentAmountInput(balance);
+                                      setIsRecordPaymentModalOpen(true);
+                                    }}
+                                    className="px-2.5 py-1 rounded bg-emerald-600 hover:bg-emerald-500 text-slate-950 font-bold text-[11px] transition cursor-pointer"
+                                  >
+                                    Record Payment
+                                  </button>
+                                ) : (
+                                  <span className="text-slate-500 font-mono text-[11px]">Unpaid</span>
+                                )
                               ) : (
                                 <div className="flex items-center justify-end gap-1.5">
                                   <span className="text-emerald-400 font-mono text-[11px] font-semibold">
@@ -2389,10 +2432,20 @@ export const SubscriberProfileView: React.FC<SubscriberProfileViewProps> = ({
                   <label className="block font-medium text-slate-300 mb-1">CNIC Number</label>
                   <input
                     type="text"
-                    value={editForm.cnic}
-                    onChange={(e) => setEditForm({ ...editForm, cnic: e.target.value })}
+                    disabled={!perms.view_passwords}
+                    value={
+                      perms.view_passwords
+                        ? editForm.cnic
+                        : editForm.cnic
+                        ? maskSensitiveCnic(editForm.cnic)
+                        : 'Masked'
+                    }
+                    onChange={(e) => {
+                      if (!perms.view_passwords) return;
+                      setEditForm({ ...editForm, cnic: e.target.value });
+                    }}
                     placeholder="37405-XXXXXXX-X"
-                    className="w-full px-3 py-2 bg-slate-900 border border-slate-700 rounded-lg text-white font-mono focus:outline-none focus:border-cyan-500"
+                    className="w-full px-3 py-2 bg-slate-900 border border-slate-700 rounded-lg text-white font-mono focus:outline-none focus:border-cyan-500 disabled:opacity-60 disabled:cursor-not-allowed"
                   />
                 </div>
                 <div>

@@ -3,8 +3,11 @@ import { BillingManagement, BillingManagementProps } from './BillingManagement';
 import { BillingView } from './BillingView';
 import { ExpiryAutomationView } from './ExpiryAutomationView';
 import { Database, Layers, ShieldAlert } from 'lucide-react';
+import { StaffPermissions } from '../lib/staffPermissions';
 
-export interface BillingStudioProps extends BillingManagementProps {}
+export interface BillingStudioProps extends BillingManagementProps {
+  staffPermissions?: StaffPermissions;
+}
 
 export { BillingView };
 
@@ -65,12 +68,17 @@ export const BillingStudio: React.FC<BillingStudioProps> = (props) => {
         <BillingView
           currentRole={props.currentRole}
           currentUser={props.currentUser}
+          staffPermissions={props.staffPermissions}
           onOpenReceiptModal={props.onOpenReceiptModal}
         />
       ) : activeMode === 'expiry' ? (
-        <ExpiryAutomationView />
+        <ExpiryAutomationView
+          currentRole={props.currentRole}
+          currentUser={props.currentUser}
+          staffPermissions={props.staffPermissions}
+        />
       ) : (
-        <BillingManagement {...props} />
+        <BillingManagement {...props} staffPermissions={props.staffPermissions} />
       )}
     </div>
   );

@@ -57,11 +57,14 @@ import {
   isOfflineCapableRole,
 } from '../services/OfflineSyncManager';
 import { reportSupabaseReachability } from '../lib/offlineFieldQueue';
-import { GisMapPermission, resolveUserGisAccess } from '../lib/gisAccessControl';
+import { GisMapPermission } from '../lib/gisAccessControl';
+import { StaffPermissions, resolveStaffPermissions } from '../lib/staffPermissions';
 
 interface FieldAgentPortalProps {
   currentUser: UserAccount;
   gisPermission?: GisMapPermission;
+  staffPermissions?: StaffPermissions;
+  onNavigateTab?: (tab: 'mikrotik' | 'olt' | 'profit_expenses') => void;
   onOpenReceiptModal?: (invoice: Invoice) => void;
   onOpenPaymentModal?: (invoice: Invoice) => void;
 }
@@ -69,6 +72,8 @@ interface FieldAgentPortalProps {
 export const FieldAgentPortal: React.FC<FieldAgentPortalProps> = ({
   currentUser,
   gisPermission,
+  staffPermissions,
+  onNavigateTab,
   onOpenReceiptModal,
   onOpenPaymentModal,
 }) => {
@@ -80,12 +85,12 @@ export const FieldAgentPortal: React.FC<FieldAgentPortalProps> = ({
   } = useISP();
   const { formatCurrency, currencySymbol } = useCurrency();
 
-  const effectiveGisAccess = gisPermission
-    ? {
-        canAccess: gisPermission !== 'none',
-        permission: gisPermission,
-      }
-    : resolveUserGisAccess(currentUser, currentUser.role || 'AGENT');
+  const perms = staffPermissions || resolveStaffPermissions(currentUser, currentUser.role || 'AGENT');
+  const resolvedGisPerm: GisMapPermission = gisPermission || perms.gis_map;
+  const effectiveGisAccess = {
+    canAccess: resolvedGisPerm !== 'none',
+    permission: resolvedGisPerm,
+  };
 
   const [activeTab, setActiveTab] = useState<'tickets' | 'collections' | 'ledger' | 'ont_checker' | 'directory' | 'fiber_gis'>('tickets');
 
@@ -446,8 +451,12 @@ export const FieldAgentPortal: React.FC<FieldAgentPortalProps> = ({
     };
   }, [currentUser.id]);
 
-  // Open modal for recording payment
+  // Open modal for recording payment (Gated by collect_fee permission)
   const handleOpenCollectionModal = (inv: SupabaseInvoice) => {
+    if (!perms.collect_fee) {
+      showNoticeToast('Cash collection is disabled for your account by Admin.', 4000);
+      return;
+    }
     const alreadyPaid = Number(inv.paid_amount) || 0;
     const remainingDue = Math.max(0, (Number(inv.amount) || 0) - alreadyPaid);
     if (remainingDue <= 0 || (inv.status || '').toUpperCase() === 'PAID') {
@@ -461,6 +470,10 @@ export const FieldAgentPortal: React.FC<FieldAgentPortalProps> = ({
 
   // Handle direct cash collection with transparent offline saving fallback
   const handleConfirmCollection = async () => {
+    if (!perms.collect_fee) {
+      showNoticeToast('Cash collection is disabled for your account by Admin.', 4000);
+      return;
+    }
     if (!selectedInvForCollection) return;
     const enteredVal = Number(collectionAmountInput);
     if (isNaN(enteredVal) || enteredVal <= 0) {
@@ -806,6 +819,39 @@ export const FieldAgentPortal: React.FC<FieldAgentPortalProps> = ({
             </span>
           </div>
         </div>
+
+        {onNavigateTab && (perms.mikrotik_panel || perms.olt_panel || perms.expenses_ledger) && (
+          <div className="mt-3 pt-2.5 border-t border-emerald-800/40 flex flex-wrap items-center gap-1.5">
+            <span className="text-[10px] font-mono text-slate-400 mr-1">Assigned Modules:</span>
+            {perms.mikrotik_panel && (
+              <button
+                type="button"
+                onClick={() => onNavigateTab('mikrotik')}
+                className="px-2.5 py-1 rounded-lg bg-cyan-950/80 hover:bg-cyan-900 border border-cyan-700/70 text-cyan-300 font-mono font-bold text-[10px] transition cursor-pointer"
+              >
+                MikroTik RouterOS v7
+              </button>
+            )}
+            {perms.olt_panel && (
+              <button
+                type="button"
+                onClick={() => onNavigateTab('olt')}
+                className="px-2.5 py-1 rounded-lg bg-indigo-950/80 hover:bg-indigo-900 border border-indigo-700/70 text-indigo-300 font-mono font-bold text-[10px] transition cursor-pointer"
+              >
+                VSOL OLT GPON
+              </button>
+            )}
+            {perms.expenses_ledger && (
+              <button
+                type="button"
+                onClick={() => onNavigateTab('profit_expenses')}
+                className="px-2.5 py-1 rounded-lg bg-emerald-950/80 hover:bg-emerald-900 border border-emerald-700/70 text-emerald-300 font-mono font-bold text-[10px] transition cursor-pointer"
+              >
+                Expenses &amp; P&amp;L
+              </button>
+            )}
+          </div>
+        )}
       </div>
 
       {/* Success Notification Banner with 1-Click Instant WhatsApp Receipt */}
@@ -1107,13 +1153,20 @@ export const FieldAgentPortal: React.FC<FieldAgentPortalProps> = ({
                         <Send className="w-3 h-3" />
                         <span>WA Remind</span>
                       </button>
-                      <button
-                        onClick={() => handleOpenCollectionModal(inv)}
-                        className="px-3 py-1.5 rounded-lg bg-emerald-600 hover:bg-emerald-500 text-slate-950 font-bold font-mono text-xs flex items-center gap-1.5 shadow transition cursor-pointer"
-                      >
-                        <DollarSign className="w-3.5 h-3.5" />
-                        <span>Collect Payment / Mark Paid</span>
-                      </button>
+                      {perms.collect_fee ? (
+                        <button
+                          onClick={() => handleOpenCollectionModal(inv)}
+                          className="px-3 py-1.5 rounded-lg bg-emerald-600 hover:bg-emerald-500 text-slate-950 font-bold font-mono text-xs flex items-center gap-1.5 shadow transition cursor-pointer"
+                        >
+                          <DollarSign className="w-3.5 h-3.5" />
+                          <span>Collect Payment / Mark Paid</span>
+                        </button>
+                      ) : (
+                        <span className="px-2.5 py-1.5 rounded-lg bg-slate-800 border border-slate-700 text-slate-400 font-mono text-[10px] flex items-center gap-1">
+                          <Lock className="w-3 h-3" />
+                          <span>Cash Collection Restricted</span>
+                        </span>
+                      )}
                     </div>
                   ) : (
                     <div className="flex items-center gap-1.5 flex-wrap">
@@ -1424,7 +1477,7 @@ export const FieldAgentPortal: React.FC<FieldAgentPortalProps> = ({
                           <Send className="w-3.5 h-3.5" />
                           <span>{remaining > 0 ? 'WA Remind' : 'WA Receipt'}</span>
                         </button>
-                        {remaining > 0 && (
+                        {remaining > 0 && perms.collect_fee && (
                           <button
                             type="button"
                             onClick={() => handleOpenCollectionModal(inv)}

@@ -32,7 +32,7 @@ export interface UserAccount {
   package_volume_gb?: number; // FUP data limit in GB (e.g. 1500)
   cnic?: string;
   address?: string;
-  permissions?: Record<string, boolean>; // Granular feature override flags
+  permissions?: Record<string, any>; // Granular feature override flags (JSONB)
   can_access_gis_map?: boolean; // Role-based Fiber GIS & Map enable/disable flag
   gis_map_permission?: GisMapPermissionLevel; // 'none' | 'view' | 'edit'
   createdAt: string;

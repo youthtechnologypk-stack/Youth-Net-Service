@@ -52,9 +52,14 @@ import {
 import {
   GIS_PERMISSION_UPDATED_EVENT,
   GisMapPermission,
-  fetchLiveUserGisPermissionFromSupabase,
   resolveUserGisAccess,
 } from './lib/gisAccessControl';
+import {
+  STAFF_PERMISSIONS_UPDATED_EVENT,
+  StaffPermissions,
+  fetchLiveStaffPermissionsFromSupabase,
+  resolveStaffPermissions,
+} from './lib/staffPermissions';
 import { supabase } from './services/supabaseClient';
 import { Radio, ShieldCheck, Database, ShieldAlert, ArrowLeft, WifiOff, RefreshCw, CheckCircle2, X } from 'lucide-react';
 import {
@@ -114,17 +119,24 @@ function ISPAppContent() {
     if (!user) return 'noc';
     const pathTab = typeof window !== 'undefined' ? getTabFromPath(window.location.pathname) : null;
     if (user.role === 'AGENT') {
-      if (pathTab === 'fiber_gis') return 'fiber_gis';
+      if (
+        pathTab === 'fiber_gis' ||
+        pathTab === 'mikrotik' ||
+        pathTab === 'olt' ||
+        pathTab === 'profit_expenses'
+      ) {
+        return pathTab as ActiveTab;
+      }
       return 'agent_portal';
     }
     if (user.role === 'CLIENT') return 'client_portal';
-    if (pathTab && isRouteAllowedForRole(user.role, pathTab)) {
+    if (pathTab && isRouteAllowedForRole(user.role, pathTab, user)) {
       return pathTab as ActiveTab;
     }
     return getLandingTabForRole(user.role);
   });
 
-  // Live-sync logged-in user's Fiber GIS & Map permissions from Supabase portal_users + realtime
+  // Live-sync logged-in user's full RBAC permissions JSONB & GIS access from Supabase portal_users + realtime
   useEffect(() => {
     if (!currentUser || currentUser.role === 'ADMIN' || currentUser.role === 'CLIENT') {
       return;
@@ -133,21 +145,26 @@ function ISPAppContent() {
     let cancelled = false;
 
     const applyPermissionUpdate = (
-      canAccess: boolean,
-      permission: GisMapPermission
+      nextPermissions: StaffPermissions
     ) => {
+      const canAccess = nextPermissions.gis_map !== 'none';
+      const gisPerm: GisMapPermission = nextPermissions.gis_map;
       setCurrentUser((prev) => {
         if (!prev) return prev;
+        const prevSerialized = JSON.stringify(prev.permissions || {});
+        const nextSerialized = JSON.stringify(nextPermissions);
         if (
           prev.can_access_gis_map === canAccess &&
-          prev.gis_map_permission === permission
+          prev.gis_map_permission === gisPerm &&
+          prevSerialized === nextSerialized
         ) {
           return prev;
         }
         const nextUser: UserAccount = {
           ...prev,
           can_access_gis_map: canAccess,
-          gis_map_permission: permission,
+          gis_map_permission: gisPerm,
+          permissions: nextPermissions,
         };
         const token = getStoredToken();
         if (token) {
@@ -158,15 +175,36 @@ function ISPAppContent() {
     };
 
     const syncFromDb = async () => {
-      const live = await fetchLiveUserGisPermissionFromSupabase(currentUser);
-      if (!cancelled && live.found) {
-        applyPermissionUpdate(live.can_access_gis_map, live.gis_map_permission);
+      const live = await fetchLiveStaffPermissionsFromSupabase(currentUser);
+      if (!cancelled && live?.permissions) {
+        const resolved = resolveStaffPermissions(
+          {
+            ...currentUser,
+            permissions: live.permissions,
+            can_access_gis_map: live.can_access_gis_map,
+            gis_map_permission: live.gis_map_permission,
+          },
+          currentUser.role
+        );
+        applyPermissionUpdate(resolved);
       }
     };
 
     void syncFromDb();
 
-    const handleCustomEvent = (evt: Event) => {
+    const handleStaffPermsEvent = (evt: Event) => {
+      const detail = (evt as CustomEvent).detail;
+      if (!detail?.permissions) return;
+      const matchesId = detail.userId && detail.userId === currentUser.id;
+      const matchesUsername =
+        detail.username &&
+        detail.username.toLowerCase() === (currentUser.username || '').toLowerCase();
+      if (matchesId || matchesUsername) {
+        applyPermissionUpdate(detail.permissions as StaffPermissions);
+      }
+    };
+
+    const handleGisEvent = (evt: Event) => {
       const detail = (evt as CustomEvent).detail;
       if (!detail) return;
       const matchesId = detail.userId && detail.userId === currentUser.id;
@@ -174,17 +212,19 @@ function ISPAppContent() {
         detail.username &&
         detail.username.toLowerCase() === (currentUser.username || '').toLowerCase();
       if (matchesId || matchesUsername) {
-        applyPermissionUpdate(
-          Boolean(detail.can_access_gis_map),
-          detail.gis_map_permission as GisMapPermission
-        );
+        const base = resolveStaffPermissions(currentUser, currentUser.role);
+        applyPermissionUpdate({
+          ...base,
+          gis_map: (detail.gis_map_permission as GisMapPermission) || (detail.can_access_gis_map ? 'view' : 'none'),
+        });
       }
     };
 
-    window.addEventListener(GIS_PERMISSION_UPDATED_EVENT, handleCustomEvent);
+    window.addEventListener(STAFF_PERMISSIONS_UPDATED_EVENT, handleStaffPermsEvent);
+    window.addEventListener(GIS_PERMISSION_UPDATED_EVENT, handleGisEvent);
 
     const channel = supabase
-      .channel(`portal_user_gis_rbac_${currentUser.id || currentUser.username}`)
+      .channel(`portal_user_rbac_${currentUser.id || currentUser.username}`)
       .on(
         'postgres_changes',
         { event: 'UPDATE', schema: 'public', table: 'portal_users' },
@@ -196,8 +236,8 @@ function ISPAppContent() {
             row.username &&
             String(row.username).toLowerCase() === (currentUser.username || '').toLowerCase();
           if (matchesId || matchesUsername) {
-            const resolved = resolveUserGisAccess(row, row.role || currentUser.role);
-            applyPermissionUpdate(resolved.canAccess, resolved.permission);
+            const resolved = resolveStaffPermissions(row, row.role || currentUser.role);
+            applyPermissionUpdate(resolved);
           }
         }
       )
@@ -205,7 +245,8 @@ function ISPAppContent() {
 
     return () => {
       cancelled = true;
-      window.removeEventListener(GIS_PERMISSION_UPDATED_EVENT, handleCustomEvent);
+      window.removeEventListener(STAFF_PERMISSIONS_UPDATED_EVENT, handleStaffPermsEvent);
+      window.removeEventListener(GIS_PERMISSION_UPDATED_EVENT, handleGisEvent);
       supabase.removeChannel(channel);
     };
   }, [currentUser?.id, currentUser?.username, currentUser?.role]);
@@ -224,7 +265,8 @@ function ISPAppContent() {
       return;
     }
 
-    if (currentUser.role === 'AGENT' && activeTab !== 'agent_portal' && activeTab !== 'fiber_gis') {
+    const agentAllowedTabs: ActiveTab[] = ['agent_portal', 'fiber_gis', 'mikrotik', 'olt', 'profit_expenses'];
+    if (currentUser.role === 'AGENT' && !agentAllowedTabs.includes(activeTab)) {
       setActiveTab('agent_portal');
       return;
     }
@@ -249,10 +291,11 @@ function ISPAppContent() {
       }
       const pathTab = getTabFromPath(window.location.pathname);
       if (user.role === 'AGENT') {
-        setActiveTab(pathTab === 'fiber_gis' ? 'fiber_gis' : 'agent_portal');
+        const agentAllowedTabs = ['fiber_gis', 'mikrotik', 'olt', 'profit_expenses'];
+        setActiveTab(pathTab && agentAllowedTabs.includes(pathTab) ? (pathTab as ActiveTab) : 'agent_portal');
       } else if (user.role === 'CLIENT') {
         setActiveTab('client_portal');
-      } else if (pathTab && isRouteAllowedForRole(user.role, pathTab)) {
+      } else if (pathTab && isRouteAllowedForRole(user.role, pathTab, user)) {
         setActiveTab(pathTab as ActiveTab);
       }
     };
@@ -579,13 +622,37 @@ function ISPAppContent() {
     return <LoginPage onLoginSuccess={handleLoginSuccess} />;
   }
 
-  // Route permission validation + per-user Fiber GIS & Map RBAC enforcement
+  // Route permission validation + complete granular per-user RBAC enforcement
+  const staffPerms = resolveStaffPermissions(currentUser, currentRole);
   const gisAccess = resolveUserGisAccess(currentUser, currentRole);
-  const isGisAccessBlocked = activeTab === 'fiber_gis' && !gisAccess.canAccess;
-  const isPermitted = isRouteAllowedForRole(currentRole, activeTab) && !isGisAccessBlocked;
+  const isGisAccessBlocked = activeTab === 'fiber_gis' && staffPerms.gis_map === 'none';
+  const isMikrotikBlocked = activeTab === 'mikrotik' && !staffPerms.mikrotik_panel;
+  const isOltBlocked = activeTab === 'olt' && !staffPerms.olt_panel;
+  const isExpensesBlocked = activeTab === 'profit_expenses' && !staffPerms.expenses_ledger;
+  const isPermitted =
+    isRouteAllowedForRole(currentRole, activeTab, currentUser) &&
+    !isGisAccessBlocked &&
+    !isMikrotikBlocked &&
+    !isOltBlocked &&
+    !isExpensesBlocked;
   const isClient = currentRole === 'CLIENT' || currentUser.role === 'CLIENT';
   const isAgent = currentRole === 'AGENT' || currentUser.role === 'AGENT';
   const isOriginalAdmin = isOriginalAdminSession();
+
+  const handleGuardedOpenProvision = () => {
+    if (!staffPerms.provision_pppoe) return;
+    setIsProvisionOpen(true);
+  };
+
+  const handleGuardedOpenOutage = () => {
+    if (!staffPerms.outage_broadcast || isClient) return;
+    handleOpenOutage();
+  };
+
+  const handleGuardedOpenPayment = (invoice: Invoice) => {
+    if (!staffPerms.collect_fee && !isClient) return;
+    handleOpenPayment(invoice);
+  };
 
   return (
     <div className="flex h-screen w-full max-w-full overflow-hidden overflow-x-hidden bg-slate-50 text-slate-900 dark:bg-[#0B111E] dark:text-slate-100 font-sans selection:bg-cyan-500 selection:text-white transition-colors duration-200">
@@ -600,11 +667,11 @@ function ISPAppContent() {
             setIsSidebarOpen(false);
           }}
           onOpenProvisionModal={() => {
-            setIsProvisionOpen(true);
+            handleGuardedOpenProvision();
             setIsSidebarOpen(false);
           }}
           onOpenOutageModal={() => {
-            handleOpenOutage();
+            handleGuardedOpenOutage();
             setIsSidebarOpen(false);
           }}
           onOpenTicketModal={() => {
@@ -615,7 +682,8 @@ function ISPAppContent() {
           onSwitchRole={isOriginalAdmin ? handleSwitchRole : undefined}
           currentUser={currentUser}
           onLogout={handleLogout}
-          canAccessGisMap={gisAccess.canAccess}
+          canAccessGisMap={staffPerms.gis_map !== 'none'}
+          staffPermissions={staffPerms}
         />
       )}
 
@@ -627,17 +695,18 @@ function ISPAppContent() {
           setActiveTab={setActiveTab}
           isSidebarOpen={isSidebarOpen}
           onToggleSidebar={() => setIsSidebarOpen((prev) => !prev)}
-          onOpenProvisionModal={() => setIsProvisionOpen(true)}
-          onOpenOutageModal={handleOpenOutage}
+          onOpenProvisionModal={handleGuardedOpenProvision}
+          onOpenOutageModal={handleGuardedOpenOutage}
           onOpenTicketModal={() => setIsTicketOpen(true)}
           onOpenAddRouterModal={() => setIsAddRouterOpen(true)}
-          onOpenPaymentModal={handleOpenPayment}
+          onOpenPaymentModal={handleGuardedOpenPayment}
           onOpenReceiptModal={handleOpenReceipt}
           currentRole={currentRole}
           onSwitchRole={isOriginalAdmin ? handleSwitchRole : undefined}
           currentUser={currentUser}
           onLogout={handleLogout}
-          canAccessGisMap={gisAccess.canAccess}
+          canAccessGisMap={staffPerms.gis_map !== 'none'}
+          staffPermissions={staffPerms}
           offlineModeStatus={
             isAgent
               ? {
@@ -780,20 +849,42 @@ function ISPAppContent() {
             {!isPermitted ? (
               <AccessDeniedView
                 currentRole={currentRole}
-                attemptedResource={isGisAccessBlocked ? 'Fiber GIS & Map' : activeTab}
+                attemptedResource={
+                  isGisAccessBlocked
+                    ? 'Fiber GIS & Map'
+                    : isMikrotikBlocked
+                    ? 'MikroTik RouterOS v7'
+                    : isOltBlocked
+                    ? 'VSOL OLT GPON'
+                    : isExpensesBlocked
+                    ? 'Profit & Expenses Ledger'
+                    : activeTab
+                }
                 customTitle={
                   isGisAccessBlocked
                     ? 'Access Restricted: Fiber GIS & Map Disabled'
+                    : isMikrotikBlocked
+                    ? 'Access Restricted: MikroTik RouterOS Panel Disabled'
+                    : isOltBlocked
+                    ? 'Access Restricted: VSOL OLT GPON Panel Disabled'
+                    : isExpensesBlocked
+                    ? 'Access Restricted: Profit & Expenses Disabled'
                     : undefined
                 }
                 customMessage={
                   isGisAccessBlocked
                     ? 'Access Restricted: Fiber GIS & Map is disabled for your account by Admin.'
+                    : isMikrotikBlocked
+                    ? 'MikroTik RouterOS v7 Tab Access is disabled for your staff profile. Ask an Administrator to enable mikrotik_panel.'
+                    : isOltBlocked
+                    ? 'VSOL OLT GPON Tab Access is disabled for your staff profile. Ask an Administrator to enable olt_panel.'
+                    : isExpensesBlocked
+                    ? 'Office Expenses & Profit Ledger access is disabled for your staff profile. Ask an Administrator to enable expenses_ledger.'
                     : undefined
                 }
                 requiredAuthLabel={
-                  isGisAccessBlocked
-                    ? 'Admin Fiber GIS & Map Grant (portal_users)'
+                  isGisAccessBlocked || isMikrotikBlocked || isOltBlocked || isExpensesBlocked
+                    ? 'Admin Granular RBAC Permission Grant (portal_users)'
                     : undefined
                 }
                 onReturnToAllowed={() => setActiveTab(getLandingTabForRole(currentRole))}
@@ -804,9 +895,10 @@ function ISPAppContent() {
                 {activeTab === 'noc' && (
                   <NocCommandCenter
                     onNavigateTab={(tab) => setActiveTab(tab)}
-                    onOpenOutageModal={() => setIsOutageOpen(true)}
+                    onOpenOutageModal={handleGuardedOpenOutage}
                     onOpenTicketModal={() => setIsTicketOpen(true)}
                     onOpenAddRouterModal={() => setIsAddRouterOpen(true)}
+                    staffPermissions={staffPerms}
                   />
                 )}
 
@@ -818,7 +910,8 @@ function ISPAppContent() {
                   <ManagerOperationsDashboard
                     currentUser={currentUser}
                     onOpenTicketModal={() => setIsTicketOpen(true)}
-                    onOpenOutageModal={() => setIsOutageOpen(true)}
+                    onOpenOutageModal={handleGuardedOpenOutage}
+                    staffPermissions={staffPerms}
                   />
                 )}
 
@@ -826,9 +919,11 @@ function ISPAppContent() {
                 {activeTab === 'agent_portal' && (
                   <FieldAgentPortal
                     currentUser={currentUser}
-                    gisPermission={gisAccess.permission}
+                    gisPermission={staffPerms.gis_map}
+                    staffPermissions={staffPerms}
+                    onNavigateTab={(tab) => setActiveTab(tab)}
                     onOpenReceiptModal={handleOpenReceipt}
-                    onOpenPaymentModal={handleOpenPayment}
+                    onOpenPaymentModal={handleGuardedOpenPayment}
                   />
                 )}
 
@@ -841,16 +936,43 @@ function ISPAppContent() {
                   />
                 )}
 
-                {/* MikroTik Fleet Studio (Admin Only) */}
+                {/* MikroTik Fleet Studio (Gated by mikrotik_panel permission) */}
                 {activeTab === 'mikrotik' && (
-                  <MikrotikStudio
-                    onOpenProvisionModal={() => setIsProvisionOpen(true)}
-                    onOpenAddRouterModal={() => setIsAddRouterOpen(true)}
-                  />
+                  <div className="space-y-3">
+                    {isAgent && (
+                      <button
+                        type="button"
+                        onClick={() => setActiveTab('agent_portal')}
+                        className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-slate-900 hover:bg-slate-800 border border-slate-700 text-xs font-mono text-cyan-300 cursor-pointer transition"
+                      >
+                        <ArrowLeft className="w-3.5 h-3.5" />
+                        <span>Back to Field Recovery Portal</span>
+                      </button>
+                    )}
+                    <MikrotikStudio
+                      onOpenProvisionModal={handleGuardedOpenProvision}
+                      onOpenAddRouterModal={() => setIsAddRouterOpen(true)}
+                      staffPermissions={staffPerms}
+                    />
+                  </div>
                 )}
 
-                {/* VSOL OLT Studio */}
-                {activeTab === 'olt' && <VsolOltStudio />}
+                {/* VSOL OLT Studio (Gated by olt_panel permission) */}
+                {activeTab === 'olt' && (
+                  <div className="space-y-3">
+                    {isAgent && (
+                      <button
+                        type="button"
+                        onClick={() => setActiveTab('agent_portal')}
+                        className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-slate-900 hover:bg-slate-800 border border-slate-700 text-xs font-mono text-cyan-300 cursor-pointer transition"
+                      >
+                        <ArrowLeft className="w-3.5 h-3.5" />
+                        <span>Back to Field Recovery Portal</span>
+                      </button>
+                    )}
+                    <VsolOltStudio />
+                  </div>
+                )}
 
                 {/* Full-Stack FTTH Fiber GIS, FOSC Joint Closure & Subscriber Map */}
                 {activeTab === 'fiber_gis' && (
@@ -867,7 +989,7 @@ function ISPAppContent() {
                     )}
                     <FiberGisMapView
                       currentUser={currentUser}
-                      gisPermission={gisAccess.permission}
+                      gisPermission={staffPerms.gis_map}
                       onReturnFromRestricted={() =>
                         setActiveTab(getLandingTabForRole(currentRole))
                       }
@@ -878,13 +1000,34 @@ function ISPAppContent() {
                 {/* Billing & Invoices */}
                 {activeTab === 'billing' && (
                   <BillingStudio
+                    currentRole={currentRole}
+                    currentUser={currentUser}
+                    staffPermissions={staffPerms}
                     onOpenReceiptModal={handleOpenReceipt}
-                    onOpenPaymentModal={handleOpenPayment}
+                    onOpenPaymentModal={handleGuardedOpenPayment}
                   />
                 )}
 
                 {/* ISP Expense Tracker & Automated Net Profit Ledger */}
-                {activeTab === 'profit_expenses' && <ProfitLossLedgerView />}
+                {activeTab === 'profit_expenses' && (
+                  <div className="space-y-3">
+                    {isAgent && (
+                      <button
+                        type="button"
+                        onClick={() => setActiveTab('agent_portal')}
+                        className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-slate-900 hover:bg-slate-800 border border-slate-700 text-xs font-mono text-cyan-300 cursor-pointer transition"
+                      >
+                        <ArrowLeft className="w-3.5 h-3.5" />
+                        <span>Back to Field Recovery Portal</span>
+                      </button>
+                    )}
+                    <ProfitLossLedgerView
+                      currentUser={currentUser}
+                      currentRole={currentRole}
+                      staffPermissions={staffPerms}
+                    />
+                  </div>
+                )}
 
                 {/* Hardware Inventory, Sales & Vendor Payables ERP */}
                 {activeTab === 'inventory' && <InventoryHardwareView />}
@@ -893,7 +1036,8 @@ function ISPAppContent() {
                 {activeTab === 'complaints' && (
                   <ComplaintsStudio
                     onOpenTicketModal={() => setIsTicketOpen(true)}
-                    onOpenOutageModal={() => setIsOutageOpen(true)}
+                    onOpenOutageModal={handleGuardedOpenOutage}
+                    staffPermissions={staffPerms}
                   />
                 )}
 
@@ -976,12 +1120,12 @@ function ISPAppContent() {
 
       {/* Global Modals (Guarded by strict RBAC) */}
       <ProvisionSecretModal
-        isOpen={isProvisionOpen && currentRole === 'ADMIN'}
+        isOpen={isProvisionOpen && staffPerms.provision_pppoe}
         onClose={() => setIsProvisionOpen(false)}
       />
 
       <OutageBroadcasterModal
-        isOpen={isOutageOpen && (currentRole === 'ADMIN' || currentRole === 'MANAGER') && !isClient}
+        isOpen={isOutageOpen && staffPerms.outage_broadcast && !isClient}
         onClose={() => setIsOutageOpen(false)}
       />
 
@@ -996,7 +1140,7 @@ function ISPAppContent() {
       />
 
       <CashPaymentModal
-        invoice={selectedPaymentInvoice}
+        invoice={staffPerms.collect_fee || isClient ? selectedPaymentInvoice : null}
         onClose={() => setSelectedPaymentInvoice(null)}
         onPaymentSuccess={handlePaymentSuccess}
       />

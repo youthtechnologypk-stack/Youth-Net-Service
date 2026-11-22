@@ -19,10 +19,13 @@ import { AreaNodeSelector } from './AreaNodeSelector';
 import { fetchMikrotikPppSecrets } from '../services/mikrotikRestClient';
 import { MikrotikPppSecret } from '../types/isp';
 import {
-  GIS_PERMISSION_OPTIONS,
-  GisMapPermission,
-  resolveUserGisAccess,
-} from '../lib/gisAccessControl';
+  ADMIN_FULL_PERMISSIONS,
+  CLIENT_NO_PERMISSIONS,
+  StaffPermissions,
+  getDefaultPermissionsForRole,
+  resolveStaffPermissions,
+} from '../lib/staffPermissions';
+import { StaffPermissionsEditor } from './StaffPermissionsEditor';
 
 interface EditUserModalProps {
   isOpen: boolean;
@@ -51,7 +54,9 @@ export const EditUserModal: React.FC<EditUserModalProps> = ({
   const [department, setDepartment] = useState('');
   const [linkedCustomerId, setLinkedCustomerId] = useState('');
   const [linkedAgentId, setLinkedAgentId] = useState('');
-  const [gisPermission, setGisPermission] = useState<GisMapPermission>('view');
+  const [staffPermissions, setStaffPermissions] = useState<StaffPermissions>(() =>
+    getDefaultPermissionsForRole('AGENT')
+  );
 
   const [isSubmitting, setIsSubmitting] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -93,7 +98,7 @@ export const EditUserModal: React.FC<EditUserModalProps> = ({
       setDepartment(user.department || 'NOC & Network Operations');
       setLinkedCustomerId(user.linkedCustomerId || '');
       setLinkedAgentId(user.linkedAgentId || '');
-      setGisPermission(resolveUserGisAccess(user, user.role).permission);
+      setStaffPermissions(resolveStaffPermissions(user, user.role));
       setError(null);
     }
   }, [user]);
@@ -123,9 +128,15 @@ export const EditUserModal: React.FC<EditUserModalProps> = ({
       linkedCustomerId: role === 'CLIENT' ? (linkedCustomerId || undefined) : undefined,
       linkedAgentId: role === 'AGENT' ? (linkedAgentId || undefined) : undefined,
       can_access_gis_map:
-        role === 'ADMIN' ? true : role === 'CLIENT' ? false : gisPermission !== 'none',
+        role === 'ADMIN' ? true : role === 'CLIENT' ? false : staffPermissions.gis_map !== 'none',
       gis_map_permission:
-        role === 'ADMIN' ? 'edit' : role === 'CLIENT' ? 'none' : gisPermission,
+        role === 'ADMIN' ? 'edit' : role === 'CLIENT' ? 'none' : staffPermissions.gis_map,
+      permissions:
+        role === 'ADMIN'
+          ? { ...ADMIN_FULL_PERMISSIONS }
+          : role === 'CLIENT'
+          ? { ...CLIENT_NO_PERMISSIONS }
+          : { ...staffPermissions },
     };
 
     try {
@@ -153,7 +164,7 @@ export const EditUserModal: React.FC<EditUserModalProps> = ({
 
   return (
     <div className="fixed inset-0 z-[9999] flex items-center justify-center bg-black/75 backdrop-blur-sm p-3 overflow-y-auto animate-fade-in font-sans">
-      <div className="w-[95vw] sm:w-full max-w-lg max-h-[90vh] overflow-y-auto mx-auto my-auto rounded-2xl box-border bg-slate-900 border border-slate-800 shadow-2xl shadow-cyan-950/30 flex flex-col">
+      <div className={`w-[95vw] sm:w-full ${role === 'MANAGER' || role === 'AGENT' ? 'max-w-2xl' : 'max-w-lg'} max-h-[92vh] overflow-y-auto mx-auto my-auto rounded-2xl box-border bg-slate-900 border border-slate-800 shadow-2xl shadow-cyan-950/30 flex flex-col`}>
         {/* Header */}
         <div className="bg-slate-950/80 border-b border-slate-800 p-5 flex items-center justify-between shrink-0">
           <div className="flex items-center gap-3">
@@ -284,25 +295,13 @@ export const EditUserModal: React.FC<EditUserModalProps> = ({
           )}
 
           {(role === 'MANAGER' || role === 'AGENT') && (
-            <div className="bg-slate-950 p-3.5 rounded-xl border border-slate-800 space-y-2">
-              <div className="text-sky-400 font-bold flex items-center gap-1.5">
-                <MapPin className="w-3.5 h-3.5" />
-                <span>Fiber GIS &amp; Map Access</span>
-              </div>
-              <select
-                value={gisPermission}
-                onChange={(e) => setGisPermission(e.target.value as GisMapPermission)}
-                className="w-full bg-slate-900 border border-slate-700 rounded-xl px-3 py-2 text-slate-200 text-xs font-mono focus:outline-none focus:border-cyan-500"
-              >
-                {GIS_PERMISSION_OPTIONS.map((opt) => (
-                  <option key={opt.value} value={opt.value}>
-                    {opt.label}
-                  </option>
-                ))}
-              </select>
-              <p className="text-[10px] text-slate-400">
-                {GIS_PERMISSION_OPTIONS.find((o) => o.value === gisPermission)?.description}
-              </p>
+            <div className="bg-slate-950 p-3.5 rounded-xl border border-slate-800">
+              <StaffPermissionsEditor
+                value={staffPermissions}
+                onChange={setStaffPermissions}
+                disabled={isSubmitting}
+                compact
+              />
             </div>
           )}
 
