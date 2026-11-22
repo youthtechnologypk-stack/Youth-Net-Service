@@ -21,6 +21,7 @@ import {
   SPLITTER_SPECS,
   computePortLiveRxDbm,
   getHealthBadgeColors,
+  groupParallelCablesByPair,
   summarizeCableCores,
 } from '../../lib/fiberOpticEngine';
 
@@ -77,6 +78,7 @@ interface FiberGisLeafletCanvasProps {
   flyToTarget: { lat: number; lng: number; zoom?: number; ts: number } | null;
   fitBoundsTarget?: { bounds: [number, number][]; ts: number } | null;
   isFilterActive?: boolean;
+  hideUnrelatedOnFilter?: boolean;
   highlightedNodeIds?: Record<string, boolean>;
   highlightedCableIds?: Record<string, boolean>;
   onMapClick: (coords: GisLatLng) => void;
@@ -84,6 +86,7 @@ interface FiberGisLeafletCanvasProps {
   onNodeDragEnd?: (node: SupabaseGisNode, coords: GisLatLng) => void;
   onCableClick: (cable: SupabaseGisCable, clickCoords?: GisLatLng) => void;
   onAreaZoneClick?: (zone: GisAreaZoneRow) => void;
+  onSelectAreaByName?: (areaName: string) => void;
   onAgentClick?: (agent: AgentLiveLocationRow) => void;
   onCameraChange?: (center: GisLatLng, zoom: number) => void;
 }
@@ -182,6 +185,7 @@ export const FiberGisLeafletCanvas: React.FC<FiberGisLeafletCanvasProps> = ({
   flyToTarget,
   fitBoundsTarget = null,
   isFilterActive = false,
+  hideUnrelatedOnFilter = false,
   highlightedNodeIds = {},
   highlightedCableIds = {},
   onMapClick,
@@ -189,6 +193,7 @@ export const FiberGisLeafletCanvas: React.FC<FiberGisLeafletCanvasProps> = ({
   onNodeDragEnd,
   onCableClick,
   onAreaZoneClick,
+  onSelectAreaByName,
   onAgentClick,
   onCameraChange,
 }) => {
@@ -207,6 +212,7 @@ export const FiberGisLeafletCanvas: React.FC<FiberGisLeafletCanvasProps> = ({
   const onNodeDragEndRef = useRef(onNodeDragEnd);
   const onCableClickRef = useRef(onCableClick);
   const onAreaZoneClickRef = useRef(onAreaZoneClick);
+  const onSelectAreaByNameRef = useRef(onSelectAreaByName);
   const onAgentClickRef = useRef(onAgentClick);
   const onCameraChangeRef = useRef(onCameraChange);
   onMapClickRef.current = onMapClick;
@@ -214,6 +220,7 @@ export const FiberGisLeafletCanvas: React.FC<FiberGisLeafletCanvasProps> = ({
   onNodeDragEndRef.current = onNodeDragEnd;
   onCableClickRef.current = onCableClick;
   onAreaZoneClickRef.current = onAreaZoneClick;
+  onSelectAreaByNameRef.current = onSelectAreaByName;
   onAgentClickRef.current = onAgentClick;
   onCameraChangeRef.current = onCameraChange;
 
@@ -380,116 +387,137 @@ export const FiberGisLeafletCanvas: React.FC<FiberGisLeafletCanvasProps> = ({
       nodesById[n.id] = n;
     }
 
-    // 1. Render existing cables (anti-aliased weight + hover glow + optical flow directional arrowheads)
+    // 1. Render existing cables grouped by node pair (collapses duplicate parallel cables into 1 crisp trunk line)
     if (showCables) {
-      for (const cable of cables) {
-      const src = nodesById[cable.source_node_id];
-      const dst = nodesById[cable.target_node_id];
-      const path: GisLatLng[] =
-        Array.isArray(cable.route_coordinates_json) && cable.route_coordinates_json.length >= 2
-          ? cable.route_coordinates_json
-          : src && dst
-          ? [
-              { lat: src.lat, lng: src.lng },
-              { lat: dst.lat, lng: dst.lng },
-            ]
-          : [];
-      if (path.length < 2) continue;
+      const cableGroups = groupParallelCablesByPair(cables);
+      for (const cableGroup of cableGroups) {
+        const selectedInGroup = cableGroup.cables.find((c) => c.id === selectedCableId);
+        const highlightedInGroup = cableGroup.cables.find((c) => Boolean(highlightedCableIds[c.id]));
+        const cable = selectedInGroup || highlightedInGroup || cableGroup.primaryCable;
 
-      const isSelected = cable.id === selectedCableId;
-      const isHighlighted = !isFilterActive || Boolean(highlightedCableIds[cable.id]);
-      const isDimmed = isFilterActive && !isHighlighted;
-      const srcBudget = budgetsByNodeId[cable.source_node_id];
-      const dstBudget = budgetsByNodeId[cable.target_node_id];
+        const isSelected = Boolean(selectedInGroup);
+        const isHighlighted =
+          !isFilterActive || cableGroup.cables.some((c) => Boolean(highlightedCableIds[c.id]));
+        const isDimmed = isFilterActive && !isHighlighted;
+        if (isDimmed && hideUnrelatedOnFilter) continue;
 
-      const isReversedFlow = Boolean(
-        srcBudget &&
-          srcBudget.parentNodeId === cable.target_node_id &&
-          dstBudget?.parentNodeId !== cable.source_node_id
-      );
-      const downstreamBudget = isReversedFlow ? srcBudget : dstBudget;
+        const src = nodesById[cable.source_node_id];
+        const dst = nodesById[cable.target_node_id];
+        const path: GisLatLng[] =
+          Array.isArray(cable.route_coordinates_json) && cable.route_coordinates_json.length >= 2
+            ? cable.route_coordinates_json
+            : src && dst
+            ? [
+                { lat: src.lat, lng: src.lng },
+                { lat: dst.lat, lng: dst.lng },
+              ]
+            : [];
+        if (path.length < 2) continue;
 
-      const color = isSelected
-        ? '#facc15'
-        : downstreamBudget && downstreamBudget.healthBand !== 'UNLINKED'
-        ? getHealthBadgeColors(downstreamBudget.healthBand).hex
-        : '#38bdf8';
+        const srcBudget = budgetsByNodeId[cable.source_node_id];
+        const dstBudget = budgetsByNodeId[cable.target_node_id];
 
-      const latLngs = path.map((p) => [p.lat, p.lng] as [number, number]);
-      const baseGlowOpacity = isSelected ? 0.3 : isFilterActive && isHighlighted ? 0.34 : 0;
+        const isReversedFlow = Boolean(
+          srcBudget &&
+            srcBudget.parentNodeId === cable.target_node_id &&
+            dstBudget?.parentNodeId !== cable.source_node_id
+        );
+        const downstreamBudget = isReversedFlow ? srcBudget : dstBudget;
 
-      const glowPoly = L.polyline(latLngs, {
-        color: isSelected ? '#fde047' : color,
-        weight: 9,
-        opacity: baseGlowOpacity,
-        lineCap: 'round',
-        lineJoin: 'round',
-        interactive: false,
-      }).addTo(group);
+        const color = isSelected
+          ? '#facc15'
+          : downstreamBudget && downstreamBudget.healthBand !== 'UNLINKED'
+          ? getHealthBadgeColors(downstreamBudget.healthBand).hex
+          : '#38bdf8';
 
-      const poly = L.polyline(latLngs, {
-        color,
-        weight: isSelected ? 4.5 : isFilterActive && isHighlighted ? 4 : isDimmed ? 2 : 3,
-        opacity: isDimmed ? 0.18 : isSelected || (isFilterActive && isHighlighted) ? 0.98 : 0.9,
-        lineCap: 'round',
-        lineJoin: 'round',
-      }).addTo(group);
+        const latLngs = path.map((p) => [p.lat, p.lng] as [number, number]);
+        const baseGlowOpacity = isSelected ? 0.3 : isFilterActive && isHighlighted ? 0.34 : 0;
 
-      const feedPon = cable.source_pon_port_id ? ponPortsById[cable.source_pon_port_id] : undefined;
-      const coreSum = summarizeCableCores(
-        cable.cores_allocation_json?.length ? cable.cores_allocation_json : cable.cores_tia598_json,
-        cable.cable_cores
-      );
-      const flowOrderLabel = isReversedFlow && dst && src
-        ? `${dst.name} → ${src.name}`
-        : src && dst
-        ? `${src.name} → ${dst.name}`
-        : `${coreSum.total}C Trunk`;
-      const cableLabel = (cable.name || '').trim() || flowOrderLabel;
-      const tipText = `${feedPon ? `PON-${feedPon.port_number} · ` : ''}${cableLabel} • ${
-        cable.distance_meters
-      }m • ${coreSum.litCount}/${coreSum.total} Lit (${coreSum.spareCount} Spare)`;
-      poly.bindTooltip(tipText, { sticky: true, direction: 'top', opacity: 0.96 });
+        const primaryCores = Number(cableGroup.primaryCable.cable_cores || 12);
+        const glowPoly = L.polyline(latLngs, {
+          color: isSelected ? '#fde047' : color,
+          weight: primaryCores >= 12 ? 10 : 9,
+          opacity: baseGlowOpacity,
+          lineCap: 'round',
+          lineJoin: 'round',
+          interactive: false,
+        }).addTo(group);
 
-      poly.on('mouseover', () => {
+        const baseWeight = primaryCores >= 24 ? 4 : primaryCores >= 12 ? 3.5 : 3;
+        const poly = L.polyline(latLngs, {
+          color,
+          weight: isSelected ? 4.8 : isFilterActive && isHighlighted ? 4.2 : isDimmed ? 1.8 : baseWeight,
+          opacity: isDimmed ? 0.08 : isSelected || (isFilterActive && isHighlighted) ? 0.98 : 0.9,
+          lineCap: 'round',
+          lineJoin: 'round',
+        }).addTo(group);
+
+        const feedPon = cable.source_pon_port_id ? ponPortsById[cable.source_pon_port_id] : undefined;
+        const coreSum = summarizeCableCores(
+          cable.cores_allocation_json?.length ? cable.cores_allocation_json : cable.cores_tia598_json,
+          cable.cable_cores
+        );
+        const flowOrderLabel =
+          isReversedFlow && dst && src
+            ? `${dst.name} → ${src.name}`
+            : src && dst
+            ? `${src.name} → ${dst.name}`
+            : `${primaryCores}C Trunk`;
+        const cableLabel = (cable.name || '').trim() || flowOrderLabel;
+        const totalCapDisplay =
+          cableGroup.cables.length > 1 ? cableGroup.totalCores : coreSum.total;
+        const totalUsedDisplay =
+          cableGroup.cables.length > 1 ? cableGroup.usedCores : coreSum.litCount;
+        const parallelNote =
+          cableGroup.cables.length > 1
+            ? ` • [${cableGroup.cables.length} Parallel Spans Collapsed]`
+            : '';
+        const tipText = `${feedPon ? `PON-${feedPon.port_number} · ` : ''}${cableLabel} • ${
+          primaryCores
+        }C Trunk • ${totalUsedDisplay}/${totalCapDisplay} Cores Used (${
+          Math.max(0, totalCapDisplay - totalUsedDisplay)
+        } Spare) • ${cable.distance_meters}m${parallelNote}`;
+        poly.bindTooltip(tipText, { sticky: true, direction: 'top', opacity: 0.96 });
+
+        poly.on('mouseover', () => {
+          if (!isDimmed) {
+            glowPoly.setStyle({ opacity: 0.36 });
+          }
+        });
+        poly.on('mouseout', () => {
+          glowPoly.setStyle({ opacity: baseGlowOpacity });
+        });
+
+        poly.on('click', (e: L.LeafletMouseEvent) => {
+          L.DomEvent.stopPropagation(e);
+          onCableClickRef.current(cable, { lat: e.latlng.lat, lng: e.latlng.lng });
+        });
+
+        // Directional arrowhead showing optical flow along span
         if (!isDimmed) {
-          glowPoly.setStyle({ opacity: 0.36 });
+          const flowPath = isReversedFlow ? [...path].reverse() : path;
+          const arrowMeta = getMidpointAndBearing(map, flowPath);
+          if (arrowMeta) {
+            const arrowSvg = `<div style="transform:translate(-50%,-50%) rotate(${arrowMeta.angleDeg.toFixed(
+              1
+            )}deg);pointer-events:none;filter:drop-shadow(0 1px 3px rgba(2,6,23,0.9));">
+              <svg width="12" height="12" viewBox="0 0 12 12" fill="none" xmlns="http://www.w3.org/2000/svg">
+                <path d="M2 1.5L10.5 6L2 10.5L4.1 6L2 1.5Z" fill="${color}" stroke="#020617" stroke-width="1" stroke-linejoin="round"/>
+              </svg>
+            </div>`;
+            const arrowIcon = L.divIcon({
+              className: 'youthnet-flow-arrow',
+              html: arrowSvg,
+              iconSize: [0, 0],
+              iconAnchor: [0, 0],
+            });
+            L.marker(arrowMeta.latLng, {
+              icon: arrowIcon,
+              interactive: false,
+              zIndexOffset: -50,
+            }).addTo(group);
+          }
         }
-      });
-      poly.on('mouseout', () => {
-        glowPoly.setStyle({ opacity: baseGlowOpacity });
-      });
-
-      poly.on('click', (e: L.LeafletMouseEvent) => {
-        L.DomEvent.stopPropagation(e);
-        onCableClickRef.current(cable, { lat: e.latlng.lat, lng: e.latlng.lng });
-      });
-
-      // Directional arrowhead showing optical flow along span
-      if (!isDimmed) {
-        const flowPath = isReversedFlow ? [...path].reverse() : path;
-        const arrowMeta = getMidpointAndBearing(map, flowPath);
-        if (arrowMeta) {
-          const arrowSvg = `<div style="transform:translate(-50%,-50%) rotate(${arrowMeta.angleDeg.toFixed(
-            1
-          )}deg);pointer-events:none;filter:drop-shadow(0 1px 3px rgba(2,6,23,0.9));">
-            <svg width="12" height="12" viewBox="0 0 12 12" fill="none" xmlns="http://www.w3.org/2000/svg">
-              <path d="M2 1.5L10.5 6L2 10.5L4.1 6L2 1.5Z" fill="${color}" stroke="#020617" stroke-width="1" stroke-linejoin="round"/>
-            </svg>
-          </div>`;
-          const arrowIcon = L.divIcon({
-            className: 'youthnet-flow-arrow',
-            html: arrowSvg,
-            iconSize: [0, 0],
-            iconAnchor: [0, 0],
-          });
-          L.marker(arrowMeta.latLng, {
-            icon: arrowIcon,
-            interactive: false,
-            zIndexOffset: -50,
-          }).addTo(group);
-        }
-      }
       }
     }
 
@@ -741,7 +769,8 @@ export const FiberGisLeafletCanvas: React.FC<FiberGisLeafletCanvasProps> = ({
 
       const isHighlightedNode = !isFilterActive || Boolean(highlightedNodeIds[node.id]);
       const isDimmedNode = isFilterActive && !isHighlightedNode;
-      const nodeOpacity = isDimmedNode ? 0.2 : 1;
+      if (isDimmedNode && hideUnrelatedOnFilter) continue;
+      const nodeOpacity = isDimmedNode ? 0.08 : 1;
 
       const alertStatus = isFdbNode ? nodeAlertStatusByNodeId[node.id] : undefined;
       const hasActiveAlert = Boolean(
@@ -954,6 +983,7 @@ export const FiberGisLeafletCanvas: React.FC<FiberGisLeafletCanvasProps> = ({
         const nodeBudget = budgetsByNodeId[node.id];
         const isHighlightedNode = !isFilterActive || Boolean(highlightedNodeIds[node.id]);
         const isDimmedSub = isFilterActive && !isHighlightedNode;
+        if (isDimmedSub && hideUnrelatedOnFilter) continue;
 
         interface ResolvedSubDrop {
           key: string;
@@ -1093,7 +1123,7 @@ export const FiberGisLeafletCanvas: React.FC<FiberGisLeafletCanvasProps> = ({
           const showMiniTag = liveZoom >= 18 && !isDimmedSub;
           const subHtml = showMiniTag
             ? `<div style="display:inline-flex;align-items:center;gap:4px;padding:1.5px 6px;border-radius:9999px;background:rgba(2,6,23,0.88);border:1px solid ${pinColor};color:#f8fafc;font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:9px;font-weight:700;white-space:nowrap;box-shadow:0 2px 6px rgba(0,0,0,0.55);transform:translate(-50%,-50%);opacity:${
-                isDimmedSub ? 0.2 : 1
+                isDimmedSub ? 0.08 : 1
               };cursor:pointer;">
                 <span style="width:6px;height:6px;border-radius:9999px;background:${pinColor};flex-shrink:0;"></span>
                 <span style="max-width:85px;overflow:hidden;text-overflow:ellipsis;">${escapeHtml(
@@ -1101,7 +1131,7 @@ export const FiberGisLeafletCanvas: React.FC<FiberGisLeafletCanvasProps> = ({
                 )}</span>
               </div>`
             : `<div style="width:9px;height:9px;border-radius:9999px;background:${pinColor};border:1.5px solid #ffffff;box-shadow:0 1px 4px rgba(0,0,0,0.7);transform:translate(-50%,-50%);opacity:${
-                isDimmedSub ? 0.2 : 1
+                isDimmedSub ? 0.08 : 1
               };cursor:pointer;"></div>`;
 
           const subIcon = L.divIcon({
@@ -1162,14 +1192,18 @@ export const FiberGisLeafletCanvas: React.FC<FiberGisLeafletCanvasProps> = ({
           zIndexOffset: -200,
           bubblingMouseEvents: false,
         }).addTo(group);
-        zm.bindTooltip(`Sector Label: ${zone.name} (Click to remove)`, {
+        zm.bindTooltip(`Area Zone: ${zone.name} (Click to isolate area)`, {
           direction: 'top',
           offset: [0, -10],
           opacity: 0.92,
         });
         zm.on('click', (e: L.LeafletMouseEvent) => {
           L.DomEvent.stopPropagation(e);
-          onAreaZoneClickRef.current?.(zone);
+          if (onSelectAreaByNameRef.current) {
+            onSelectAreaByNameRef.current(zone.name);
+          } else {
+            onAreaZoneClickRef.current?.(zone);
+          }
         });
       }
 
@@ -1191,17 +1225,27 @@ export const FiberGisLeafletCanvas: React.FC<FiberGisLeafletCanvasProps> = ({
         const avgLng = bucket.lngs.reduce((a, b) => a + b, 0) / bucket.lngs.length;
         const autoIcon = L.divIcon({
           className: 'youthnet-area-auto-label',
-          html: `<div style="padding:1px 7px;border-radius:5px;background:rgba(15,23,42,0.52);border:1px dashed rgba(148,163,184,0.45);color:rgba(226,232,240,0.92);font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:10px;font-weight:700;letter-spacing:0.08em;text-transform:uppercase;white-space:nowrap;text-shadow:0 1px 4px rgba(0,0,0,0.95);transform:translate(-50%,-160%);pointer-events:none;">${escapeHtml(
+          html: `<div style="padding:2px 8px;border-radius:6px;background:rgba(15,23,42,0.72);border:1px solid rgba(56,189,248,0.45);color:rgba(226,232,240,0.95);font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:10px;font-weight:700;letter-spacing:0.08em;text-transform:uppercase;white-space:nowrap;text-shadow:0 1px 4px rgba(0,0,0,0.95);transform:translate(-50%,-160%);cursor:pointer;box-shadow:0 2px 6px rgba(0,0,0,0.45);">${escapeHtml(
             bucket.label
           )}</div>`,
           iconSize: [0, 0],
           iconAnchor: [0, 0],
         });
-        L.marker([avgLat, avgLng], {
+        const amAuto = L.marker([avgLat, avgLng], {
           icon: autoIcon,
-          interactive: false,
-          zIndexOffset: -250,
+          interactive: true,
+          zIndexOffset: -220,
+          bubblingMouseEvents: false,
         }).addTo(group);
+        amAuto.bindTooltip(`Area: ${bucket.label} (Click to isolate area)`, {
+          direction: 'top',
+          offset: [0, -10],
+          opacity: 0.92,
+        });
+        amAuto.on('click', (e: L.LeafletMouseEvent) => {
+          L.DomEvent.stopPropagation(e);
+          onSelectAreaByNameRef.current?.(bucket.label);
+        });
       }
     }
 
@@ -1317,6 +1361,7 @@ export const FiberGisLeafletCanvas: React.FC<FiberGisLeafletCanvasProps> = ({
     draftWaypoints,
     userLocation,
     isFilterActive,
+    hideUnrelatedOnFilter,
     highlightedNodeIds,
     highlightedCableIds,
   ]);

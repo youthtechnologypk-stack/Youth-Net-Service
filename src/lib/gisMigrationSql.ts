@@ -502,4 +502,17 @@ BEGIN
         CREATE POLICY agent_gps_breadcrumbs_full_access ON public.agent_gps_breadcrumbs FOR ALL TO anon, authenticated USING (true) WITH CHECK (true);
     END IF;
 END $$;
+
+-- Per-User Role-Based Fiber GIS & Map Access Control (portal_users)
+ALTER TABLE IF EXISTS public.portal_users
+    ADD COLUMN IF NOT EXISTS can_access_gis_map BOOLEAN NOT NULL DEFAULT TRUE;
+ALTER TABLE IF EXISTS public.portal_users
+    ADD COLUMN IF NOT EXISTS gis_map_permission TEXT NOT NULL DEFAULT 'view'
+    CHECK (gis_map_permission IN ('none', 'view', 'edit'));
+UPDATE public.portal_users
+SET can_access_gis_map = TRUE, gis_map_permission = 'edit'
+WHERE UPPER(COALESCE(role, '')) = 'ADMIN';
+UPDATE public.portal_users
+SET can_access_gis_map = FALSE, gis_map_permission = 'none'
+WHERE UPPER(COALESCE(role, '')) = 'CLIENT';
 `;

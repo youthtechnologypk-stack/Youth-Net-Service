@@ -24,6 +24,8 @@ export interface PortalUser {
   isActive?: boolean;
   linkedAgentId?: string;
   linkedCustomerId?: string;
+  can_access_gis_map?: boolean;
+  gis_map_permission?: 'none' | 'view' | 'edit';
   createdAt: string;
 }
 
@@ -375,6 +377,14 @@ class StorageService {
             area: su.area || 'Central NOC Core',
             baseSalary: su.base_salary,
             balance: su.cash_in_hand || 0,
+            can_access_gis_map:
+              typeof su.can_access_gis_map === 'boolean' ? su.can_access_gis_map : undefined,
+            gis_map_permission:
+              su.gis_map_permission === 'none' ||
+              su.gis_map_permission === 'view' ||
+              su.gis_map_permission === 'edit'
+                ? su.gis_map_permission
+                : undefined,
             createdAt: su.created_at || new Date().toISOString(),
             isActive: true,
           };
@@ -657,10 +667,20 @@ class StorageService {
         cash_in_hand: user.balance || 0,
         created_at: user.createdAt || new Date().toISOString(),
       };
+      if (typeof user.can_access_gis_map === 'boolean') {
+        payload.can_access_gis_map = user.can_access_gis_map;
+      }
+      if (user.gis_map_permission) {
+        payload.gis_map_permission = user.gis_map_permission;
+      }
       if (/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(user.id)) {
         payload.id = user.id;
       }
-      await supabase.from('portal_users').upsert([payload], { onConflict: 'username' });
+      const { error: upsertErr } = await supabase.from('portal_users').upsert([payload], { onConflict: 'username' });
+      if (upsertErr && (String(upsertErr.message || '').includes('gis_map') || upsertErr.code === '42703' || upsertErr.code === 'PGRST204')) {
+        const { can_access_gis_map: _a, gis_map_permission: _b, ...legacyPayload } = payload;
+        await supabase.from('portal_users').upsert([legacyPayload], { onConflict: 'username' });
+      }
     } catch (err) {
       console.warn('[StorageService] Supabase savePortalUser notice:', err);
     }

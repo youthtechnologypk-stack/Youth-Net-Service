@@ -57,15 +57,18 @@ import {
   isOfflineCapableRole,
 } from '../services/OfflineSyncManager';
 import { reportSupabaseReachability } from '../lib/offlineFieldQueue';
+import { GisMapPermission, resolveUserGisAccess } from '../lib/gisAccessControl';
 
 interface FieldAgentPortalProps {
   currentUser: UserAccount;
+  gisPermission?: GisMapPermission;
   onOpenReceiptModal?: (invoice: Invoice) => void;
   onOpenPaymentModal?: (invoice: Invoice) => void;
 }
 
 export const FieldAgentPortal: React.FC<FieldAgentPortalProps> = ({
   currentUser,
+  gisPermission,
   onOpenReceiptModal,
   onOpenPaymentModal,
 }) => {
@@ -77,7 +80,20 @@ export const FieldAgentPortal: React.FC<FieldAgentPortalProps> = ({
   } = useISP();
   const { formatCurrency, currencySymbol } = useCurrency();
 
+  const effectiveGisAccess = gisPermission
+    ? {
+        canAccess: gisPermission !== 'none',
+        permission: gisPermission,
+      }
+    : resolveUserGisAccess(currentUser, currentUser.role || 'AGENT');
+
   const [activeTab, setActiveTab] = useState<'tickets' | 'collections' | 'ledger' | 'ont_checker' | 'directory' | 'fiber_gis'>('tickets');
+
+  useEffect(() => {
+    if (!effectiveGisAccess.canAccess && activeTab === 'fiber_gis') {
+      setActiveTab('tickets');
+    }
+  }, [effectiveGisAccess.canAccess, activeTab]);
   const [collectionSuccessToast, setCollectionSuccessToast] = useState<string | null>(null);
   const [ontSearchQuery, setOntSearchQuery] = useState('');
   const [dirSearchQuery, setDirSearchQuery] = useState('');
@@ -842,7 +858,11 @@ export const FieldAgentPortal: React.FC<FieldAgentPortalProps> = ({
       )}
 
       {/* Navigation Tabs for Agent */}
-      <div className="grid grid-cols-3 sm:grid-cols-6 gap-1 bg-slate-900 p-1 rounded-xl border border-slate-800 text-[10px] sm:text-[11px] font-mono font-bold">
+      <div
+        className={`grid grid-cols-3 ${
+          effectiveGisAccess.canAccess ? 'sm:grid-cols-6' : 'sm:grid-cols-5'
+        } gap-1 bg-slate-900 p-1 rounded-xl border border-slate-800 text-[10px] sm:text-[11px] font-mono font-bold`}
+      >
         <button
           onClick={() => setActiveTab('tickets')}
           className={`min-h-[40px] py-2 rounded-lg transition flex items-center justify-center gap-1 cursor-pointer ${
@@ -893,15 +913,17 @@ export const FieldAgentPortal: React.FC<FieldAgentPortalProps> = ({
           <span>Directory</span>
         </button>
 
-        <button
-          onClick={() => setActiveTab('fiber_gis')}
-          className={`min-h-[40px] py-2 rounded-lg transition flex items-center justify-center gap-1 cursor-pointer ${
-            activeTab === 'fiber_gis' ? 'bg-sky-600 text-white shadow' : 'text-slate-400 hover:text-white'
-          }`}
-        >
-          <MapPin className="w-3 h-3" />
-          <span>Fiber GIS</span>
-        </button>
+        {effectiveGisAccess.canAccess && (
+          <button
+            onClick={() => setActiveTab('fiber_gis')}
+            className={`min-h-[40px] py-2 rounded-lg transition flex items-center justify-center gap-1 cursor-pointer ${
+              activeTab === 'fiber_gis' ? 'bg-sky-600 text-white shadow' : 'text-slate-400 hover:text-white'
+            }`}
+          >
+            <MapPin className="w-3 h-3" />
+            <span>Fiber GIS</span>
+          </button>
+        )}
       </div>
 
       {/* Tab 1: My Assigned Tickets (Strictly filtered to currentUser) */}
@@ -1422,9 +1444,14 @@ export const FieldAgentPortal: React.FC<FieldAgentPortalProps> = ({
         );
       })()}
 
-      {/* Tab 5: Live FTTH Fiber GIS & Area Map */}
+      {/* Tab 5: Live FTTH Fiber GIS & Area Map (Strictly gated by Admin GIS permission) */}
       {activeTab === 'fiber_gis' && (
-        <FiberGisMapView currentUser={currentUser} compactMobile />
+        <FiberGisMapView
+          currentUser={currentUser}
+          gisPermission={effectiveGisAccess.permission}
+          onReturnFromRestricted={() => setActiveTab('tickets')}
+          compactMobile
+        />
       )}
 
       {/* Cash Collection Modal with Partial Payment Support */}

@@ -49,6 +49,13 @@ import {
   getPathFromTab,
   getLandingRouteForRole,
 } from './lib/auth';
+import {
+  GIS_PERMISSION_UPDATED_EVENT,
+  GisMapPermission,
+  fetchLiveUserGisPermissionFromSupabase,
+  resolveUserGisAccess,
+} from './lib/gisAccessControl';
+import { supabase } from './services/supabaseClient';
 import { Radio, ShieldCheck, Database, ShieldAlert, ArrowLeft, WifiOff, RefreshCw, CheckCircle2, X } from 'lucide-react';
 import {
   QueuedApiRequest,
@@ -105,14 +112,103 @@ function ISPAppContent() {
   const [activeTab, setActiveTab] = useState<ActiveTab>(() => {
     const user = getStoredUser();
     if (!user) return 'noc';
-    if (user.role === 'AGENT') return 'agent_portal';
-    if (user.role === 'CLIENT') return 'client_portal';
     const pathTab = typeof window !== 'undefined' ? getTabFromPath(window.location.pathname) : null;
+    if (user.role === 'AGENT') {
+      if (pathTab === 'fiber_gis') return 'fiber_gis';
+      return 'agent_portal';
+    }
+    if (user.role === 'CLIENT') return 'client_portal';
     if (pathTab && isRouteAllowedForRole(user.role, pathTab)) {
       return pathTab as ActiveTab;
     }
     return getLandingTabForRole(user.role);
   });
+
+  // Live-sync logged-in user's Fiber GIS & Map permissions from Supabase portal_users + realtime
+  useEffect(() => {
+    if (!currentUser || currentUser.role === 'ADMIN' || currentUser.role === 'CLIENT') {
+      return;
+    }
+
+    let cancelled = false;
+
+    const applyPermissionUpdate = (
+      canAccess: boolean,
+      permission: GisMapPermission
+    ) => {
+      setCurrentUser((prev) => {
+        if (!prev) return prev;
+        if (
+          prev.can_access_gis_map === canAccess &&
+          prev.gis_map_permission === permission
+        ) {
+          return prev;
+        }
+        const nextUser: UserAccount = {
+          ...prev,
+          can_access_gis_map: canAccess,
+          gis_map_permission: permission,
+        };
+        const token = getStoredToken();
+        if (token) {
+          saveAuthSession(token, nextUser, true);
+        }
+        return nextUser;
+      });
+    };
+
+    const syncFromDb = async () => {
+      const live = await fetchLiveUserGisPermissionFromSupabase(currentUser);
+      if (!cancelled && live.found) {
+        applyPermissionUpdate(live.can_access_gis_map, live.gis_map_permission);
+      }
+    };
+
+    void syncFromDb();
+
+    const handleCustomEvent = (evt: Event) => {
+      const detail = (evt as CustomEvent).detail;
+      if (!detail) return;
+      const matchesId = detail.userId && detail.userId === currentUser.id;
+      const matchesUsername =
+        detail.username &&
+        detail.username.toLowerCase() === (currentUser.username || '').toLowerCase();
+      if (matchesId || matchesUsername) {
+        applyPermissionUpdate(
+          Boolean(detail.can_access_gis_map),
+          detail.gis_map_permission as GisMapPermission
+        );
+      }
+    };
+
+    window.addEventListener(GIS_PERMISSION_UPDATED_EVENT, handleCustomEvent);
+
+    const channel = supabase
+      .channel(`portal_user_gis_rbac_${currentUser.id || currentUser.username}`)
+      .on(
+        'postgres_changes',
+        { event: 'UPDATE', schema: 'public', table: 'portal_users' },
+        (payload) => {
+          const row = payload.new as any;
+          if (!row) return;
+          const matchesId = row.id && row.id === currentUser.id;
+          const matchesUsername =
+            row.username &&
+            String(row.username).toLowerCase() === (currentUser.username || '').toLowerCase();
+          if (matchesId || matchesUsername) {
+            const resolved = resolveUserGisAccess(row, row.role || currentUser.role);
+            applyPermissionUpdate(resolved.canAccess, resolved.permission);
+          }
+        }
+      )
+      .subscribe();
+
+    return () => {
+      cancelled = true;
+      window.removeEventListener(GIS_PERMISSION_UPDATED_EVENT, handleCustomEvent);
+      supabase.removeChannel(channel);
+    };
+  }, [currentUser?.id, currentUser?.username, currentUser?.role]);
 
   const { setActiveViewTab } = useISP();
   useEffect(() => {
@@ -128,7 +224,7 @@ function ISPAppContent() {
       return;
     }
 
-    if (currentUser.role === 'AGENT' && activeTab !== 'agent_portal') {
+    if (currentUser.role === 'AGENT' && activeTab !== 'agent_portal' && activeTab !== 'fiber_gis') {
       setActiveTab('agent_portal');
       return;
     }
@@ -153,7 +249,7 @@ function ISPAppContent() {
       }
       const pathTab = getTabFromPath(window.location.pathname);
       if (user.role === 'AGENT') {
-        setActiveTab('agent_portal');
+        setActiveTab(pathTab === 'fiber_gis' ? 'fiber_gis' : 'agent_portal');
       } else if (user.role === 'CLIENT') {
         setActiveTab('client_portal');
       } else if (pathTab && isRouteAllowedForRole(user.role, pathTab)) {
@@ -483,8 +579,10 @@ function ISPAppContent() {
     return <LoginPage onLoginSuccess={handleLoginSuccess} />;
   }
 
-  // Route permission validation
-  const isPermitted = isRouteAllowedForRole(currentRole, activeTab);
+  // Route permission validation + per-user Fiber GIS & Map RBAC enforcement
+  const gisAccess = resolveUserGisAccess(currentUser, currentRole);
+  const isGisAccessBlocked = activeTab === 'fiber_gis' && !gisAccess.canAccess;
+  const isPermitted = isRouteAllowedForRole(currentRole, activeTab) && !isGisAccessBlocked;
   const isClient = currentRole === 'CLIENT' || currentUser.role === 'CLIENT';
   const isAgent = currentRole === 'AGENT' || currentUser.role === 'AGENT';
   const isOriginalAdmin = isOriginalAdminSession();
@@ -517,6 +615,7 @@ function ISPAppContent() {
           onSwitchRole={isOriginalAdmin ? handleSwitchRole : undefined}
           currentUser={currentUser}
           onLogout={handleLogout}
+          canAccessGisMap={gisAccess.canAccess}
         />
       )}
 
@@ -538,6 +637,7 @@ function ISPAppContent() {
           onSwitchRole={isOriginalAdmin ? handleSwitchRole : undefined}
           currentUser={currentUser}
           onLogout={handleLogout}
+          canAccessGisMap={gisAccess.canAccess}
           offlineModeStatus={
             isAgent
               ? {
@@ -676,11 +776,26 @@ function ISPAppContent() {
               <PWAInstallPrompt role={currentRole} variant="banner" forceVisibleOnDesktop={false} />
             )}
 
-            {/* Route Protection Guard: If current role lacks permission, show 403 Forbidden screen */}
+            {/* Route Protection Guard: If current role/user lacks permission, show 403 Restricted screen */}
             {!isPermitted ? (
               <AccessDeniedView
                 currentRole={currentRole}
-                attemptedResource={activeTab}
+                attemptedResource={isGisAccessBlocked ? 'Fiber GIS & Map' : activeTab}
+                customTitle={
+                  isGisAccessBlocked
+                    ? 'Access Restricted: Fiber GIS & Map Disabled'
+                    : undefined
+                }
+                customMessage={
+                  isGisAccessBlocked
+                    ? 'Access Restricted: Fiber GIS & Map is disabled for your account by Admin.'
+                    : undefined
+                }
+                requiredAuthLabel={
+                  isGisAccessBlocked
+                    ? 'Admin Fiber GIS & Map Grant (portal_users)'
+                    : undefined
+                }
                 onReturnToAllowed={() => setActiveTab(getLandingTabForRole(currentRole))}
               />
             ) : (
@@ -711,6 +826,7 @@ function ISPAppContent() {
                 {activeTab === 'agent_portal' && (
                   <FieldAgentPortal
                     currentUser={currentUser}
+                    gisPermission={gisAccess.permission}
                     onOpenReceiptModal={handleOpenReceipt}
                     onOpenPaymentModal={handleOpenPayment}
                   />
@@ -738,7 +854,25 @@ function ISPAppContent() {
 
                 {/* Full-Stack FTTH Fiber GIS, FOSC Joint Closure & Subscriber Map */}
                 {activeTab === 'fiber_gis' && (
-                  <FiberGisMapView currentUser={currentUser} />
+                  <div className="space-y-3">
+                    {isAgent && (
+                      <button
+                        type="button"
+                        onClick={() => setActiveTab('agent_portal')}
+                        className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-slate-900 hover:bg-slate-800 border border-slate-700 text-xs font-mono text-cyan-300 cursor-pointer transition"
+                      >
+                        <ArrowLeft className="w-3.5 h-3.5" />
+                        <span>Back to Field Recovery Portal</span>
+                      </button>
+                    )}
+                    <FiberGisMapView
+                      currentUser={currentUser}
+                      gisPermission={gisAccess.permission}
+                      onReturnFromRestricted={() =>
+                        setActiveTab(getLandingTabForRole(currentRole))
+                      }
+                    />
+                  </div>
                 )}
 
                 {/* Billing & Invoices */}

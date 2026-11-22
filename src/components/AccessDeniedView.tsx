@@ -6,12 +6,18 @@ interface AccessDeniedViewProps {
   currentRole: SystemRole;
   attemptedResource: string;
   onReturnToAllowed: () => void;
+  customTitle?: string;
+  customMessage?: string;
+  requiredAuthLabel?: string;
 }
 
 export const AccessDeniedView: React.FC<AccessDeniedViewProps> = ({
   currentRole,
   attemptedResource,
   onReturnToAllowed,
+  customTitle,
+  customMessage,
+  requiredAuthLabel,
 }) => {
   return (
     <div className="min-h-[70vh] flex flex-col items-center justify-center p-6 text-center">
@@ -23,11 +29,23 @@ export const AccessDeniedView: React.FC<AccessDeniedViewProps> = ({
         <div className="space-y-2">
           <div className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full bg-rose-950 border border-rose-800 text-rose-300 font-mono text-[11px] font-bold">
             <Lock className="w-3 h-3" />
-            <span>HTTP 403 &bull; ACCESS DENIED</span>
+            <span>HTTP 403 &bull; ACCESS RESTRICTED</span>
           </div>
-          <h2 className="text-xl font-bold text-white">Privilege Escalation Blocked</h2>
+          <h2 className="text-xl font-bold text-white">
+            {customTitle || 'Privilege Escalation Blocked'}
+          </h2>
           <p className="text-xs text-slate-300 leading-relaxed">
-            Your current account role <strong className="text-amber-400 font-mono uppercase">[{currentRole}]</strong> is not authorized to access <code className="bg-slate-900 px-1.5 py-0.5 rounded text-rose-300 border border-rose-900">{attemptedResource}</code>.
+            {customMessage || (
+              <>
+                Your current account role{' '}
+                <strong className="text-amber-400 font-mono uppercase">[{currentRole}]</strong> is not
+                authorized to access{' '}
+                <code className="bg-slate-900 px-1.5 py-0.5 rounded text-rose-300 border border-rose-900">
+                  {attemptedResource}
+                </code>
+                .
+              </>
+            )}
           </p>
         </div>
 
@@ -38,11 +56,13 @@ export const AccessDeniedView: React.FC<AccessDeniedViewProps> = ({
           </div>
           <div className="flex justify-between">
             <span>Required Authorization:</span>
-            <span className="text-rose-400 font-bold">MASTER ADMIN (RBAC Tier 1)</span>
+            <span className="text-rose-400 font-bold">
+              {requiredAuthLabel || 'MASTER ADMIN (RBAC Tier 1)'}
+            </span>
           </div>
           <div className="flex justify-between">
             <span>Action Taken:</span>
-            <span className="text-amber-400">Route Intercepted &amp; Logged</span>
+            <span className="text-amber-400">Route Intercepted &amp; Blocked</span>
           </div>
         </div>
 

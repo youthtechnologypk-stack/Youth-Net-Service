@@ -16,6 +16,13 @@ import {
 } from 'lucide-react';
 import { supabase } from '../services/supabaseClient';
 import { AreaNodeSelector } from './AreaNodeSelector';
+import {
+  GIS_PERMISSION_OPTIONS,
+  GisMapPermission,
+  isMissingGisPermissionColumnError,
+  resolveUserGisAccess,
+  updatePortalUserGisPermission,
+} from '../lib/gisAccessControl';
 
 export interface StaffUserRecord {
   id: string;
@@ -33,6 +40,8 @@ export interface StaffUserRecord {
   password?: string;
   cash_in_hand?: number;
   advance_balance?: number;
+  can_access_gis_map?: boolean | null;
+  gis_map_permission?: GisMapPermission | string | null;
 }
 
 export interface EditStaffModalProps {
@@ -67,6 +76,7 @@ export const EditStaffModal: React.FC<EditStaffModalProps> = ({
   const [baseSalary, setBaseSalary] = useState<string>('0');
   const [role, setRole] = useState<'AGENT' | 'MANAGER'>('AGENT');
   const [accountStatus, setAccountStatus] = useState<'ACTIVE' | 'SUSPENDED'>('ACTIVE');
+  const [gisPermission, setGisPermission] = useState<GisMapPermission>('view');
   const [newPassword, setNewPassword] = useState('');
   const [showPassword, setShowPassword] = useState(false);
 
@@ -89,6 +99,9 @@ export const EditStaffModal: React.FC<EditStaffModalProps> = ({
         staff.account_status?.toUpperCase() === 'SUSPENDED' ||
         staff.isActive === false;
       setAccountStatus(isSuspended ? 'SUSPENDED' : 'ACTIVE');
+
+      const resolvedGis = resolveUserGisAccess(staff, roleUpper);
+      setGisPermission(resolvedGis.permission);
 
       setNewPassword('');
       setShowPassword(false);
@@ -121,6 +134,8 @@ export const EditStaffModal: React.FC<EditStaffModalProps> = ({
       base_salary: salaryNum,
       role: role,
       account_status: accountStatus,
+      can_access_gis_map: gisPermission !== 'none',
+      gis_map_permission: gisPermission,
     };
 
     if (newPassword && newPassword.trim() !== '') {
@@ -135,7 +150,30 @@ export const EditStaffModal: React.FC<EditStaffModalProps> = ({
         .eq('id', staff.id);
 
       if (sbError) {
-        throw new Error(sbError.message || 'Supabase database update failed.');
+        if (isMissingGisPermissionColumnError(sbError)) {
+          const { can_access_gis_map: _c, gis_map_permission: _p, ...legacyPayload } = updatePayload;
+          const { error: retryErr } = await supabase
+            .from('portal_users')
+            .update(legacyPayload)
+            .eq('id', staff.id);
+          if (retryErr) {
+            throw new Error(retryErr.message || 'Supabase database update failed.');
+          }
+          await updatePortalUserGisPermission({
+            userId: staff.id,
+            username: staff.username,
+            permission: gisPermission,
+          });
+        } else {
+          throw new Error(sbError.message || 'Supabase database update failed.');
+        }
+      } else {
+        // Broadcast permission change so any live sessions sync immediately
+        await updatePortalUserGisPermission({
+          userId: staff.id,
+          username: staff.username,
+          permission: gisPermission,
+        });
       }
 
       // 2. Sync to Node.js backend proxy if available
@@ -322,6 +360,73 @@ export const EditStaffModal: React.FC<EditStaffModalProps> = ({
                 <option value="ACTIVE">ACTIVE (Authorized Staff)</option>
                 <option value="SUSPENDED">SUSPENDED (Access Revoked)</option>
               </select>
+            </div>
+          </div>
+
+          {/* Fiber GIS & Map Access Control (3-State Selector) */}
+          <div className="bg-slate-950 p-4 rounded-xl border border-slate-800 space-y-2.5">
+            <div className="flex items-center justify-between gap-2">
+              <label className="text-slate-200 font-semibold flex items-center gap-1.5">
+                <MapPin className="w-3.5 h-3.5 text-sky-400" />
+                <span>Fiber GIS &amp; Map Access</span>
+              </label>
+              <span
+                className={`text-[10px] font-mono font-bold px-2 py-0.5 rounded-full border ${
+                  gisPermission === 'edit'
+                    ? 'bg-emerald-950 text-emerald-300 border-emerald-800'
+                    : gisPermission === 'view'
+                    ? 'bg-sky-950 text-sky-300 border-sky-800'
+                    : 'bg-rose-950 text-rose-300 border-rose-800'
+                }`}
+              >
+                {gisPermission === 'edit'
+                  ? 'Full Edit & Splice'
+                  : gisPermission === 'view'
+                  ? 'View & Trace Only'
+                  : 'Disabled'}
+              </span>
+            </div>
+
+            <div className="grid grid-cols-1 gap-2">
+              {GIS_PERMISSION_OPTIONS.map((opt) => {
+                const isSelected = gisPermission === opt.value;
+                return (
+                  <button
+                    key={opt.value}
+                    type="button"
+                    onClick={() => setGisPermission(opt.value)}
+                    className={`w-full text-left p-2.5 rounded-xl border transition cursor-pointer flex items-start gap-2.5 ${
+                      isSelected
+                        ? opt.value === 'edit'
+                          ? 'bg-emerald-950/60 border-emerald-500/80 text-emerald-100'
+                          : opt.value === 'view'
+                          ? 'bg-sky-950/60 border-sky-500/80 text-sky-100'
+                          : 'bg-rose-950/60 border-rose-500/80 text-rose-100'
+                        : 'bg-slate-900/70 border-slate-800 text-slate-300 hover:border-slate-700'
+                    }`}
+                  >
+                    <span
+                      className={`mt-0.5 w-3.5 h-3.5 rounded-full border flex items-center justify-center shrink-0 ${
+                        isSelected
+                          ? opt.value === 'edit'
+                            ? 'border-emerald-400 bg-emerald-400'
+                            : opt.value === 'view'
+                            ? 'border-sky-400 bg-sky-400'
+                            : 'border-rose-400 bg-rose-400'
+                          : 'border-slate-600'
+                      }`}
+                    >
+                      {isSelected && <span className="w-1.5 h-1.5 rounded-full bg-slate-950" />}
+                    </span>
+                    <div className="min-w-0">
+                      <div className="font-bold text-xs leading-tight">{opt.label}</div>
+                      <div className="text-[10px] text-slate-400 mt-0.5 leading-snug">
+                        {opt.description}
+                      </div>
+                    </div>
+                  </button>
+                );
+              })}
             </div>
           </div>
 

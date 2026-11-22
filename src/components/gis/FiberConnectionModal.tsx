@@ -14,6 +14,7 @@ import type {
   GisCoreEntry,
   GisCoreLedgerStatus,
   GisLatLng,
+  SupabaseGisCable,
   SupabaseGisFdbPort,
   SupabaseGisNode,
   SupabaseGisOlt,
@@ -28,6 +29,8 @@ import {
   computePolylineDistanceMeters,
   coreStatusToLedgerStatus,
   coreStatusToUsageType,
+  findExistingCableBetweenNodes,
+  findNextFreeCoreOnCable,
   ledgerStatusToCoreStatus,
   normalizeCableCores,
   summarizeCableCores,
@@ -38,6 +41,7 @@ import { SearchableCombobox, SearchableOption } from './SearchableCombobox';
 interface FiberConnectionModalProps {
   isOpen: boolean;
   nodes: SupabaseGisNode[];
+  existingCables?: SupabaseGisCable[];
   olts: SupabaseGisOlt[];
   oltsById: Record<string, SupabaseGisOlt>;
   ponPortsByOltId: Record<string, SupabaseGisOltPonPort[]>;
@@ -63,6 +67,8 @@ interface FiberConnectionModalProps {
     routeCoordinates: GisLatLng[];
     cores: GisCoreEntry[];
     notes: string;
+    reuseExistingCableId?: string | null;
+    forceNewCable?: boolean;
   }) => Promise<void>;
 }
 
@@ -82,6 +88,7 @@ function getLedgerBadgeClass(status: GisCoreLedgerStatus): string {
 export const FiberConnectionModal: React.FC<FiberConnectionModalProps> = ({
   isOpen,
   nodes,
+  existingCables = [],
   olts,
   oltsById,
   ponPortsByOltId,
@@ -108,6 +115,29 @@ export const FiberConnectionModal: React.FC<FiberConnectionModalProps> = ({
   const [notes, setNotes] = useState('');
   const [coresDraft, setCoresDraft] = useState<GisCoreEntry[]>([]);
   const [formError, setFormError] = useState<string>('');
+  const [forceNewPhysicalCable, setForceNewPhysicalCable] = useState<boolean>(false);
+
+  const existingSpanCable = useMemo(
+    () => findExistingCableBetweenNodes(existingCables, startNodeId, endNodeId),
+    [existingCables, startNodeId, endNodeId]
+  );
+  const isReusingExistingCable = Boolean(existingSpanCable && !forceNewPhysicalCable);
+  const existingNextFreeCore = useMemo(
+    () => (existingSpanCable ? findNextFreeCoreOnCable(existingSpanCable) : null),
+    [existingSpanCable]
+  );
+  const existingSpanSummary = useMemo(
+    () =>
+      existingSpanCable
+        ? summarizeCableCores(
+            existingSpanCable.cores_allocation_json?.length
+              ? existingSpanCable.cores_allocation_json
+              : existingSpanCable.cores_tia598_json,
+            existingSpanCable.cable_cores
+          )
+        : null,
+    [existingSpanCable]
+  );
 
   const nodesById = useMemo(() => {
     const map: Record<string, SupabaseGisNode> = {};
@@ -219,6 +249,7 @@ export const FiberConnectionModal: React.FC<FiberConnectionModalProps> = ({
     setFormError('');
     setNameTouched(false);
     setNotes('');
+    setForceNewPhysicalCable(false);
 
     const fallbackStart = sortedNodes.find((n) => n.node_type === 'OLT')?.id || sortedNodes[0]?.id || '';
     const resolvedStartId = initialStartNodeId || fallbackStart;
@@ -230,9 +261,16 @@ export const FiberConnectionModal: React.FC<FiberConnectionModalProps> = ({
     setStartNodeId(resolvedStartId);
     setEndNodeId(resolvedEndId);
 
+    const existingBetween = findExistingCableBetweenNodes(
+      existingCables,
+      resolvedStartId,
+      resolvedEndId
+    );
+    const effectiveCoreCap = existingBetween ? existingBetween.cable_cores : initialCableCores;
+
     const matchedPreset =
-      CABLE_CAPACITY_PRESETS.find((p) => p.cores === initialCableCores && p.cableType !== 'DROP') ||
-      CABLE_CAPACITY_PRESETS.find((p) => p.cores === initialCableCores) ||
+      CABLE_CAPACITY_PRESETS.find((p) => p.cores === effectiveCoreCap && p.cableType !== 'DROP') ||
+      CABLE_CAPACITY_PRESETS.find((p) => p.cores === effectiveCoreCap) ||
       CABLE_CAPACITY_PRESETS[6];
     setPresetId(matchedPreset.id);
 
@@ -240,15 +278,15 @@ export const FiberConnectionModal: React.FC<FiberConnectionModalProps> = ({
     const eNode = resolvedEndId ? nodesById[resolvedEndId] : undefined;
 
     // Auto-select OLT & PON if Start Node is OLT
-    let initOltId = '';
-    let initPonId = '';
-    if (sNode?.olt_id && oltsById[sNode.olt_id]) {
+    let initOltId = existingBetween?.source_olt_id || '';
+    let initPonId = existingBetween?.source_pon_port_id || '';
+    if (!initOltId && sNode?.olt_id && oltsById[sNode.olt_id]) {
       initOltId = sNode.olt_id;
       const pps = (ponPortsByOltId[initOltId] || [])
         .slice()
         .sort((a, b) => a.port_number - b.port_number);
       initPonId = sNode.pon_port_id || pps[0]?.id || '';
-    } else if (sNode?.pon_port_id && ponPortsById[sNode.pon_port_id]) {
+    } else if (!initPonId && sNode?.pon_port_id && ponPortsById[sNode.pon_port_id]) {
       initPonId = sNode.pon_port_id;
       initOltId = ponPortsById[initPonId].olt_id;
     }
@@ -259,11 +297,16 @@ export const FiberConnectionModal: React.FC<FiberConnectionModalProps> = ({
       ? ` [PON-${ponPortsById[initPonId].port_number}]`
       : '';
     setCableName(
-      sNode && eNode ? `${sNode.name}${ponTag} → ${eNode.name}` : 'New Fiber Span'
+      existingBetween?.name ||
+        (sNode && eNode ? `${sNode.name}${ponTag} → ${eNode.name}` : 'New Fiber Span')
     );
 
     const coords = buildRouteCoords(sNode, eNode);
-    const calcM = coords.length >= 2 ? Math.max(1, computePolylineDistanceMeters(coords)) : 100;
+    const calcM = existingBetween
+      ? Math.max(1, Number(existingBetween.distance_meters || 100))
+      : coords.length >= 2
+      ? Math.max(1, computePolylineDistanceMeters(coords))
+      : 100;
     setDistanceMeters(calcM);
 
     const initialOriginLabel =
@@ -272,6 +315,15 @@ export const FiberConnectionModal: React.FC<FiberConnectionModalProps> = ({
             ponPortsById[initPonId].port_number
           }`
         : sNode?.name || '';
+
+    if (existingBetween) {
+      const existingRaw = existingBetween.cores_allocation_json?.length
+        ? existingBetween.cores_allocation_json
+        : existingBetween.cores_tia598_json;
+      setCoresDraft(normalizeCableCores(existingBetween.cable_cores, existingRaw));
+      setNotes(existingBetween.notes || '');
+      return;
+    }
 
     const normalized = normalizeCableCores(matchedPreset.cores, []);
     // Pre-mark Core #1 as ACTIVE if start & end nodes exist for fast workflow
@@ -293,6 +345,23 @@ export const FiberConnectionModal: React.FC<FiberConnectionModalProps> = ({
     }
     setCoresDraft(normalized);
   }, [isOpen, initialStartNodeId, initialEndNodeId, initialCableCores]);
+
+  // When user changes A-End or B-End inside the modal and an existing cable connects them, load its core ledger unless + Lay New Physical Cable is active
+  useEffect(() => {
+    if (!isOpen) return;
+    if (existingSpanCable && !forceNewPhysicalCable) {
+      const matchedPreset =
+        CABLE_CAPACITY_PRESETS.find((p) => p.cores === existingSpanCable.cable_cores && p.cableType !== 'DROP') ||
+        CABLE_CAPACITY_PRESETS.find((p) => p.cores === existingSpanCable.cable_cores);
+      if (matchedPreset) setPresetId(matchedPreset.id);
+      if (!nameTouched && existingSpanCable.name) setCableName(existingSpanCable.name);
+      setDistanceMeters(Math.max(1, Number(existingSpanCable.distance_meters || distanceMeters)));
+      const raw = existingSpanCable.cores_allocation_json?.length
+        ? existingSpanCable.cores_allocation_json
+        : existingSpanCable.cores_tia598_json;
+      setCoresDraft(normalizeCableCores(existingSpanCable.cable_cores, raw));
+    }
+  }, [existingSpanCable?.id, forceNewPhysicalCable]);
 
   const handleRecalcDistance = (sId = startNodeId, eId = endNodeId) => {
     const sNode = nodesById[sId];
@@ -422,6 +491,8 @@ export const FiberConnectionModal: React.FC<FiberConnectionModalProps> = ({
       routeCoordinates,
       cores: normalizeCableCores(activePreset.cores, coresDraft),
       notes: notes.trim(),
+      reuseExistingCableId: isReusingExistingCable ? existingSpanCable?.id || null : null,
+      forceNewCable: forceNewPhysicalCable,
     });
   };
 
@@ -521,6 +592,58 @@ export const FiberConnectionModal: React.FC<FiberConnectionModalProps> = ({
                 />
               </div>
             </div>
+
+            {/* Multi-Core Cable Reuse Detection Banner (Prevents Duplicate Parallel Cables) */}
+            {existingSpanCable && (
+              <div
+                className={`p-3 rounded-xl border flex flex-wrap items-center justify-between gap-2.5 text-[11px] font-mono ${
+                  isReusingExistingCable
+                    ? 'bg-emerald-950/50 border-emerald-600/70 text-emerald-200'
+                    : 'bg-amber-950/45 border-amber-600/70 text-amber-200'
+                }`}
+              >
+                <div className="min-w-0 space-y-0.5">
+                  <div className="font-bold flex items-center gap-1.5 flex-wrap">
+                    <CheckCircle2 className="w-3.5 h-3.5 shrink-0" />
+                    <span>
+                      {isReusingExistingCable
+                        ? `Reusing Existing ${existingSpanCable.cable_cores}C Cable (${existingSpanCable.name || 'Trunk Span'})`
+                        : `Laying NEW Parallel Cable (Existing ${existingSpanCable.cable_cores}C span already exists)`}
+                    </span>
+                  </div>
+                  <div className="text-[10px] opacity-90">
+                    {existingSpanSummary
+                      ? `${existingSpanSummary.litCount + existingSpanSummary.reservedCount}/${existingSpanSummary.total} Cores Used/Reserved • ${existingSpanSummary.spareCount} Free`
+                      : ''}
+                    {existingNextFreeCore !== null
+                      ? ` • Next Free: Core #${existingNextFreeCore}`
+                      : ' • All cores currently allocated'}
+                  </div>
+                </div>
+                <div className="flex items-center gap-1.5 shrink-0">
+                  {isReusingExistingCable ? (
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setForceNewPhysicalCable(true);
+                        setCoresDraft(normalizeCableCores(activePreset.cores, []));
+                      }}
+                      className="px-2.5 py-1.5 rounded-lg bg-slate-900 hover:bg-slate-800 border border-amber-500/70 text-amber-300 font-bold text-[10px] cursor-pointer"
+                    >
+                      + Lay New Physical Cable
+                    </button>
+                  ) : (
+                    <button
+                      type="button"
+                      onClick={() => setForceNewPhysicalCable(false)}
+                      className="px-2.5 py-1.5 rounded-lg bg-emerald-600 hover:bg-emerald-500 text-slate-950 font-bold text-[10px] cursor-pointer"
+                    >
+                      Bind to Existing {existingSpanCable.cable_cores}C Cable
+                    </button>
+                  )}
+                </div>
+              </div>
+            )}
           </div>
 
           {/* Cable Capacity, Name, Distance, OLT/PON Binding */}
@@ -919,7 +1042,13 @@ export const FiberConnectionModal: React.FC<FiberConnectionModalProps> = ({
               className="min-h-[40px] px-5 py-2 rounded-xl bg-cyan-600 hover:bg-cyan-500 disabled:opacity-50 text-slate-950 font-mono font-bold text-xs flex items-center gap-1.5 cursor-pointer shadow-lg"
             >
               <Save className="w-4 h-4" />
-              <span>{isSaving ? 'Saving to Supabase...' : 'Save Fiber Route & Core Ledger'}</span>
+              <span>
+                {isSaving
+                  ? 'Saving to Supabase...'
+                  : isReusingExistingCable
+                  ? `Update Existing ${existingSpanCable?.cable_cores}C Cable Cores`
+                  : 'Lay New Cable & Save Core Ledger'}
+              </span>
             </button>
           </div>
         </div>

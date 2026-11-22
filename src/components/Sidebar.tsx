@@ -30,6 +30,7 @@ import { useISP } from '../context/ISPContext';
 import { useCurrency } from '../context/CurrencyContext';
 import { isOriginalAdminSession } from '../lib/auth';
 import { ThemeToggle } from './ThemeToggle';
+import { resolveUserGisAccess } from '../lib/gisAccessControl';
 
 export interface SidebarProps {
   isOpen: boolean;
@@ -43,6 +44,7 @@ export interface SidebarProps {
   onSwitchRole?: (role: SystemRole) => void;
   currentUser?: UserAccount | null;
   onLogout?: () => void;
+  canAccessGisMap?: boolean;
 }
 
 export const Sidebar: React.FC<SidebarProps> = ({
@@ -57,7 +59,12 @@ export const Sidebar: React.FC<SidebarProps> = ({
   onSwitchRole,
   currentUser,
   onLogout,
+  canAccessGisMap,
 }) => {
+  const effectiveCanAccessGisMap =
+    canAccessGisMap !== undefined
+      ? canAccessGisMap
+      : resolveUserGisAccess(currentUser, currentRole).canAccess;
   const { complaints, customers, onus, activeSessions, outages } = useISP();
   const { currencySymbol } = useCurrency();
 
@@ -240,8 +247,12 @@ export const Sidebar: React.FC<SidebarProps> = ({
     },
   ];
 
-  // Filter menu strictly by role
-  const menuItems = allMenuItems.filter((item) => item.roles.includes(currentRole));
+  // Filter menu strictly by role + per-user GIS map access permission
+  const menuItems = allMenuItems.filter((item) => {
+    if (!item.roles.includes(currentRole)) return false;
+    if (item.id === 'fiber_gis' && !effectiveCanAccessGisMap) return false;
+    return true;
+  });
 
   const handleSelectTab = (tab: ActiveTab) => {
     setActiveTab(tab);

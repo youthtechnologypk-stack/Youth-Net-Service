@@ -1,4 +1,4 @@
-import React, { useEffect, useMemo, useState } from 'react';
+import React, { useEffect, useMemo, useRef, useState } from 'react';
 import {
   Activity,
   AlertTriangle,
@@ -10,6 +10,7 @@ import {
   History,
   Layers,
   Link2,
+  Lock,
   Navigation,
   Phone,
   Plus,
@@ -22,6 +23,7 @@ import {
   ShieldAlert,
   Sliders,
   Trash2,
+  Unlock,
   UserPlus,
   Users,
   Wrench,
@@ -70,6 +72,8 @@ import {
   coreStatusToLedgerStatus,
   coreStatusToUsageType,
   evaluateEnclosureOpticalState,
+  findExistingCableBetweenNodes,
+  findNextFreeCoreOnCable,
   generateDefaultSpliceTray,
   getDefaultMaxOnuLimit,
   getFbtLegOutputs,
@@ -79,6 +83,7 @@ import {
   getTia598Color,
   inferSfpClassFromDbm,
   inferSplitterCategory,
+  isCoreLockedOrUsed,
   ledgerStatusToCoreStatus,
   normalizeCableCores,
   resolveHopSpliceLoss,
@@ -101,6 +106,7 @@ interface FiberGisInspectorPanelProps {
   ponPortsById?: Record<string, SupabaseGisOltPonPort>;
   subscribers: GisSubscriberSummary[];
   isSaving: boolean;
+  readOnly?: boolean;
   onClose: () => void;
   onSaveNode: (nodeId: string, patch: Partial<SupabaseGisNode>) => Promise<void>;
   onDeleteNode: (nodeId: string) => Promise<void>;
@@ -148,9 +154,11 @@ interface FiberGisInspectorPanelProps {
     outgoingCableCores: 1 | 2 | 4 | 6 | 8 | 12 | 24 | 48;
     outgoingCoreNumber: number;
     spliceLossDb: number;
+    forceNewCable?: boolean;
   }) => Promise<void>;
   onRecalculateOpticalPower?: (nodeId?: string) => Promise<void>;
   onFocusNode?: (node: SupabaseGisNode) => void;
+  onDirtyChange?: (isDirty: boolean) => void;
 }
 
 export const FiberGisInspectorPanel: React.FC<FiberGisInspectorPanelProps> = ({
@@ -168,6 +176,7 @@ export const FiberGisInspectorPanel: React.FC<FiberGisInspectorPanelProps> = ({
   ponPortsById = {},
   subscribers,
   isSaving,
+  readOnly = false,
   onClose,
   onSaveNode,
   onDeleteNode,
@@ -184,8 +193,11 @@ export const FiberGisInspectorPanel: React.FC<FiberGisInspectorPanelProps> = ({
   onRouteCableFromNode,
   onQuickSpliceAndExtendCore,
   onRecalculateOpticalPower,
+  onDirtyChange,
 }) => {
   const [fdbSubTab, setFdbSubTab] = useState<'ports' | 'splices' | 'signal'>('ports');
+  const loadedNodeIdRef = useRef<string | null>(null);
+  const loadedCableIdRef = useRef<string | null>(null);
   const [confirmDelete, setConfirmDelete] = useState(false);
   const [ponTxDrafts, setPonTxDrafts] = useState<Record<string, number>>({});
   const [editingPonId, setEditingPonId] = useState<string | null>(null);
@@ -217,6 +229,7 @@ export const FiberGisInspectorPanel: React.FC<FiberGisInspectorPanelProps> = ({
     1 | 2 | 4 | 6 | 8 | 12 | 24 | 48
   >(2);
   const [quickExtendOutCore, setQuickExtendOutCore] = useState<number>(1);
+  const [quickExtendForceNewCable, setQuickExtendForceNewCable] = useState<boolean>(false);
   const [localSaving, setLocalSaving] = useState(false);
   const [localSaveError, setLocalSaveError] = useState<string | null>(null);
 
@@ -243,6 +256,16 @@ export const FiberGisInspectorPanel: React.FC<FiberGisInspectorPanelProps> = ({
   const [triageChecks, setTriageChecks] = useState<Record<string, boolean>>({});
 
   useEffect(() => {
+    if (!selectedNode) {
+      loadedNodeIdRef.current = null;
+      return;
+    }
+    // Guard: NEVER wipe open dropdowns or unsaved form drafts on background refresh echoes for the SAME node ID
+    if (loadedNodeIdRef.current === selectedNode.id) {
+      return;
+    }
+    loadedNodeIdRef.current = selectedNode.id;
+
     setConfirmDelete(false);
     setEditingPortNum(null);
     setActiveLegEditor(null);
@@ -253,73 +276,93 @@ export const FiberGisInspectorPanel: React.FC<FiberGisInspectorPanelProps> = ({
     setQuickExtendTargetNodeId('');
     setQuickExtendCableCores(2);
     setQuickExtendOutCore(1);
+    setQuickExtendForceNewCable(false);
     setLocalSaveError(null);
-    if (selectedNode) {
-      const spType = (selectedNode.splitter_type ||
-        (selectedNode.node_type === 'FDB_FAT' ? '1:8' : 'none')) as GisSplitterType;
-      setNodeName(selectedNode.name || '');
-      setNodeArea(selectedNode.area_name || '');
-      setNodeTxPower(Number(selectedNode.tx_power_dbm ?? 5.0));
-      setNodeSplitter(spType);
-      setNodeSplitterCat(
-        selectedNode.splitter_category || inferSplitterCategory(spType)
-      );
-      const tPorts = Number(selectedNode.total_ports ?? 8);
-      setNodeTotalPorts(tPorts);
-      setNodeBoxCapacity(Math.max(Number(selectedNode.box_capacity ?? tPorts), tPorts));
-      setNodeFeedCableId(selectedNode.feed_cable_id || '');
-      setNodeFeedCore(Number(selectedNode.feed_core_number ?? 1));
-      setNodeFeedCorePair(selectedNode.feed_core_pair || '');
-      setNodePonPortId(selectedNode.pon_port_id || '');
-      const cap = Number(selectedNode.tray_capacity ?? 12);
-      setNodeTrayCapacity(cap);
-      setNodeLossPerSplice(resolveHopSpliceLoss(selectedNode.loss_per_splice));
-      setNodeNotes(selectedNode.notes || '');
-      setSpliceTrayDraft(
-        Array.isArray(selectedNode.splice_tray_json) && selectedNode.splice_tray_json.length > 0
-          ? selectedNode.splice_tray_json
-          : generateDefaultSpliceTray(cap)
-      );
-      setInternalSplittersDraft(
-        Array.isArray(selectedNode.internal_splitters)
-          ? selectedNode.internal_splitters.map((s) => ({
-              ...s,
-              legs: buildDefaultLegsForSplitter(s.splitter_type, s.legs),
-            }))
-          : []
-      );
-      setCoreSplicesDraft(
-        Array.isArray(selectedNode.core_splices) ? selectedNode.core_splices : []
-      );
+
+    if (selectedNode.node_type === 'DIST_NODE') {
+      setFdbSubTab('splices');
+    } else if (selectedNode.node_type === 'FDB_FAT') {
+      setFdbSubTab('ports');
     }
+
+    const spType = (selectedNode.splitter_type ||
+      (selectedNode.node_type === 'FDB_FAT' ? '1:8' : 'none')) as GisSplitterType;
+    setNodeName(selectedNode.name || '');
+    setNodeArea(selectedNode.area_name || '');
+    setNodeTxPower(Number(selectedNode.tx_power_dbm ?? 5.0));
+    setNodeSplitter(spType);
+    setNodeSplitterCat(
+      selectedNode.splitter_category || inferSplitterCategory(spType)
+    );
+    const tPorts = Number(selectedNode.total_ports ?? 8);
+    setNodeTotalPorts(tPorts);
+    setNodeBoxCapacity(Math.max(Number(selectedNode.box_capacity ?? tPorts), tPorts));
+    setNodeFeedCableId(selectedNode.feed_cable_id || '');
+    setNodeFeedCore(Number(selectedNode.feed_core_number ?? 1));
+    setNodeFeedCorePair(selectedNode.feed_core_pair || '');
+    setNodePonPortId(selectedNode.pon_port_id || '');
+    const cap = Number(selectedNode.tray_capacity ?? 12);
+    setNodeTrayCapacity(cap);
+    setNodeLossPerSplice(resolveHopSpliceLoss(selectedNode.loss_per_splice));
+    setNodeNotes(selectedNode.notes || '');
+    setSpliceTrayDraft(
+      Array.isArray(selectedNode.splice_tray_json) && selectedNode.splice_tray_json.length > 0
+        ? selectedNode.splice_tray_json
+        : generateDefaultSpliceTray(cap)
+    );
+    setInternalSplittersDraft(
+      Array.isArray(selectedNode.internal_splitters)
+        ? selectedNode.internal_splitters.map((s) => ({
+            ...s,
+            legs: buildDefaultLegsForSplitter(s.splitter_type, s.legs),
+          }))
+        : []
+    );
+    setCoreSplicesDraft(
+      Array.isArray(selectedNode.core_splices) ? selectedNode.core_splices : []
+    );
   }, [selectedNode]);
 
   useEffect(() => {
-    setConfirmDelete(false);
-    if (selectedCable) {
-      setCableName(selectedCable.name || '');
-      setCableDistanceMeters(Number(selectedCable.distance_meters || 0));
-      setCableNotes(selectedCable.notes || '');
-      const resolvedType = cableCoresToType(
-        selectedCable.cable_cores,
-        selectedCable.cable_type
-      );
-      const matchedPreset =
-        CABLE_CAPACITY_PRESETS.find(
-          (p) => p.cores === selectedCable.cable_cores && p.cableType === resolvedType
-        ) ||
-        CABLE_CAPACITY_PRESETS.find((p) => p.cores === selectedCable.cable_cores) ||
-        CABLE_CAPACITY_PRESETS[6];
-      setCablePresetId(matchedPreset.id);
-      setCableSourceOltId(selectedCable.source_olt_id || '');
-      setCableSourcePonPortId(selectedCable.source_pon_port_id || '');
-      const rawCores =
-        selectedCable.cores_allocation_json && selectedCable.cores_allocation_json.length > 0
-          ? selectedCable.cores_allocation_json
-          : selectedCable.cores_tia598_json;
-      setCableCoresDraft(normalizeCableCores(matchedPreset.cores, rawCores));
+    if (!selectedCable) {
+      loadedCableIdRef.current = null;
+      return;
     }
+    // Guard: NEVER wipe open cable core allocation drafts on background refresh echoes for the SAME cable ID
+    if (loadedCableIdRef.current === selectedCable.id) {
+      return;
+    }
+    loadedCableIdRef.current = selectedCable.id;
+
+    setConfirmDelete(false);
+    setCableName(selectedCable.name || '');
+    setCableDistanceMeters(Number(selectedCable.distance_meters || 0));
+    setCableNotes(selectedCable.notes || '');
+    const resolvedType = cableCoresToType(
+      selectedCable.cable_cores,
+      selectedCable.cable_type
+    );
+    const matchedPreset =
+      CABLE_CAPACITY_PRESETS.find(
+        (p) => p.cores === selectedCable.cable_cores && p.cableType === resolvedType
+      ) ||
+      CABLE_CAPACITY_PRESETS.find((p) => p.cores === selectedCable.cable_cores) ||
+      CABLE_CAPACITY_PRESETS[6];
+    setCablePresetId(matchedPreset.id);
+    setCableSourceOltId(selectedCable.source_olt_id || '');
+    setCableSourcePonPortId(selectedCable.source_pon_port_id || '');
+    const rawCores =
+      selectedCable.cores_allocation_json && selectedCable.cores_allocation_json.length > 0
+        ? selectedCable.cores_allocation_json
+        : selectedCable.cores_tia598_json;
+    setCableCoresDraft(normalizeCableCores(matchedPreset.cores, rawCores));
   }, [selectedCable]);
+
+  const cablesById = useMemo(() => {
+    const map: Record<string, SupabaseGisCable> = {};
+    for (const c of cables) map[c.id] = c;
+    return map;
+  }, [cables]);
 
   const nodesById = useMemo(() => {
     const map: Record<string, SupabaseGisNode> = {};
@@ -406,6 +449,58 @@ export const FiberGisInspectorPanel: React.FC<FiberGisInspectorPanelProps> = ({
     nodeTxPower,
   ]);
 
+  const hasAnyUnsavedChanges = useMemo(() => {
+    if (selectedNode) {
+      if (hasUnsavedOpticalEdits) return true;
+      if ((selectedNode.name || '') !== nodeName) return true;
+      if ((selectedNode.area_name || '') !== nodeArea) return true;
+      if ((selectedNode.notes || '') !== nodeNotes) return true;
+      if ((selectedNode.feed_core_pair || '') !== nodeFeedCorePair) return true;
+      if (editingPortNum !== null || activeLegEditor !== null || quickExtendCoreKey !== null) {
+        return true;
+      }
+      return false;
+    }
+    if (selectedCable) {
+      const savedCores = normalizeCableCores(
+        selectedCable.cable_cores,
+        selectedCable.cores_allocation_json?.length
+          ? selectedCable.cores_allocation_json
+          : selectedCable.cores_tia598_json
+      );
+      return (
+        (selectedCable.name || '') !== cableName ||
+        Number(selectedCable.distance_meters || 0) !== Number(cableDistanceMeters || 0) ||
+        (selectedCable.notes || '') !== cableNotes ||
+        (selectedCable.source_olt_id || '') !== cableSourceOltId ||
+        (selectedCable.source_pon_port_id || '') !== cableSourcePonPortId ||
+        JSON.stringify(savedCores) !== JSON.stringify(cableCoresDraft)
+      );
+    }
+    return false;
+  }, [
+    selectedNode,
+    selectedCable,
+    hasUnsavedOpticalEdits,
+    nodeName,
+    nodeArea,
+    nodeNotes,
+    nodeFeedCorePair,
+    editingPortNum,
+    activeLegEditor,
+    quickExtendCoreKey,
+    cableName,
+    cableDistanceMeters,
+    cableNotes,
+    cableSourceOltId,
+    cableSourcePonPortId,
+    cableCoresDraft,
+  ]);
+
+  useEffect(() => {
+    onDirtyChange?.(hasAnyUnsavedChanges);
+  }, [hasAnyUnsavedChanges, onDirtyChange]);
+
   const liveDraftBudget = useMemo(() => {
     if (!selectedNode || !hasUnsavedOpticalEdits) return null;
     const patchedNodes = nodes.map((n) =>
@@ -475,6 +570,8 @@ export const FiberGisInspectorPanel: React.FC<FiberGisInspectorPanelProps> = ({
         },
         arrivalDbmByCoreKey: budgetForSave?.arrivalDbmByCoreKey || {},
         fallbackInputDbm: budgetForSave?.inputDbm ?? null,
+        ponPortsById,
+        cablesById,
       });
       const effectivePorts = Math.max(
         0,
@@ -542,6 +639,8 @@ export const FiberGisInspectorPanel: React.FC<FiberGisInspectorPanelProps> = ({
     const outputsByNumber: Record<number, SupabaseGisSplitterOutput> = {};
     for (const o of nodeOutputs) outputsByNumber[o.port_number] = o;
 
+    const isMultiPonTrunkNode =
+      node.node_type === 'DIST_NODE' || node.node_type === 'FOSC_JOINT';
     const hasMultiSplitters = internalSplittersDraft.length > 0;
     const liveEnclosureEval = evaluateEnclosureOpticalState({
       node: {
@@ -552,6 +651,8 @@ export const FiberGisInspectorPanel: React.FC<FiberGisInspectorPanelProps> = ({
       },
       arrivalDbmByCoreKey: budget?.arrivalDbmByCoreKey || {},
       fallbackInputDbm: budget?.inputDbm ?? null,
+      ponPortsById,
+      cablesById,
     });
     const evaluatedSplitters = liveEnclosureEval.evaluatedSplitters;
     const evaluatedCoreSplices = liveEnclosureEval.evaluatedCoreSplices;
@@ -819,6 +920,13 @@ export const FiberGisInspectorPanel: React.FC<FiberGisInspectorPanelProps> = ({
           </div>
         </div>
 
+        {readOnly && (
+          <div className="px-4 py-1.5 bg-sky-950/60 border-b border-sky-800/70 flex items-center gap-2 text-[11px] font-mono text-sky-200 shrink-0">
+            <Lock className="w-3.5 h-3.5 text-sky-400 shrink-0" />
+            <span>View &amp; Trace Only — Topology editing &amp; splicing disabled by Admin</span>
+          </div>
+        )}
+
         {/* Sub-tabs for FDB_FAT, DIST_NODE, & FOSC_JOINT */}
         {(node.node_type === 'FDB_FAT' ||
           node.node_type === 'DIST_NODE' ||
@@ -853,7 +961,8 @@ export const FiberGisInspectorPanel: React.FC<FiberGisInspectorPanelProps> = ({
             >
               <Link2 className="w-3.5 h-3.5 shrink-0" />
               <span className="truncate">
-                Core Splices{passThroughCount > 0 ? ` (${passThroughCount})` : ''}
+                {isMultiPonTrunkNode ? 'Trunk Matrix' : 'Core Splices'}
+                {passThroughCount > 0 ? ` (${passThroughCount})` : ''}
               </span>
             </button>
             <button
@@ -915,86 +1024,95 @@ export const FiberGisInspectorPanel: React.FC<FiberGisInspectorPanelProps> = ({
                   </div>
                 </div>
 
-                <div>
-                  <span className="text-[10px] text-slate-400 block mb-1">
-                    Box Port Capacity (Up to 48 Ports)
-                  </span>
-                  <div className="grid grid-cols-7 gap-1">
-                    {FDB_ENCLOSURE_CAPACITIES.map((cap) => (
+                {!readOnly && (
+                  <>
+                    <div>
+                      <span className="text-[10px] text-slate-400 block mb-1">
+                        Box Port Capacity (Up to 48 Ports)
+                      </span>
+                      <div className="grid grid-cols-7 gap-1">
+                        {FDB_ENCLOSURE_CAPACITIES.map((cap) => (
+                          <button
+                            key={cap}
+                            type="button"
+                            onClick={() => {
+                              setNodeBoxCapacity(cap);
+                              setNodeTotalPorts(cap);
+                            }}
+                            className={`py-1.5 rounded-lg border text-[11px] font-bold transition cursor-pointer ${
+                              nodeBoxCapacity === cap
+                                ? 'bg-cyan-600 text-slate-950 border-cyan-300 shadow'
+                                : 'bg-slate-900 text-slate-300 border-slate-700 hover:border-slate-500'
+                            }`}
+                          >
+                            {cap}P
+                          </button>
+                        ))}
+                      </div>
+                    </div>
+
+                    <div className="flex flex-wrap items-center gap-2 pt-1">
                       <button
-                        key={cap}
                         type="button"
-                        onClick={() => {
-                          setNodeBoxCapacity(cap);
-                          setNodeTotalPorts(cap);
-                        }}
-                        className={`py-1.5 rounded-lg border text-[11px] font-bold transition cursor-pointer ${
-                          nodeBoxCapacity === cap
-                            ? 'bg-cyan-600 text-slate-950 border-cyan-300 shadow'
-                            : 'bg-slate-900 text-slate-300 border-slate-700 hover:border-slate-500'
-                        }`}
+                        onClick={() =>
+                          addInternalSplitterUnit(
+                            internalSplittersDraft.length === 0 && nodeSplitter !== 'none'
+                          )
+                        }
+                        className="flex-1 min-h-[36px] px-3 py-1.5 rounded-lg bg-emerald-600 hover:bg-emerald-500 text-slate-950 font-bold text-[11px] flex items-center justify-center gap-1.5 cursor-pointer shadow-sm"
                       >
-                        {cap}P
+                        <Plus className="w-3.5 h-3.5" />
+                        <span>
+                          {internalSplittersDraft.length === 0 && nodeSplitter !== 'none'
+                            ? 'Convert & Add Multi-Splitter Inside FDB'
+                            : 'Add Splitter Inside This FDB'}
+                        </span>
                       </button>
-                    ))}
-                  </div>
-                </div>
+                      {onRecalculateOpticalPower && (
+                        <button
+                          type="button"
+                          disabled={isSaving || localSaving}
+                          onClick={() => onRecalculateOpticalPower(node.id)}
+                          className="min-h-[36px] px-2.5 py-1.5 rounded-lg bg-indigo-950/90 hover:bg-indigo-900 disabled:opacity-50 text-indigo-200 border border-indigo-700/70 font-bold text-[11px] flex items-center gap-1 cursor-pointer"
+                          title="Recalculate FDB optical budget and sync live Rx power to all assigned ports in Supabase"
+                        >
+                          <RefreshCw className={`w-3.5 h-3.5 ${isSaving ? 'animate-spin' : ''}`} />
+                          <span>Recalculate Optical Power</span>
+                        </button>
+                      )}
+                      {onRouteCableFromNode && (
+                        <button
+                          type="button"
+                          onClick={() => onRouteCableFromNode(node)}
+                          className="min-h-[36px] px-2.5 py-1.5 rounded-lg bg-slate-800 hover:bg-slate-700 text-cyan-300 border border-slate-700 font-bold text-[11px] flex items-center gap-1 cursor-pointer"
+                          title="Draw outgoing fiber cable from this box"
+                        >
+                          <Cable className="w-3.5 h-3.5" />
+                          <span>+ Out Cable</span>
+                        </button>
+                      )}
+                    </div>
 
-                <div className="flex flex-wrap items-center gap-2 pt-1">
-                  <button
-                    type="button"
-                    onClick={() => addInternalSplitterUnit(internalSplittersDraft.length === 0 && nodeSplitter !== 'none')}
-                    className="flex-1 min-h-[36px] px-3 py-1.5 rounded-lg bg-emerald-600 hover:bg-emerald-500 text-slate-950 font-bold text-[11px] flex items-center justify-center gap-1.5 cursor-pointer shadow-sm"
-                  >
-                    <Plus className="w-3.5 h-3.5" />
-                    <span>
-                      {internalSplittersDraft.length === 0 && nodeSplitter !== 'none'
-                        ? 'Convert & Add Multi-Splitter Inside FDB'
-                        : 'Add Splitter Inside This FDB'}
-                    </span>
-                  </button>
-                  {onRecalculateOpticalPower && (
-                    <button
-                      type="button"
-                      disabled={isSaving || localSaving}
-                      onClick={() => onRecalculateOpticalPower(node.id)}
-                      className="min-h-[36px] px-2.5 py-1.5 rounded-lg bg-indigo-950/90 hover:bg-indigo-900 disabled:opacity-50 text-indigo-200 border border-indigo-700/70 font-bold text-[11px] flex items-center gap-1 cursor-pointer"
-                      title="Recalculate FDB optical budget and sync live Rx power to all assigned ports in Supabase"
-                    >
-                      <RefreshCw className={`w-3.5 h-3.5 ${isSaving ? 'animate-spin' : ''}`} />
-                      <span>Recalculate Optical Power</span>
-                    </button>
-                  )}
-                  {onRouteCableFromNode && (
-                    <button
-                      type="button"
-                      onClick={() => onRouteCableFromNode(node)}
-                      className="min-h-[36px] px-2.5 py-1.5 rounded-lg bg-slate-800 hover:bg-slate-700 text-cyan-300 border border-slate-700 font-bold text-[11px] flex items-center gap-1 cursor-pointer"
-                      title="Draw outgoing fiber cable from this box"
-                    >
-                      <Cable className="w-3.5 h-3.5" />
-                      <span>+ Out Cable</span>
-                    </button>
-                  )}
-                </div>
-
-                {hasMultiSplitters && totalAllocatedLegs > nodeBoxCapacity && (
-                  <div className="p-2 rounded-lg bg-amber-950/60 border border-amber-600/70 text-[11px] text-amber-200 flex items-center justify-between gap-2">
-                    <span>
-                      Total splitter legs ({totalAllocatedLegs}) exceed {nodeBoxCapacity}P box capacity.
-                    </span>
-                    <button
-                      type="button"
-                      onClick={() => {
-                        const nextFit = FDB_ENCLOSURE_CAPACITIES.find((c) => c >= totalAllocatedLegs) || 48;
-                        setNodeBoxCapacity(nextFit);
-                        setNodeTotalPorts(nextFit);
-                      }}
-                      className="px-2 py-0.5 rounded bg-amber-500 text-slate-950 font-bold text-[10px] shrink-0 cursor-pointer"
-                    >
-                      Expand to {FDB_ENCLOSURE_CAPACITIES.find((c) => c >= totalAllocatedLegs) || 48}P
-                    </button>
-                  </div>
+                    {hasMultiSplitters && totalAllocatedLegs > nodeBoxCapacity && (
+                      <div className="p-2 rounded-lg bg-amber-950/60 border border-amber-600/70 text-[11px] text-amber-200 flex items-center justify-between gap-2">
+                        <span>
+                          Total splitter legs ({totalAllocatedLegs}) exceed {nodeBoxCapacity}P box capacity.
+                        </span>
+                        <button
+                          type="button"
+                          onClick={() => {
+                            const nextFit =
+                              FDB_ENCLOSURE_CAPACITIES.find((c) => c >= totalAllocatedLegs) || 48;
+                            setNodeBoxCapacity(nextFit);
+                            setNodeTotalPorts(nextFit);
+                          }}
+                          className="px-2 py-0.5 rounded bg-amber-500 text-slate-950 font-bold text-[10px] shrink-0 cursor-pointer"
+                        >
+                          Expand to {FDB_ENCLOSURE_CAPACITIES.find((c) => c >= totalAllocatedLegs) || 48}P
+                        </button>
+                      </div>
+                    )}
+                  </>
                 )}
               </div>
 
@@ -1036,6 +1154,7 @@ export const FiberGisInspectorPanel: React.FC<FiberGisInspectorPanelProps> = ({
                             </span>
                             <input
                               type="text"
+                              disabled={readOnly}
                               value={unit.label}
                               onChange={(e) => {
                                 const label = e.target.value;
@@ -1043,9 +1162,10 @@ export const FiberGisInspectorPanel: React.FC<FiberGisInspectorPanelProps> = ({
                                   prev.map((s) => (s.id === unit.id ? { ...s, label } : s))
                                 );
                               }}
-                              className="w-24 bg-slate-900 border border-slate-700 rounded px-2 py-1 text-xs font-mono font-bold text-white"
+                              className="w-24 bg-slate-900 border border-slate-700 rounded px-2 py-1 text-xs font-mono font-bold text-white disabled:opacity-75"
                             />
                             <select
+                              disabled={readOnly}
                               value={unit.splitter_type}
                               onChange={(e) => {
                                 const nextSp = e.target.value as GisSplitterType;
@@ -1061,7 +1181,7 @@ export const FiberGisInspectorPanel: React.FC<FiberGisInspectorPanelProps> = ({
                                   )
                                 );
                               }}
-                              className="bg-slate-900 border border-slate-700 rounded px-2 py-1 text-xs font-mono text-white"
+                              className="bg-slate-900 border border-slate-700 rounded px-2 py-1 text-xs font-mono text-white disabled:opacity-75"
                             >
                               {(Object.keys(SPLITTER_SPECS) as GisSplitterType[])
                                 .filter((k) => k !== 'none')
@@ -1085,23 +1205,30 @@ export const FiberGisInspectorPanel: React.FC<FiberGisInspectorPanelProps> = ({
                                 ? `${unitOutDbm.toFixed(1)} dBm`
                                 : 'Unlinked'}
                             </span>
-                            <button
-                              type="button"
-                              onClick={() => {
-                                setInternalSplittersDraft((prev) =>
-                                  prev.filter((s) => s.id !== unit.id)
-                                );
-                              }}
-                              className="p-1 rounded bg-slate-900 hover:bg-rose-950 text-rose-400 border border-slate-800 cursor-pointer"
-                              title="Remove this internal splitter"
-                            >
-                              <Trash2 className="w-3.5 h-3.5" />
-                            </button>
+                            {!readOnly && (
+                              <button
+                                type="button"
+                                onClick={() => {
+                                  setInternalSplittersDraft((prev) =>
+                                    prev.filter((s) => s.id !== unit.id)
+                                  );
+                                }}
+                                className="p-1 rounded bg-slate-900 hover:bg-rose-950 text-rose-400 border border-slate-800 cursor-pointer"
+                                title="Remove this internal splitter"
+                              >
+                                <Trash2 className="w-3.5 h-3.5" />
+                              </button>
+                            )}
                           </div>
                         </div>
 
                         {/* Splitter Signal Input Source (Incoming Core OR Internal Cascade) */}
-                        <div className="p-2.5 rounded-lg bg-slate-900/90 border border-slate-800 space-y-2 font-mono text-[11px]">
+                        <fieldset
+                          disabled={readOnly}
+                          className={`p-2.5 rounded-lg bg-slate-900/90 border border-slate-800 space-y-2 font-mono text-[11px] min-w-0 ${
+                            readOnly ? 'pointer-events-none opacity-85' : ''
+                          }`}
+                        >
                           <div className="flex items-center justify-between gap-2">
                             <span className="text-[10px] uppercase text-cyan-300 font-bold flex items-center gap-1">
                               <Sliders className="w-3 h-3" />
@@ -1289,7 +1416,7 @@ export const FiberGisInspectorPanel: React.FC<FiberGisInspectorPanelProps> = ({
                               </div>
                             </div>
                           )}
-                        </div>
+                        </fieldset>
 
                         {/* Individual Output Legs inside this splitter */}
                         <div className="space-y-1.5">
@@ -1376,23 +1503,25 @@ export const FiberGisInspectorPanel: React.FC<FiberGisInspectorPanelProps> = ({
                                     </div>
                                   </div>
 
-                                  <button
-                                    type="button"
-                                    onClick={() => {
-                                      setLegSubSearch('');
-                                      setActiveLegEditor(
-                                        isLegEditing
-                                          ? null
-                                          : { splitterId: unit.id, legNumber: leg.legNumber }
-                                      );
-                                    }}
-                                    className="px-2 py-1 rounded bg-slate-800 hover:bg-slate-700 text-cyan-300 border border-slate-700 text-[10px] font-bold shrink-0 cursor-pointer"
-                                  >
-                                    {isLegEditing ? 'Close' : leg.status === 'FREE' ? 'Assign' : 'Edit'}
-                                  </button>
+                                  {!readOnly && (
+                                    <button
+                                      type="button"
+                                      onClick={() => {
+                                        setLegSubSearch('');
+                                        setActiveLegEditor(
+                                          isLegEditing
+                                            ? null
+                                            : { splitterId: unit.id, legNumber: leg.legNumber }
+                                        );
+                                      }}
+                                      className="px-2 py-1 rounded bg-slate-800 hover:bg-slate-700 text-cyan-300 border border-slate-700 text-[10px] font-bold shrink-0 cursor-pointer"
+                                    >
+                                      {isLegEditing ? 'Close' : leg.status === 'FREE' ? 'Assign' : 'Edit'}
+                                    </button>
+                                  )}
                                 </div>
 
-                                {isLegEditing && (
+                                {!readOnly && isLegEditing && (
                                   <div className="mt-2 pt-2 border-t border-slate-800 space-y-2 text-[11px]">
                                     <select
                                       value={leg.status}
@@ -1906,31 +2035,37 @@ export const FiberGisInspectorPanel: React.FC<FiberGisInspectorPanelProps> = ({
                                 Trace
                               </button>
                             )}
-                            <button
-                              type="button"
-                              onClick={() => {
-                                if (isEditing) {
-                                  setEditingPortNum(null);
-                                } else {
-                                  setEditingPortNum(portNum);
-                                  setPortUtilDraft(util === 'FREE_PORT' ? 'CLIENT_ONT' : util);
-                                  setSelectedSubId(out?.subscriber_id || port?.subscriber_id || linkedSub?.id || '');
-                                  setManualClientName(out?.client_name_manual || port?.client_label || '');
-                                  setTargetAreaOrNodeDraft(out?.target_area_or_node || '');
-                                  setPortDropMeters(Number(displayDistance || 30));
-                                  setPortStatusDraft(port?.status || 'ACTIVE');
-                                  setSubSearch('');
-                                }
-                              }}
-                              className="min-h-[34px] px-2.5 py-1 rounded-lg bg-slate-800 hover:bg-slate-700 text-cyan-300 border border-slate-700 text-[11px] font-mono font-semibold flex items-center gap-1 cursor-pointer"
-                            >
-                              <UserPlus className="w-3 h-3" />
-                              <span>{isEditing ? 'Close' : util === 'FREE_PORT' ? 'Assign' : 'Edit'}</span>
-                            </button>
+                            {!readOnly && (
+                              <button
+                                type="button"
+                                onClick={() => {
+                                  if (isEditing) {
+                                    setEditingPortNum(null);
+                                  } else {
+                                    setEditingPortNum(portNum);
+                                    setPortUtilDraft(util === 'FREE_PORT' ? 'CLIENT_ONT' : util);
+                                    setSelectedSubId(
+                                      out?.subscriber_id || port?.subscriber_id || linkedSub?.id || ''
+                                    );
+                                    setManualClientName(
+                                      out?.client_name_manual || port?.client_label || ''
+                                    );
+                                    setTargetAreaOrNodeDraft(out?.target_area_or_node || '');
+                                    setPortDropMeters(Number(displayDistance || 30));
+                                    setPortStatusDraft(port?.status || 'ACTIVE');
+                                    setSubSearch('');
+                                  }
+                                }}
+                                className="min-h-[34px] px-2.5 py-1 rounded-lg bg-slate-800 hover:bg-slate-700 text-cyan-300 border border-slate-700 text-[11px] font-mono font-semibold flex items-center gap-1 cursor-pointer"
+                              >
+                                <UserPlus className="w-3 h-3" />
+                                <span>{isEditing ? 'Close' : util === 'FREE_PORT' ? 'Assign' : 'Edit'}</span>
+                              </button>
+                            )}
                           </div>
                         </div>
 
-                        {isEditing && (
+                        {!readOnly && isEditing && (
                           <div className="mt-3 pt-3 border-t border-slate-800 space-y-2.5">
                             <div>
                               <label className="block text-[10px] font-mono uppercase text-slate-400 mb-1">
@@ -2189,7 +2324,7 @@ export const FiberGisInspectorPanel: React.FC<FiberGisInspectorPanelProps> = ({
             </div>
           )}
 
-          {/* TAB 2: Core Splices & Pass-Through Jointing */}
+          {/* TAB 2: Core Splices / Multi-PON 24-Core Trunk Matrix & Pass-Through Jointing */}
           {(node.node_type === 'FDB_FAT' ||
             node.node_type === 'DIST_NODE' ||
             node.node_type === 'FOSC_JOINT') &&
@@ -2201,16 +2336,20 @@ export const FiberGisInspectorPanel: React.FC<FiberGisInspectorPanelProps> = ({
                   <div>
                     <span className="text-[11px] font-mono uppercase tracking-wider text-cyan-300 font-bold flex items-center gap-1.5">
                       <Link2 className="w-3.5 h-3.5" />
-                      Core Splices &amp; Pass-Through Tray
+                      {isMultiPonTrunkNode
+                        ? 'Per-Core Multi-PON Trunk Matrix'
+                        : 'Core Splices & Pass-Through Tray'}
                     </span>
                     <p className="text-[11px] text-slate-400 mt-1 leading-snug">
-                      Route incoming cores into local splitters OR fusion-splice pass-through cores straight onto outgoing cables (-0.2 dB splice loss, bypassing splitter loss).
+                      {isMultiPonTrunkNode
+                        ? 'Map each incoming core independently to its Source OLT + PON Port (OLT1/OLT2/OLT3), lock Reserved cores to prevent accidental overwrites, or pass-through directly to Area Sub-Distribution Boxes.'
+                        : 'Route incoming cores into local splitters OR fusion-splice pass-through cores straight onto outgoing cables (-0.2 dB splice loss, bypassing splitter loss).'}
                     </p>
                   </div>
                 </div>
 
                 <div className="flex flex-wrap items-center gap-2">
-                  {onRouteCableFromNode && (
+                  {!readOnly && onRouteCableFromNode && (
                     <button
                       type="button"
                       onClick={() => onRouteCableFromNode(node)}
@@ -2254,7 +2393,7 @@ export const FiberGisInspectorPanel: React.FC<FiberGisInspectorPanelProps> = ({
                       <div className="flex items-center justify-between gap-2 pb-1.5 border-b border-slate-800 font-mono">
                         <div className="min-w-0">
                           <span className="text-[10px] uppercase text-emerald-400 font-bold block">
-                            Incoming Cable ({coreCount}C · {incCable.distance_meters}m)
+                            Incoming Trunk ({coreCount}C · {incCable.distance_meters}m)
                           </span>
                           <span className="text-xs font-bold text-white truncate block">
                             From {otherNodeName} {incCable.name ? `(${incCable.name})` : ''}
@@ -2265,23 +2404,35 @@ export const FiberGisInspectorPanel: React.FC<FiberGisInspectorPanelProps> = ({
                         </span>
                       </div>
 
-                      <div className="space-y-2 max-h-[380px] overflow-y-auto pr-0.5">
+                      <div className="space-y-2 max-h-[420px] overflow-y-auto pr-0.5">
                         {Array.from({ length: coreCount }, (_, idx) => idx + 1).map((coreNum) => {
                           const coreColor = getTia598Color(coreNum);
                           const arrivalKey = `${incCable.id}:${coreNum}`;
-                          const arrivalDbm = budget?.arrivalDbmByCoreKey?.[arrivalKey];
+                          const arrivalMeta = budget?.arrivalMetaByCoreKey?.[arrivalKey];
                           const savedEntry = evaluatedCoreSplices.find(
                             (sp) =>
                               sp.incoming_cable_id === incCable.id &&
                               sp.incoming_core_number === coreNum
                           );
+                          const arrivalDbm =
+                            savedEntry?.calculated_in_dbm ??
+                            arrivalMeta?.dbm ??
+                            budget?.arrivalDbmByCoreKey?.[arrivalKey];
+                          const isLockedCore = Boolean(
+                            savedEntry?.locked_reserved || savedEntry?.action === 'RESERVED_LOCKED'
+                          );
                           const currentAction: CoreSpliceAction =
                             savedEntry?.action ||
-                            (coreNum === Number(nodeFeedCore || 1) && incCable.id === incomingFeedCableId
+                            (!isMultiPonTrunkNode &&
+                            coreNum === Number(nodeFeedCore || 1) &&
+                            incCable.id === incomingFeedCableId
                               ? 'FEED_INTERNAL_SPLITTER'
                               : 'SPARE_DARK');
                           const selectedOutCableId =
-                            savedEntry?.outgoing_cable_id || outgoingCablesForBox[0]?.id || candidateOutCables[0]?.id || '';
+                            savedEntry?.outgoing_cable_id ||
+                            outgoingCablesForBox[0]?.id ||
+                            candidateOutCables[0]?.id ||
+                            '';
                           const selectedOutCable = connectedCables.find(
                             (c) => c.id === selectedOutCableId
                           );
@@ -2290,6 +2441,19 @@ export const FiberGisInspectorPanel: React.FC<FiberGisInspectorPanelProps> = ({
                             Math.min(coreNum, Math.max(1, Number(selectedOutCable?.cable_cores || 12)));
                           const spliceLoss =
                             savedEntry?.splice_loss_db ?? DEFAULT_PASS_THROUGH_SPLICE_LOSS_DB;
+
+                          const resolvedSourcePonId =
+                            savedEntry?.source_pon_port_id || arrivalMeta?.ponPortId || '';
+                          const resolvedSourceLabel =
+                            savedEntry?.source_pon_label ||
+                            (arrivalMeta?.ponLabel
+                              ? arrivalMeta.ponLabel
+                              : arrivalMeta?.oltName || '');
+
+                          const existingTargetCable =
+                            quickExtendCoreKey === arrivalKey && quickExtendTargetNodeId
+                              ? findExistingCableBetweenNodes(cables, node.id, quickExtendTargetNodeId)
+                              : null;
 
                           const updateCoreSplice = (patch: Partial<EnclosureCoreSpliceEntry>) => {
                             setCoreSplicesDraft((prev) => {
@@ -2323,7 +2487,9 @@ export const FiberGisInspectorPanel: React.FC<FiberGisInspectorPanelProps> = ({
                             <div
                               key={arrivalKey}
                               className={`p-2.5 rounded-lg border space-y-2 font-mono text-[11px] ${
-                                currentAction === 'PASS_THROUGH_JOINT'
+                                isLockedCore
+                                  ? 'bg-amber-950/35 border-amber-600/80'
+                                  : currentAction === 'PASS_THROUGH_JOINT'
                                   ? 'bg-indigo-950/35 border-indigo-700/70'
                                   : currentAction === 'FEED_INTERNAL_SPLITTER'
                                   ? 'bg-emerald-950/25 border-emerald-800/60'
@@ -2336,23 +2502,138 @@ export const FiberGisInspectorPanel: React.FC<FiberGisInspectorPanelProps> = ({
                                     className="w-3.5 h-3.5 rounded border border-white/40 shrink-0"
                                     style={{ backgroundColor: coreColor.hex }}
                                   />
-                                  <span className="font-bold text-white">
+                                  <span className="font-bold text-white truncate">
                                     Core #{coreNum} ({coreColor.name})
                                   </span>
+                                  {resolvedSourceLabel && (
+                                    <span className="px-1.5 py-0.5 rounded bg-sky-950/90 border border-sky-700/70 text-[9px] text-sky-300 truncate max-w-[130px]">
+                                      {resolvedSourceLabel}
+                                    </span>
+                                  )}
                                 </div>
-                                <span className="text-[10px] font-bold tabular-nums text-cyan-300 shrink-0">
-                                  {arrivalDbm !== undefined
-                                    ? `In: ${arrivalDbm >= 0 ? '+' : ''}${arrivalDbm.toFixed(2)} dBm`
-                                    : 'In: —'}
-                                </span>
+                                <div className="flex items-center gap-1.5 shrink-0">
+                                  <span className="text-[10px] font-bold tabular-nums text-cyan-300">
+                                    {arrivalDbm !== null && arrivalDbm !== undefined
+                                      ? `In: ${arrivalDbm >= 0 ? '+' : ''}${arrivalDbm.toFixed(2)} dBm`
+                                      : 'In: Dark'}
+                                  </span>
+                                  {!readOnly ? (
+                                    <button
+                                      type="button"
+                                      onClick={() => {
+                                        const nextLocked = !isLockedCore;
+                                        updateCoreSplice({
+                                          locked_reserved: nextLocked,
+                                          action: nextLocked
+                                            ? currentAction === 'SPARE_DARK'
+                                              ? 'RESERVED_LOCKED'
+                                              : currentAction
+                                            : currentAction === 'RESERVED_LOCKED'
+                                            ? 'SPARE_DARK'
+                                            : currentAction,
+                                        });
+                                      }}
+                                      className={`px-1.5 py-0.5 rounded border text-[9px] font-bold flex items-center gap-1 cursor-pointer transition ${
+                                        isLockedCore
+                                          ? 'bg-amber-500/20 border-amber-500/70 text-amber-200 hover:bg-amber-500/30'
+                                          : 'bg-slate-950 border-slate-700 text-slate-400 hover:text-amber-300 hover:border-amber-600/60'
+                                      }`}
+                                      title={
+                                        isLockedCore
+                                          ? 'Unlock this reserved core'
+                                          : 'Lock core as Reserved / In Use to prevent accidental overwrite'
+                                      }
+                                    >
+                                      {isLockedCore ? (
+                                        <>
+                                          <Lock className="w-2.5 h-2.5" />
+                                          <span>Locked</span>
+                                        </>
+                                      ) : (
+                                        <>
+                                          <Unlock className="w-2.5 h-2.5" />
+                                          <span>Lock</span>
+                                        </>
+                                      )}
+                                    </button>
+                                  ) : (
+                                    isLockedCore && (
+                                      <span className="px-1.5 py-0.5 rounded border bg-amber-500/15 border-amber-500/50 text-amber-200 text-[9px] font-bold flex items-center gap-1">
+                                        <Lock className="w-2.5 h-2.5" />
+                                        <span>Locked</span>
+                                      </span>
+                                    )
+                                  )}
+                                </div>
                               </div>
 
+                              {/* Independent Per-Core Source OLT + PON Port Mapping for Distribution / FOSC Boxes */}
+                              <fieldset
+                                disabled={readOnly}
+                                className={`space-y-1.5 min-w-0 border-0 p-0 m-0 ${
+                                  readOnly ? 'pointer-events-none opacity-85' : ''
+                                }`}
+                              >
+                              {isMultiPonTrunkNode && (
+                                <div className="space-y-1">
+                                  <label className="block text-[9px] uppercase tracking-wider text-sky-300 font-bold">
+                                    Core #{coreNum} Source OLT &amp; PON Port (Independent Power)
+                                  </label>
+                                  <select
+                                    disabled={readOnly || isLockedCore}
+                                    value={savedEntry?.source_pon_port_id || ''}
+                                    onChange={(e) => {
+                                      const nextPonId = e.target.value;
+                                      if (!nextPonId) {
+                                        updateCoreSplice({
+                                          source_olt_id: null,
+                                          source_pon_port_id: null,
+                                          source_pon_label: null,
+                                          source_tx_dbm: null,
+                                        });
+                                        return;
+                                      }
+                                      const pp = ponPortsById[nextPonId];
+                                      const olt = pp ? oltsById[pp.olt_id] : undefined;
+                                      const ponLabel = pp
+                                        ? `${olt?.name || 'OLT'} · PON-${pp.port_number}${
+                                            pp.port_label ? ` (${pp.port_label})` : ''
+                                          }`
+                                        : null;
+                                      updateCoreSplice({
+                                        source_olt_id: pp?.olt_id || null,
+                                        source_pon_port_id: nextPonId,
+                                        source_pon_label: ponLabel,
+                                        source_tx_dbm:
+                                          pp !== undefined ? Number(pp.tx_power_dbm ?? 5.0) : null,
+                                      });
+                                    }}
+                                    className="w-full bg-slate-950 border border-sky-800/70 disabled:opacity-60 rounded px-2 py-1.5 text-[11px] text-sky-100"
+                                  >
+                                    <option value="">
+                                      {resolvedSourcePonId && !savedEntry?.source_pon_port_id
+                                        ? `Inherited: ${resolvedSourceLabel || 'Upstream Signal'}`
+                                        : '-- Select OLT & PON Port (No Global Override) --'}
+                                    </option>
+                                    {allPonPortOptions.map((opt) => (
+                                      <option key={opt.value} value={opt.value}>
+                                        {opt.label}
+                                        {opt.sublabel ? ` (${opt.sublabel})` : ''}{' '}
+                                        {opt.metric ? `[${opt.metric}]` : ''}
+                                      </option>
+                                    ))}
+                                  </select>
+                                </div>
+                              )}
+
                               <select
+                                disabled={isLockedCore}
                                 value={currentAction}
                                 onChange={(e) => {
                                   const act = e.target.value as CoreSpliceAction;
                                   updateCoreSplice({
                                     action: act,
+                                    locked_reserved: act === 'RESERVED_LOCKED',
                                     target_splitter_id:
                                       act === 'FEED_INTERNAL_SPLITTER'
                                         ? savedEntry?.target_splitter_id ||
@@ -2367,7 +2648,7 @@ export const FiberGisInspectorPanel: React.FC<FiberGisInspectorPanelProps> = ({
                                       act === 'PASS_THROUGH_JOINT' ? selectedOutCore : null,
                                   });
                                 }}
-                                className="w-full bg-slate-950 border border-slate-700 rounded px-2 py-1.5 text-[11px] text-white"
+                                className="w-full bg-slate-950 border border-slate-700 disabled:opacity-60 rounded px-2 py-1.5 text-[11px] text-white"
                               >
                                 <option value="FEED_INTERNAL_SPLITTER">
                                   Route Into Internal Splitter (Drop Locally)
@@ -2375,13 +2656,25 @@ export const FiberGisInspectorPanel: React.FC<FiberGisInspectorPanelProps> = ({
                                 <option value="PASS_THROUGH_JOINT">
                                   Fusion-Splice Pass-Through to Outgoing Cable (-0.2 dB)
                                 </option>
+                                <option value="RESERVED_LOCKED">
+                                  Reserved / In Use (Locked — Prevent Overwrite)
+                                </option>
                                 <option value="SPARE_DARK">Leave Dark / Spare Inside Tray</option>
                               </select>
+
+                              {currentAction === 'RESERVED_LOCKED' && (
+                                <div className="text-[10px] text-amber-300 bg-amber-950/40 border border-amber-700/60 rounded px-2 py-1 flex items-center justify-between gap-2">
+                                  <span>
+                                    Core #{coreNum} is locked &amp; reserved. Unlock above to reassign.
+                                  </span>
+                                </div>
+                              )}
 
                               {currentAction === 'FEED_INTERNAL_SPLITTER' && (
                                 <div>
                                   {evaluatedSplitters.length > 0 ? (
                                     <select
+                                      disabled={isLockedCore}
                                       value={savedEntry?.target_splitter_id || evaluatedSplitters[0]?.id || ''}
                                       onChange={(e) => {
                                         const tSplId = e.target.value || null;
@@ -2401,7 +2694,7 @@ export const FiberGisInspectorPanel: React.FC<FiberGisInspectorPanelProps> = ({
                                           );
                                         }
                                       }}
-                                      className="w-full bg-slate-950 border border-emerald-700/70 rounded px-2 py-1 text-[11px] text-emerald-200"
+                                      className="w-full bg-slate-950 border border-emerald-700/70 disabled:opacity-60 rounded px-2 py-1 text-[11px] text-emerald-200"
                                     >
                                       {evaluatedSplitters.map((sp) => (
                                         <option key={sp.id} value={sp.id}>
@@ -2422,8 +2715,8 @@ export const FiberGisInspectorPanel: React.FC<FiberGisInspectorPanelProps> = ({
                                   {candidateOutCables.length === 0 ? (
                                     <div className="p-2 rounded bg-amber-950/50 border border-amber-700/60 text-[10px] text-amber-200">
                                       No outgoing cable connected yet — use{' '}
-                                      <strong>&ldquo;Splice &amp; Extend Core Directly to Next FDB&rdquo;</strong>{' '}
-                                      below to create the span and bind this pass-through joint in 1 click.
+                                      <strong>&ldquo;Splice &amp; Extend Core Directly to Next Box&rdquo;</strong>{' '}
+                                      below to bind this pass-through joint in 1 click.
                                     </div>
                                   ) : (
                                     <>
@@ -2453,19 +2746,20 @@ export const FiberGisInspectorPanel: React.FC<FiberGisInspectorPanelProps> = ({
                                               })
                                             }
                                             placeholder="Select outgoing cable..."
-                                            searchPlaceholder="Search target FDB / cable..."
+                                            searchPlaceholder="Search target Area Dist / FDB..."
                                             accentColor="indigo"
                                             ariaLabel="Outgoing pass-through cable"
                                           />
                                         </div>
                                         <select
+                                          disabled={isLockedCore}
                                           value={selectedOutCore}
                                           onChange={(e) =>
                                             updateCoreSplice({
                                               outgoing_core_number: Number(e.target.value),
                                             })
                                           }
-                                          className="bg-slate-950 border border-indigo-600/80 rounded-lg px-2 py-1.5 text-[11px] text-white"
+                                          className="bg-slate-950 border border-indigo-600/80 disabled:opacity-60 rounded-lg px-2 py-1.5 text-[11px] text-white"
                                         >
                                           {Array.from(
                                             {
@@ -2475,11 +2769,24 @@ export const FiberGisInspectorPanel: React.FC<FiberGisInspectorPanelProps> = ({
                                               ),
                                             },
                                             (_, cIdx) => cIdx + 1
-                                          ).map((ocNum) => (
-                                            <option key={ocNum} value={ocNum}>
-                                              Out #{ocNum} ({getTia598Color(ocNum).name})
-                                            </option>
-                                          ))}
+                                          ).map((ocNum) => {
+                                            const occEntries =
+                                              selectedOutCable?.cores_allocation_json?.length
+                                                ? selectedOutCable.cores_allocation_json
+                                                : selectedOutCable?.cores_tia598_json || [];
+                                            const occEntry = occEntries.find(
+                                              (c) => c.coreNumber === ocNum
+                                            );
+                                            const usedTag =
+                                              occEntry && isCoreLockedOrUsed(occEntry) && ocNum !== selectedOutCore
+                                                ? ' [USED]'
+                                                : '';
+                                            return (
+                                              <option key={ocNum} value={ocNum}>
+                                                Out #{ocNum} ({getTia598Color(ocNum).name}){usedTag}
+                                              </option>
+                                            );
+                                          })}
                                         </select>
                                       </div>
 
@@ -2491,7 +2798,7 @@ export const FiberGisInspectorPanel: React.FC<FiberGisInspectorPanelProps> = ({
                                           </span>
                                         </span>
                                         <span className="font-bold text-emerald-300 tabular-nums">
-                                          {arrivalDbm !== undefined
+                                          {arrivalDbm !== null && arrivalDbm !== undefined
                                             ? `Out: ${(arrivalDbm - spliceLoss).toFixed(2)} dBm`
                                             : ''}
                                         </span>
@@ -2501,22 +2808,25 @@ export const FiberGisInspectorPanel: React.FC<FiberGisInspectorPanelProps> = ({
                                 </div>
                               )}
 
-                              {/* 1-Step Mid-Span Splice & Extend Core Directly to Next FDB */}
-                              {onQuickSpliceAndExtendCore && (
+                              {/* 1-Step Mid-Span Splice & Extend Core Directly to Next Box (Reuses Existing Multi-Core Cable!) */}
+                              {onQuickSpliceAndExtendCore && !isLockedCore && (
                                 <div className="pt-1 border-t border-slate-800/80">
                                   {quickExtendCoreKey !== arrivalKey ? (
                                     <button
                                       type="button"
                                       onClick={() => {
                                         setQuickExtendCoreKey(arrivalKey);
-                                        setQuickExtendCableCores(2);
+                                        setQuickExtendCableCores(isMultiPonTrunkNode ? 12 : 4);
                                         setQuickExtendOutCore(1);
                                         setQuickExtendTargetNodeId('');
+                                        setQuickExtendForceNewCable(false);
                                       }}
                                       className="w-full py-1.5 px-2.5 rounded-lg bg-indigo-950/70 hover:bg-indigo-900/80 border border-indigo-700/70 text-[10px] font-bold text-indigo-200 flex items-center justify-center gap-1.5 cursor-pointer transition"
                                     >
                                       <Zap className="w-3 h-3 text-amber-300 shrink-0" />
-                                      <span>Splice &amp; Extend Core #{coreNum} Directly to Next FDB</span>
+                                      <span>
+                                        Splice &amp; Extend Core #{coreNum} to Next Area Dist / FDB
+                                      </span>
                                     </button>
                                   ) : (
                                     <div className="p-2.5 rounded-lg bg-slate-950 border border-indigo-600/80 space-y-2">
@@ -2527,7 +2837,10 @@ export const FiberGisInspectorPanel: React.FC<FiberGisInspectorPanelProps> = ({
                                         </span>
                                         <button
                                           type="button"
-                                          onClick={() => setQuickExtendCoreKey(null)}
+                                          onClick={() => {
+                                            setQuickExtendCoreKey(null);
+                                            setQuickExtendForceNewCable(false);
+                                          }}
                                           className="text-slate-400 hover:text-white text-[10px] cursor-pointer"
                                         >
                                           Cancel
@@ -2536,54 +2849,122 @@ export const FiberGisInspectorPanel: React.FC<FiberGisInspectorPanelProps> = ({
 
                                       <div>
                                         <label className="block text-[9px] text-slate-400 mb-1">
-                                          Destination FDB / FAT / Joint (e.g. LAL-CHAND)
+                                          Destination Area Dist Box / FDB / Joint
                                         </label>
                                         <SearchableCombobox
                                           compact
                                           value={quickExtendTargetNodeId}
                                           options={destinationNodeOptions}
-                                          onChange={setQuickExtendTargetNodeId}
-                                          placeholder="Search target FDB / FAT..."
+                                          onChange={(nextTargetId) => {
+                                            setQuickExtendTargetNodeId(nextTargetId);
+                                            setQuickExtendForceNewCable(false);
+                                            if (nextTargetId) {
+                                              const matchedCable = findExistingCableBetweenNodes(
+                                                cables,
+                                                node.id,
+                                                nextTargetId
+                                              );
+                                              if (matchedCable) {
+                                                const nextFree = findNextFreeCoreOnCable(
+                                                  matchedCable,
+                                                  coreNum
+                                                );
+                                                if (nextFree !== null) {
+                                                  setQuickExtendOutCore(nextFree);
+                                                }
+                                              }
+                                            }
+                                          }}
+                                          placeholder="Search target Area Dist / FDB..."
                                           searchPlaceholder="Type box name, area, or dBm..."
                                           accentColor="indigo"
-                                          ariaLabel="Target FDB for mid-span core extension"
+                                          ariaLabel="Target box for mid-span core extension"
                                         />
                                       </div>
+
+                                      {/* Existing Multi-Core Cable Reuse Banner */}
+                                      {existingTargetCable && !quickExtendForceNewCable && (
+                                        <div className="p-2 rounded-lg bg-emerald-950/55 border border-emerald-600/70 space-y-1.5">
+                                          <div className="flex items-start justify-between gap-2">
+                                            <div className="text-[10px] text-emerald-200 leading-snug">
+                                              <strong className="text-emerald-300">
+                                                Reusing Existing {existingTargetCable.cable_cores}C Cable:
+                                              </strong>{' '}
+                                              {existingTargetCable.name || 'Existing Trunk'} ({existingTargetCable.distance_meters}m). Core will bind onto a free strand inside this same cable (no duplicate span).
+                                            </div>
+                                            <button
+                                              type="button"
+                                              onClick={() => setQuickExtendForceNewCable(true)}
+                                              className="px-2 py-0.5 rounded bg-slate-900 hover:bg-slate-800 border border-slate-600 text-[9px] text-amber-300 font-bold shrink-0 cursor-pointer"
+                                            >
+                                              + Lay New Physical Cable
+                                            </button>
+                                          </div>
+                                        </div>
+                                      )}
+
+                                      {existingTargetCable && quickExtendForceNewCable && (
+                                        <div className="p-2 rounded-lg bg-amber-950/50 border border-amber-600/70 flex items-center justify-between gap-2 text-[10px] text-amber-200">
+                                          <span>Laying a separate parallel physical cable.</span>
+                                          <button
+                                            type="button"
+                                            onClick={() => {
+                                              setQuickExtendForceNewCable(false);
+                                              const nextFree = findNextFreeCoreOnCable(
+                                                existingTargetCable,
+                                                coreNum
+                                              );
+                                              if (nextFree !== null) setQuickExtendOutCore(nextFree);
+                                            }}
+                                            className="px-2 py-0.5 rounded bg-emerald-600 text-slate-950 font-bold text-[9px] shrink-0 cursor-pointer"
+                                          >
+                                            Reuse {existingTargetCable.cable_cores}C Cable Instead
+                                          </button>
+                                        </div>
+                                      )}
 
                                       <div className="grid grid-cols-2 gap-1.5">
                                         <div>
                                           <label className="block text-[9px] text-slate-400 mb-0.5">
-                                            New Cable Capacity
+                                            {existingTargetCable && !quickExtendForceNewCable
+                                              ? 'Existing Cable Capacity'
+                                              : 'New Cable Capacity'}
                                           </label>
-                                          <select
-                                            value={quickExtendCableCores}
-                                            onChange={(e) => {
-                                              const nextC = Number(e.target.value) as
-                                                | 1
-                                                | 2
-                                                | 4
-                                                | 6
-                                                | 8
-                                                | 12
-                                                | 24
-                                                | 48;
-                                              setQuickExtendCableCores(nextC);
-                                              if (quickExtendOutCore > nextC) {
-                                                setQuickExtendOutCore(1);
-                                              }
-                                            }}
-                                            className="w-full bg-slate-900 border border-slate-700 rounded-lg px-2 py-1.5 text-[11px] text-white"
-                                          >
-                                            {[1, 2, 4, 6, 8, 12, 24, 48].map((cnt) => (
-                                              <option key={cnt} value={cnt}>
-                                                {cnt}C Fiber Cable
-                                              </option>
-                                            ))}
-                                          </select>
+                                          {existingTargetCable && !quickExtendForceNewCable ? (
+                                            <div className="w-full bg-slate-900/90 border border-emerald-700/60 rounded-lg px-2 py-1.5 text-[11px] text-emerald-300 font-bold">
+                                              {existingTargetCable.cable_cores}C Existing Trunk
+                                            </div>
+                                          ) : (
+                                            <select
+                                              value={quickExtendCableCores}
+                                              onChange={(e) => {
+                                                const nextC = Number(e.target.value) as
+                                                  | 1
+                                                  | 2
+                                                  | 4
+                                                  | 6
+                                                  | 8
+                                                  | 12
+                                                  | 24
+                                                  | 48;
+                                                setQuickExtendCableCores(nextC);
+                                                if (quickExtendOutCore > nextC) {
+                                                  setQuickExtendOutCore(1);
+                                                }
+                                              }}
+                                              className="w-full bg-slate-900 border border-slate-700 rounded-lg px-2 py-1.5 text-[11px] text-white"
+                                            >
+                                              {[1, 2, 4, 6, 8, 12, 24, 48].map((cnt) => (
+                                                <option key={cnt} value={cnt}>
+                                                  {cnt}C Fiber Cable
+                                                </option>
+                                              ))}
+                                            </select>
+                                          )}
                                         </div>
                                         <div>
                                           <label className="block text-[9px] text-slate-400 mb-0.5">
-                                            Target Incoming Core #
+                                            Target Strand / Core #
                                           </label>
                                           <select
                                             value={quickExtendOutCore}
@@ -2593,19 +2974,43 @@ export const FiberGisInspectorPanel: React.FC<FiberGisInspectorPanelProps> = ({
                                             className="w-full bg-slate-900 border border-slate-700 rounded-lg px-2 py-1.5 text-[11px] text-white"
                                           >
                                             {Array.from(
-                                              { length: quickExtendCableCores },
+                                              {
+                                                length:
+                                                  existingTargetCable && !quickExtendForceNewCable
+                                                    ? Number(existingTargetCable.cable_cores || 12)
+                                                    : quickExtendCableCores,
+                                              },
                                               (_, i) => i + 1
-                                            ).map((cIdx) => (
-                                              <option key={cIdx} value={cIdx}>
-                                                Core #{cIdx} ({getTia598Color(cIdx).name})
-                                              </option>
-                                            ))}
+                                            ).map((cIdx) => {
+                                              const existingEntries =
+                                                existingTargetCable && !quickExtendForceNewCable
+                                                  ? existingTargetCable.cores_allocation_json?.length
+                                                    ? existingTargetCable.cores_allocation_json
+                                                    : existingTargetCable.cores_tia598_json || []
+                                                  : [];
+                                              const matchedEntry = existingEntries.find(
+                                                (ec) => ec.coreNumber === cIdx
+                                              );
+                                              const isOccupied = Boolean(
+                                                matchedEntry && isCoreLockedOrUsed(matchedEntry)
+                                              );
+                                              return (
+                                                <option
+                                                  key={cIdx}
+                                                  value={cIdx}
+                                                  disabled={isOccupied}
+                                                >
+                                                  Core #{cIdx} ({getTia598Color(cIdx).name})
+                                                  {isOccupied ? ' [IN USE / LOCKED]' : ' [FREE]'}
+                                                </option>
+                                              );
+                                            })}
                                           </select>
                                         </div>
                                       </div>
 
                                       <div className="text-[10px] text-emerald-300 bg-emerald-950/40 border border-emerald-800/60 rounded px-2 py-1.5">
-                                        {arrivalDbm !== undefined
+                                        {arrivalDbm !== null && arrivalDbm !== undefined
                                           ? `Signal: ${arrivalDbm.toFixed(
                                               2
                                             )} dBm - ${DEFAULT_PASS_THROUGH_SPLICE_LOSS_DB.toFixed(
@@ -2638,12 +3043,14 @@ export const FiberGisInspectorPanel: React.FC<FiberGisInspectorPanelProps> = ({
                                               outgoingCableCores: quickExtendCableCores,
                                               outgoingCoreNumber: quickExtendOutCore,
                                               spliceLossDb: DEFAULT_PASS_THROUGH_SPLICE_LOSS_DB,
+                                              forceNewCable: quickExtendForceNewCable,
                                             });
                                             setQuickExtendCoreKey(null);
+                                            setQuickExtendForceNewCable(false);
                                           } catch (err: any) {
                                             setLocalSaveError(
                                               err?.message ||
-                                                'Failed to extend pass-through core to destination FDB.'
+                                                'Failed to extend pass-through core to destination box.'
                                             );
                                           } finally {
                                             setLocalSaving(false);
@@ -2654,14 +3061,17 @@ export const FiberGisInspectorPanel: React.FC<FiberGisInspectorPanelProps> = ({
                                         <Zap className="w-3.5 h-3.5" />
                                         <span>
                                           {localSaving
-                                            ? 'Creating Cable & Saving Splice...'
-                                            : 'Create Cable & Bind Pass-Through Splice'}
+                                            ? 'Binding Core & Saving Splice...'
+                                            : existingTargetCable && !quickExtendForceNewCable
+                                            ? `Bind Core #${quickExtendOutCore} on Existing ${existingTargetCable.cable_cores}C Cable`
+                                            : 'Create Physical Cable & Bind Pass-Through Splice'}
                                         </span>
                                       </button>
                                     </div>
                                   )}
                                 </div>
                               )}
+                              </fieldset>
                             </div>
                           );
                         })}
@@ -3224,7 +3634,12 @@ export const FiberGisInspectorPanel: React.FC<FiberGisInspectorPanelProps> = ({
             }
 
             return (
-              <div className="p-3.5 rounded-xl bg-slate-950 border border-slate-800 space-y-2.5 font-mono">
+              <fieldset
+                disabled={readOnly}
+                className={`p-3.5 rounded-xl bg-slate-950 border border-slate-800 space-y-2.5 font-mono min-w-0 ${
+                  readOnly ? 'pointer-events-none opacity-85' : ''
+                }`}
+              >
                 <label className="block text-[10px] uppercase tracking-wider text-sky-400 font-bold">
                   PON SFP Module TX Power (dBm)
                 </label>
@@ -3253,13 +3668,18 @@ export const FiberGisInspectorPanel: React.FC<FiberGisInspectorPanelProps> = ({
                   onChange={(e) => setNodeTxPower(Number(e.target.value))}
                   className="w-full bg-slate-900 border border-slate-700 rounded-lg px-3 py-2 text-xs text-white focus:outline-none focus:border-sky-500 tabular-nums"
                 />
-              </div>
+              </fieldset>
             );
           })()}
 
           {/* FOSC Joint Closure Splice Tray Matrix */}
           {node.node_type === 'FOSC_JOINT' && (
-            <div className="p-3.5 rounded-xl bg-slate-950 border border-slate-800 space-y-3">
+            <fieldset
+              disabled={readOnly}
+              className={`p-3.5 rounded-xl bg-slate-950 border border-slate-800 space-y-3 min-w-0 ${
+                readOnly ? 'pointer-events-none opacity-85' : ''
+              }`}
+            >
               <div className="flex items-center justify-between">
                 <span className="text-[11px] font-mono uppercase tracking-wider text-purple-300 font-bold">
                   FOSC Joint Splice Tray Matrix
@@ -3374,7 +3794,7 @@ export const FiberGisInspectorPanel: React.FC<FiberGisInspectorPanelProps> = ({
                   );
                 })}
               </div>
-            </div>
+            </fieldset>
           )}
 
           {/* Optional FOSC Joint Internal FBT Ratio / PLC Splitter Card */}
@@ -3431,7 +3851,12 @@ export const FiberGisInspectorPanel: React.FC<FiberGisInspectorPanelProps> = ({
           )}
 
           {/* Node General Properties (Always visible for editing name/area/splitter) */}
-          <div className="p-3.5 rounded-xl bg-slate-950 border border-slate-800 space-y-3">
+          <fieldset
+            disabled={readOnly}
+            className={`p-3.5 rounded-xl bg-slate-950 border border-slate-800 space-y-3 min-w-0 ${
+              readOnly ? 'pointer-events-none opacity-85' : ''
+            }`}
+          >
             <span className="text-[11px] font-mono uppercase tracking-wider text-slate-400 font-bold block">
               Hardware Properties
             </span>
@@ -3521,6 +3946,19 @@ export const FiberGisInspectorPanel: React.FC<FiberGisInspectorPanelProps> = ({
                   )}
 
                   <div className="grid grid-cols-1 gap-2.5">
+                    {isMultiPonTrunkNode && (
+                      <div className="p-2.5 rounded-lg bg-sky-950/40 border border-sky-700/60 text-[10px] font-mono text-sky-200 leading-snug">
+                        <strong>Multi-PON Trunk Mode Active:</strong> Global Auto-OLT overwrite is disabled on this box so each incoming core keeps its own OLT/PON power. Map individual cores inside the{' '}
+                        <button
+                          type="button"
+                          onClick={() => setFdbSubTab('splices')}
+                          className="underline text-cyan-300 hover:text-white font-bold cursor-pointer"
+                        >
+                          Trunk Matrix tab
+                        </button>
+                        .
+                      </div>
+                    )}
                     <div>
                       <label className="block text-[10px] font-mono text-slate-400 mb-1">
                         Incoming Feed Cable
@@ -3529,17 +3967,23 @@ export const FiberGisInspectorPanel: React.FC<FiberGisInspectorPanelProps> = ({
                         value={nodeFeedCableId}
                         options={connectedCableOptions}
                         onChange={(val) => setNodeFeedCableId(val)}
-                        emptyOptionLabel="Auto (Best OLT Path)"
+                        emptyOptionLabel={
+                          isMultiPonTrunkNode
+                            ? 'Per-Core Trunk Matrix (No Global Override)'
+                            : 'Auto (Best OLT Path)'
+                        }
                         searchPlaceholder="Search upstream cable or dBm..."
                         accentColor="cyan"
                         ariaLabel="Incoming Feed Cable"
                       />
-                      {budget?.parentOutputDbm !== null && budget?.parentOutputDbm !== undefined && (
-                        <span className="block text-[10px] font-mono text-cyan-400 mt-1">
-                          Inherits {nodesById[budget.parentNodeId || '']?.name || 'parent'} output ({budget.parentOutputDbm >= 0 ? '+' : ''}
-                          {budget.parentOutputDbm.toFixed(1)} dBm)
-                        </span>
-                      )}
+                      {!isMultiPonTrunkNode &&
+                        budget?.parentOutputDbm !== null &&
+                        budget?.parentOutputDbm !== undefined && (
+                          <span className="block text-[10px] font-mono text-cyan-400 mt-1">
+                            Inherits {nodesById[budget.parentNodeId || '']?.name || 'parent'} output ({budget.parentOutputDbm >= 0 ? '+' : ''}
+                            {budget.parentOutputDbm.toFixed(1)} dBm)
+                          </span>
+                        )}
                     </div>
 
                     <div className="grid grid-cols-2 gap-2">
@@ -3575,13 +4019,17 @@ export const FiberGisInspectorPanel: React.FC<FiberGisInspectorPanelProps> = ({
 
                     <div>
                       <label className="block text-[10px] font-mono text-slate-400 mb-1">
-                        Source PON Port
+                        Source PON Port {isMultiPonTrunkNode ? '(Optional Fallback Only)' : ''}
                       </label>
                       <SearchableCombobox
                         value={nodePonPortId}
                         options={allPonPortOptions}
                         onChange={(val) => setNodePonPortId(val)}
-                        emptyOptionLabel="Auto (Inherited)"
+                        emptyOptionLabel={
+                          isMultiPonTrunkNode
+                            ? 'Per-Core OLT/PON Mapping (See Trunk Matrix)'
+                            : 'Auto (Inherited)'
+                        }
                         searchPlaceholder="Search OLT or PON port..."
                         accentColor="sky"
                         ariaLabel="Source PON Port"
@@ -3602,7 +4050,7 @@ export const FiberGisInspectorPanel: React.FC<FiberGisInspectorPanelProps> = ({
                 />
               </div>
             </div>
-          </div>
+          </fieldset>
 
           {/* Swap History Preview for OLT / FOSC_JOINT nodes (Signal tab handles FDB_FAT/DIST_NODE) */}
           {(node.node_type === 'FOSC_JOINT' || node.node_type === 'OLT') && (
@@ -3643,64 +4091,66 @@ export const FiberGisInspectorPanel: React.FC<FiberGisInspectorPanelProps> = ({
         </div>
 
         {/* Sticky Footer Upgrade / Save / Delete Bar */}
-        <div className="p-3 border-t border-slate-800 bg-slate-950 flex flex-col gap-2 shrink-0">
-          {localSaveError && (
-            <div className="p-2 rounded-lg bg-rose-950/90 border border-rose-700 text-[11px] font-mono text-rose-200 flex items-start justify-between gap-2">
-              <span className="leading-snug break-words">{localSaveError}</span>
-              <button
-                type="button"
-                onClick={() => setLocalSaveError(null)}
-                className="text-rose-300 hover:text-white shrink-0 cursor-pointer"
-                aria-label="Dismiss save error"
-              >
-                <X className="w-3.5 h-3.5" />
-              </button>
-            </div>
-          )}
-          {onOpenUpgradeModal && (
-            <button
-              type="button"
-              disabled={isSaving || localSaving}
-              onClick={() => onOpenUpgradeModal(node)}
-              className="w-full min-h-[40px] px-3 py-2 rounded-xl bg-amber-500/15 hover:bg-amber-500/25 border border-amber-500/60 text-amber-300 font-mono font-bold text-xs flex items-center justify-center gap-1.5 cursor-pointer transition"
-            >
-              <RefreshCw className="w-3.5 h-3.5" />
-              <span>Upgrade / Replace Equipment</span>
-            </button>
-          )}
-          <div className="flex items-center gap-2">
-            <button
-              type="button"
-              disabled={isSaving || localSaving}
-              onClick={handleSaveNodeClick}
-              className="flex-1 min-h-[44px] px-4 py-2 rounded-xl bg-cyan-600 hover:bg-cyan-500 disabled:opacity-50 text-slate-950 font-mono font-bold text-xs flex items-center justify-center gap-1.5 cursor-pointer"
-            >
-              <Save className="w-4 h-4" />
-              <span>{isSaving || localSaving ? 'Saving...' : 'Save Node Changes'}</span>
-            </button>
-
-            {!confirmDelete ? (
-              <button
-                type="button"
-                onClick={() => setConfirmDelete(true)}
-                className="min-h-[44px] px-3 py-2 rounded-xl bg-slate-900 hover:bg-rose-950 text-rose-400 border border-slate-800 hover:border-rose-800 text-xs font-mono flex items-center justify-center gap-1 cursor-pointer"
-                title="Delete node"
-              >
-                <Trash2 className="w-4 h-4" />
-              </button>
-            ) : (
+        {!readOnly && (
+          <div className="p-3 border-t border-slate-800 bg-slate-950 flex flex-col gap-2 shrink-0">
+            {localSaveError && (
+              <div className="p-2 rounded-lg bg-rose-950/90 border border-rose-700 text-[11px] font-mono text-rose-200 flex items-start justify-between gap-2">
+                <span className="leading-snug break-words">{localSaveError}</span>
+                <button
+                  type="button"
+                  onClick={() => setLocalSaveError(null)}
+                  className="text-rose-300 hover:text-white shrink-0 cursor-pointer"
+                  aria-label="Dismiss save error"
+                >
+                  <X className="w-3.5 h-3.5" />
+                </button>
+              </div>
+            )}
+            {onOpenUpgradeModal && (
               <button
                 type="button"
                 disabled={isSaving || localSaving}
-                onClick={() => onDeleteNode(node.id)}
-                className="min-h-[44px] px-3 py-2 rounded-xl bg-rose-600 hover:bg-rose-500 text-white font-mono font-bold text-xs flex items-center gap-1 cursor-pointer"
+                onClick={() => onOpenUpgradeModal(node)}
+                className="w-full min-h-[40px] px-3 py-2 rounded-xl bg-amber-500/15 hover:bg-amber-500/25 border border-amber-500/60 text-amber-300 font-mono font-bold text-xs flex items-center justify-center gap-1.5 cursor-pointer transition"
               >
-                <ShieldAlert className="w-3.5 h-3.5" />
-                <span>Confirm</span>
+                <RefreshCw className="w-3.5 h-3.5" />
+                <span>Upgrade / Replace Equipment</span>
               </button>
             )}
+            <div className="flex items-center gap-2">
+              <button
+                type="button"
+                disabled={isSaving || localSaving}
+                onClick={handleSaveNodeClick}
+                className="flex-1 min-h-[44px] px-4 py-2 rounded-xl bg-cyan-600 hover:bg-cyan-500 disabled:opacity-50 text-slate-950 font-mono font-bold text-xs flex items-center justify-center gap-1.5 cursor-pointer"
+              >
+                <Save className="w-4 h-4" />
+                <span>{isSaving || localSaving ? 'Saving...' : 'Save Node Changes'}</span>
+              </button>
+
+              {!confirmDelete ? (
+                <button
+                  type="button"
+                  onClick={() => setConfirmDelete(true)}
+                  className="min-h-[44px] px-3 py-2 rounded-xl bg-slate-900 hover:bg-rose-950 text-rose-400 border border-slate-800 hover:border-rose-800 text-xs font-mono flex items-center justify-center gap-1 cursor-pointer"
+                  title="Delete node"
+                >
+                  <Trash2 className="w-4 h-4" />
+                </button>
+              ) : (
+                <button
+                  type="button"
+                  disabled={isSaving || localSaving}
+                  onClick={() => onDeleteNode(node.id)}
+                  className="min-h-[44px] px-3 py-2 rounded-xl bg-rose-600 hover:bg-rose-500 text-white font-mono font-bold text-xs flex items-center gap-1 cursor-pointer"
+                >
+                  <ShieldAlert className="w-3.5 h-3.5" />
+                  <span>Confirm</span>
+                </button>
+              )}
+            </div>
           </div>
-        </div>
+        )}
       </div>
     );
   };
@@ -3793,6 +4243,13 @@ export const FiberGisInspectorPanel: React.FC<FiberGisInspectorPanelProps> = ({
           </button>
         </div>
 
+        {readOnly && (
+          <div className="px-4 py-1.5 bg-sky-950/60 border-b border-sky-800/70 flex items-center gap-2 text-[11px] font-mono text-sky-200 shrink-0">
+            <Lock className="w-3.5 h-3.5 text-sky-400 shrink-0" />
+            <span>View &amp; Trace Only — Cable editing &amp; splitting disabled by Admin</span>
+          </div>
+        )}
+
         <div className="flex-1 overflow-y-auto p-4 space-y-4 text-xs">
           {/* Core Summary Counters Bar */}
           <div className="grid grid-cols-4 gap-1.5 p-2.5 rounded-xl bg-slate-950 border border-slate-800 font-mono text-center">
@@ -3823,34 +4280,42 @@ export const FiberGisInspectorPanel: React.FC<FiberGisInspectorPanelProps> = ({
           </div>
 
           {/* One-Click Cable Cut & FOSC Joint Box Insertion */}
-          <div className="p-3.5 rounded-xl bg-purple-950/35 border border-purple-700/60 space-y-2">
-            <div className="flex items-center justify-between gap-2">
-              <span className="text-[11px] font-mono font-bold uppercase text-purple-300 flex items-center gap-1.5">
-                <Scissors className="w-3.5 h-3.5" />
-                Cable Cut &amp; Repair Workflow
-              </span>
-              {cableClickPoint && (
-                <span className="text-[10px] font-mono text-purple-200 tabular-nums">
-                  Point Ready
+          {!readOnly && (
+            <div className="p-3.5 rounded-xl bg-purple-950/35 border border-purple-700/60 space-y-2">
+              <div className="flex items-center justify-between gap-2">
+                <span className="text-[11px] font-mono font-bold uppercase text-purple-300 flex items-center gap-1.5">
+                  <Scissors className="w-3.5 h-3.5" />
+                  Cable Cut &amp; Repair Workflow
                 </span>
-              )}
+                {cableClickPoint && (
+                  <span className="text-[10px] font-mono text-purple-200 tabular-nums">
+                    Point Ready
+                  </span>
+                )}
+              </div>
+              <p className="text-[11px] text-slate-300 leading-relaxed">
+                Insert a FOSC Joint Closure directly on this span. Both resulting spans preserve all{' '}
+                {activePreset.cores} TIA-598 core mappings and notes.
+              </p>
+              <button
+                type="button"
+                disabled={isSaving}
+                onClick={() => onSplitCable(cable, cableClickPoint || undefined)}
+                className="w-full min-h-[42px] px-3 py-2 rounded-xl bg-purple-600 hover:bg-purple-500 disabled:opacity-50 text-white font-mono font-bold text-xs flex items-center justify-center gap-2 shadow-lg cursor-pointer transition"
+              >
+                <Scissors className="w-4 h-4" />
+                <span>Split Cable Here (Insert FOSC Joint Box)</span>
+              </button>
             </div>
-            <p className="text-[11px] text-slate-300 leading-relaxed">
-              Insert a FOSC Joint Closure directly on this span. Both resulting spans preserve all{' '}
-              {activePreset.cores} TIA-598 core mappings and notes.
-            </p>
-            <button
-              type="button"
-              disabled={isSaving}
-              onClick={() => onSplitCable(cable, cableClickPoint || undefined)}
-              className="w-full min-h-[42px] px-3 py-2 rounded-xl bg-purple-600 hover:bg-purple-500 disabled:opacity-50 text-white font-mono font-bold text-xs flex items-center justify-center gap-2 shadow-lg cursor-pointer transition"
-            >
-              <Scissors className="w-4 h-4" />
-              <span>Split Cable Here (Insert FOSC Joint Box)</span>
-            </button>
-          </div>
+          )}
 
           {/* Span Name, Capacity, Length & Origin OLT/PON Binding */}
+          <fieldset
+            disabled={readOnly}
+            className={`space-y-4 min-w-0 border-0 p-0 m-0 ${
+              readOnly ? 'pointer-events-none opacity-85' : ''
+            }`}
+          >
           <div className="p-3 rounded-xl bg-slate-950 border border-slate-800 space-y-2.5">
             <div>
               <label className="block text-[10px] font-mono text-slate-400 mb-1">Span Name / Tag</label>
@@ -4153,53 +4618,56 @@ export const FiberGisInspectorPanel: React.FC<FiberGisInspectorPanelProps> = ({
               })}
             </div>
           </div>
+          </fieldset>
         </div>
 
         {/* Sticky Footer */}
-        <div className="p-3 border-t border-slate-800 bg-slate-950 flex items-center gap-2 shrink-0">
-          <button
-            type="button"
-            disabled={isSaving}
-            onClick={() =>
-              onSaveCable(cable.id, {
-                name: cableName.trim(),
-                cable_type: activePreset.cableType as GisCableTypeCode,
-                cable_cores: activePreset.cores,
-                distance_meters: Math.max(1, Math.round(Number(cableDistanceMeters) || 1)),
-                notes: cableNotes.trim(),
-                source_olt_id: cableSourceOltId || null,
-                source_pon_port_id: cableSourcePonPortId || null,
-                cores_tia598_json: normalizeCableCores(activePreset.cores, cableCoresDraft),
-                cores_allocation_json: normalizeCableCores(activePreset.cores, cableCoresDraft),
-              })
-            }
-            className="flex-1 min-h-[44px] px-4 py-2 rounded-xl bg-cyan-600 hover:bg-cyan-500 disabled:opacity-50 text-slate-950 font-mono font-bold text-xs flex items-center justify-center gap-1.5 cursor-pointer"
-          >
-            <Save className="w-4 h-4" />
-            <span>{isSaving ? 'Saving...' : 'Save Core Allocation'}</span>
-          </button>
-
-          {!confirmDelete ? (
-            <button
-              type="button"
-              onClick={() => setConfirmDelete(true)}
-              className="min-h-[44px] px-3 py-2 rounded-xl bg-slate-900 hover:bg-rose-950 text-rose-400 border border-slate-800 text-xs font-mono flex items-center justify-center cursor-pointer"
-              title="Delete cable span"
-            >
-              <Trash2 className="w-4 h-4" />
-            </button>
-          ) : (
+        {!readOnly && (
+          <div className="p-3 border-t border-slate-800 bg-slate-950 flex items-center gap-2 shrink-0">
             <button
               type="button"
               disabled={isSaving}
-              onClick={() => onDeleteCable(cable.id)}
-              className="min-h-[44px] px-3 py-2 rounded-xl bg-rose-600 hover:bg-rose-500 text-white font-mono font-bold text-xs flex items-center gap-1 cursor-pointer"
+              onClick={() =>
+                onSaveCable(cable.id, {
+                  name: cableName.trim(),
+                  cable_type: activePreset.cableType as GisCableTypeCode,
+                  cable_cores: activePreset.cores,
+                  distance_meters: Math.max(1, Math.round(Number(cableDistanceMeters) || 1)),
+                  notes: cableNotes.trim(),
+                  source_olt_id: cableSourceOltId || null,
+                  source_pon_port_id: cableSourcePonPortId || null,
+                  cores_tia598_json: normalizeCableCores(activePreset.cores, cableCoresDraft),
+                  cores_allocation_json: normalizeCableCores(activePreset.cores, cableCoresDraft),
+                })
+              }
+              className="flex-1 min-h-[44px] px-4 py-2 rounded-xl bg-cyan-600 hover:bg-cyan-500 disabled:opacity-50 text-slate-950 font-mono font-bold text-xs flex items-center justify-center gap-1.5 cursor-pointer"
             >
-              <AlertTriangle className="w-3.5 h-3.5" />
-              <span>Confirm</span>
+              <Save className="w-4 h-4" />
+              <span>{isSaving ? 'Saving...' : 'Save Core Allocation'}</span>
             </button>
-          )}
-        </div>
+
+            {!confirmDelete ? (
+              <button
+                type="button"
+                onClick={() => setConfirmDelete(true)}
+                className="min-h-[44px] px-3 py-2 rounded-xl bg-slate-900 hover:bg-rose-950 text-rose-400 border border-slate-800 text-xs font-mono flex items-center justify-center cursor-pointer"
+                title="Delete cable span"
+              >
+                <Trash2 className="w-4 h-4" />
+              </button>
+            ) : (
+              <button
+                type="button"
+                disabled={isSaving}
+                onClick={() => onDeleteCable(cable.id)}
+                className="min-h-[44px] px-3 py-2 rounded-xl bg-rose-600 hover:bg-rose-500 text-white font-mono font-bold text-xs flex items-center gap-1 cursor-pointer"
+              >
+                <AlertTriangle className="w-3.5 h-3.5" />
+                <span>Confirm</span>
+              </button>
+            )}
+          </div>
+        )}
       </div>
     );
   };

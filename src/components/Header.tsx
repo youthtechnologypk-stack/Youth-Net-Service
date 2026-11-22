@@ -34,6 +34,7 @@ import { GlobalSearchBar } from './GlobalSearchBar';
 import { PWAInstallPrompt } from './PWAInstallPrompt';
 import { ThemeToggle } from './ThemeToggle';
 import { getStoredUser } from '../lib/auth';
+import { resolveUserGisAccess } from '../lib/gisAccessControl';
 
 export type ActiveTab =
   | 'noc'
@@ -70,6 +71,7 @@ interface HeaderProps {
   onLogout?: () => void;
   isSidebarOpen?: boolean;
   onToggleSidebar?: () => void;
+  canAccessGisMap?: boolean;
   offlineModeStatus?: {
     isOfflineOrBlocked: boolean;
     isAutoSyncing: boolean;
@@ -93,8 +95,13 @@ export const Header: React.FC<HeaderProps> = ({
   onLogout,
   isSidebarOpen,
   onToggleSidebar,
+  canAccessGisMap,
   offlineModeStatus,
 }) => {
+  const effectiveCanAccessGisMap =
+    canAccessGisMap !== undefined
+      ? canAccessGisMap
+      : resolveUserGisAccess(currentUser, currentRole).canAccess;
   const {
     routers,
     selectedRouterId,
@@ -669,13 +676,15 @@ export const Header: React.FC<HeaderProps> = ({
                 <span>VSOL OLT</span>
               </button>
 
-              <button
-                onClick={() => setActiveTab('fiber_gis')}
-                className={`shrink-0 whitespace-nowrap snap-start flex items-center gap-2 px-3 py-2 text-xs sm:text-sm font-medium rounded-xl transition cursor-pointer ${getTabClassName('fiber_gis', 'indigo')}`}
-              >
-                <MapPin className={`w-4 h-4 shrink-0 ${activeTab === 'fiber_gis' ? 'text-white dark:text-indigo-300' : 'text-sky-500 dark:text-sky-400'}`} />
-                <span>Fiber GIS &amp; Map</span>
-              </button>
+              {effectiveCanAccessGisMap && (
+                <button
+                  onClick={() => setActiveTab('fiber_gis')}
+                  className={`shrink-0 whitespace-nowrap snap-start flex items-center gap-2 px-3 py-2 text-xs sm:text-sm font-medium rounded-xl transition cursor-pointer ${getTabClassName('fiber_gis', 'indigo')}`}
+                >
+                  <MapPin className={`w-4 h-4 shrink-0 ${activeTab === 'fiber_gis' ? 'text-white dark:text-indigo-300' : 'text-sky-500 dark:text-sky-400'}`} />
+                  <span>Fiber GIS &amp; Map</span>
+                </button>
+              )}
 
               <button
                 onClick={() => setActiveTab('billing')}

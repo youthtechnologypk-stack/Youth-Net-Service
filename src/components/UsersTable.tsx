@@ -18,9 +18,19 @@ import {
   Shield,
   ShieldCheck,
   Wallet,
+  MapPin,
+  Database,
 } from 'lucide-react';
 import { supabase } from '../services/supabaseClient';
 import { buildStandardWhatsAppCredentialText, getPortalUrlForRole } from '../services/authUtils';
+import {
+  GIS_ACCESS_MIGRATION_SQL,
+  GIS_PERMISSION_OPTIONS,
+  GisMapPermission,
+  isStaffRoleEligibleForGisControl,
+  resolveUserGisAccess,
+  updatePortalUserGisPermission,
+} from '../lib/gisAccessControl';
 
 export type TabType = 'ALL' | 'CLIENT' | 'AGENT' | 'MANAGER' | 'ADMIN';
 
@@ -49,6 +59,8 @@ export interface PortalUserRow {
   cash_in_hand?: number;
   advance_balance?: number;
   base_salary?: number;
+  can_access_gis_map?: boolean | null;
+  gis_map_permission?: GisMapPermission | string | null;
 }
 
 export interface UsersTableProps {
@@ -81,6 +93,9 @@ export const UsersTable: React.FC<UsersTableProps> = ({
   const [isLoading, setIsLoading] = useState(false);
   const [copiedId, setCopiedId] = useState<string | null>(null);
   const [actionNotice, setActionNotice] = useState<string | null>(null);
+  const [updatingGisUserId, setUpdatingGisUserId] = useState<string | null>(null);
+  const [gisSchemaNotice, setGisSchemaNotice] = useState<string | null>(null);
+  const [copiedGisSql, setCopiedGisSql] = useState(false);
 
   // 2. Fetch Users strictly from Supabase PostgreSQL portal_users table (No Mock Fallbacks)
   const fetchUsers = useCallback(async () => {
@@ -212,6 +227,48 @@ export const UsersTable: React.FC<UsersTableProps> = ({
     }
   };
 
+  // Update per-user Fiber GIS & Map access directly in Supabase portal_users
+  const handleUpdateGisPermission = async (user: PortalUserRow, nextPermission: GisMapPermission) => {
+    setUpdatingGisUserId(user.id);
+    try {
+      const res = await updatePortalUserGisPermission({
+        userId: user.id,
+        username: user.username,
+        permission: nextPermission,
+      });
+
+      if (res.ok) {
+        setUsers((prev) =>
+          prev.map((u) =>
+            u.id === user.id
+              ? {
+                  ...u,
+                  can_access_gis_map: res.can_access_gis_map,
+                  gis_map_permission: res.gis_map_permission,
+                }
+              : u
+          )
+        );
+        const label =
+          GIS_PERMISSION_OPTIONS.find((o) => o.value === nextPermission)?.label || nextPermission;
+        setActionNotice(`Fiber GIS & Map access for @${user.username} set to "${label}".`);
+        setTimeout(() => setActionNotice(null), 4000);
+        if (res.schemaMissing) {
+          setGisSchemaNotice(
+            res.error || 'Run the portal_users GIS permission SQL migration in Supabase.'
+          );
+        } else {
+          setGisSchemaNotice(null);
+        }
+      } else {
+        setActionNotice(res.error || 'Failed to update Fiber GIS permission.');
+        setTimeout(() => setActionNotice(null), 5000);
+      }
+    } finally {
+      setUpdatingGisUserId(null);
+    }
+  };
+
   // One-click copy credentials
   const handleCopyCredentials = (user: PortalUserRow) => {
     const displayName = user.full_name || user.fullName || user.displayName || user.username;
@@ -233,6 +290,28 @@ export const UsersTable: React.FC<UsersTableProps> = ({
         <div className="p-3 bg-emerald-950/90 border border-emerald-700 rounded-xl text-emerald-300 text-xs font-mono flex items-center gap-2.5 animate-fadeIn shadow-lg">
           <CheckCircle2 className="w-4 h-4 text-emerald-400 shrink-0" />
           <span>{actionNotice}</span>
+        </div>
+      )}
+
+      {/* Optional SQL Column Migration Banner if portal_users columns are not yet added */}
+      {gisSchemaNotice && (
+        <div className="p-3 bg-amber-950/80 border border-amber-700/80 rounded-xl text-amber-200 text-xs font-mono flex flex-wrap items-center justify-between gap-2.5 shadow-lg">
+          <div className="flex items-center gap-2 min-w-0">
+            <Database className="w-4 h-4 text-amber-400 shrink-0" />
+            <span>{gisSchemaNotice}</span>
+          </div>
+          <button
+            type="button"
+            onClick={() => {
+              navigator.clipboard?.writeText(GIS_ACCESS_MIGRATION_SQL);
+              setCopiedGisSql(true);
+              setTimeout(() => setCopiedGisSql(false), 3000);
+            }}
+            className="px-3 py-1.5 rounded-lg bg-amber-500 hover:bg-amber-400 text-slate-950 font-bold text-[11px] flex items-center gap-1.5 shrink-0 cursor-pointer transition"
+          >
+            {copiedGisSql ? <Check className="w-3.5 h-3.5" /> : <Copy className="w-3.5 h-3.5" />}
+            <span>{copiedGisSql ? 'SQL Copied!' : 'Copy ALTER TABLE SQL'}</span>
+          </button>
         </div>
       )}
 
@@ -305,6 +384,7 @@ export const UsersTable: React.FC<UsersTableProps> = ({
                 <th className="py-3.5 px-4">Full Name</th>
                 <th className="py-3.5 px-4">Username / Account ID</th>
                 <th className="py-3.5 px-4">Role Badge</th>
+                <th className="py-3.5 px-4">Fiber GIS &amp; Map</th>
                 <th className="py-3.5 px-4">Phone Number</th>
                 <th className="py-3.5 px-4">Status</th>
                 <th className="py-3.5 px-4 text-right">Actions</th>
@@ -313,7 +393,7 @@ export const UsersTable: React.FC<UsersTableProps> = ({
             <tbody className="divide-y divide-slate-800/80 font-sans">
               {isLoading && users.length === 0 ? (
                 <tr>
-                  <td colSpan={6} className="py-12 text-center text-slate-400 font-mono">
+                  <td colSpan={7} className="py-12 text-center text-slate-400 font-mono">
                     <div className="flex items-center justify-center gap-2">
                       <div className="w-4 h-4 border-2 border-cyan-500 border-t-transparent rounded-full animate-spin" />
                       <span>Loading records from Supabase PostgreSQL...</span>
@@ -322,7 +402,7 @@ export const UsersTable: React.FC<UsersTableProps> = ({
                 </tr>
               ) : filteredUsers.length === 0 ? (
                 <tr>
-                  <td colSpan={6} className="py-12 text-center text-slate-500 font-mono">
+                  <td colSpan={7} className="py-12 text-center text-slate-500 font-mono">
                     <div className="space-y-1">
                       <p className="text-slate-400 font-medium">No user records found in Supabase.</p>
                       <p className="text-[11px] text-slate-500">
@@ -424,6 +504,83 @@ export const UsersTable: React.FC<UsersTableProps> = ({
                           {userRole === 'CLIENT' && <Smartphone className="w-3 h-3 text-emerald-400" />}
                           <span>{userRole || 'CLIENT'}</span>
                         </span>
+                      </td>
+
+                      {/* 3b. Fiber GIS & Map Access (Quick 1-Click Toggle + 3-State Selector) */}
+                      <td
+                        className="py-3.5 px-4"
+                        onClick={(e) => e.stopPropagation()}
+                      >
+                        {userRole === 'ADMIN' ? (
+                          <span className="inline-flex items-center gap-1 px-2 py-1 rounded-lg bg-sky-950/80 border border-sky-800/80 text-sky-300 font-mono text-[10px] font-bold">
+                            <MapPin className="w-3 h-3 text-sky-400" />
+                            <span>Always Full Access</span>
+                          </span>
+                        ) : isStaffRoleEligibleForGisControl(userRole) ? (() => {
+                          const resolvedGis = resolveUserGisAccess(user, userRole);
+                          const isBusy = updatingGisUserId === user.id;
+                          return (
+                            <div className="flex items-center gap-2">
+                              {/* Quick 1-Click Enable / Disable Switch */}
+                              <button
+                                type="button"
+                                role="switch"
+                                aria-checked={resolvedGis.canAccess}
+                                disabled={isBusy}
+                                onClick={() =>
+                                  handleUpdateGisPermission(
+                                    user,
+                                    resolvedGis.canAccess ? 'none' : 'view'
+                                  )
+                                }
+                                title={
+                                  resolvedGis.canAccess
+                                    ? `Click to immediately disable Fiber GIS & Map for @${user.username}`
+                                    : `Click to enable Fiber GIS & Map (View & Trace Only) for @${user.username}`
+                                }
+                                className={`relative inline-flex h-5 w-9 shrink-0 items-center rounded-full border transition cursor-pointer disabled:opacity-50 ${
+                                  resolvedGis.canAccess
+                                    ? resolvedGis.canEdit
+                                      ? 'bg-emerald-600 border-emerald-400'
+                                      : 'bg-sky-600 border-sky-400'
+                                    : 'bg-slate-800 border-slate-700'
+                                }`}
+                              >
+                                <span
+                                  className={`inline-block h-3.5 w-3.5 transform rounded-full bg-white shadow transition ${
+                                    resolvedGis.canAccess ? 'translate-x-4' : 'translate-x-0.5'
+                                  }`}
+                                />
+                              </button>
+
+                              {/* Granular 3-State Selector */}
+                              <select
+                                value={resolvedGis.permission}
+                                disabled={isBusy}
+                                aria-label={`Fiber GIS & Map access for ${user.username}`}
+                                onChange={(e) =>
+                                  handleUpdateGisPermission(
+                                    user,
+                                    e.target.value as GisMapPermission
+                                  )
+                                }
+                                className={`text-[10px] font-mono font-bold rounded-lg px-2 py-1 border focus:outline-none cursor-pointer transition disabled:opacity-50 ${
+                                  resolvedGis.permission === 'edit'
+                                    ? 'bg-emerald-950/90 border-emerald-700 text-emerald-300'
+                                    : resolvedGis.permission === 'view'
+                                    ? 'bg-sky-950/90 border-sky-700 text-sky-300'
+                                    : 'bg-rose-950/80 border-rose-800 text-rose-300'
+                                }`}
+                              >
+                                <option value="none">Disabled (No Access)</option>
+                                <option value="view">View &amp; Trace Only</option>
+                                <option value="edit">Full Edit &amp; Splice</option>
+                              </select>
+                            </div>
+                          );
+                        })() : (
+                          <span className="text-[10px] font-mono text-slate-600">N/A (Subscriber)</span>
+                        )}
                       </td>
 
                       {/* 4. Phone Number */}

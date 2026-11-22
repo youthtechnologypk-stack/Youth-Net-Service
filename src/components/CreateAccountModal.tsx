@@ -21,6 +21,7 @@ import {
   Copy,
   ExternalLink,
   Wifi,
+  MapPin,
 } from 'lucide-react';
 import { UserAccount, SystemRole } from '../types/auth';
 import { useISP } from '../context/ISPContext';
@@ -40,6 +41,12 @@ import {
   NetworkAreaNode,
   NETWORK_AREAS_UPDATED_EVENT,
 } from '../lib/billingAndNetwork';
+import {
+  GIS_PERMISSION_OPTIONS,
+  GisMapPermission,
+  isMissingGisPermissionColumnError,
+  updatePortalUserGisPermission,
+} from '../lib/gisAccessControl';
 
 export interface CreateAccountModalProps {
   isOpen: boolean;
@@ -104,6 +111,7 @@ export const CreateAccountModal: React.FC<CreateAccountModalProps> = ({
   // Manager specific fields
   const [department, setDepartment] = useState('NOC & Network Operations');
   const [operationalPermissions, setOperationalPermissions] = useState('Full NOC Operations & SLA Oversight');
+  const [gisPermission, setGisPermission] = useState<GisMapPermission>('view');
 
   // WhatsApp checkbox
   const [sendWhatsApp, setSendWhatsApp] = useState(true);
@@ -255,6 +263,10 @@ export const CreateAccountModal: React.FC<CreateAccountModalProps> = ({
       cashLimit: role === 'AGENT' ? Number(cashLimit) : undefined,
       grantClientPortal: role === 'CLIENT' ? grantClientPortal : undefined,
       sendWhatsAppNotice: sendWhatsApp,
+      can_access_gis_map:
+        role === 'ADMIN' ? true : role === 'CLIENT' ? false : gisPermission !== 'none',
+      gis_map_permission:
+        role === 'ADMIN' ? 'edit' : role === 'CLIENT' ? 'none' : gisPermission,
       createdAt: new Date().toISOString(),
     };
 
@@ -277,7 +289,9 @@ export const CreateAccountModal: React.FC<CreateAccountModalProps> = ({
 
     // 2. Persist directly to Supabase PostgreSQL portal_users table
     try {
-      const newUserPayload = {
+      const effectiveGisPerm: GisMapPermission =
+        role === 'ADMIN' ? 'edit' : role === 'CLIENT' ? 'none' : gisPermission;
+      const newUserPayload: Record<string, any> = {
         username: cleanUsername,
         password: plainPass,
         role,
@@ -286,9 +300,20 @@ export const CreateAccountModal: React.FC<CreateAccountModalProps> = ({
         area: assignedArea || 'Sector G-11',
         base_salary: 0,
         cash_in_hand: 0,
+        can_access_gis_map: effectiveGisPerm !== 'none',
+        gis_map_permission: effectiveGisPerm,
         created_at: new Date().toISOString(),
       };
-      await supabase.from('portal_users').insert([newUserPayload]);
+      const { error: insertErr } = await supabase.from('portal_users').insert([newUserPayload]);
+      if (insertErr && isMissingGisPermissionColumnError(insertErr)) {
+        const { can_access_gis_map: _c, gis_map_permission: _p, ...legacyPayload } = newUserPayload;
+        await supabase.from('portal_users').insert([legacyPayload]);
+        await updatePortalUserGisPermission({
+          userId: newUser.id,
+          username: cleanUsername,
+          permission: effectiveGisPerm,
+        });
+      }
     } catch (sbErr) {
       console.warn('Failed inserting to Supabase portal_users:', sbErr);
     }
@@ -814,6 +839,32 @@ export const CreateAccountModal: React.FC<CreateAccountModalProps> = ({
                     />
                   </div>
                 </div>
+              </div>
+            )}
+
+            {(role === 'MANAGER' || role === 'AGENT') && (
+              <div className="bg-slate-950 p-4 rounded-xl border border-slate-800 space-y-2.5">
+                <div className="flex items-center justify-between gap-2">
+                  <div className="flex items-center gap-2 text-sky-400 font-bold text-xs">
+                    <MapPin className="w-3.5 h-3.5" />
+                    <span>Fiber GIS &amp; Map Access</span>
+                  </div>
+                  <span className="text-[10px] font-mono text-slate-400">Granular RBAC</span>
+                </div>
+                <select
+                  value={gisPermission}
+                  onChange={(e) => setGisPermission(e.target.value as GisMapPermission)}
+                  className="w-full bg-slate-900 border border-slate-700 rounded-xl px-3 py-2 text-slate-200 font-mono text-xs focus:outline-none focus:border-cyan-500"
+                >
+                  {GIS_PERMISSION_OPTIONS.map((opt) => (
+                    <option key={opt.value} value={opt.value}>
+                      {opt.label}
+                    </option>
+                  ))}
+                </select>
+                <p className="text-[10px] text-slate-400">
+                  {GIS_PERMISSION_OPTIONS.find((o) => o.value === gisPermission)?.description}
+                </p>
               </div>
             )}
 

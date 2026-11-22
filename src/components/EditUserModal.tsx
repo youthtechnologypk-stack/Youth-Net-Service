@@ -10,6 +10,7 @@ import {
   Users,
   DollarSign,
   Link as LinkIcon,
+  MapPin,
 } from 'lucide-react';
 import { UserAccount, SystemRole } from '../types/auth';
 import { useISP } from '../context/ISPContext';
@@ -17,6 +18,11 @@ import { supabase } from '../services/supabaseClient';
 import { AreaNodeSelector } from './AreaNodeSelector';
 import { fetchMikrotikPppSecrets } from '../services/mikrotikRestClient';
 import { MikrotikPppSecret } from '../types/isp';
+import {
+  GIS_PERMISSION_OPTIONS,
+  GisMapPermission,
+  resolveUserGisAccess,
+} from '../lib/gisAccessControl';
 
 interface EditUserModalProps {
   isOpen: boolean;
@@ -45,6 +51,7 @@ export const EditUserModal: React.FC<EditUserModalProps> = ({
   const [department, setDepartment] = useState('');
   const [linkedCustomerId, setLinkedCustomerId] = useState('');
   const [linkedAgentId, setLinkedAgentId] = useState('');
+  const [gisPermission, setGisPermission] = useState<GisMapPermission>('view');
 
   const [isSubmitting, setIsSubmitting] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -86,6 +93,7 @@ export const EditUserModal: React.FC<EditUserModalProps> = ({
       setDepartment(user.department || 'NOC & Network Operations');
       setLinkedCustomerId(user.linkedCustomerId || '');
       setLinkedAgentId(user.linkedAgentId || '');
+      setGisPermission(resolveUserGisAccess(user, user.role).permission);
       setError(null);
     }
   }, [user]);
@@ -114,6 +122,10 @@ export const EditUserModal: React.FC<EditUserModalProps> = ({
       department: role === 'MANAGER' ? department : undefined,
       linkedCustomerId: role === 'CLIENT' ? (linkedCustomerId || undefined) : undefined,
       linkedAgentId: role === 'AGENT' ? (linkedAgentId || undefined) : undefined,
+      can_access_gis_map:
+        role === 'ADMIN' ? true : role === 'CLIENT' ? false : gisPermission !== 'none',
+      gis_map_permission:
+        role === 'ADMIN' ? 'edit' : role === 'CLIENT' ? 'none' : gisPermission,
     };
 
     try {
@@ -268,6 +280,29 @@ export const EditUserModal: React.FC<EditUserModalProps> = ({
                   className="w-full bg-slate-900 border border-slate-700 rounded-xl px-3 py-2 text-slate-200 text-xs focus:outline-none focus:border-cyan-500"
                 />
               </div>
+            </div>
+          )}
+
+          {(role === 'MANAGER' || role === 'AGENT') && (
+            <div className="bg-slate-950 p-3.5 rounded-xl border border-slate-800 space-y-2">
+              <div className="text-sky-400 font-bold flex items-center gap-1.5">
+                <MapPin className="w-3.5 h-3.5" />
+                <span>Fiber GIS &amp; Map Access</span>
+              </div>
+              <select
+                value={gisPermission}
+                onChange={(e) => setGisPermission(e.target.value as GisMapPermission)}
+                className="w-full bg-slate-900 border border-slate-700 rounded-xl px-3 py-2 text-slate-200 text-xs font-mono focus:outline-none focus:border-cyan-500"
+              >
+                {GIS_PERMISSION_OPTIONS.map((opt) => (
+                  <option key={opt.value} value={opt.value}>
+                    {opt.label}
+                  </option>
+                ))}
+              </select>
+              <p className="text-[10px] text-slate-400">
+                {GIS_PERMISSION_OPTIONS.find((o) => o.value === gisPermission)?.description}
+              </p>
             </div>
           )}
 

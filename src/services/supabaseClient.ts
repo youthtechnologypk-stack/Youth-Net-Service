@@ -53,6 +53,8 @@ export interface SupabasePortalUser {
   last_reminder_cycle?: string | null;
   suspended_at?: string | null;
   last_restored_at?: string | null;
+  can_access_gis_map?: boolean | null;
+  gis_map_permission?: 'none' | 'view' | 'edit' | string | null;
   created_at?: string;
 }
 
@@ -468,6 +470,7 @@ export interface InternalSplitterUnit {
 export type CoreSpliceAction =
   | 'FEED_INTERNAL_SPLITTER'
   | 'PASS_THROUGH_JOINT'
+  | 'RESERVED_LOCKED'
   | 'SPARE_DARK';
 
 export interface EnclosureCoreSpliceEntry {
@@ -475,6 +478,13 @@ export interface EnclosureCoreSpliceEntry {
   incoming_cable_id: string;
   incoming_core_number: number;
   action: CoreSpliceAction;
+  source_olt_id?: string | null;
+  source_pon_port_id?: string | null;
+  source_pon_label?: string | null;
+  source_tx_dbm?: number | null;
+  locked_reserved?: boolean;
+  forwarded_to_node_id?: string | null;
+  forwarded_to_area?: string | null;
   target_splitter_id?: string | null;
   outgoing_cable_id?: string | null;
   outgoing_core_number?: number | null;

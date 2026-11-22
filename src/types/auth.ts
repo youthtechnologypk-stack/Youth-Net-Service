@@ -1,6 +1,7 @@
 // Authentication & RBAC (Role-Based Access Control) Types
 
 export type SystemRole = 'ADMIN' | 'MANAGER' | 'AGENT' | 'CLIENT';
+export type GisMapPermissionLevel = 'none' | 'view' | 'edit';
 
 export interface UserAccount {
   id: string;
@@ -32,6 +33,8 @@ export interface UserAccount {
   cnic?: string;
   address?: string;
   permissions?: Record<string, boolean>; // Granular feature override flags
+  can_access_gis_map?: boolean; // Role-based Fiber GIS & Map enable/disable flag
+  gis_map_permission?: GisMapPermissionLevel; // 'none' | 'view' | 'edit'
   createdAt: string;
   lastLoginAt?: string;
 }

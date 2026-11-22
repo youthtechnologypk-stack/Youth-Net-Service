@@ -1,5 +1,6 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
+  ArrowLeft,
   Cable,
   Calculator,
   CheckCircle2,
@@ -11,7 +12,9 @@ import {
   Eye,
   EyeOff,
   Filter,
+  GitMerge,
   Layers,
+  Lock,
   MapPin,
   MousePointer,
   Navigation,
@@ -21,6 +24,7 @@ import {
   RotateCcw,
   Search,
   Server,
+  ShieldAlert,
   Tag,
   Undo2,
   Users,
@@ -30,6 +34,7 @@ import {
 } from 'lucide-react';
 import { useISP } from '../context/ISPContext';
 import type { UserAccount } from '../types/auth';
+import { GisMapPermission, resolveUserGisAccess } from '../lib/gisAccessControl';
 import type {
   GisCableTypeCode,
   GisCoreEntry,
@@ -61,6 +66,7 @@ import {
   deleteGisNode,
   initializeSplitterOutputsForNode,
   loadGisTopology,
+  mergeDuplicateParallelCablesInDb,
   placeOrMoveOltOnMap,
   replaceGisNodeEquipment,
   splitCableWithFoscJoint,
@@ -79,14 +85,19 @@ import {
   FIBER_ATTENUATION_DB_PER_KM,
   SFP_TX_PRESETS,
   SPLITTER_SPECS,
+  allocateCoreOnCable,
   cableCoresToType,
   calculateTopologyOpticalBudgets,
   computePolylineDistanceMeters,
   computePortLiveRxDbm,
+  findExistingCableBetweenNodes,
+  findNextFreeCoreOnCable,
   getTia598Color,
+  groupParallelCablesByPair,
   haversineMeters,
   inferSfpClassFromDbm,
   inferSplitterCategory,
+  isCoreLockedOrUsed,
   normalizeCableCores,
   resolveHopSpliceLoss,
   traceOpticalPathToNode,
@@ -103,6 +114,7 @@ import {
 import { FIBER_GIS_MIGRATION_SQL } from '../lib/gisMigrationSql';
 import {
   collectSortedAreaOptions,
+  computeAreaQuickChips,
   computeGisHighlightFilter,
 } from '../lib/fiberGisFilter';
 import { DEFAULT_NETWORK_AREAS } from '../lib/billingAndNetwork';
@@ -122,6 +134,8 @@ import { OltFormDraft, OltManagerModal } from './OltManagerModal';
 interface FiberGisMapViewProps {
   currentUser?: UserAccount | null;
   compactMobile?: boolean;
+  gisPermission?: GisMapPermission;
+  onReturnFromRestricted?: () => void;
 }
 
 const DEFAULT_MAP_CENTER: GisLatLng = { lat: 31.5204, lng: 74.3587 };
@@ -384,8 +398,32 @@ export function calculateOpticalLinkBudgetLoss(params: {
 export const FiberGisMapView: React.FC<FiberGisMapViewProps> = ({
   currentUser,
   compactMobile = false,
+  gisPermission,
+  onReturnFromRestricted,
 }) => {
   const { activeSessions, complaints, outages } = useISP();
+
+  // Resolve effective Fiber GIS & Map RBAC permission (Admin tier always retains full access)
+  const resolvedGisAccess = useMemo(() => {
+    const base = resolveUserGisAccess(currentUser);
+    if (base.isAdminOverride) return base;
+    if (gisPermission) {
+      return {
+        canAccess: gisPermission !== 'none',
+        permission: gisPermission,
+        canEdit: gisPermission === 'edit',
+        isViewOnly: gisPermission === 'view',
+        isAdminOverride: false,
+      };
+    }
+    return base;
+  }, [currentUser, gisPermission]);
+
+  const canAccessGis = resolvedGisAccess.canAccess;
+  const canEditGis = resolvedGisAccess.canEdit;
+  const isViewOnlyMode = resolvedGisAccess.isViewOnly;
+  const canEditGisRef = useRef<boolean>(canEditGis);
+  canEditGisRef.current = canEditGis;
 
   const [olts, setOlts] = useState<SupabaseGisOlt[]>([]);
   const [ponPorts, setPonPorts] = useState<SupabaseGisOltPonPort[]>([]);
@@ -483,11 +521,21 @@ export const FiberGisMapView: React.FC<FiberGisMapViewProps> = ({
   const [isSearchOpen, setIsSearchOpen] = useState(false);
   const [copiedSql, setCopiedSql] = useState(false);
 
-  // Highlight Filter State (OLT / PON Port / Area)
+  // Highlight Filter State (OLT / PON Port / Area) + Area Isolation Mode
   const [filterOltId, setFilterOltId] = useState<string>('ALL');
   const [filterPonPortId, setFilterPonPortId] = useState<string>('ALL');
   const [filterAreaName, setFilterAreaName] = useState<string>('ALL');
   const [filterZoomTriggerTs, setFilterZoomTriggerTs] = useState<number>(0);
+  const [hideUnrelatedOnFilter, setHideUnrelatedOnFilter] = useState<boolean>(false);
+
+  // Edit / Form Protection Guard (Prevents background sync from resetting open forms/dropdowns)
+  const [isInspectorDirty, setIsInspectorDirty] = useState<boolean>(false);
+  const activeSessionNamesRef = useRef<string[]>([]);
+  const selectedNodeIdRef = useRef<string | null>(null);
+  const selectedCableIdRef = useRef<string | null>(null);
+  const isInspectorDirtyRef = useRef<boolean>(false);
+  const isEditingFormRef = useRef<boolean>(false);
+  const pendingBackgroundRefreshRef = useRef<boolean>(false);
 
   // Two-Node Optical Link Budget Loss Estimator State
   const [isLinkEstimatorOpen, setIsLinkEstimatorOpen] = useState(false);
@@ -496,6 +544,22 @@ export const FiberGisMapView: React.FC<FiberGisMapViewProps> = ({
   const [linkCalcCustomSplices, setLinkCalcCustomSplices] = useState<string>('');
 
   const actorUsername = currentUser?.username || 'admin';
+
+  // If permission downgrades to View-Only or Disabled in real time, immediately exit any active edit tool or modal
+  useEffect(() => {
+    if (!canEditGis) {
+      if (toolMode !== 'pan') setToolMode('pan');
+      setConnectSourceNodeId(null);
+      setConnectTargetNodeId(null);
+      setDraftWaypoints([]);
+      setIsConnectionModalOpen(false);
+      setIsOltManagerOpen(false);
+      setUpgradeTargetNodeId(null);
+      setPendingPlaceCoords(null);
+      setPendingAreaZoneCoords(null);
+      setIsSqlModalOpen(false);
+    }
+  }, [canEditGis, toolMode]);
 
   const showToast = useCallback((text: string, tone: 'ok' | 'err' = 'ok') => {
     setToastMsg({ text, tone });
@@ -512,11 +576,44 @@ export const FiberGisMapView: React.FC<FiberGisMapViewProps> = ({
     [activeSessions]
   );
 
+  // Keep refs updated WITHOUT destabilizing refreshTopology or Realtime subscriptions!
+  activeSessionNamesRef.current = activeSessionNames;
+  selectedNodeIdRef.current = selectedNodeId;
+  selectedCableIdRef.current = selectedCableId;
+  isInspectorDirtyRef.current = isInspectorDirty;
+
+  const isEditingForm = Boolean(
+    isInspectorDirty ||
+      isConnectionModalOpen ||
+      pendingPlaceCoords ||
+      pendingAreaZoneCoords ||
+      upgradeTargetNodeId ||
+      isOltManagerOpen
+  );
+  isEditingFormRef.current = isEditingForm;
+
+  const isInteractiveInputFocused = () => {
+    if (typeof document === 'undefined') return false;
+    const tag = document.activeElement?.tagName?.toUpperCase();
+    return tag === 'SELECT' || tag === 'INPUT' || tag === 'TEXTAREA';
+  };
+
   const refreshTopology = useCallback(
-    async (centerOnFirstNode = false) => {
+    async (centerOnFirstNode = false, force = false) => {
+      // Pause/guard background refreshes while user is editing forms, inspector drafts, or open dropdowns
+      if (
+        !force &&
+        !centerOnFirstNode &&
+        (isEditingFormRef.current || isInteractiveInputFocused())
+      ) {
+        pendingBackgroundRefreshRef.current = true;
+        return;
+      }
+
+      pendingBackgroundRefreshRef.current = false;
       setIsLoading(true);
       try {
-        const data = await loadGisTopology(activeSessionNames);
+        const data = await loadGisTopology(activeSessionNamesRef.current);
         setSchemaMissing(data.schemaMissing);
         setOlts(data.olts);
         setPonPorts(data.ponPorts);
@@ -585,15 +682,29 @@ export const FiberGisMapView: React.FC<FiberGisMapViewProps> = ({
             })
             .catch(() => {});
         }
-        setLastSyncedAt(new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' }));
+        setLastSyncedAt(
+          new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' })
+        );
       } catch (err: any) {
         showToast(err?.message || 'Failed to load FTTH GIS topology', 'err');
       } finally {
         setIsLoading(false);
       }
     },
-    [activeSessionNames, showToast]
+    [showToast]
   );
+
+  // Gently flush deferred background sync once user finishes editing forms/inspector
+  useEffect(() => {
+    if (!isEditingForm && pendingBackgroundRefreshRef.current) {
+      const timer = setTimeout(() => {
+        if (!isEditingFormRef.current && pendingBackgroundRefreshRef.current) {
+          refreshTopology(false, false);
+        }
+      }, 600);
+      return () => clearTimeout(timer);
+    }
+  }, [isEditingForm, refreshTopology]);
 
   useEffect(() => {
     refreshTopology(true);
@@ -628,6 +739,15 @@ export const FiberGisMapView: React.FC<FiberGisMapViewProps> = ({
         );
       },
       onNodeDelta: (eventType, newRow, oldRow) => {
+        if (
+          eventType === 'UPDATE' &&
+          newRow?.id &&
+          newRow.id === selectedNodeIdRef.current &&
+          isInspectorDirtyRef.current
+        ) {
+          pendingBackgroundRefreshRef.current = true;
+          return;
+        }
         setNodes((prev) => applyRealtimeNodeDelta(prev, eventType, newRow, oldRow));
         if (eventType === 'DELETE' && oldRow?.id) {
           setSelectedNodeId((cur) => (cur === oldRow.id ? null : cur));
@@ -637,6 +757,15 @@ export const FiberGisMapView: React.FC<FiberGisMapViewProps> = ({
         );
       },
       onCableDelta: (eventType, newRow, oldRow) => {
+        if (
+          eventType === 'UPDATE' &&
+          newRow?.id &&
+          newRow.id === selectedCableIdRef.current &&
+          isInspectorDirtyRef.current
+        ) {
+          pendingBackgroundRefreshRef.current = true;
+          return;
+        }
         setCables((prev) => applyRealtimeCableDelta(prev, eventType, newRow, oldRow));
         if (eventType === 'DELETE' && oldRow?.id) {
           setSelectedCableId((cur) => (cur === oldRow.id ? null : cur));
@@ -786,8 +915,25 @@ export const FiberGisMapView: React.FC<FiberGisMapViewProps> = ({
         olts,
         subscribers,
         splitterOutputs,
+        areaZones,
       }),
-    [nodes, olts, subscribers, splitterOutputs]
+    [nodes, olts, subscribers, splitterOutputs, areaZones]
+  );
+
+  const areaQuickChips = useMemo(
+    () =>
+      computeAreaQuickChips({
+        nodes,
+        areaZones,
+        subscribers,
+      }),
+    [nodes, areaZones, subscribers]
+  );
+
+  const parallelCableGroups = useMemo(() => groupParallelCablesByPair(cables), [cables]);
+  const duplicateParallelCableCount = useMemo(
+    () => parallelCableGroups.reduce((acc, g) => acc + g.duplicateCount, 0),
+    [parallelCableGroups]
   );
 
   const availablePonPortsForFilter = useMemo(() => {
@@ -834,15 +980,16 @@ export const FiberGisMapView: React.FC<FiberGisMapViewProps> = ({
   );
 
   const fitBoundsTarget = useMemo(() => {
+    const targetCoords = highlightFilterResult.fitBoundsCoords;
     if (
       !highlightFilterResult.isFilterActive ||
-      highlightFilterResult.fitBoundsCoords.length === 0 ||
+      targetCoords.length === 0 ||
       filterZoomTriggerTs === 0
     ) {
       return null;
     }
     return {
-      bounds: highlightFilterResult.fitBoundsCoords,
+      bounds: targetCoords,
       ts: filterZoomTriggerTs,
     };
   }, [
@@ -1272,6 +1419,7 @@ export const FiberGisMapView: React.FC<FiberGisMapViewProps> = ({
   const handleMapClick = useCallback(
     async (coords: GisLatLng) => {
       setIsSearchOpen(false);
+      if (!canEditGisRef.current) return;
 
       if (toolMode === 'pick_olt_coords') {
         if (pendingPlaceOltFromRegistry) {
@@ -1380,13 +1528,72 @@ export const FiberGisMapView: React.FC<FiberGisMapViewProps> = ({
       distanceMeters?: number;
       cores?: GisCoreEntry[];
       notes?: string;
+      reuseExistingCableId?: string | null;
+      forceNewCable?: boolean;
     }) => {
+      if (!canEditGisRef.current) return;
       setIsSaving(true);
       try {
         const ponLabel =
           params.sourcePonPortId && ponPortsById[params.sourcePonPortId]
             ? ` [PON-${ponPortsById[params.sourcePonPortId].port_number}]`
             : '';
+
+        const existingTargetCable = !params.forceNewCable
+          ? (params.reuseExistingCableId
+              ? cables.find((c) => c.id === params.reuseExistingCableId) || null
+              : findExistingCableBetweenNodes(cables, params.sourceNode.id, params.targetNode.id))
+          : null;
+
+        if (existingTargetCable) {
+          const mergedCapacity = Math.max(
+            Number(existingTargetCable.cable_cores || 12),
+            Number(params.cableCores || existingTargetCable.cable_cores || 12)
+          ) as 1 | 2 | 4 | 6 | 8 | 12 | 24 | 48;
+          const prevCores = normalizeCableCores(
+            mergedCapacity,
+            existingTargetCable.cores_allocation_json?.length
+              ? existingTargetCable.cores_allocation_json
+              : existingTargetCable.cores_tia598_json
+          );
+          const incomingCores = normalizeCableCores(mergedCapacity, params.cores || []);
+          const mergedCores = prevCores.map((prevEntry, idx) => {
+            const inc = incomingCores[idx];
+            if (!inc) return prevEntry;
+            // Preserve existing locked/active cores unless explicitly edited in the same modal
+            if (isCoreLockedOrUsed(inc)) return inc;
+            return prevEntry;
+          });
+
+          const updatedCable = await updateGisCable(existingTargetCable.id, {
+            name: params.name?.trim() || existingTargetCable.name,
+            cable_cores: mergedCapacity,
+            cable_type: cableCoresToType(mergedCapacity, existingTargetCable.cable_type),
+            distance_meters: params.distanceMeters || existingTargetCable.distance_meters,
+            source_olt_id: params.sourceOltId ?? existingTargetCable.source_olt_id ?? null,
+            source_pon_port_id:
+              params.sourcePonPortId ?? existingTargetCable.source_pon_port_id ?? null,
+            cores_allocation_json: mergedCores,
+            cores_tia598_json: mergedCores,
+            notes: params.notes ?? existingTargetCable.notes,
+            updated_by: actorUsername,
+          });
+          const nextCables = applyRealtimeCableDelta(cables, 'UPDATE', updatedCable);
+          setCables(nextCables);
+          syncOpticalBudgetsToDb(nodes, nextCables, ponPortsById).catch(() => {});
+          setConnectSourceNodeId(null);
+          setConnectTargetNodeId(null);
+          setDraftWaypoints([]);
+          setIsConnectionModalOpen(false);
+          setToolMode('pan');
+          setSelectedCableId(updatedCable.id);
+          setSelectedNodeId(null);
+          showToast(
+            `✅ Reused existing ${updatedCable.cable_cores}C trunk (${updatedCable.name || 'Cable'}) — core allocation updated without creating a duplicate span.`
+          );
+          return;
+        }
+
         const created = await createGisCable({
           name:
             params.name?.trim() ||
@@ -1427,10 +1634,57 @@ export const FiberGisMapView: React.FC<FiberGisMapViewProps> = ({
     [nodes, cables, ponPortsById, draftCableCores, actorUsername, showToast]
   );
 
+  const handleMergeDuplicateCables = useCallback(async () => {
+    if (!canEditGisRef.current || duplicateParallelCableCount === 0 || isSaving) return;
+    setIsSaving(true);
+    try {
+      const result = await mergeDuplicateParallelCablesInDb({
+        nodes,
+        cables,
+        updatedBy: actorUsername,
+      });
+      setCables(result.updatedCables);
+      setNodes(result.updatedNodes);
+      const freshBudgets = await syncOpticalBudgetsToDb(
+        result.updatedNodes,
+        result.updatedCables,
+        ponPortsById
+      );
+      const { updatedOutputs, updatedPorts } = await syncFdbPortsOpticalPowerToDb({
+        nodes: result.updatedNodes,
+        budgetsByNodeId: freshBudgets,
+        splitterOutputs,
+        fdbPorts: ports,
+      });
+      setSplitterOutputs(updatedOutputs);
+      setPorts(updatedPorts);
+      const removedCount = result.removedCableIds.length;
+      showToast(
+        `✅ Merged ${removedCount} duplicate parallel cable${
+          removedCount === 1 ? '' : 's'
+        } across ${result.mergedPairsCount} trunk span${result.mergedPairsCount === 1 ? '' : 's'}.`
+      );
+    } catch (err: any) {
+      showToast(err?.message || 'Failed to merge duplicate parallel cables', 'err');
+    } finally {
+      setIsSaving(false);
+    }
+  }, [
+    duplicateParallelCableCount,
+    isSaving,
+    nodes,
+    cables,
+    actorUsername,
+    ponPortsById,
+    splitterOutputs,
+    ports,
+    showToast,
+  ]);
+
   const handleNodeClick = useCallback(
     async (node: SupabaseGisNode) => {
       setIsSearchOpen(false);
-      if (toolMode === 'connect_cable') {
+      if (toolMode === 'connect_cable' && canEditGisRef.current) {
         if (!connectSourceNodeId) {
           setConnectSourceNodeId(node.id);
           setConnectTargetNodeId(null);
@@ -1465,6 +1719,7 @@ export const FiberGisMapView: React.FC<FiberGisMapViewProps> = ({
 
   const handleNodeDragEnd = useCallback(
     async (node: SupabaseGisNode, coords: GisLatLng) => {
+      if (!canEditGisRef.current) return;
       setIsSaving(true);
       try {
         if (node.node_type === 'OLT' && node.olt_id && oltsById[node.olt_id]) {
@@ -1508,7 +1763,7 @@ export const FiberGisMapView: React.FC<FiberGisMapViewProps> = ({
 
   const handleCreatePendingNode = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (!pendingPlaceCoords) return;
+    if (!canEditGisRef.current || !pendingPlaceCoords) return;
     setIsSaving(true);
     try {
       const chosenSplitter =
@@ -1579,6 +1834,7 @@ export const FiberGisMapView: React.FC<FiberGisMapViewProps> = ({
 
   const handleUpdatePonPort = useCallback(
     async (portId: string, patch: Partial<SupabaseGisOltPonPort>) => {
+      if (!canEditGisRef.current) return;
       setIsSaving(true);
       try {
         const updatedPort = await updateOltPonPort(portId, patch);
@@ -1613,6 +1869,7 @@ export const FiberGisMapView: React.FC<FiberGisMapViewProps> = ({
   );
 
   const handleSaveNode = async (nodeId: string, patch: Partial<SupabaseGisNode>) => {
+    if (!canEditGisRef.current) return;
     setIsSaving(true);
     const schemaWarnings: string[] = [];
     const collectWarning = (msg: string) => {
@@ -1627,15 +1884,115 @@ export const FiberGisMapView: React.FC<FiberGisMapViewProps> = ({
           { onSchemaWarning: collectWarning }
         );
         let nextNodes = applyRealtimeNodeDelta(nodes, 'UPDATE', updated);
+        let nextCables = cables;
+
+        // Sync per-core OLT/PON trunk assignments & Reserved locks back onto connected cables cleanly
+        if (
+          (updated.node_type === 'DIST_NODE' || updated.node_type === 'FOSC_JOINT') &&
+          Array.isArray(updated.core_splices) &&
+          updated.core_splices.length > 0
+        ) {
+          const cableUpdatesById = new Map<string, typeof updated.core_splices>();
+          for (const sp of updated.core_splices) {
+            if (!sp.incoming_cable_id) continue;
+            if (!cableUpdatesById.has(sp.incoming_cable_id)) {
+              cableUpdatesById.set(sp.incoming_cable_id, []);
+            }
+            cableUpdatesById.get(sp.incoming_cable_id)!.push(sp);
+          }
+
+          for (const [incCableId, entries] of cableUpdatesById.entries()) {
+            const targetCable = nextCables.find((c) => c.id === incCableId);
+            if (!targetCable) continue;
+            let workingCable = targetCable;
+            let changed = false;
+            for (const sp of entries) {
+              if (!sp.source_pon_port_id && !sp.locked_reserved && sp.action !== 'RESERVED_LOCKED') {
+                continue;
+              }
+              const currentCores = normalizeCableCores(
+                workingCable.cable_cores,
+                workingCable.cores_allocation_json?.length
+                  ? workingCable.cores_allocation_json
+                  : workingCable.cores_tia598_json
+              );
+              const existingCore = currentCores.find((c) => c.coreNumber === sp.incoming_core_number);
+              const desiredStatus =
+                sp.locked_reserved || sp.action === 'RESERVED_LOCKED'
+                  ? ('RESERVED' as const)
+                  : sp.action === 'SPARE_DARK'
+                  ? ('SPARE' as const)
+                  : ('ACTIVE' as const);
+              const desiredPonId = sp.source_pon_port_id || existingCore?.origin_pon_port_id || null;
+              const desiredOltId = sp.source_olt_id || existingCore?.origin_olt_id || null;
+              const desiredLabel = sp.source_pon_label || existingCore?.origin_olt_label || '';
+
+              if (
+                existingCore &&
+                existingCore.core_status === desiredStatus &&
+                (existingCore.origin_pon_port_id || null) === desiredPonId &&
+                (existingCore.origin_olt_label || '') === desiredLabel
+              ) {
+                continue;
+              }
+
+              const updatedCores = allocateCoreOnCable({
+                cable: workingCable,
+                coreNumber: sp.incoming_core_number,
+                coreStatus: desiredStatus,
+                originOltId: desiredOltId,
+                originPonPortId: desiredPonId,
+                originLabel: desiredLabel,
+                destinationTarget: sp.forwarded_to_area || existingCore?.forwarded_to_area || '',
+                opticalPowerDbm:
+                  sp.calculated_in_dbm !== null && sp.calculated_in_dbm !== undefined
+                    ? sp.calculated_in_dbm
+                    : null,
+              });
+              workingCable = {
+                ...workingCable,
+                cores_allocation_json: updatedCores,
+                cores_tia598_json: updatedCores,
+              };
+              changed = true;
+            }
+            if (changed) {
+              try {
+                const persistedCable = await updateGisCable(workingCable.id, {
+                  cores_allocation_json: workingCable.cores_allocation_json,
+                  cores_tia598_json: workingCable.cores_tia598_json,
+                  updated_by: actorUsername,
+                });
+                nextCables = applyRealtimeCableDelta(nextCables, 'UPDATE', persistedCable);
+              } catch {
+                nextCables = applyRealtimeCableDelta(nextCables, 'UPDATE', workingCable);
+              }
+            }
+          }
+          if (nextCables !== cables) {
+            setCables(nextCables);
+          }
+        }
 
         // Automatically bind connected downstream nodes to the routed core (Pass-Through Joint OR Splitter Leg Feed)
-        const downstreamTargets: Array<{ cableId: string; coreNum: number }> = [];
+        const downstreamTargets: Array<{
+          cableId: string;
+          coreNum: number;
+          sourceOltId?: string | null;
+          sourcePonPortId?: string | null;
+          sourcePonLabel?: string | null;
+          sourceTxDbm?: number | null;
+        }> = [];
         if (Array.isArray(updated.core_splices)) {
           for (const sp of updated.core_splices) {
             if (sp.action === 'PASS_THROUGH_JOINT' && sp.outgoing_cable_id) {
               downstreamTargets.push({
                 cableId: sp.outgoing_cable_id,
                 coreNum: Math.max(1, Number(sp.outgoing_core_number || 1)),
+                sourceOltId: sp.source_olt_id || null,
+                sourcePonPortId: sp.source_pon_port_id || null,
+                sourcePonLabel: sp.source_pon_label || null,
+                sourceTxDbm: sp.source_tx_dbm ?? null,
               });
             }
           }
@@ -1656,7 +2013,7 @@ export const FiberGisMapView: React.FC<FiberGisMapViewProps> = ({
         if (downstreamTargets.length > 0) {
           const seenNodeUpdates = new Set<string>();
           for (const target of downstreamTargets) {
-            const outCable = cables.find((c) => c.id === target.cableId);
+            const outCable = nextCables.find((c) => c.id === target.cableId);
             if (!outCable) continue;
             const neighborId =
               outCable.source_node_id === updated.id
@@ -1668,8 +2025,13 @@ export const FiberGisMapView: React.FC<FiberGisMapViewProps> = ({
             const downstreamNode = nextNodes.find((n) => n.id === neighborId);
             if (!downstreamNode || downstreamNode.node_type === 'OLT') continue;
 
+            // Do NOT force-overwrite a downstream multi-PON DIST_NODE/FOSC_JOINT's single feed_core_number
+            const isDownstreamMultiPon =
+              downstreamNode.node_type === 'DIST_NODE' || downstreamNode.node_type === 'FOSC_JOINT';
             const hasExplicitSpliceRules =
               Array.isArray(downstreamNode.core_splices) && downstreamNode.core_splices.length > 0;
+            if (isDownstreamMultiPon && hasExplicitSpliceRules) continue;
+
             const needsFeedSync =
               downstreamNode.feed_cable_id !== outCable.id ||
               (!hasExplicitSpliceRules &&
@@ -1707,7 +2069,7 @@ export const FiberGisMapView: React.FC<FiberGisMapViewProps> = ({
         }
 
         // Recalculate downstream optical budgets immediately & persist to gis_nodes + fiber_nodes + FDB ports
-        const freshBudgets = await syncOpticalBudgetsToDb(nextNodes, cables, ponPortsById);
+        const freshBudgets = await syncOpticalBudgetsToDb(nextNodes, nextCables, ponPortsById);
         const nextNodesWithBudgets = nextNodes.map((n) => {
           if (n.node_type === 'OLT') return n;
           const b = freshBudgets[n.id];
@@ -1773,10 +2135,14 @@ export const FiberGisMapView: React.FC<FiberGisMapViewProps> = ({
       outgoingCableCores: 1 | 2 | 4 | 6 | 8 | 12 | 24 | 48;
       outgoingCoreNumber: number;
       spliceLossDb: number;
+      forceNewCable?: boolean;
     }) => {
+      if (!canEditGisRef.current) {
+        throw new Error('View-only GIS access: editing and splicing are disabled by Admin.');
+      }
       const targetNode = nodes.find((n) => n.id === params.targetNodeId);
       if (!targetNode) {
-        throw new Error('Selected destination FDB / FAT node was not found.');
+        throw new Error('Selected destination box was not found.');
       }
 
       setIsSaving(true);
@@ -1786,65 +2152,131 @@ export const FiberGisMapView: React.FC<FiberGisMapViewProps> = ({
       };
 
       try {
-        const routeCoordinates: GisLatLng[] = [
-          { lat: params.sourceNode.lat, lng: params.sourceNode.lng },
-          { lat: targetNode.lat, lng: targetNode.lng },
-        ];
-        const distMeters = Math.max(1, computePolylineDistanceMeters(routeCoordinates));
-        const cableType = cableCoresToType(params.outgoingCableCores);
         const srcBudget = budgetsByNodeId[params.sourceNode.id];
+        const arrivalKey = `${params.incomingCableId}:${params.incomingCoreNumber}`;
+        const arrivalMeta = srcBudget?.arrivalMetaByCoreKey?.[arrivalKey];
+        const existingSourceSplice = (params.sourceNode.core_splices || []).find(
+          (s) =>
+            s.incoming_cable_id === params.incomingCableId &&
+            s.incoming_core_number === params.incomingCoreNumber
+        );
+
+        const resolvedOltId =
+          existingSourceSplice?.source_olt_id || arrivalMeta?.oltId || srcBudget?.oltId || null;
+        const resolvedPonPortId =
+          existingSourceSplice?.source_pon_port_id ||
+          arrivalMeta?.ponPortId ||
+          srcBudget?.sourcePonPortId ||
+          null;
+        const resolvedPonLabel =
+          existingSourceSplice?.source_pon_label ||
+          arrivalMeta?.ponLabel ||
+          srcBudget?.sourcePonLabel ||
+          null;
+        const resolvedTxDbm =
+          existingSourceSplice?.source_tx_dbm ?? arrivalMeta?.oltTxDbm ?? srcBudget?.oltTxDbm ?? null;
+
         const arrivalDbm =
-          srcBudget?.arrivalDbmByCoreKey?.[
-            `${params.incomingCableId}:${params.incomingCoreNumber}`
-          ] ??
+          arrivalMeta?.dbm ??
+          srcBudget?.arrivalDbmByCoreKey?.[arrivalKey] ??
+          existingSourceSplice?.calculated_in_dbm ??
           srcBudget?.inputDbm ??
           null;
         const forwardedDbm =
           arrivalDbm !== null ? Number((arrivalDbm - params.spliceLossDb).toFixed(2)) : null;
 
-        const baseCores = normalizeCableCores(params.outgoingCableCores, []);
-        const outColor = getTia598Color(params.outgoingCoreNumber);
-        const initialCores = baseCores.map((c) => {
-          if (c.coreNumber === params.outgoingCoreNumber) {
-            const originLabel = `${params.sourceNode.name} Pass-Thru Core #${params.incomingCoreNumber}`;
-            const destLabel = `${targetNode.name}${
-              targetNode.area_name ? ` (${targetNode.area_name})` : ''
-            }`;
-            return {
-              ...c,
-              core_status: 'ACTIVE' as const,
-              status: 'Feed / Splitter' as const,
-              usage_type: 'SPLITTER_FEED' as const,
-              origin_olt_id: srcBudget?.oltId || null,
-              origin_pon_port_id: srcBudget?.sourcePonPortId || null,
-              origin_olt_label: originLabel,
-              source_signal: originLabel,
-              forwarded_to_area: destLabel,
-              destination_target: destLabel,
-              destinationNote: destLabel,
-              optical_power_dbm: forwardedDbm !== null ? `${forwardedDbm.toFixed(2)}` : '',
-            };
+        const existingCable = !params.forceNewCable
+          ? findExistingCableBetweenNodes(cables, params.sourceNode.id, targetNode.id)
+          : null;
+
+        let boundCable: SupabaseGisCable;
+        let boundCoreNumber = params.outgoingCoreNumber;
+        let reusedExisting = false;
+        let nextCables = cables;
+
+        const originLabel = resolvedPonLabel
+          ? `${resolvedPonLabel} via ${params.sourceNode.name} C#${params.incomingCoreNumber}`
+          : `${params.sourceNode.name} Pass-Thru Core #${params.incomingCoreNumber}`;
+        const destLabel = `${targetNode.name}${
+          targetNode.area_name ? ` (${targetNode.area_name})` : ''
+        }`;
+
+        if (existingCable) {
+          const freeCore = findNextFreeCoreOnCable(existingCable, params.outgoingCoreNumber);
+          if (freeCore === null) {
+            throw new Error(
+              `All ${existingCable.cable_cores} cores on existing cable "${
+                existingCable.name || 'Trunk'
+              }" are occupied or locked. Click "+ Lay New Physical Cable" to add a separate span.`
+            );
           }
-          return c;
-        });
+          boundCoreNumber = freeCore;
+          reusedExisting = true;
+          const updatedCores = allocateCoreOnCable({
+            cable: existingCable,
+            coreNumber: boundCoreNumber,
+            coreStatus: 'ACTIVE',
+            originOltId: resolvedOltId,
+            originPonPortId: resolvedPonPortId,
+            originLabel,
+            destinationTarget: destLabel,
+            opticalPowerDbm: forwardedDbm,
+            remarks: `Pass-through from ${params.sourceNode.name} Core #${params.incomingCoreNumber}`,
+          });
+          boundCable = await updateGisCable(existingCable.id, {
+            cores_allocation_json: updatedCores,
+            cores_tia598_json: updatedCores,
+            updated_by: actorUsername,
+          });
+          nextCables = applyRealtimeCableDelta(cables, 'UPDATE', boundCable);
+        } else {
+          const routeCoordinates: GisLatLng[] = [
+            { lat: params.sourceNode.lat, lng: params.sourceNode.lng },
+            { lat: targetNode.lat, lng: targetNode.lng },
+          ];
+          const distMeters = Math.max(1, computePolylineDistanceMeters(routeCoordinates));
+          const cableType = cableCoresToType(params.outgoingCableCores);
+          const outColor = getTia598Color(boundCoreNumber);
+          const baseCores = normalizeCableCores(params.outgoingCableCores, []);
+          const initialCores = baseCores.map((c) => {
+            if (c.coreNumber === boundCoreNumber) {
+              return {
+                ...c,
+                core_status: 'ACTIVE' as const,
+                status: 'Feed / Splitter' as const,
+                usage_type: 'SPLITTER_FEED' as const,
+                origin_olt_id: resolvedOltId,
+                origin_pon_port_id: resolvedPonPortId,
+                origin_olt_label: originLabel,
+                source_signal: originLabel,
+                forwarded_to_area: destLabel,
+                destination_target: destLabel,
+                destinationNote: destLabel,
+                optical_power_dbm: forwardedDbm !== null ? `${forwardedDbm.toFixed(2)}` : '',
+              };
+            }
+            return c;
+          });
 
-        const createdCable = await createGisCable({
-          name: `${params.sourceNode.name} [Pass-Thru C${params.incomingCoreNumber}] → ${targetNode.name}`,
-          sourceNodeId: params.sourceNode.id,
-          targetNodeId: targetNode.id,
-          sourceOltId: srcBudget?.oltId || null,
-          sourcePonPortId: srcBudget?.sourcePonPortId || null,
-          cableType,
-          cableCores: params.outgoingCableCores,
-          distanceMeters: distMeters,
-          routeCoordinates,
-          initialCores,
-          notes: `Mid-span pass-through from ${params.sourceNode.name} Core #${params.incomingCoreNumber} → ${targetNode.name} Core #${params.outgoingCoreNumber} (${outColor.name})`,
-          updatedBy: actorUsername,
-        });
+          boundCable = await createGisCable({
+            name: `${params.sourceNode.name} → ${targetNode.name} (${params.outgoingCableCores}C Trunk)`,
+            sourceNodeId: params.sourceNode.id,
+            targetNodeId: targetNode.id,
+            sourceOltId: resolvedOltId,
+            sourcePonPortId: resolvedPonPortId,
+            cableType,
+            cableCores: params.outgoingCableCores,
+            distanceMeters: distMeters,
+            routeCoordinates,
+            initialCores,
+            notes: `Mid-span pass-through from ${params.sourceNode.name} Core #${params.incomingCoreNumber} → ${targetNode.name} Core #${boundCoreNumber} (${outColor.name})`,
+            updatedBy: actorUsername,
+          });
+          nextCables = applyRealtimeCableDelta(cables, 'INSERT', boundCable);
+        }
 
-        const nextCables = applyRealtimeCableDelta(cables, 'INSERT', createdCable);
         setCables(nextCables);
+        const outColor = getTia598Color(boundCoreNumber);
 
         const existingSplices = Array.isArray(params.sourceNode.core_splices)
           ? params.sourceNode.core_splices
@@ -1855,11 +2287,17 @@ export const FiberGisMapView: React.FC<FiberGisMapViewProps> = ({
           incoming_core_number: params.incomingCoreNumber,
           action: 'PASS_THROUGH_JOINT' as const,
           target_splitter_id: null,
-          outgoing_cable_id: createdCable.id,
-          outgoing_core_number: params.outgoingCoreNumber,
+          outgoing_cable_id: boundCable.id,
+          outgoing_core_number: boundCoreNumber,
           splice_loss_db: params.spliceLossDb,
           calculated_output_dbm: forwardedDbm,
-          notes: `Mid-span extended directly to ${targetNode.name} Core #${params.outgoingCoreNumber} (${outColor.name})`,
+          source_olt_id: resolvedOltId,
+          source_pon_port_id: resolvedPonPortId,
+          source_pon_label: resolvedPonLabel,
+          source_tx_dbm: resolvedTxDbm,
+          forwarded_to_node_id: targetNode.id,
+          forwarded_to_area: targetNode.area_name || targetNode.name,
+          notes: `Mid-span extended directly to ${targetNode.name} Core #${boundCoreNumber} (${outColor.name})`,
         };
         const mergedSplices = existingSplices.some(
           (s) =>
@@ -1884,17 +2322,53 @@ export const FiberGisMapView: React.FC<FiberGisMapViewProps> = ({
         );
         let nextNodes = applyRealtimeNodeDelta(nodes, 'UPDATE', updatedSource);
 
-        const updatedTarget = await updateGisNode(
-          targetNode.id,
-          {
-            feed_cable_id: createdCable.id,
-            feed_core_number: params.outgoingCoreNumber,
-            feed_core_pair: `Core #${params.outgoingCoreNumber} (${outColor.name})`,
-            pon_port_id: targetNode.pon_port_id || srcBudget?.sourcePonPortId || null,
-            updated_by: actorUsername,
-          },
-          { onSchemaWarning: collectWarning }
-        );
+        // Preserve multi-PON Sub-Distribution cascading: if target is DIST_NODE/FOSC_JOINT, add/preserve core_splices entry cleanly
+        const isTargetMultiPon =
+          targetNode.node_type === 'DIST_NODE' || targetNode.node_type === 'FOSC_JOINT';
+        const targetPatch: Partial<SupabaseGisNode> = isTargetMultiPon
+          ? {
+              core_splices: (() => {
+                const prevTargetSplices = Array.isArray(targetNode.core_splices)
+                  ? targetNode.core_splices
+                  : [];
+                const alreadyExists = prevTargetSplices.some(
+                  (s) =>
+                    s.incoming_cable_id === boundCable.id &&
+                    s.incoming_core_number === boundCoreNumber
+                );
+                if (alreadyExists) return prevTargetSplices;
+                return [
+                  ...prevTargetSplices,
+                  {
+                    id: `${boundCable.id}-${boundCoreNumber}`,
+                    incoming_cable_id: boundCable.id,
+                    incoming_core_number: boundCoreNumber,
+                    action: 'FEED_INTERNAL_SPLITTER' as const,
+                    target_splitter_id: targetNode.internal_splitters?.[0]?.id || null,
+                    outgoing_cable_id: null,
+                    outgoing_core_number: null,
+                    splice_loss_db: params.spliceLossDb,
+                    source_olt_id: resolvedOltId,
+                    source_pon_port_id: resolvedPonPortId,
+                    source_pon_label: resolvedPonLabel,
+                    source_tx_dbm: resolvedTxDbm,
+                    notes: `Cascaded from ${params.sourceNode.name} Core #${params.incomingCoreNumber}`,
+                  },
+                ];
+              })(),
+              updated_by: actorUsername,
+            }
+          : {
+              feed_cable_id: boundCable.id,
+              feed_core_number: boundCoreNumber,
+              feed_core_pair: `Core #${boundCoreNumber} (${outColor.name})`,
+              pon_port_id: resolvedPonPortId || targetNode.pon_port_id || null,
+              updated_by: actorUsername,
+            };
+
+        const updatedTarget = await updateGisNode(targetNode.id, targetPatch, {
+          onSchemaWarning: collectWarning,
+        });
         nextNodes = applyRealtimeNodeDelta(nextNodes, 'UPDATE', updatedTarget);
 
         const freshBudgets = await syncOpticalBudgetsToDb(nextNodes, nextCables, ponPortsById);
@@ -1936,17 +2410,20 @@ export const FiberGisMapView: React.FC<FiberGisMapViewProps> = ({
           );
         } else {
           showToast(
-            `✅ Core #${params.incomingCoreNumber} Pass-Thru spliced to ${targetNode.name} Core #${params.outgoingCoreNumber} (${outColor.name})${targetRxMsg}`
+            reusedExisting
+              ? `✅ Reused existing ${boundCable.cable_cores}C cable: Core #${params.incomingCoreNumber} → ${targetNode.name} Core #${boundCoreNumber} (${outColor.name})${targetRxMsg}`
+              : `✅ Core #${params.incomingCoreNumber} Pass-Thru spliced to ${targetNode.name} Core #${boundCoreNumber} (${outColor.name})${targetRxMsg}`
           );
         }
       } finally {
         setIsSaving(false);
       }
     },
-    [nodes, cables, budgetsByNodeId, ponPortsById, actorUsername, showToast]
+    [nodes, cables, budgetsByNodeId, ponPortsById, splitterOutputs, ports, actorUsername, showToast]
   );
 
   const handleDeleteNode = async (nodeId: string) => {
+    if (!canEditGisRef.current) return;
     setIsSaving(true);
     try {
       await deleteGisNode(nodeId);
@@ -1966,6 +2443,7 @@ export const FiberGisMapView: React.FC<FiberGisMapViewProps> = ({
   };
 
   const handleSaveCable = async (cableId: string, patch: Partial<SupabaseGisCable>) => {
+    if (!canEditGisRef.current) return;
     setIsSaving(true);
     try {
       const existing = cables.find((c) => c.id === cableId);
@@ -1992,6 +2470,7 @@ export const FiberGisMapView: React.FC<FiberGisMapViewProps> = ({
   };
 
   const handleDeleteCable = async (cableId: string) => {
+    if (!canEditGisRef.current) return;
     setIsSaving(true);
     try {
       await deleteGisCable(cableId);
@@ -2008,6 +2487,7 @@ export const FiberGisMapView: React.FC<FiberGisMapViewProps> = ({
   };
 
   const handleSplitCable = async (cable: SupabaseGisCable, splitPoint?: GisLatLng) => {
+    if (!canEditGisRef.current) return;
     setIsSaving(true);
     try {
       const src = nodes.find((n) => n.id === cable.source_node_id);
@@ -2048,6 +2528,7 @@ export const FiberGisMapView: React.FC<FiberGisMapViewProps> = ({
     dropCableMeters: number;
     status: GisPortStatus;
   }) => {
+    if (!canEditGisRef.current) return;
     setIsSaving(true);
     try {
       const nodeBudget = budgetsByNodeId[params.fdbNodeId];
@@ -2127,6 +2608,7 @@ export const FiberGisMapView: React.FC<FiberGisMapViewProps> = ({
     dropDistanceMeters?: number;
     estimatedRxDbm?: number | null;
   }) => {
+    if (!canEditGisRef.current) return;
     setIsSaving(true);
     try {
       const res = await upsertSplitterOutput(params);
@@ -2150,6 +2632,7 @@ export const FiberGisMapView: React.FC<FiberGisMapViewProps> = ({
     totalPorts: number;
     inputDbm?: number | null;
   }) => {
+    if (!canEditGisRef.current) return;
     setIsSaving(true);
     try {
       const updatedNode = await updateGisNode(params.node.id, {
@@ -2196,7 +2679,7 @@ export const FiberGisMapView: React.FC<FiberGisMapViewProps> = ({
     deductInventoryItemId?: string | null;
     returnInventoryItemId?: string | null;
   }) => {
-    if (!upgradeTargetNode) return;
+    if (!canEditGisRef.current || !upgradeTargetNode) return;
     setIsSaving(true);
     try {
       const result = await replaceGisNodeEquipment({
@@ -2286,6 +2769,34 @@ export const FiberGisMapView: React.FC<FiberGisMapViewProps> = ({
     [draftWaypoints]
   );
 
+  if (!canAccessGis) {
+    return (
+      <div className="min-h-[55vh] flex items-center justify-center p-6 bg-slate-950 border border-slate-800 rounded-2xl shadow-2xl text-slate-100">
+        <div className="max-w-md w-full bg-slate-900 border border-rose-500/40 rounded-2xl p-6 text-center space-y-4 shadow-xl">
+          <div className="w-12 h-12 rounded-2xl bg-rose-500/15 border border-rose-500/35 flex items-center justify-center mx-auto text-rose-400">
+            <ShieldAlert className="w-6 h-6" />
+          </div>
+          <div className="space-y-1.5">
+            <h2 className="text-base font-bold text-white">Access Restricted</h2>
+            <p className="text-xs text-slate-300 leading-relaxed">
+              Access Restricted: Fiber GIS &amp; Map is disabled for your account by Admin.
+            </p>
+          </div>
+          {onReturnFromRestricted && (
+            <button
+              type="button"
+              onClick={onReturnFromRestricted}
+              className="inline-flex items-center justify-center gap-2 px-4 py-2.5 rounded-xl bg-slate-800 hover:bg-slate-700 border border-slate-700 text-xs font-semibold text-white cursor-pointer transition"
+            >
+              <ArrowLeft className="w-4 h-4" />
+              <span>Return to Dashboard</span>
+            </button>
+          )}
+        </div>
+      </div>
+    );
+  }
+
   return (
     <div className="flex flex-col bg-slate-950 border border-slate-800 rounded-2xl overflow-hidden shadow-2xl text-slate-100">
       {/* Migration Required Banner */}
@@ -2297,27 +2808,35 @@ export const FiberGisMapView: React.FC<FiberGisMapViewProps> = ({
               <span>Supabase FTTH Fiber GIS Tables Not Initialized Yet</span>
             </div>
             <p className="text-[11px] text-amber-200/90">
-              Run the SQL migration in your Supabase SQL Editor to update{' '}
-              <code className="font-mono text-white">gis_olts</code>,{' '}
-              <code className="font-mono text-white">gis_nodes</code>,{' '}
-              <code className="font-mono text-white">gis_cables</code>,{' '}
-              <code className="font-mono text-white">gis_fdb_ports</code>, and{' '}
-              <code className="font-mono text-white">gis_splitter_outputs</code>.
+              {canEditGis ? (
+                <>
+                  Run the SQL migration in your Supabase SQL Editor to update{' '}
+                  <code className="font-mono text-white">gis_olts</code>,{' '}
+                  <code className="font-mono text-white">gis_nodes</code>,{' '}
+                  <code className="font-mono text-white">gis_cables</code>,{' '}
+                  <code className="font-mono text-white">gis_fdb_ports</code>, and{' '}
+                  <code className="font-mono text-white">gis_splitter_outputs</code>.
+                </>
+              ) : (
+                'Fiber GIS tables are not initialized yet. Please ask your System Admin to run the GIS database setup.'
+              )}
             </p>
           </div>
           <div className="flex items-center gap-2 shrink-0">
-            <button
-              type="button"
-              onClick={() => {
-                navigator.clipboard?.writeText(FIBER_GIS_MIGRATION_SQL);
-                setCopiedSql(true);
-                setTimeout(() => setCopiedSql(false), 3000);
-              }}
-              className="min-h-[40px] px-3 py-1.5 rounded-lg bg-amber-500 hover:bg-amber-400 text-slate-950 font-mono font-bold text-xs flex items-center gap-1.5 cursor-pointer"
-            >
-              <Copy className="w-3.5 h-3.5" />
-              <span>{copiedSql ? 'Copied SQL!' : 'Copy GIS SQL'}</span>
-            </button>
+            {canEditGis && (
+              <button
+                type="button"
+                onClick={() => {
+                  navigator.clipboard?.writeText(FIBER_GIS_MIGRATION_SQL);
+                  setCopiedSql(true);
+                  setTimeout(() => setCopiedSql(false), 3000);
+                }}
+                className="min-h-[40px] px-3 py-1.5 rounded-lg bg-amber-500 hover:bg-amber-400 text-slate-950 font-mono font-bold text-xs flex items-center gap-1.5 cursor-pointer"
+              >
+                <Copy className="w-3.5 h-3.5" />
+                <span>{copiedSql ? 'Copied SQL!' : 'Copy GIS SQL'}</span>
+              </button>
+            )}
             <button
               type="button"
               onClick={() => refreshTopology(true)}
@@ -2366,6 +2885,15 @@ export const FiberGisMapView: React.FC<FiberGisMapViewProps> = ({
                       : 'Syncing...'}
                   </span>
                 </span>
+                {isViewOnlyMode && (
+                  <span
+                    className="inline-flex items-center gap-1 px-2 py-0.5 rounded-md bg-sky-500/15 border border-sky-500/40 text-[10px] font-mono font-semibold text-sky-300 whitespace-nowrap"
+                    title="Your account has View & Trace Only access (Field Mode). Editing and splicing controls are hidden."
+                  >
+                    <Lock className="w-2.5 h-2.5" />
+                    <span>View &amp; Trace Only</span>
+                  </span>
+                )}
               </div>
               <p className="text-[10px] font-mono text-slate-400 tabular-nums whitespace-nowrap">
                 {summaryStats.oltCount} OLT · {summaryStats.distCount} Dist · {summaryStats.fdbCount} FDB ({summaryStats.freePorts}/
@@ -2446,110 +2974,114 @@ export const FiberGisMapView: React.FC<FiberGisMapViewProps> = ({
             <span>Select</span>
           </button>
 
-          <button
-            type="button"
-            onClick={() => {
-              setEditingOltId(null);
-              setOltDraftForPick(null);
-              setPickedCoordsForModal(null);
-              setIsOltManagerOpen(true);
-            }}
-            className="min-h-[40px] px-2.5 py-1.5 rounded-lg border text-xs font-mono font-semibold flex items-center gap-1.5 whitespace-nowrap cursor-pointer transition bg-sky-950/80 text-sky-300 border-sky-700/80 hover:border-sky-500"
-            title="Add, Edit & Delete EPON/GPON OLTs and PON Ports"
-          >
-            <Server className="w-3.5 h-3.5" />
-            <span>Manage OLTs</span>
-          </button>
+          {canEditGis && (
+            <>
+              <button
+                type="button"
+                onClick={() => {
+                  setEditingOltId(null);
+                  setOltDraftForPick(null);
+                  setPickedCoordsForModal(null);
+                  setIsOltManagerOpen(true);
+                }}
+                className="min-h-[40px] px-2.5 py-1.5 rounded-lg border text-xs font-mono font-semibold flex items-center gap-1.5 whitespace-nowrap cursor-pointer transition bg-sky-950/80 text-sky-300 border-sky-700/80 hover:border-sky-500"
+                title="Add, Edit & Delete EPON/GPON OLTs and PON Ports"
+              >
+                <Server className="w-3.5 h-3.5" />
+                <span>Manage OLTs</span>
+              </button>
 
-          <button
-            type="button"
-            onClick={() => {
-              setToolMode('place_olt');
-              setConnectSourceNodeId(null);
-              setConnectTargetNodeId(null);
-              setDraftWaypoints([]);
-            }}
-            className={`min-h-[40px] px-2.5 py-1.5 rounded-lg border text-xs font-mono font-semibold flex items-center gap-1 whitespace-nowrap cursor-pointer transition ${
-              toolMode === 'place_olt'
-                ? 'bg-sky-600 text-white border-sky-300'
-                : 'bg-slate-950 text-sky-300 border-slate-700 hover:border-sky-600'
-            }`}
-          >
-            <Plus className="w-3.5 h-3.5" />
-            <span>OLT</span>
-          </button>
+              <button
+                type="button"
+                onClick={() => {
+                  setToolMode('place_olt');
+                  setConnectSourceNodeId(null);
+                  setConnectTargetNodeId(null);
+                  setDraftWaypoints([]);
+                }}
+                className={`min-h-[40px] px-2.5 py-1.5 rounded-lg border text-xs font-mono font-semibold flex items-center gap-1 whitespace-nowrap cursor-pointer transition ${
+                  toolMode === 'place_olt'
+                    ? 'bg-sky-600 text-white border-sky-300'
+                    : 'bg-slate-950 text-sky-300 border-slate-700 hover:border-sky-600'
+                }`}
+              >
+                <Plus className="w-3.5 h-3.5" />
+                <span>OLT</span>
+              </button>
 
-          <button
-            type="button"
-            onClick={() => {
-              setToolMode('place_dist');
-              setConnectSourceNodeId(null);
-              setConnectTargetNodeId(null);
-              setDraftWaypoints([]);
-            }}
-            className={`min-h-[40px] px-2.5 py-1.5 rounded-lg border text-xs font-mono font-semibold flex items-center gap-1 whitespace-nowrap cursor-pointer transition ${
-              toolMode === 'place_dist'
-                ? 'bg-indigo-600 text-white border-indigo-300'
-                : 'bg-slate-950 text-indigo-300 border-slate-700 hover:border-indigo-500'
-            }`}
-          >
-            <Plus className="w-3.5 h-3.5" />
-            <span>Dist Node</span>
-          </button>
+              <button
+                type="button"
+                onClick={() => {
+                  setToolMode('place_dist');
+                  setConnectSourceNodeId(null);
+                  setConnectTargetNodeId(null);
+                  setDraftWaypoints([]);
+                }}
+                className={`min-h-[40px] px-2.5 py-1.5 rounded-lg border text-xs font-mono font-semibold flex items-center gap-1 whitespace-nowrap cursor-pointer transition ${
+                  toolMode === 'place_dist'
+                    ? 'bg-indigo-600 text-white border-indigo-300'
+                    : 'bg-slate-950 text-indigo-300 border-slate-700 hover:border-indigo-500'
+                }`}
+              >
+                <Plus className="w-3.5 h-3.5" />
+                <span>Dist Node</span>
+              </button>
 
-          <button
-            type="button"
-            onClick={() => {
-              setToolMode('place_fdb');
-              setConnectSourceNodeId(null);
-              setConnectTargetNodeId(null);
-              setDraftWaypoints([]);
-            }}
-            className={`min-h-[40px] px-2.5 py-1.5 rounded-lg border text-xs font-mono font-semibold flex items-center gap-1 whitespace-nowrap cursor-pointer transition ${
-              toolMode === 'place_fdb'
-                ? 'bg-emerald-600 text-white border-emerald-300'
-                : 'bg-slate-950 text-emerald-300 border-slate-700 hover:border-emerald-600'
-            }`}
-          >
-            <Plus className="w-3.5 h-3.5" />
-            <span>FDB / FAT</span>
-          </button>
+              <button
+                type="button"
+                onClick={() => {
+                  setToolMode('place_fdb');
+                  setConnectSourceNodeId(null);
+                  setConnectTargetNodeId(null);
+                  setDraftWaypoints([]);
+                }}
+                className={`min-h-[40px] px-2.5 py-1.5 rounded-lg border text-xs font-mono font-semibold flex items-center gap-1 whitespace-nowrap cursor-pointer transition ${
+                  toolMode === 'place_fdb'
+                    ? 'bg-emerald-600 text-white border-emerald-300'
+                    : 'bg-slate-950 text-emerald-300 border-slate-700 hover:border-emerald-600'
+                }`}
+              >
+                <Plus className="w-3.5 h-3.5" />
+                <span>FDB / FAT</span>
+              </button>
 
-          <button
-            type="button"
-            onClick={() => {
-              setToolMode('place_fosc');
-              setConnectSourceNodeId(null);
-              setConnectTargetNodeId(null);
-              setDraftWaypoints([]);
-            }}
-            className={`min-h-[40px] px-2.5 py-1.5 rounded-lg border text-xs font-mono font-semibold flex items-center gap-1 whitespace-nowrap cursor-pointer transition ${
-              toolMode === 'place_fosc'
-                ? 'bg-purple-600 text-white border-purple-300'
-                : 'bg-slate-950 text-purple-300 border-slate-700 hover:border-purple-600'
-            }`}
-          >
-            <Plus className="w-3.5 h-3.5" />
-            <span>FOSC Joint</span>
-          </button>
+              <button
+                type="button"
+                onClick={() => {
+                  setToolMode('place_fosc');
+                  setConnectSourceNodeId(null);
+                  setConnectTargetNodeId(null);
+                  setDraftWaypoints([]);
+                }}
+                className={`min-h-[40px] px-2.5 py-1.5 rounded-lg border text-xs font-mono font-semibold flex items-center gap-1 whitespace-nowrap cursor-pointer transition ${
+                  toolMode === 'place_fosc'
+                    ? 'bg-purple-600 text-white border-purple-300'
+                    : 'bg-slate-950 text-purple-300 border-slate-700 hover:border-purple-600'
+                }`}
+              >
+                <Plus className="w-3.5 h-3.5" />
+                <span>FOSC Joint</span>
+              </button>
 
-          <button
-            type="button"
-            onClick={() => {
-              setToolMode('connect_cable');
-              setConnectSourceNodeId(null);
-              setConnectTargetNodeId(null);
-              setDraftWaypoints([]);
-            }}
-            className={`min-h-[40px] px-2.5 py-1.5 rounded-lg border text-xs font-mono font-semibold flex items-center gap-1.5 whitespace-nowrap cursor-pointer transition ${
-              toolMode === 'connect_cable'
-                ? 'bg-cyan-500 text-slate-950 border-white font-bold'
-                : 'bg-slate-950 text-cyan-300 border-slate-700 hover:border-cyan-500'
-            }`}
-          >
-            <Cable className="w-3.5 h-3.5" />
-            <span>Connect Fiber</span>
-          </button>
+              <button
+                type="button"
+                onClick={() => {
+                  setToolMode('connect_cable');
+                  setConnectSourceNodeId(null);
+                  setConnectTargetNodeId(null);
+                  setDraftWaypoints([]);
+                }}
+                className={`min-h-[40px] px-2.5 py-1.5 rounded-lg border text-xs font-mono font-semibold flex items-center gap-1.5 whitespace-nowrap cursor-pointer transition ${
+                  toolMode === 'connect_cable'
+                    ? 'bg-cyan-500 text-slate-950 border-white font-bold'
+                    : 'bg-slate-950 text-cyan-300 border-slate-700 hover:border-cyan-500'
+                }`}
+              >
+                <Cable className="w-3.5 h-3.5" />
+                <span>Connect Fiber</span>
+              </button>
+            </>
+          )}
 
           <button
             type="button"
@@ -2583,22 +3115,24 @@ export const FiberGisMapView: React.FC<FiberGisMapViewProps> = ({
             <span className="hidden sm:inline">Nearest Agent</span>
           </button>
 
-          <button
-            type="button"
-            onClick={() => {
-              setToolMode((prev) => (prev === 'place_area_zone' ? 'pan' : 'place_area_zone'));
-              setShowAreaLabelsLayer(true);
-            }}
-            className={`min-h-[40px] px-2.5 py-1.5 rounded-lg border text-xs font-mono font-semibold flex items-center gap-1.5 whitespace-nowrap cursor-pointer transition ${
-              toolMode === 'place_area_zone'
-                ? 'bg-cyan-500 text-slate-950 border-white font-bold'
-                : 'bg-slate-950 text-cyan-300 border-slate-700 hover:border-cyan-500'
-            }`}
-            title="Drop a custom Area / Mohallah / Street zone label on the map"
-          >
-            <Tag className="w-3.5 h-3.5" />
-            <span className="hidden sm:inline">+ Area Label</span>
-          </button>
+          {canEditGis && (
+            <button
+              type="button"
+              onClick={() => {
+                setToolMode((prev) => (prev === 'place_area_zone' ? 'pan' : 'place_area_zone'));
+                setShowAreaLabelsLayer(true);
+              }}
+              className={`min-h-[40px] px-2.5 py-1.5 rounded-lg border text-xs font-mono font-semibold flex items-center gap-1.5 whitespace-nowrap cursor-pointer transition ${
+                toolMode === 'place_area_zone'
+                  ? 'bg-cyan-500 text-slate-950 border-white font-bold'
+                  : 'bg-slate-950 text-cyan-300 border-slate-700 hover:border-cyan-500'
+              }`}
+              title="Drop a custom Area / Mohallah / Street zone label on the map"
+            >
+              <Tag className="w-3.5 h-3.5" />
+              <span className="hidden sm:inline">+ Area Label</span>
+            </button>
+          )}
 
           <button
             type="button"
@@ -2636,21 +3170,39 @@ export const FiberGisMapView: React.FC<FiberGisMapViewProps> = ({
             ))}
           </div>
 
-          <button
-            type="button"
-            onClick={() => setIsSqlModalOpen(true)}
-            className="min-h-[40px] px-2.5 py-1.5 rounded-lg bg-slate-950 border border-amber-700/70 hover:border-amber-500 text-amber-300 font-mono font-semibold text-xs flex items-center gap-1.5 whitespace-nowrap cursor-pointer"
-            title="View & Copy Supabase GIS SQL Schema"
-          >
-            <Database className="w-3.5 h-3.5" />
-            <span className="hidden sm:inline">GIS SQL</span>
-          </button>
+          {canEditGis && duplicateParallelCableCount > 0 && (
+            <button
+              type="button"
+              disabled={isSaving}
+              onClick={handleMergeDuplicateCables}
+              className="min-h-[40px] px-2.5 py-1.5 rounded-lg bg-amber-500/15 hover:bg-amber-500/25 border border-amber-500/60 text-amber-200 font-mono font-bold text-xs flex items-center gap-1.5 whitespace-nowrap cursor-pointer disabled:opacity-50"
+              title="Consolidate duplicate parallel cables between the same node pairs into single multi-core trunk spans"
+            >
+              <GitMerge className="w-3.5 h-3.5 text-amber-300" />
+              <span>
+                Merge {duplicateParallelCableCount} Duplicate Cable
+                {duplicateParallelCableCount === 1 ? '' : 's'}
+              </span>
+            </button>
+          )}
+
+          {canEditGis && (
+            <button
+              type="button"
+              onClick={() => setIsSqlModalOpen(true)}
+              className="min-h-[40px] px-2.5 py-1.5 rounded-lg bg-slate-950 border border-amber-700/70 hover:border-amber-500 text-amber-300 font-mono font-semibold text-xs flex items-center gap-1.5 whitespace-nowrap cursor-pointer"
+              title="View & Copy Supabase GIS SQL Schema"
+            >
+              <Database className="w-3.5 h-3.5" />
+              <span className="hidden sm:inline">GIS SQL</span>
+            </button>
+          )}
 
           <button
             type="button"
-            onClick={() => refreshTopology(false)}
+            onClick={() => refreshTopology(false, true)}
             className="min-h-[40px] min-w-[40px] rounded-lg bg-slate-950 border border-slate-700 hover:border-slate-500 text-slate-300 flex items-center justify-center cursor-pointer"
-            title="Reload Topology"
+            title="Force Reload Topology"
           >
             <RefreshCw className={`w-3.5 h-3.5 ${isLoading ? 'animate-spin text-cyan-400' : ''}`} />
           </button>
@@ -2772,6 +3324,69 @@ export const FiberGisMapView: React.FC<FiberGisMapViewProps> = ({
           </div>
         )}
       </div>
+
+      {/* 1-Click Area Focus / Isolation Bar */}
+      {areaQuickChips.length > 0 && (
+        <div className="relative z-20 px-3 py-1.5 bg-slate-950/90 border-b border-slate-800/90 flex items-center gap-1.5 overflow-x-auto no-scrollbar">
+          <span className="text-[10px] font-mono uppercase tracking-wider text-slate-400 font-bold shrink-0 mr-1 flex items-center gap-1">
+            <MapPin className="w-3 h-3 text-cyan-400" />
+            <span>Area Focus:</span>
+          </span>
+          <button
+            type="button"
+            onClick={() => {
+              setFilterAreaName('ALL');
+              setHideUnrelatedOnFilter(false);
+              setFilterZoomTriggerTs(0);
+            }}
+            className={`px-2.5 py-1 rounded-lg text-[11px] font-mono font-bold whitespace-nowrap transition cursor-pointer shrink-0 border ${
+              filterAreaName === 'ALL'
+                ? 'bg-cyan-500 text-slate-950 border-cyan-300 shadow'
+                : 'bg-slate-900 text-slate-300 border-slate-700 hover:border-cyan-500/60 hover:text-white'
+            }`}
+          >
+            All Areas
+          </button>
+          {areaQuickChips.map((chip) => {
+            const isActiveArea =
+              filterAreaName !== 'ALL' &&
+              filterAreaName.trim().toLowerCase() === chip.areaName.trim().toLowerCase();
+            return (
+              <button
+                key={chip.areaName}
+                type="button"
+                onClick={() => {
+                  if (isActiveArea) {
+                    setFilterAreaName('ALL');
+                    setHideUnrelatedOnFilter(false);
+                    setFilterZoomTriggerTs(0);
+                  } else {
+                    setFilterAreaName(chip.areaName);
+                    setFilterZoomTriggerTs(Date.now());
+                  }
+                }}
+                className={`px-2.5 py-1 rounded-lg text-[11px] font-mono font-semibold whitespace-nowrap transition cursor-pointer shrink-0 border flex items-center gap-1.5 ${
+                  isActiveArea
+                    ? 'bg-emerald-500 text-slate-950 border-emerald-300 font-bold shadow'
+                    : 'bg-slate-900 text-slate-200 border-slate-800 hover:border-cyan-500/60 hover:bg-slate-800'
+                }`}
+                title={`Isolate ${chip.areaName} (${chip.fdbCount} FDBs, ${chip.distCount} Sub-Dist, ${chip.nodeCount} Nodes)`}
+              >
+                <span>{chip.areaName}</span>
+                <span
+                  className={`text-[10px] px-1 rounded tabular-nums ${
+                    isActiveArea
+                      ? 'bg-emerald-950/30 text-slate-950'
+                      : 'bg-slate-950 text-cyan-300'
+                  }`}
+                >
+                  {chip.fdbCount > 0 ? `${chip.fdbCount} FDB` : `${chip.nodeCount}`}
+                </span>
+              </button>
+            );
+          })}
+        </div>
+      )}
 
       {/* Collapsible Two-Node Optical Link Budget Loss Calculator */}
       {isLinkEstimatorOpen && (
@@ -3089,7 +3704,7 @@ export const FiberGisMapView: React.FC<FiberGisMapViewProps> = ({
             center={mapCenter}
             zoom={mapZoom}
             layerType={layerType}
-            toolMode={toolMode}
+            toolMode={canEditGis ? toolMode : 'pan'}
             nodes={nodes}
             cables={cables}
             portsByNodeId={portsByNodeId}
@@ -3111,23 +3726,27 @@ export const FiberGisMapView: React.FC<FiberGisMapViewProps> = ({
             showAgents={showAgentsLayer}
             selectedNodeId={selectedNodeId}
             selectedCableId={selectedCableId}
-            connectSourceNodeId={connectSourceNodeId}
-            connectTargetNodeId={connectTargetNodeId}
-            draftWaypoints={draftWaypoints}
+            connectSourceNodeId={canEditGis ? connectSourceNodeId : null}
+            connectTargetNodeId={canEditGis ? connectTargetNodeId : null}
+            draftWaypoints={canEditGis ? draftWaypoints : []}
             userLocation={userLocation}
             flyToTarget={flyToTarget}
             fitBoundsTarget={fitBoundsTarget}
             isFilterActive={highlightFilterResult.isFilterActive}
+            hideUnrelatedOnFilter={hideUnrelatedOnFilter}
             highlightedNodeIds={highlightFilterResult.highlightedNodeIds}
             highlightedCableIds={highlightFilterResult.highlightedCableIds}
-            onMapClick={handleMapClick}
+            onMapClick={canEditGis ? handleMapClick : () => {}}
             onNodeClick={handleNodeClick}
-            onNodeDragEnd={handleNodeDragEnd}
+            onNodeDragEnd={canEditGis ? handleNodeDragEnd : undefined}
             onCableClick={handleCableClick}
-            onAreaZoneClick={async (zone) => {
-              await deleteGisAreaZone(zone.id);
-              setAreaZones((prev) => prev.filter((z) => z.id !== zone.id));
-              showToast(`Removed area zone label "${zone.name}".`);
+            onSelectAreaByName={(areaName) => {
+              setFilterAreaName(areaName);
+              setFilterZoomTriggerTs(Date.now());
+            }}
+            onAreaZoneClick={(zone) => {
+              setFilterAreaName(zone.name);
+              setFilterZoomTriggerTs(Date.now());
             }}
             onAgentClick={(agent) => {
               setFlyToTarget({ lat: agent.lat, lng: agent.lng, zoom: 17, ts: Date.now() });
@@ -3142,6 +3761,97 @@ export const FiberGisMapView: React.FC<FiberGisMapViewProps> = ({
               setMapZoom(z);
             }}
           />
+
+          {/* Floating Area Isolation Summary Card */}
+          {highlightFilterResult.areaSummary && (
+            <div className="absolute top-3 left-14 z-20 w-72 max-w-[calc(100%-80px)] rounded-xl bg-slate-950/94 border border-cyan-500/65 backdrop-blur-md shadow-2xl p-3 space-y-2.5 font-mono">
+              <div className="flex items-start justify-between gap-2">
+                <div className="min-w-0">
+                  <span className="text-[9px] uppercase tracking-wider text-cyan-400 font-bold block">
+                    Area Isolation View
+                  </span>
+                  <h4 className="text-sm font-bold text-white truncate">
+                    {highlightFilterResult.areaSummary.areaName}
+                  </h4>
+                  {highlightFilterResult.areaSummary.subDistNames.length > 0 && (
+                    <div className="text-[10px] text-indigo-300 truncate mt-0.5">
+                      Sub-Dist: {highlightFilterResult.areaSummary.subDistNames.join(', ')}
+                    </div>
+                  )}
+                </div>
+                <button
+                  type="button"
+                  onClick={() => {
+                    setFilterAreaName('ALL');
+                    setFilterOltId('ALL');
+                    setFilterPonPortId('ALL');
+                    setHideUnrelatedOnFilter(false);
+                    setFilterZoomTriggerTs(0);
+                  }}
+                  className="px-2 py-1 rounded-lg bg-cyan-500 hover:bg-cyan-400 text-slate-950 text-[10px] font-bold shrink-0 cursor-pointer"
+                >
+                  Show All Areas
+                </button>
+              </div>
+
+              <div className="grid grid-cols-2 gap-1.5 text-[10px]">
+                <div className="p-2 rounded-lg bg-slate-900/90 border border-slate-800">
+                  <span className="text-slate-400 block">Total FDBs</span>
+                  <span className="text-xs font-bold text-white tabular-nums">
+                    {highlightFilterResult.areaSummary.fdbCount} Box
+                    {highlightFilterResult.areaSummary.fdbCount === 1 ? '' : 'es'}
+                  </span>
+                </div>
+                <div className="p-2 rounded-lg bg-slate-900/90 border border-slate-800">
+                  <span className="text-slate-400 block">FDB Ports</span>
+                  <span className="text-xs font-bold tabular-nums text-emerald-300">
+                    {highlightFilterResult.areaSummary.freePorts} Free
+                  </span>
+                  <span className="text-slate-400">
+                    {' '}
+                    / {highlightFilterResult.areaSummary.usedPorts} Used
+                  </span>
+                </div>
+                <div className="p-2 rounded-lg bg-slate-900/90 border border-slate-800">
+                  <span className="text-slate-400 block">Area ONTs</span>
+                  <span className="text-xs font-bold tabular-nums text-emerald-400">
+                    {highlightFilterResult.areaSummary.onlineOnts} On
+                  </span>
+                  <span className="text-slate-500"> · </span>
+                  <span className="text-xs font-bold tabular-nums text-rose-400">
+                    {highlightFilterResult.areaSummary.offlineOnts} Off
+                  </span>
+                </div>
+                <div className="p-2 rounded-lg bg-slate-900/90 border border-slate-800">
+                  <span className="text-slate-400 block">Feeder Power</span>
+                  <span className="text-xs font-bold tabular-nums text-sky-300">
+                    {highlightFilterResult.areaSummary.feederDbm !== null
+                      ? `${highlightFilterResult.areaSummary.feederDbm >= 0 ? '+' : ''}${highlightFilterResult.areaSummary.feederDbm.toFixed(1)} dBm`
+                      : 'Unlinked'}
+                  </span>
+                </div>
+              </div>
+
+              <div className="flex items-center justify-between gap-2 pt-1 border-t border-slate-800 text-[10px]">
+                <span className="text-slate-400 truncate">
+                  {highlightFilterResult.areaSummary.feederLabel
+                    ? `Via ${highlightFilterResult.areaSummary.feederLabel}`
+                    : 'Other areas dimmed to 8%'}
+                </span>
+                <button
+                  type="button"
+                  onClick={() => setHideUnrelatedOnFilter((v) => !v)}
+                  className={`px-2 py-0.5 rounded border font-bold shrink-0 cursor-pointer transition ${
+                    hideUnrelatedOnFilter
+                      ? 'bg-amber-500/20 border-amber-500/70 text-amber-200'
+                      : 'bg-slate-900 border-slate-700 text-slate-300 hover:text-white'
+                  }`}
+                >
+                  {hideUnrelatedOnFilter ? 'Hidden (Show 8%)' : 'Hide Unrelated'}
+                </button>
+              </div>
+            </div>
+          )}
 
           {/* Nearest Field Agent Alert Banner */}
           {nearestAgentMatch && (
@@ -3312,17 +4022,19 @@ export const FiberGisMapView: React.FC<FiberGisMapViewProps> = ({
                   );
                 })}
 
-                <div className="grid grid-cols-2 gap-1.5 pt-1">
-                  <button
-                    type="button"
-                    onClick={() => {
-                      setShowAreaLabelsLayer(true);
-                      setToolMode('place_area_zone');
-                    }}
-                    className="py-1.5 px-2 rounded-lg bg-slate-900 hover:bg-slate-800 border border-slate-700 text-[10px] font-semibold text-cyan-300 text-center transition-colors cursor-pointer"
-                  >
-                    + Area Label
-                  </button>
+                <div className={`grid ${canEditGis ? 'grid-cols-2' : 'grid-cols-1'} gap-1.5 pt-1`}>
+                  {canEditGis && (
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setShowAreaLabelsLayer(true);
+                        setToolMode('place_area_zone');
+                      }}
+                      className="py-1.5 px-2 rounded-lg bg-slate-900 hover:bg-slate-800 border border-slate-700 text-[10px] font-semibold text-cyan-300 text-center transition-colors cursor-pointer"
+                    >
+                      + Area Label
+                    </button>
+                  )}
                   <button
                     type="button"
                     onClick={handleLocateNearestAgent}
@@ -3411,6 +4123,7 @@ export const FiberGisMapView: React.FC<FiberGisMapViewProps> = ({
           ponPortsById={ponPortsById}
           subscribers={subscribers}
           isSaving={isSaving}
+          readOnly={!canEditGis}
           onClose={() => {
             setSelectedNodeId(null);
             setSelectedCableId(null);
@@ -3423,32 +4136,43 @@ export const FiberGisMapView: React.FC<FiberGisMapViewProps> = ({
           onSplitCable={handleSplitCable}
           onAssignPort={handleAssignPort}
           onUpsertSplitterOutput={handleUpsertSplitterOutput}
-          onInitializeSplitterOutputs={handleInitializeSplitterOutputs}
+          onInitializeSplitterOutputs={canEditGis ? handleInitializeSplitterOutputs : undefined}
           onOpenTrace={(nodeId, output) => setTraceRequest({ nodeId, output })}
-          onOpenEditOlt={(oltId) => {
-            setEditingOltId(oltId);
-            setOltDraftForPick(null);
-            setPickedCoordsForModal(null);
-            setIsOltManagerOpen(true);
-          }}
-          onUpdatePonPort={handleUpdatePonPort}
-          onOpenUpgradeModal={(node) => setUpgradeTargetNodeId(node.id)}
-          onQuickSpliceAndExtendCore={handleQuickSpliceAndExtendCore}
-          onRecalculateOpticalPower={handleRecalculateOpticalPower}
-          onRouteCableFromNode={(node) => {
-            setToolMode('connect_cable');
-            setConnectSourceNodeId(node.id);
-            setConnectTargetNodeId(null);
-            setDraftWaypoints([{ lat: node.lat, lng: node.lng }]);
-            setSelectedNodeId(null);
-            setSelectedCableId(null);
-            showToast(`A-Start set to "${node.name}". Click the next FDB / Joint Box on map to route outgoing cable.`);
-          }}
+          onOpenEditOlt={
+            canEditGis
+              ? (oltId) => {
+                  setEditingOltId(oltId);
+                  setOltDraftForPick(null);
+                  setPickedCoordsForModal(null);
+                  setIsOltManagerOpen(true);
+                }
+              : undefined
+          }
+          onUpdatePonPort={canEditGis ? handleUpdatePonPort : undefined}
+          onOpenUpgradeModal={canEditGis ? (node) => setUpgradeTargetNodeId(node.id) : undefined}
+          onQuickSpliceAndExtendCore={canEditGis ? handleQuickSpliceAndExtendCore : undefined}
+          onRecalculateOpticalPower={canEditGis ? handleRecalculateOpticalPower : undefined}
+          onDirtyChange={setIsInspectorDirty}
+          onRouteCableFromNode={
+            canEditGis
+              ? (node) => {
+                  setToolMode('connect_cable');
+                  setConnectSourceNodeId(node.id);
+                  setConnectTargetNodeId(null);
+                  setDraftWaypoints([{ lat: node.lat, lng: node.lng }]);
+                  setSelectedNodeId(null);
+                  setSelectedCableId(null);
+                  showToast(
+                    `A-Start set to "${node.name}". Click the next FDB / Joint Box on map to route outgoing cable.`
+                  );
+                }
+              : undefined
+          }
         />
       </div>
 
       {/* Quick Place Node Modal */}
-      {pendingPlaceCoords && (
+      {canEditGis && pendingPlaceCoords && (
         <div className="fixed inset-0 z-[9999] flex items-center justify-center bg-black/75 backdrop-blur-sm p-3 overflow-y-auto">
           <form
             onSubmit={handleCreatePendingNode}
@@ -3684,7 +4408,7 @@ export const FiberGisMapView: React.FC<FiberGisMapViewProps> = ({
 
       {/* Full Multi-OLT Manager Modal */}
       <OltManagerModal
-        isOpen={isOltManagerOpen}
+        isOpen={canEditGis && isOltManagerOpen}
         initialOltId={editingOltId}
         preservedDraft={oltDraftForPick}
         pickedCoords={pickedCoordsForModal}
@@ -3728,8 +4452,9 @@ export const FiberGisMapView: React.FC<FiberGisMapViewProps> = ({
 
       {/* Dual-Picker Fiber Cable Connection & Core Marking Modal */}
       <FiberConnectionModal
-        isOpen={isConnectionModalOpen}
+        isOpen={canEditGis && isConnectionModalOpen}
         nodes={nodes}
+        existingCables={cables}
         olts={olts}
         oltsById={oltsById}
         ponPortsByOltId={ponPortsByOltId}
@@ -3756,12 +4481,14 @@ export const FiberGisMapView: React.FC<FiberGisMapViewProps> = ({
             distanceMeters: payload.distanceMeters,
             cores: payload.cores,
             notes: payload.notes,
+            reuseExistingCableId: payload.reuseExistingCableId,
+            forceNewCable: payload.forceNewCable,
           });
         }}
       />
 
       {/* Persistent Supabase GIS SQL Setup Modal */}
-      {isSqlModalOpen && (
+      {canEditGis && isSqlModalOpen && (
         <div className="fixed inset-0 z-[9999] flex items-center justify-center bg-black/75 backdrop-blur-sm p-3 overflow-y-auto">
           <div className="w-[95vw] sm:w-full max-w-3xl max-h-[90vh] overflow-y-auto mx-auto my-auto rounded-2xl box-border bg-slate-900 border border-slate-700 p-4 sm:p-5 shadow-2xl space-y-3">
             <div className="flex items-center justify-between gap-2 pb-2 border-b border-slate-800">
@@ -3841,7 +4568,7 @@ export const FiberGisMapView: React.FC<FiberGisMapViewProps> = ({
 
       {/* Zero-Loss Deployed Equipment Replacement / Upgrade Modal */}
       <FiberEquipmentUpgradeModal
-        isOpen={Boolean(upgradeTargetNode)}
+        isOpen={canEditGis && Boolean(upgradeTargetNode)}
         node={upgradeTargetNode}
         allNodes={nodes}
         allCables={cables}
@@ -3857,7 +4584,7 @@ export const FiberGisMapView: React.FC<FiberGisMapViewProps> = ({
       />
 
       {/* Custom Area / Sector Zone Label Creation Modal */}
-      {pendingAreaZoneCoords && (
+      {canEditGis && pendingAreaZoneCoords && (
         <div className="fixed inset-0 z-50 bg-slate-950/75 backdrop-blur-sm flex items-center justify-center p-4">
           <form
             onSubmit={async (e) => {

@@ -28,8 +28,10 @@ import {
   getDefaultMaxOnuLimit,
   getFbtLegOutputs,
   getNodeTypeLabel,
+  groupParallelCablesByPair,
   inferSfpClassFromDbm,
   inferSplitterCategory,
+  isCoreLockedOrUsed,
   normalizeCableCores,
   resolveHopSpliceLoss,
 } from '../lib/fiberOpticEngine';
@@ -710,6 +712,7 @@ export function subscribeToGisRealtime(handlers: {
   onSplitterOutputDelta?: (eventType: GisRealtimeEventType, newRow?: any, oldRow?: any) => void;
   onStatusChange?: (status: GisRealtimeConnectionStatus) => void;
 }): () => void {
+  let isDisposed = false;
   handlers.onStatusChange?.('CONNECTING');
 
   const channelName = `fiber-gis-realtime-${Math.random().toString(36).slice(2, 8)}`;
@@ -720,6 +723,7 @@ export function subscribeToGisRealtime(handlers: {
       'postgres_changes',
       { event: '*', schema: 'public', table: 'gis_olts' },
       (payload) => {
+        if (isDisposed) return;
         handlers.onOltDelta?.(
           payload.eventType as GisRealtimeEventType,
           payload.new,
@@ -734,6 +738,7 @@ export function subscribeToGisRealtime(handlers: {
       'postgres_changes',
       { event: '*', schema: 'public', table: 'gis_olt_pon_ports' },
       (payload) => {
+        if (isDisposed) return;
         handlers.onPonPortDelta?.(
           payload.eventType as GisRealtimeEventType,
           payload.new,
@@ -748,6 +753,7 @@ export function subscribeToGisRealtime(handlers: {
       'postgres_changes',
       { event: '*', schema: 'public', table: 'gis_splitter_outputs' },
       (payload) => {
+        if (isDisposed) return;
         handlers.onSplitterOutputDelta?.(
           payload.eventType as GisRealtimeEventType,
           payload.new,
@@ -762,6 +768,7 @@ export function subscribeToGisRealtime(handlers: {
       'postgres_changes',
       { event: '*', schema: 'public', table: 'gis_nodes' },
       (payload) => {
+        if (isDisposed) return;
         handlers.onNodeDelta(
           payload.eventType as GisRealtimeEventType,
           payload.new,
@@ -773,6 +780,7 @@ export function subscribeToGisRealtime(handlers: {
       'postgres_changes',
       { event: '*', schema: 'public', table: 'gis_cables' },
       (payload) => {
+        if (isDisposed) return;
         handlers.onCableDelta(
           payload.eventType as GisRealtimeEventType,
           payload.new,
@@ -784,6 +792,7 @@ export function subscribeToGisRealtime(handlers: {
       'postgres_changes',
       { event: '*', schema: 'public', table: 'gis_fdb_ports' },
       (payload) => {
+        if (isDisposed) return;
         handlers.onPortDelta(
           payload.eventType as GisRealtimeEventType,
           payload.new,
@@ -792,6 +801,7 @@ export function subscribeToGisRealtime(handlers: {
       }
     )
     .subscribe((status) => {
+      if (isDisposed) return;
       if (status === 'SUBSCRIBED') {
         handlers.onStatusChange?.('SUBSCRIBED');
       } else if (status === 'TIMED_OUT' || status === 'CLOSED') {
@@ -802,6 +812,7 @@ export function subscribeToGisRealtime(handlers: {
     });
 
   return () => {
+    isDisposed = true;
     try {
       supabase.removeChannel(channel);
     } catch {
@@ -2613,3 +2624,204 @@ export async function replaceGisNodeEquipment(
     returnedItemName,
   };
 }
+
+/**
+ * Consolidates duplicate parallel cables between the same (Node A <-> Node B) pair into a single
+ * multi-core trunk cable, preserving all active/reserved core allocations and remapping any
+ * node references (`feed_cable_id`, `core_splices`, `internal_splitters`) cleanly in Supabase.
+ */
+export async function mergeDuplicateParallelCablesInDb(params: {
+  nodes: SupabaseGisNode[];
+  cables: SupabaseGisCable[];
+  updatedBy?: string;
+}): Promise<{
+  mergedPairsCount: number;
+  removedCableIds: string[];
+  updatedCables: SupabaseGisCable[];
+  updatedNodes: SupabaseGisNode[];
+}> {
+  const groups = groupParallelCablesByPair(params.cables).filter((g) => g.duplicateCount > 0);
+  if (groups.length === 0) {
+    return {
+      mergedPairsCount: 0,
+      removedCableIds: [],
+      updatedCables: params.cables,
+      updatedNodes: params.nodes,
+    };
+  }
+
+  let nextCables = params.cables.slice();
+  let nextNodes = params.nodes.slice();
+  const removedCableIds: string[] = [];
+  const nodeById: Record<string, SupabaseGisNode> = {};
+  for (const n of nextNodes) nodeById[n.id] = n;
+
+  for (const group of groups) {
+    const primary = group.primaryCable;
+    const duplicates = group.cables.slice(1);
+    const primaryCap = Math.max(1, Number(primary.cable_cores || 12));
+    const primaryCores = normalizeCableCores(
+      primaryCap,
+      primary.cores_allocation_json?.length
+        ? primary.cores_allocation_json
+        : primary.cores_tia598_json
+    ).slice();
+
+    // Map old (dupCableId:oldCoreNum) -> newCoreNum on primaryCable
+    const coreRemap: Record<string, number> = {};
+    const mergedDupIds: string[] = [];
+
+    for (const dup of duplicates) {
+      const dupCores = normalizeCableCores(
+        dup.cable_cores,
+        dup.cores_allocation_json?.length ? dup.cores_allocation_json : dup.cores_tia598_json
+      );
+      const activeDupCores = dupCores.filter((c) => isCoreLockedOrUsed(c));
+
+      // Check whether every active core on dup can fit into a free slot on primary
+      const candidateSlots: Array<{ dupCore: typeof dupCores[number]; targetSlotIdx: number }> = [];
+      const reservedIdx = new Set<number>();
+      let canFitAll = true;
+      for (const dc of activeDupCores) {
+        let slotIdx = -1;
+        // Prefer same core number if spare
+        const sameIdx = primaryCores.findIndex(
+          (pc, i) => pc.coreNumber === dc.coreNumber && !isCoreLockedOrUsed(pc) && !reservedIdx.has(i)
+        );
+        if (sameIdx >= 0) {
+          slotIdx = sameIdx;
+        } else {
+          slotIdx = primaryCores.findIndex(
+            (pc, i) => !isCoreLockedOrUsed(pc) && !reservedIdx.has(i)
+          );
+        }
+        if (slotIdx < 0) {
+          canFitAll = false;
+          break;
+        }
+        reservedIdx.add(slotIdx);
+        candidateSlots.push({ dupCore: dc, targetSlotIdx: slotIdx });
+      }
+
+      if (!canFitAll) continue;
+
+      for (const { dupCore, targetSlotIdx } of candidateSlots) {
+        const targetCoreNum = primaryCores[targetSlotIdx].coreNumber;
+        primaryCores[targetSlotIdx] = {
+          ...primaryCores[targetSlotIdx],
+          status: dupCore.status,
+          core_status: dupCore.core_status,
+          usage_type: dupCore.usage_type,
+          origin_olt_id: dupCore.origin_olt_id ?? null,
+          origin_pon_port_id: dupCore.origin_pon_port_id ?? null,
+          origin_olt_label: dupCore.origin_olt_label || '',
+          source_signal: dupCore.source_signal || '',
+          assigned_splitter_node_id: dupCore.assigned_splitter_node_id ?? null,
+          forwarded_to_area: dupCore.forwarded_to_area || '',
+          destination_target: dupCore.destination_target || '',
+          optical_power_dbm: dupCore.optical_power_dbm || '',
+          remarks: dupCore.remarks || `Merged from ${dup.name || `${dup.cable_cores}C span`}`,
+          destinationNote: dupCore.destinationNote || '',
+        };
+        coreRemap[`${dup.id}:${dupCore.coreNumber}`] = targetCoreNum;
+      }
+
+      mergedDupIds.push(dup.id);
+    }
+
+    if (mergedDupIds.length === 0) continue;
+
+    // 1. Save merged core allocations onto the primary cable
+    const savedPrimary = await updateGisCable(
+      primary.id,
+      {
+        cores_allocation_json: primaryCores,
+        cores_tia598_json: primaryCores,
+        updated_by: params.updatedBy || 'admin',
+      },
+      {
+        startNodeName: nodeById[primary.source_node_id]?.name,
+        endNodeName: nodeById[primary.target_node_id]?.name,
+      }
+    );
+    nextCables = nextCables.map((c) => (c.id === savedPrimary.id ? savedPrimary : c));
+
+    // 2. Remap any nodes referencing the removed duplicate cable IDs
+    const dupIdSet = new Set(mergedDupIds);
+    for (let i = 0; i < nextNodes.length; i++) {
+      const node = nextNodes[i];
+      let touched = false;
+      let nextFeedCableId = node.feed_cable_id;
+      let nextFeedCore = node.feed_core_number;
+
+      if (node.feed_cable_id && dupIdSet.has(node.feed_cable_id)) {
+        nextFeedCableId = primary.id;
+        nextFeedCore = coreRemap[`${node.feed_cable_id}:${node.feed_core_number || 1}`] || node.feed_core_number || 1;
+        touched = true;
+      }
+
+      const nextCoreSplices = Array.isArray(node.core_splices)
+        ? node.core_splices.map((sp) => {
+            let s = sp;
+            if (s.incoming_cable_id && dupIdSet.has(s.incoming_cable_id)) {
+              const mappedCore = coreRemap[`${s.incoming_cable_id}:${s.incoming_core_number}`] || s.incoming_core_number;
+              s = { ...s, incoming_cable_id: primary.id, incoming_core_number: mappedCore };
+              touched = true;
+            }
+            if (s.outgoing_cable_id && dupIdSet.has(s.outgoing_cable_id)) {
+              const mappedCore = coreRemap[`${s.outgoing_cable_id}:${s.outgoing_core_number || 1}`] || s.outgoing_core_number || 1;
+              s = { ...s, outgoing_cable_id: primary.id, outgoing_core_number: mappedCore };
+              touched = true;
+            }
+            return s;
+          })
+        : node.core_splices;
+
+      const nextSplitters = Array.isArray(node.internal_splitters)
+        ? node.internal_splitters.map((spl) => {
+            let nextSpl = spl;
+            if (spl.incoming_cable_id && dupIdSet.has(spl.incoming_cable_id)) {
+              const mappedCore = coreRemap[`${spl.incoming_cable_id}:${spl.incoming_core_number || 1}`] || spl.incoming_core_number || 1;
+              nextSpl = { ...nextSpl, incoming_cable_id: primary.id, incoming_core_number: mappedCore };
+              touched = true;
+            }
+            const nextLegs = (nextSpl.legs || []).map((leg) => {
+              if (leg.target_cable_id && dupIdSet.has(leg.target_cable_id)) {
+                const mappedCore = coreRemap[`${leg.target_cable_id}:${leg.target_core_number || 1}`] || leg.target_core_number || 1;
+                touched = true;
+                return { ...leg, target_cable_id: primary.id, target_core_number: mappedCore };
+              }
+              return leg;
+            });
+            return { ...nextSpl, legs: nextLegs };
+          })
+        : node.internal_splitters;
+
+      if (touched) {
+        const updatedNode = await updateGisNode(node.id, {
+          feed_cable_id: nextFeedCableId,
+          feed_core_number: nextFeedCore,
+          core_splices: nextCoreSplices,
+          internal_splitters: nextSplitters,
+          updated_by: params.updatedBy || 'admin',
+        });
+        nextNodes[i] = updatedNode;
+      }
+    }
+
+    // 3. Delete merged duplicate cables from Supabase
+    for (const dupId of mergedDupIds) {
+      await deleteGisCable(dupId);
+      removedCableIds.push(dupId);
+    }
+    nextCables = nextCables.filter((c) => !dupIdSet.has(c.id));
+  }
+
+  return {
+    mergedPairsCount: groups.length,
+    removedCableIds,
+    updatedCables: nextCables,
+    updatedNodes: nextNodes,
+  };
+}
+

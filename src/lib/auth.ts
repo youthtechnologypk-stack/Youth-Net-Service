@@ -1,6 +1,7 @@
 import { SystemRole, UserAccount } from '../types/auth';
 import { storageService } from '../services/storageService';
 import { supabase } from '../services/supabaseClient';
+import { normalizeGisMapPermission } from './gisAccessControl';
 import {
   USERS_STORAGE_KEY,
   AUTH_STORAGE_KEY,
@@ -183,6 +184,11 @@ export function getStoredUser(): UserAccount | null {
         isActive: u.isActive !== false,
         linkedAgentId: u.linkedAgentId,
         linkedCustomerId: u.linkedCustomerId,
+        can_access_gis_map:
+          typeof u.can_access_gis_map === 'boolean' ? u.can_access_gis_map : undefined,
+        gis_map_permission: u.gis_map_permission
+          ? normalizeGisMapPermission(u.gis_map_permission, u.can_access_gis_map, u.role)
+          : undefined,
         createdAt: u.createdAt || new Date().toISOString(),
       };
     }
@@ -351,6 +357,19 @@ export async function apiLogin(
         balance: Number(user.cash_in_hand || 0),
         email: user.username.includes('@') ? user.username : `${user.username}@youthnet.pk`,
         isActive: true,
+        can_access_gis_map:
+          user.role === 'ADMIN'
+            ? true
+            : user.role === 'CLIENT'
+            ? false
+            : typeof user.can_access_gis_map === 'boolean'
+            ? user.can_access_gis_map
+            : normalizeGisMapPermission(user.gis_map_permission, user.can_access_gis_map, user.role) !== 'none',
+        gis_map_permission: normalizeGisMapPermission(
+          user.gis_map_permission,
+          user.can_access_gis_map,
+          user.role
+        ),
         createdAt: user.created_at || new Date().toISOString(),
       };
 
