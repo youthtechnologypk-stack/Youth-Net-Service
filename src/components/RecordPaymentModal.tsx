@@ -17,6 +17,9 @@ import {
 import { Invoice, PaymentMethod } from '../types/isp';
 import { useCurrency } from '../context/CurrencyContext';
 import { useISP } from '../context/ISPContext';
+import { supabase, SupabasePortalUser } from '../services/supabaseClient';
+import { getStoredUser } from '../lib/auth';
+import { filterFieldAgentsForUser, isResellerUser } from '../lib/resellerEngine';
 
 export interface RecordPaymentModalProps {
   isOpen: boolean;
@@ -42,7 +45,8 @@ export const RecordPaymentModal: React.FC<RecordPaymentModalProps> = ({
   onPaymentRecorded,
 }) => {
   const { formatCurrency, currencySymbol } = useCurrency();
-  const { customers, agents } = useISP();
+  const { customers } = useISP();
+  const [scopedAgents, setScopedAgents] = useState<SupabasePortalUser[]>([]);
 
   // Find linked customer for PPPoE username
   const customer = customers.find(
@@ -66,23 +70,51 @@ export const RecordPaymentModal: React.FC<RecordPaymentModalProps> = ({
   const [isSubmitting, setIsSubmitting] = useState<boolean>(false);
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
 
+  // Fetch strictly scoped field agents for the active Master ISP / Dealer / Sub-Dealer
+  useEffect(() => {
+    if (!isOpen) return;
+    let cancelled = false;
+    const activeUser = getStoredUser();
+
+    supabase
+      .from('portal_users')
+      .select('*')
+      .order('full_name', { ascending: true })
+      .then(({ data }) => {
+        if (cancelled) return;
+        const allRows = Array.isArray(data) ? (data as SupabasePortalUser[]) : [];
+        const filtered = filterFieldAgentsForUser(allRows, activeUser, {
+          allPortalUsers: allRows,
+        });
+        setScopedAgents(filtered);
+      });
+
+    return () => {
+      cancelled = true;
+    };
+  }, [isOpen]);
+
   // Sync state whenever selected invoice opens
   useEffect(() => {
     if (invoice) {
+      const activeUser = getStoredUser();
+      const resellerSession = isResellerUser(activeUser);
       setAmountReceived(invoice.totalAmount);
       setPaymentDate(getInitialDateTime());
       setTransactionRef(`TXN-${Date.now().toString().slice(-6)}`);
       setErrorMessage(null);
-      // Pre-fill agent name if assigned
+      // Pre-fill agent name if assigned, else first scoped agent, else own counter
       if (invoice.agentName) {
         setCollectorName(invoice.agentName);
-      } else if (agents.length > 0) {
-        setCollectorName(agents[0].name);
+      } else if (scopedAgents.length > 0) {
+        setCollectorName(scopedAgents[0].full_name || scopedAgents[0].username);
+      } else if (resellerSession && activeUser) {
+        setCollectorName(activeUser.fullName || `@${activeUser.username} (Counter)`);
       } else {
         setCollectorName('Office Counter / Admin');
       }
     }
-  }, [invoice, agents]);
+  }, [invoice, scopedAgents]);
 
   if (!isOpen || !invoice || typeof document === 'undefined') return null;
 
@@ -281,17 +313,17 @@ export const RecordPaymentModal: React.FC<RecordPaymentModalProps> = ({
           {/* Quick Collector Preset Pills */}
           <div className="flex flex-wrap items-center gap-1.5 font-mono text-xs w-full min-w-0">
             <span className="text-slate-500">Quick Fill:</span>
-            {agents.slice(0, 3).map((a) => (
+            {scopedAgents.slice(0, 3).map((a) => (
               <button
                 type="button"
                 key={a.id}
                 onClick={() => {
-                  setCollectorName(a.name);
+                  setCollectorName(a.full_name || a.username);
                   setPaymentMethod('agent_cash');
                 }}
                 className="px-2 py-1 rounded-lg bg-slate-950 hover:bg-slate-800 text-slate-300 border border-slate-800 transition cursor-pointer"
               >
-                {a.name}
+                {a.full_name || a.username}
               </button>
             ))}
             <button

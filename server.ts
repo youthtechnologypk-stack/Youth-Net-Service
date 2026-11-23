@@ -64,11 +64,17 @@ import { runExpirySweep } from './src/server/expirySweepEngine.ts';
 import { createClient } from '@supabase/supabase-js';
 import { supabase as defaultSupabaseClient } from './src/services/supabaseClient.ts';
 import {
+  evaluateStrictPrepaidWalletGate,
+  formatInsufficientWalletError,
   getResellerTier,
   isVisibleToCurrentUser,
+  resolveActiveResellerIdForSubscriber,
   resolveResellerScope,
+  resolveTariffForProfile,
   ResellerScope,
+  TARIFF_NOT_CONFIGURED_ERROR,
 } from './src/lib/resellerEngine.ts';
+import { isExpiryOrBlockedProfile } from './src/lib/mikrotikProfileSync.ts';
 
 dotenv.config();
 
@@ -200,6 +206,373 @@ async function resolveServerResellerScope(req: Request): Promise<{
     return { scope: unrestricted, caller: null };
   }
 }
+
+interface ServerWalletGateResult {
+  allowed: boolean;
+  statusCode?: number;
+  error?: string;
+  serverDeducted?: boolean;
+  deductedAmount?: number;
+  resellerId?: string;
+  subscriberUsername?: string;
+  profileName?: string;
+}
+
+/**
+ * Server-side Prepaid Wallet Payment Gate:
+ * Enforces that NO MikroTik active package profile may be assigned or restored for
+ * a Dealer / Sub-Dealer subscriber until wholesale tariff payment is verified and
+ * deducted from the active reseller's wallet (`sub_dealer_id` first, else `dealer_id`).
+ *
+ * - If the frontend already completed an atomic deduction in `reseller_wallet_ledger`
+ *   within the last 90 seconds for the exact (reseller, subscriber, profile), accepts
+ *   without double-charging.
+ * - Otherwise verifies tariff + availableFunds on the server and atomically deducts
+ *   before forwarding to MikroTik RouterOS.
+ */
+async function enforceServerPrepaidWalletGate(
+  req: Request,
+  params: {
+    subscriberUsername?: string | null;
+    targetProfile?: string | null;
+    txType: 'USER_ACTIVATION' | 'RENEWAL_DEDUCTION';
+    explicitResellerId?: string | null;
+    isActivatingSecret?: boolean;
+  }
+): Promise<ServerWalletGateResult> {
+  const cleanProfile = String(params.targetProfile || '').trim();
+  const cleanUser = String(params.subscriberUsername || '').trim().toLowerCase();
+
+  // Suspending / isolating a user into EXPIRED-16-POOL or Expire is never blocked or charged
+  if (cleanProfile && isExpiryOrBlockedProfile(cleanProfile)) {
+    return { allowed: true };
+  }
+
+  const { caller } = await resolveServerResellerScope(req);
+
+  // Look up existing subscriber ownership in Supabase portal_users
+  let subscriberRow: Record<string, any> | null = null;
+  if (cleanUser) {
+    const { data } = await serverSupabase
+      .from('portal_users')
+      .select('id, username, dealer_id, sub_dealer_id, original_package_profile, package_profile_name, package_name, package_speed')
+      .ilike('username', cleanUser)
+      .limit(1)
+      .maybeSingle();
+    subscriberRow = data || null;
+  }
+
+  const effectiveProfile =
+    cleanProfile ||
+    String(
+      subscriberRow?.original_package_profile ||
+        subscriberRow?.package_profile_name ||
+        subscriberRow?.package_name ||
+        subscriberRow?.package_speed ||
+        ''
+    ).trim();
+
+  // If no active profile is being assigned/restored (e.g., password-only or comment-only edit), allow
+  if (!effectiveProfile && !params.isActivatingSecret) {
+    return { allowed: true };
+  }
+
+  const activeResellerId =
+    (params.explicitResellerId ? String(params.explicitResellerId) : null) ||
+    resolveActiveResellerIdForSubscriber(subscriberRow as any, caller as any);
+
+  // Master ISP direct subscriber operated by Master ISP staff -> no reseller wallet gate
+  if (!activeResellerId) {
+    return { allowed: true };
+  }
+
+  // Fetch live reseller account from Supabase
+  const { data: reseller, error: resErr } = await serverSupabase
+    .from('portal_users')
+    .select('*')
+    .eq('id', activeResellerId)
+    .maybeSingle();
+
+  if (resErr || !reseller) {
+    return {
+      allowed: false,
+      statusCode: 402,
+      error: resErr?.message || 'Active reseller account could not be verified.',
+    };
+  }
+
+  if (!getResellerTier(reseller)) {
+    return { allowed: true };
+  }
+
+  if (String(reseller.account_status || 'ACTIVE').toUpperCase() === 'SUSPENDED') {
+    return {
+      allowed: false,
+      statusCode: 403,
+      error: `Reseller account @${reseller.username} is currently SUSPENDED. Contact Master ISP Admin.`,
+    };
+  }
+
+  // Check if a verified ledger deduction already occurred in the last 90 seconds for this exact activation
+  if (cleanUser && effectiveProfile) {
+    const ninetySecAgoIso = new Date(Date.now() - 90_000).toISOString();
+    const { data: recentLedger } = await serverSupabase
+      .from('reseller_wallet_ledger')
+      .select('id, amount, tx_type, profile_name, created_at')
+      .eq('reseller_id', reseller.id)
+      .ilike('subscriber_username', cleanUser)
+      .in('tx_type', ['USER_ACTIVATION', 'RENEWAL_DEDUCTION'])
+      .gte('created_at', ninetySecAgoIso)
+      .order('created_at', { ascending: false })
+      .limit(5);
+
+    if (Array.isArray(recentLedger)) {
+      const matchedReceipt = recentLedger.find(
+        (row: any) =>
+          String(row.profile_name || '').trim().toLowerCase() === effectiveProfile.toLowerCase() &&
+          Number(row.amount || 0) < 0
+      );
+      if (matchedReceipt) {
+        return {
+          allowed: true,
+          serverDeducted: false,
+          resellerId: reseller.id,
+          subscriberUsername: cleanUser,
+          profileName: effectiveProfile,
+        };
+      }
+    }
+  }
+
+  // Fetch reseller tariffs and run strict wholesale & balance verification
+  const { data: tariffRows, error: tariffErr } = await serverSupabase
+    .from('reseller_tariffs')
+    .select('*')
+    .eq('reseller_id', reseller.id);
+
+  if (tariffErr) {
+    return {
+      allowed: false,
+      statusCode: 402,
+      error: TARIFF_NOT_CONFIGURED_ERROR,
+    };
+  }
+
+  const normalizedTariffs = ((tariffRows || []) as any[]).map((t) => ({
+    ...t,
+    profile_name: String(t.profile_name || t.package_name || t.mikrotik_profile || '').trim(),
+    wholesale_price: Number(t.wholesale_price ?? t.wholesale_rate ?? 0),
+    retail_price: Number(t.retail_price ?? t.retail_rate ?? 0),
+  }));
+
+  const { matchedTariff, wholesalePrice } = resolveTariffForProfile(
+    reseller.id,
+    effectiveProfile,
+    normalizedTariffs as any,
+    0
+  );
+
+  const walletBalance = Number(reseller.wallet_balance || 0);
+  const creditLimit = Math.max(0, Number(reseller.credit_limit || 0));
+
+  const gate = evaluateStrictPrepaidWalletGate({
+    walletBalance,
+    creditLimit,
+    matchedTariff: matchedTariff as any,
+  });
+
+  if (!gate.allowed) {
+    return {
+      allowed: false,
+      statusCode: 402,
+      error:
+        gate.error ||
+        (gate.tariffMissing
+          ? TARIFF_NOT_CONFIGURED_ERROR
+          : formatInsufficientWalletError(walletBalance + creditLimit, wholesalePrice)),
+    };
+  }
+
+  // Atomically deduct wholesale_price from portal_users.wallet_balance BEFORE MikroTik API call
+  const balanceAfter = Math.round((walletBalance - wholesalePrice) * 100) / 100;
+  if (wholesalePrice > 0) {
+    const { error: updErr } = await serverSupabase
+      .from('portal_users')
+      .update({ wallet_balance: balanceAfter })
+      .eq('id', reseller.id);
+
+    if (updErr) {
+      return {
+        allowed: false,
+        statusCode: 500,
+        error: `Failed to deduct reseller wallet balance: ${updErr.message}`,
+      };
+    }
+
+    const ledgerPayload: Record<string, any> = {
+      reseller_id: reseller.id,
+      reseller_name: reseller.full_name,
+      reseller_username: reseller.username,
+      tx_type: params.txType,
+      amount: -wholesalePrice,
+      balance_before: walletBalance,
+      balance_after: balanceAfter,
+      subscriber_username: cleanUser || 'unknown',
+      profile_name: effectiveProfile,
+      performed_by: caller?.username || reseller.username || 'SERVER_WALLET_GATE',
+      notes: `Server wallet gate ${params.txType} for @${cleanUser || 'unknown'} (${effectiveProfile})`,
+    };
+    const { error: ledErr } = await serverSupabase
+      .from('reseller_wallet_ledger')
+      .insert([ledgerPayload]);
+    if (ledErr) {
+      console.warn('[ServerWalletGate] Ledger insert notice:', ledErr.message);
+    }
+  }
+
+  return {
+    allowed: true,
+    serverDeducted: wholesalePrice > 0,
+    deductedAmount: wholesalePrice,
+    resellerId: reseller.id,
+    subscriberUsername: cleanUser,
+    profileName: effectiveProfile,
+  };
+}
+
+/**
+ * Automatic server-side refund when a MikroTik API call fails AFTER the server deducted wallet funds.
+ */
+async function refundServerPrepaidWalletGate(
+  gate: ServerWalletGateResult,
+  reason: string
+): Promise<void> {
+  if (!gate.serverDeducted || !gate.resellerId || !gate.deductedAmount || gate.deductedAmount <= 0) {
+    return;
+  }
+  try {
+    const { data: reseller } = await serverSupabase
+      .from('portal_users')
+      .select('id, full_name, username, wallet_balance')
+      .eq('id', gate.resellerId)
+      .maybeSingle();
+    if (!reseller) return;
+
+    const before = Number(reseller.wallet_balance || 0);
+    const after = Math.round((before + gate.deductedAmount) * 100) / 100;
+    await serverSupabase
+      .from('portal_users')
+      .update({ wallet_balance: after })
+      .eq('id', reseller.id);
+
+    await serverSupabase.from('reseller_wallet_ledger').insert([
+      {
+        reseller_id: reseller.id,
+        reseller_name: reseller.full_name,
+        reseller_username: reseller.username,
+        tx_type: 'REFUND',
+        amount: gate.deductedAmount,
+        balance_before: before,
+        balance_after: after,
+        subscriber_username: gate.subscriberUsername || 'unknown',
+        profile_name: gate.profileName || '',
+        performed_by: 'SERVER_AUTO_REFUND',
+        notes: `Auto-refund (MikroTik RouterOS failed): ${reason}`,
+      },
+    ]);
+  } catch (err: any) {
+    console.error('[ServerWalletGate] Refund error:', err?.message || err);
+  }
+}
+
+/**
+ * POST /api/reseller/wallet/preview
+ * Read-only prepaid tariff & wallet verification preview for Provision / Restore modals.
+ */
+app.post('/api/reseller/wallet/preview', async (req: Request, res: Response) => {
+  try {
+    const profileName = String(req.body?.profileName || '').trim();
+    const subscriberUsername = String(req.body?.subscriberUsername || '').trim().toLowerCase();
+    const explicitResellerId = req.body?.resellerId ? String(req.body.resellerId).trim() : null;
+
+    if (!profileName) {
+      return res.status(400).json({ success: false, error: 'profileName is required.' });
+    }
+
+    const { caller } = await resolveServerResellerScope(req);
+    let subscriberRow: Record<string, any> | null = null;
+    if (!explicitResellerId && subscriberUsername) {
+      const { data } = await serverSupabase
+        .from('portal_users')
+        .select('sub_dealer_id, dealer_id')
+        .ilike('username', subscriberUsername)
+        .limit(1)
+        .maybeSingle();
+      subscriberRow = data || null;
+    }
+
+    const activeResellerId =
+      explicitResellerId ||
+      resolveActiveResellerIdForSubscriber(subscriberRow as any, caller as any);
+
+    if (!activeResellerId) {
+      return res.json({ success: true, applicable: false, allowed: true, blocked: false });
+    }
+
+    const [{ data: reseller }, { data: tariffRows }] = await Promise.all([
+      serverSupabase.from('portal_users').select('*').eq('id', activeResellerId).maybeSingle(),
+      serverSupabase.from('reseller_tariffs').select('*').eq('reseller_id', activeResellerId),
+    ]);
+
+    if (!reseller || !getResellerTier(reseller)) {
+      return res.json({ success: true, applicable: false, allowed: true, blocked: false });
+    }
+
+    const normalizedTariffs = ((tariffRows || []) as any[]).map((t) => ({
+      ...t,
+      profile_name: String(t.profile_name || t.package_name || t.mikrotik_profile || '').trim(),
+      wholesale_price: Number(t.wholesale_price ?? t.wholesale_rate ?? 0),
+      retail_price: Number(t.retail_price ?? t.retail_rate ?? 0),
+    }));
+
+    const { matchedTariff, wholesalePrice, retailPrice } = resolveTariffForProfile(
+      reseller.id,
+      profileName,
+      normalizedTariffs as any,
+      0
+    );
+
+    const walletBalance = Number(reseller.wallet_balance || 0);
+    const creditLimit = Math.max(0, Number(reseller.credit_limit || 0));
+    const gate = evaluateStrictPrepaidWalletGate({
+      walletBalance,
+      creditLimit,
+      matchedTariff: matchedTariff as any,
+    });
+
+    return res.json({
+      success: true,
+      applicable: true,
+      allowed: gate.allowed,
+      blocked: !gate.allowed,
+      tariffMissing: Boolean(gate.tariffMissing),
+      insufficientFunds: gate.insufficientFunds,
+      resellerId: reseller.id,
+      resellerName: reseller.full_name || reseller.username,
+      resellerUsername: reseller.username,
+      profileName,
+      wholesalePrice: matchedTariff ? wholesalePrice : 0,
+      retailPrice: matchedTariff ? retailPrice : 0,
+      walletBalance,
+      creditLimit,
+      availableFunds: walletBalance + creditLimit,
+      projectedBalanceAfter: gate.projectedBalanceAfter,
+      error: gate.allowed ? null : gate.error || TARIFF_NOT_CONFIGURED_ERROR,
+    });
+  } catch (err: any) {
+    return res.status(500).json({ success: false, error: err?.message || 'Wallet preview failed' });
+  }
+});
 
 // ============================================================================
 // API ROUTES: /api/routers & /api/mikrotik
@@ -1698,6 +2071,23 @@ app.post('/api/mikrotik/users', async (req: Request, res: Response) => {
       }
     }
 
+    // 0. MANDATORY SERVER-SIDE PREPAID WALLET PAYMENT GATE FOR DEALERS & SUB-DEALERS
+    const serverWalletGate = await enforceServerPrepaidWalletGate(req, {
+      subscriberUsername: finalUsername,
+      targetProfile: finalProfile,
+      txType: 'USER_ACTIVATION',
+      explicitResellerId: req.body?.subDealerId || req.body?.dealerId || null,
+      isActivatingSecret: true,
+    });
+
+    if (!serverWalletGate.allowed) {
+      return res.status(serverWalletGate.statusCode || 402).json({
+        success: false,
+        walletGateBlocked: true,
+        error: serverWalletGate.error || 'Prepaid wallet payment gate blocked activation.',
+      });
+    }
+
     // 1. Try Provisioning on Physical MikroTik Router via RouterOS API (/ppp/secret/add) with 3s timeout
     let physicalProvisioned = false;
     let mikrotikId: string | undefined;
@@ -1724,8 +2114,26 @@ app.post('/api/mikrotik/users', async (req: Request, res: Response) => {
         if (routerOsRes.success) {
           physicalProvisioned = true;
           mikrotikId = routerOsRes.id;
+        } else if (serverWalletGate.serverDeducted) {
+          await refundServerPrepaidWalletGate(
+            serverWalletGate,
+            routerOsRes.error || 'MikroTik /ppp/secret/add rejected request'
+          );
+          return res.status(502).json({
+            success: false,
+            refunded: true,
+            error: `MikroTik activation failed (${routerOsRes.error || 'Router rejected secret'}). Wallet charge was automatically refunded.`,
+          });
         }
       } catch (err: any) {
+        if (serverWalletGate.serverDeducted) {
+          await refundServerPrepaidWalletGate(serverWalletGate, err?.message || 'MikroTik unreachable');
+          return res.status(502).json({
+            success: false,
+            refunded: true,
+            error: `MikroTik unreachable (${err?.message || 'timeout'}). Wallet charge was automatically refunded.`,
+          });
+        }
         console.warn(`[Hybrid Mode] Physical MikroTik push skipped on ${creds.host}:`, err.message);
       }
     }
@@ -2114,6 +2522,49 @@ app.all('/api/mikrotik/*', async (req: Request, res: Response) => {
   const queryString = req.url.includes('?') ? req.url.slice(req.url.indexOf('?')) : '';
   const targetUrl = `${protocol}://${targetHost}:${targetPort}/rest/${subpath}${queryString}`;
 
+  // MANDATORY SERVER-SIDE PREPAID WALLET PAYMENT GATE ON ALL /ppp/secret MUTATIONS
+  let proxyWalletGate: ServerWalletGateResult | null = null;
+  const cleanSubpath = subpath.replace(/^\/+/, '').toLowerCase();
+  const isPppSecretMutation =
+    ['POST', 'PUT', 'PATCH'].includes(req.method.toUpperCase()) &&
+    (cleanSubpath === 'ppp/secret' ||
+      cleanSubpath === 'ppp/secret/add' ||
+      cleanSubpath === 'ppp/secret/set' ||
+      cleanSubpath.startsWith('ppp/secret/'));
+
+  if (isPppSecretMutation && !cleanSubpath.endsWith('/print') && !cleanSubpath.endsWith('/remove')) {
+    const bodyObj = req.body && typeof req.body === 'object' ? req.body : {};
+    const targetProfile = String(bodyObj.profile || '').trim();
+    const isEnabling = bodyObj.disabled === 'false' || bodyObj.disabled === false;
+    const isCreatingSecret =
+      cleanSubpath === 'ppp/secret/add' ||
+      (cleanSubpath === 'ppp/secret' && (req.method.toUpperCase() === 'PUT' || req.method.toUpperCase() === 'POST'));
+    const subscriberHeader = String(req.headers['x-subscriber-username'] || '').trim();
+    const subscriberFromBody = String(bodyObj.name || bodyObj.numbers || '').trim();
+    const candidateUsername =
+      subscriberHeader ||
+      (subscriberFromBody && !subscriberFromBody.startsWith('*') ? subscriberFromBody : '');
+
+    // Enforce gate whenever assigning a non-expiry profile, creating a secret, or re-enabling a secret
+    if ((targetProfile && !isExpiryOrBlockedProfile(targetProfile)) || isCreatingSecret || isEnabling) {
+      proxyWalletGate = await enforceServerPrepaidWalletGate(req, {
+        subscriberUsername: candidateUsername,
+        targetProfile: targetProfile || undefined,
+        txType: isCreatingSecret ? 'USER_ACTIVATION' : 'RENEWAL_DEDUCTION',
+        isActivatingSecret: isCreatingSecret || isEnabling,
+      });
+
+      if (!proxyWalletGate.allowed) {
+        res.status(proxyWalletGate.statusCode || 402).json({
+          success: false,
+          walletGateBlocked: true,
+          error: proxyWalletGate.error || 'Prepaid wallet payment gate blocked MikroTik package assignment.',
+        });
+        return;
+      }
+    }
+  }
+
   try {
     let authHeader = req.headers['authorization'] as string | undefined;
     if (!authHeader || !authHeader.startsWith('Basic ')) {
@@ -2171,6 +2622,9 @@ app.all('/api/mikrotik/*', async (req: Request, res: Response) => {
     res.setHeader('Pragma', 'no-cache');
 
     if (mikrotikRes.status === 401) {
+      if (proxyWalletGate?.serverDeducted) {
+        await refundServerPrepaidWalletGate(proxyWalletGate, 'Router authentication failed (401)');
+      }
       res.removeHeader('www-authenticate');
       res.removeHeader('WWW-Authenticate');
       res.status(401).json({
@@ -2181,12 +2635,22 @@ app.all('/api/mikrotik/*', async (req: Request, res: Response) => {
       return;
     }
 
+    const body = await mikrotikRes.text();
+    if (!mikrotikRes.ok && proxyWalletGate?.serverDeducted) {
+      await refundServerPrepaidWalletGate(
+        proxyWalletGate,
+        `MikroTik returned HTTP ${mikrotikRes.status}: ${body.slice(0, 120)}`
+      );
+    }
+
     res.status(mikrotikRes.status);
     const contentType = mikrotikRes.headers.get('content-type');
     if (contentType) res.setHeader('content-type', contentType);
-    const body = await mikrotikRes.text();
     res.send(body);
   } catch (err: any) {
+    if (proxyWalletGate?.serverDeducted) {
+      await refundServerPrepaidWalletGate(proxyWalletGate, err?.message || 'Router proxy timeout');
+    }
     res.removeHeader('www-authenticate');
     res.removeHeader('WWW-Authenticate');
     res.status(502).json({

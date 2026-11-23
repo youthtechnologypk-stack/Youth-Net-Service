@@ -25,6 +25,7 @@ import { PermissionMatrixStudio } from './PermissionMatrixStudio';
 import { SubscriberProfileView } from './SubscriberProfileView';
 import { AgentProfileView } from './AgentProfileView';
 import { EditStaffModal } from './EditStaffModal';
+import { AddScopedFieldAgentModal } from './AddScopedFieldAgentModal';
 import { buildStandardWhatsAppCredentialText, getPortalUrlForRole } from '../services/authUtils';
 import { RealMikrotikSubscriber, fetchLiveMikrotikSubscribers } from '../services/mikrotikSubscriberSync';
 import { supabase, SupabasePortalUser } from '../services/supabaseClient';
@@ -103,6 +104,7 @@ export const UserAccountsView: React.FC<UserAccountsViewProps> = ({
   const [isResetModalOpen, setIsResetModalOpen] = useState(false);
   const [isWhatsAppModalOpen, setIsWhatsAppModalOpen] = useState(false);
   const [isAddPppoeModalOpen, setIsAddPppoeModalOpen] = useState(false);
+  const [isAddScopedAgentModalOpen, setIsAddScopedAgentModalOpen] = useState(false);
 
   // Selected user for modals
   const [selectedUser, setSelectedUser] = useState<UserAccount | null>(null);
@@ -480,7 +482,7 @@ export const UserAccountsView: React.FC<UserAccountsViewProps> = ({
             </p>
           </div>
 
-          <div className="flex items-center gap-2.5">
+          <div className="flex flex-wrap items-center gap-2.5">
             <button
               onClick={() => setIsAddPppoeModalOpen(true)}
               className="flex items-center gap-1.5 bg-gradient-to-r from-cyan-600 via-blue-600 to-indigo-600 hover:from-cyan-500 hover:to-indigo-500 text-slate-950 font-bold text-xs px-4 py-2 rounded-xl transition shadow-lg shadow-cyan-950/40 cursor-pointer active:scale-95"
@@ -489,7 +491,16 @@ export const UserAccountsView: React.FC<UserAccountsViewProps> = ({
               <Radio className="w-3.5 h-3.5" />
               <span>{isResellerView ? '+ Add Subscriber' : '+ MikroTik PPPoE'}</span>
             </button>
-            {!isResellerView && (
+            {isResellerView ? (
+              <button
+                type="button"
+                onClick={() => setIsAddScopedAgentModalOpen(true)}
+                className="flex items-center gap-1.5 bg-slate-800 hover:bg-slate-700 text-slate-100 border border-slate-700 font-bold text-xs px-4 py-2 rounded-xl transition shadow-sm cursor-pointer active:scale-95"
+              >
+                <UserCheck className="w-4 h-4 text-emerald-400" />
+                <span>+ Add Field Agent</span>
+              </button>
+            ) : (
               <button
                 onClick={() => setIsCreateModalOpen(true)}
                 className="flex items-center gap-1.5 bg-slate-800 hover:bg-slate-700 text-slate-100 border border-slate-700 font-bold text-xs px-4 py-2 rounded-xl transition shadow-sm cursor-pointer active:scale-95"
@@ -725,6 +736,19 @@ export const UserAccountsView: React.FC<UserAccountsViewProps> = ({
           subscribers={liveSubscribers}
         />
       )}
+
+      {/* A2. Create Scoped Field Agent Modal (Dealers & Sub-Dealers) */}
+      <AddScopedFieldAgentModal
+        isOpen={isAddScopedAgentModalOpen}
+        onClose={() => setIsAddScopedAgentModalOpen(false)}
+        currentUser={activeUser}
+        onSuccess={(created) => {
+          setActionNotice(`Field Agent ${created.full_name} (@${created.username}) created under your account.`);
+          setTimeout(() => setActionNotice(null), 5000);
+          setRefreshTrigger((prev) => prev + 1);
+          void refreshMetrics();
+        }}
+      />
 
       {/* B. Edit Staff Profile Modal (for Field Agents & Managers) */}
       <EditStaffModal

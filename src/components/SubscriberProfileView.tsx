@@ -72,10 +72,12 @@ import {
   NetworkAreaNode,
   PARENT_FLEET_ROUTER,
   safeInsertInvoiceInSupabase,
+  syncMikrotikSecretProfile,
+  kickMikrotikActiveSessionForUser,
 } from '../lib/billingAndNetwork';
+import { isExpiryOrBlockedProfile } from '../lib/mikrotikProfileSync';
 import { buildWhatsAppUrl } from '../lib/whatsappBilling';
 import {
-  FIELD_STAFF_ROLES,
   computeBillingAnchorDay,
   computeNextBillingDateFromInstall,
   extractYmdString,
@@ -91,12 +93,18 @@ import {
 } from '../lib/staffPermissions';
 import {
   buildOwnershipStamp,
+  checkAndDeductResellerWallet,
   doesSubscriberMatchScope,
+  filterFieldAgentsForUser,
   getResellerTier,
   isResellerUser,
+  refundResellerWallet,
+  resolveActiveResellerIdForSubscriber,
   resolveResellerScope,
   stampOwnershipOnPortalUserAndInvoices,
+  WalletGatePreviewResult,
 } from '../lib/resellerEngine';
+import { ResellerWalletGatePreview } from './ResellerWalletGatePreview';
 
 export interface SubscriberProfileViewProps {
   username: string;
@@ -211,11 +219,41 @@ export const SubscriberProfileView: React.FC<SubscriberProfileViewProps> = ({
     assignedOwnerId: '',
   });
   const [isSavingEdit, setIsSavingEdit] = useState<boolean>(false);
+  const [editWalletStatus, setEditWalletStatus] = useState<WalletGatePreviewResult | null>(null);
+  const [editWalletError, setEditWalletError] = useState<string | null>(null);
+  const [paymentWalletStatus, setPaymentWalletStatus] = useState<WalletGatePreviewResult | null>(null);
+  const [paymentWalletError, setPaymentWalletError] = useState<string | null>(null);
   const [allResellers, setAllResellers] = useState<SupabasePortalUser[]>([]);
   const isAdminSession = useMemo(() => {
     const u = getStoredUser();
     return String(u?.role || '').toUpperCase() === 'ADMIN' && !isResellerUser(u);
   }, []);
+  const activeOwnerResellerId = useMemo(
+    () => resolveActiveResellerIdForSubscriber(user, getStoredUser()),
+    [user]
+  );
+  const editRequiresWalletGate = useMemo(() => {
+    if (!activeOwnerResellerId) return false;
+    const targetPkg = String(editForm.packageSpeed || '').trim();
+    const currentPkg = String(
+      liveSecretProfile || mikrotikSecret?.profile || user?.original_package_profile || user?.package_speed || ''
+    ).trim();
+    const isTargetExpiry = !targetPkg || isExpiryOrBlockedProfile(targetPkg);
+    const packageChangedToActivePlan =
+      Boolean(targetPkg) &&
+      !isTargetExpiry &&
+      targetPkg.toLowerCase() !== currentPkg.toLowerCase();
+    const prevStatus = String(user?.account_status || '').toUpperCase();
+    const wasSuspendedOrExpired =
+      prevStatus === 'EXPIRED' ||
+      prevStatus === 'SUSPENDED' ||
+      mikrotikSecret?.disabled === 'true' ||
+      mikrotikSecret?.disabled === true ||
+      isExpiryOrBlockedProfile(currentPkg);
+    const restoringToActive =
+      editForm.accountStatus === 'ACTIVE' && wasSuspendedOrExpired && !isTargetExpiry;
+    return packageChangedToActivePlan || restoringToActive;
+  }, [activeOwnerResellerId, editForm.packageSpeed, editForm.accountStatus, liveSecretProfile, mikrotikSecret, user]);
 
   const editAnchorDay = useMemo(
     () =>
@@ -442,14 +480,18 @@ export const SubscriberProfileView: React.FC<SubscriberProfileViewProps> = ({
         setTickets(uniqueTickets);
       }
 
-      // 1.7 Fetch Portal Agents for assignment dropdowns
-      const { data: agentsData } = await supabase
+      // 1.7 Fetch Portal Agents strictly scoped to the logged-in Master ISP / Dealer / Sub-Dealer
+      const { data: allAgentsScan } = await supabase
         .from('portal_users')
-        .select('id, full_name, username, area, role')
-        .in('role', [...FIELD_STAFF_ROLES]);
+        .select('*')
+        .order('full_name', { ascending: true });
 
-      if (agentsData) {
-        setPortalAgents(agentsData as SupabasePortalUser[]);
+      if (Array.isArray(allAgentsScan)) {
+        const allRows = allAgentsScan as SupabasePortalUser[];
+        const scopedAgents = filterFieldAgentsForUser(allRows, getStoredUser(), {
+          allPortalUsers: allRows,
+        });
+        setPortalAgents(scopedAgents);
       }
 
       // 1.7a Lookup GIS FDB Port & Node assignment for real FAT / DP location
@@ -902,15 +944,80 @@ export const SubscriberProfileView: React.FC<SubscriberProfileViewProps> = ({
     }
   };
 
-  // Action 3: Save Edited Customer Details
+  // Action 3: Save Edited Customer Details (with Prepaid Reseller Wallet Payment Gate on Package Change / Restore)
   const handleSaveCustomer = async (e: React.FormEvent) => {
     e.preventDefault();
+    setEditWalletError(null);
+
+    if (editRequiresWalletGate && editWalletStatus?.blocked) {
+      const msg =
+        editWalletStatus.error || 'Prepaid reseller wallet gate blocked this package assignment.';
+      setEditWalletError(msg);
+      showToast(msg, 'error');
+      return;
+    }
+
     setIsSavingEdit(true);
+    let chargedAmount = 0;
+    const actingUser = getStoredUser();
+
     try {
       const normalizedInstallDate =
         extractYmdString(editForm.installationDate) || new Date().toISOString().slice(0, 10);
       const anchorDay = computeBillingAnchorDay({ installation_date: normalizedInstallDate });
       const nextBillingDate = computeNextBillingDateFromInstall(normalizedInstallDate, anchorDay);
+      const targetPackageProfile = String(editForm.packageSpeed || '').trim();
+
+      // STRICT PREPAID WALLET PAYMENT GATE BEFORE CHANGING PACKAGE OR RESTORING ACTIVE STATUS
+      if (editRequiresWalletGate && activeOwnerResellerId && targetPackageProfile) {
+        const walletCheck = await checkAndDeductResellerWallet({
+          resellerId: activeOwnerResellerId,
+          profileName: targetPackageProfile,
+          subscriberUsername: cleanUsername,
+          txType: 'RENEWAL_DEDUCTION',
+          performedBy: actingUser?.fullName || actingUser?.username || 'Subscriber Profile Desk',
+          notes: `Subscriber 360 package/restore update for @${cleanUsername} -> ${targetPackageProfile}`,
+        });
+
+        if (!walletCheck.ok) {
+          const msg =
+            walletCheck.error || 'Insufficient Dealer Wallet Balance. Package update blocked.';
+          setEditWalletError(msg);
+          showToast(msg, 'error');
+          setIsSavingEdit(false);
+          return;
+        }
+        chargedAmount = Number(walletCheck.chargedAmount || 0);
+
+        const mkRes = await syncMikrotikSecretProfile(
+          cleanUsername,
+          targetPackageProfile,
+          { disabled: 'false' },
+          activeRouter
+        );
+        if (!mkRes.ok) {
+          let refundMsg = '';
+          if (chargedAmount > 0) {
+            const refundRes = await refundResellerWallet({
+              resellerId: activeOwnerResellerId,
+              amount: chargedAmount,
+              profileName: targetPackageProfile,
+              subscriberUsername: cleanUsername,
+              performedBy: actingUser?.fullName || actingUser?.username || 'System Auto-Refund',
+              reason: `Auto-refund: MikroTik profile update failed for @${cleanUsername} (${(mkRes as any).error || 'Router error'})`,
+            });
+            refundMsg = refundRes.ok
+              ? ` Wallet automatically refunded Rs. ${chargedAmount.toLocaleString()}.`
+              : ` Refund warning: ${refundRes.error || 'Please reconcile wallet.'}`;
+          }
+          const failMsg = `${(mkRes as any).error || 'MikroTik profile sync failed.'}${refundMsg}`;
+          setEditWalletError(failMsg);
+          showToast(failMsg, 'error');
+          setIsSavingEdit(false);
+          return;
+        }
+        await kickMikrotikActiveSessionForUser(cleanUsername, activeRouter).catch(() => {});
+      }
 
       const baseUpdatePayload: Partial<SupabasePortalUser> = {
         full_name: editForm.fullName,
@@ -930,6 +1037,13 @@ export const SubscriberProfileView: React.FC<SubscriberProfileViewProps> = ({
         drop_wire_meters: Number(editForm.dropWireMeters),
         fiber_box_location: editForm.fiberBoxLocation,
         patch_cord_qty: Number(editForm.patchCordQty),
+        ...(editRequiresWalletGate && targetPackageProfile
+          ? {
+              original_package_profile: targetPackageProfile,
+              package_profile_name: targetPackageProfile,
+              is_suspended: false,
+            }
+          : {}),
       };
 
       const extendedPayload: Partial<SupabasePortalUser> = {
@@ -973,6 +1087,7 @@ export const SubscriberProfileView: React.FC<SubscriberProfileViewProps> = ({
       setIsEditUserModalOpen(false);
       await fetchAllProfileData();
     } catch (err: any) {
+      setEditWalletError(err?.message || 'Update failed.');
       showToast(`Update error: ${err.message}`, 'error');
     } finally {
       setIsSavingEdit(false);
@@ -1147,16 +1262,26 @@ export const SubscriberProfileView: React.FC<SubscriberProfileViewProps> = ({
           anchorDay
         );
       }
+      setPaymentWalletError(null);
       if (newStatus === 'PAID') {
+        if (paymentWalletStatus?.blocked) {
+          const msg =
+            paymentWalletStatus.error || 'Insufficient Dealer Wallet Balance. Renewal blocked.';
+          setPaymentWalletError(msg);
+          showToast(msg, 'error');
+          return;
+        }
         const restoreRes = await restoreSubscriberOnInvoicePaid(cleanUsername, {
           triggeredBy: 'ADMIN',
+          performedBy: getStoredUser()?.fullName || getStoredUser()?.username || 'Subscriber 360 Desk',
           notes: `Payment recorded via 360 Profile on Invoice #${inv.invoice_no}`,
+          activeRouter,
         });
-        if (restoreRes.insufficientWalletFunds || (!restoreRes.success && restoreRes.error)) {
-          showToast(
-            restoreRes.error || 'Insufficient Dealer Wallet Balance. Renewal blocked.',
-            'error'
-          );
+        if (restoreRes.insufficientWalletFunds || !restoreRes.success) {
+          const msg =
+            restoreRes.error || 'Insufficient Dealer Wallet Balance. Renewal blocked.';
+          setPaymentWalletError(msg);
+          showToast(msg, 'error');
           return;
         }
       }
@@ -2768,23 +2893,51 @@ export const SubscriberProfileView: React.FC<SubscriberProfileViewProps> = ({
                 </div>
               </div>
 
+              {editRequiresWalletGate && activeOwnerResellerId && (
+                <ResellerWalletGatePreview
+                  resellerId={activeOwnerResellerId}
+                  subscriberUsername={cleanUsername}
+                  profileName={editForm.packageSpeed}
+                  actionLabel="package update"
+                  compact
+                  onStatusChange={setEditWalletStatus}
+                />
+              )}
+
+              {editWalletError && (
+                <div className="rounded-xl border border-rose-500/70 bg-rose-950/90 px-3 py-2.5 text-xs font-semibold text-rose-200 flex items-start gap-2">
+                  <AlertTriangle className="w-4 h-4 text-rose-400 shrink-0 mt-0.5" />
+                  <span>{editWalletError}</span>
+                </div>
+              )}
+
               <div className="flex items-center justify-end gap-2.5 pt-3 border-t border-slate-800">
                 <button
                   type="button"
-                  onClick={() => setIsEditUserModalOpen(false)}
+                  onClick={() => {
+                    setEditWalletError(null);
+                    setIsEditUserModalOpen(false);
+                  }}
                   className="px-4 py-2 bg-slate-800 hover:bg-slate-700 text-slate-300 rounded-lg transition cursor-pointer"
                 >
                   Cancel
                 </button>
                 <button
                   type="submit"
-                  disabled={isSavingEdit}
-                  className="px-5 py-2 bg-cyan-600 hover:bg-cyan-500 text-slate-950 font-bold rounded-lg transition shadow flex items-center gap-1.5 cursor-pointer"
+                  disabled={
+                    isSavingEdit || Boolean(editRequiresWalletGate && editWalletStatus?.blocked)
+                  }
+                  className="px-5 py-2 bg-cyan-600 hover:bg-cyan-500 disabled:opacity-50 disabled:cursor-not-allowed text-slate-950 font-bold rounded-lg transition shadow flex items-center gap-1.5 cursor-pointer"
                 >
                   {isSavingEdit ? (
                     <>
                       <RefreshCw className="w-4 h-4 animate-spin" />
                       <span>Saving...</span>
+                    </>
+                  ) : editRequiresWalletGate && editWalletStatus?.blocked ? (
+                    <>
+                      <AlertTriangle className="w-4 h-4" />
+                      <span>Wallet Payment Gate Blocked</span>
                     </>
                   ) : (
                     <span>Save Changes</span>
@@ -3158,18 +3311,69 @@ export const SubscriberProfileView: React.FC<SubscriberProfileViewProps> = ({
                   </select>
                 </div>
 
+                {Number(selectedInvoiceForPayment.paid_amount || 0) +
+                  (Number(paymentAmountInput) || 0) >=
+                  Number(selectedInvoiceForPayment.amount || 0) && (
+                  <ResellerWalletGatePreview
+                    resellerId={activeOwnerResellerId}
+                    subscriberUsername={cleanUsername}
+                    profileName={
+                      selectedInvoiceForPayment.package_profile ||
+                      selectedInvoiceForPayment.package_name ||
+                      user?.original_package_profile ||
+                      user?.package_profile_name ||
+                      user?.package_speed ||
+                      effectivePackage
+                    }
+                    actionLabel="renewal"
+                    compact
+                    onStatusChange={setPaymentWalletStatus}
+                  />
+                )}
+
+                {paymentWalletError && (
+                  <div className="rounded-xl border border-rose-500/70 bg-rose-950/90 px-3 py-2.5 text-xs font-semibold text-rose-200 flex items-start gap-2">
+                    <AlertTriangle className="w-4 h-4 text-rose-400 shrink-0 mt-0.5" />
+                    <span>{paymentWalletError}</span>
+                  </div>
+                )}
+
                 <div className="flex flex-col gap-2 pt-2 border-t border-slate-800 w-full min-w-0">
                   <button
                     type="button"
                     onClick={handleConfirmPayment}
-                    className="w-full min-w-0 py-3 px-4 bg-emerald-600 hover:bg-emerald-500 text-white font-bold rounded-xl text-base transition shadow flex items-center justify-center gap-1.5 cursor-pointer"
+                    disabled={
+                      Number(paymentAmountInput) <= 0 ||
+                      Boolean(
+                        Number(selectedInvoiceForPayment.paid_amount || 0) +
+                          (Number(paymentAmountInput) || 0) >=
+                          Number(selectedInvoiceForPayment.amount || 0) &&
+                          paymentWalletStatus?.blocked
+                      )
+                    }
+                    className="w-full min-w-0 py-3 px-4 bg-emerald-600 hover:bg-emerald-500 disabled:opacity-50 disabled:cursor-not-allowed text-white font-bold rounded-xl text-base transition shadow flex items-center justify-center gap-1.5 cursor-pointer"
                   >
-                    <CheckCircle2 className="w-4 h-4 shrink-0" />
-                    <span>Confirm &amp; Save Payment</span>
+                    {Number(selectedInvoiceForPayment.paid_amount || 0) +
+                      (Number(paymentAmountInput) || 0) >=
+                      Number(selectedInvoiceForPayment.amount || 0) &&
+                    paymentWalletStatus?.blocked ? (
+                      <>
+                        <AlertTriangle className="w-4 h-4 shrink-0" />
+                        <span>Wallet Payment Gate Blocked</span>
+                      </>
+                    ) : (
+                      <>
+                        <CheckCircle2 className="w-4 h-4 shrink-0" />
+                        <span>Confirm &amp; Save Payment</span>
+                      </>
+                    )}
                   </button>
                   <button
                     type="button"
-                    onClick={() => setIsRecordPaymentModalOpen(false)}
+                    onClick={() => {
+                      setPaymentWalletError(null);
+                      setIsRecordPaymentModalOpen(false);
+                    }}
                     className="w-full min-w-0 py-2.5 px-4 bg-slate-800 hover:bg-slate-700 text-slate-300 rounded-xl text-base transition cursor-pointer"
                   >
                     Cancel

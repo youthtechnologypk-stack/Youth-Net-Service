@@ -41,6 +41,8 @@ import {
   doesRecordMatchAdminOwnerFilter,
   doesSubscriberMatchScope,
   getResellerTier,
+  isFieldAgentRole,
+  isFieldAgentVisibleToUser,
   isVisibleToCurrentUser,
   resolveAdminDealerFilterIds,
   resolveResellerScope,
@@ -207,7 +209,13 @@ export const UsersTable: React.FC<UsersTableProps> = ({
           allowedSubscriberUsernames: resellerScope.allowedSubscriberUsernames,
         });
       }
-      // Dealers may also inspect their own Sub-Dealers in the table; Sub-Dealers only see own subscribers
+      // Resellers also see their OWN created Field Agents (never Master ISP or other resellers' agents)
+      if (isFieldAgentRole(roleUpper)) {
+        return isFieldAgentVisibleToUser(u, effectiveUser, {
+          childSubDealerIds: resellerScope.allowedResellerIds,
+        });
+      }
+      // Dealers may also inspect their own Sub-Dealers in the table; Sub-Dealers only see own subscribers/agents
       if (resellerScope.tier === 'DEALER' && getResellerTier(u) === 'SUB_DEALER') {
         return u.parent_dealer_id === resellerScope.resellerId;
       }
@@ -247,18 +255,19 @@ export const UsersTable: React.FC<UsersTableProps> = ({
   const totalCount = scopedUsers.length;
   const clientCount = scopedUsers.filter((u) => (u.role || '').toUpperCase() === 'CLIENT').length;
   const subDealerCount = scopedUsers.filter((u) => getResellerTier(u) === 'SUB_DEALER').length;
-  const agentCount = scopedUsers.filter((u) => (u.role || '').toUpperCase() === 'AGENT').length;
+  const agentCount = scopedUsers.filter((u) => isFieldAgentRole(u.role)).length;
   const managerCount = scopedUsers.filter((u) => (u.role || '').toUpperCase() === 'MANAGER').length;
   const adminCount = scopedUsers.filter((u) => (u.role || '').toUpperCase() === 'ADMIN').length;
 
   // Ensure isolated resellers never sit on a hidden staff/admin tab
   useEffect(() => {
     if (!resellerScope.isIsolated) return;
-    if (resellerScope.tier === 'SUB_DEALER' && activeTab !== 'CLIENT') {
+    if (resellerScope.tier === 'SUB_DEALER' && activeTab !== 'CLIENT' && activeTab !== 'AGENT') {
       setActiveTab('CLIENT');
     } else if (
       resellerScope.tier === 'DEALER' &&
       activeTab !== 'CLIENT' &&
+      activeTab !== 'AGENT' &&
       activeTab !== 'SUB_DEALER'
     ) {
       setActiveTab('CLIENT');
@@ -406,6 +415,26 @@ export const UsersTable: React.FC<UsersTableProps> = ({
                 }`}
               >
                 {clientCount}
+              </span>
+            </button>
+            <button
+              type="button"
+              onClick={() => setActiveTab('AGENT')}
+              className={`px-3 py-1.5 rounded-lg text-xs font-semibold whitespace-nowrap transition cursor-pointer flex items-center gap-1.5 ${
+                activeTab === 'AGENT'
+                  ? 'bg-cyan-600 text-slate-950 font-bold shadow-md shadow-cyan-950/40'
+                  : 'bg-slate-950 text-slate-400 hover:text-slate-200 border border-slate-800'
+              }`}
+            >
+              <span>My Field Agents</span>
+              <span
+                className={`px-1.5 py-0.2 rounded-full text-[10px] font-mono ${
+                  activeTab === 'AGENT'
+                    ? 'bg-slate-950 text-cyan-300 font-bold'
+                    : 'bg-slate-800 text-slate-400'
+                }`}
+              >
+                {agentCount}
               </span>
             </button>
             {resellerScope.tier === 'DEALER' && subDealerCount > 0 && (

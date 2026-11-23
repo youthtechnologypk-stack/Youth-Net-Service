@@ -65,7 +65,10 @@ import {
 import {
   doesInvoiceMatchScope,
   doesSubscriberMatchScope,
+  filterFieldAgentsForUser,
+  resolveActiveResellerIdForSubscriber,
   resolveResellerScope,
+  WalletGatePreviewResult,
 } from '../lib/resellerEngine';
 import {
   extractOrigPkgFromComment,
@@ -73,10 +76,12 @@ import {
   resolveExactSubscriberProfile,
 } from '../lib/mikrotikProfileSync';
 import { BulkReceiveAmountModal } from './BulkReceiveAmountModal';
+import { ResellerWalletGatePreview } from './ResellerWalletGatePreview';
 import { SystemRole, UserAccount } from '../types/auth';
 import { getStoredUser } from '../lib/auth';
 import {
   StaffPermissions,
+  hasExplicitAdminGracePermission,
   resolveStaffPermissions,
 } from '../lib/staffPermissions';
 
@@ -121,6 +126,10 @@ export const ExpiryAutomationView: React.FC<ExpiryAutomationViewProps> = ({
   );
   const canBulkActivate = perms.bulk_billing;
   const canBulkReceive = perms.bulk_billing && perms.collect_fee;
+  const canUseGraceAndShift = useMemo(
+    () => hasExplicitAdminGracePermission((currentUser || getStoredUser()) as any, perms),
+    [currentUser, perms]
+  );
   const { routers, selectedRouterId } = useISP();
   const { formatCurrency } = useCurrency();
   const activeRouter = routers.find((r) => r.id === selectedRouterId) || routers[0];
@@ -157,6 +166,13 @@ export const ExpiryAutomationView: React.FC<ExpiryAutomationViewProps> = ({
   const [lastProfileSyncSummary, setLastProfileSyncSummary] = useState<string | null>(null);
   const [busyUsernames, setBusyUsernames] = useState<Record<string, boolean>>({});
   const [nowTickMs, setNowTickMs] = useState<number>(() => Date.now());
+  const [collectConfirmTarget, setCollectConfirmTarget] = useState<
+    (SupabasePortalUser & { amountDue: number; adoptedProfile?: string }) | null
+  >(null);
+  const [collectWalletStatus, setCollectWalletStatus] = useState<WalletGatePreviewResult | null>(
+    null
+  );
+  const [collectConfirmError, setCollectConfirmError] = useState<string | null>(null);
   const [fieldAgents, setFieldAgents] = useState<
     Array<{ id: string; full_name: string; area?: string; role?: string }>
   >([]);
@@ -277,8 +293,12 @@ export const ExpiryAutomationView: React.FC<ExpiryAutomationViewProps> = ({
         setAllInvoices(scopedInvs);
       }
       if (Array.isArray(staffRes)) {
+        const scopedStaff = filterFieldAgentsForUser(staffRes, effectiveUser, {
+          childSubDealerIds: resellerScope.allowedResellerIds,
+          allPortalUsers,
+        });
         setFieldAgents(
-          staffRes.map((s) => ({
+          scopedStaff.map((s) => ({
             id: s.id,
             full_name: s.name,
             area: s.assignedArea,
@@ -990,7 +1010,13 @@ export const ExpiryAutomationView: React.FC<ExpiryAutomationViewProps> = ({
   const handleOpenEditGraceModal = (
     sub: SupabasePortalUser & { amountDue: number; graceEndsMs: number; isSyntheticRecord?: boolean; extraGraceNote?: string | null }
   ) => {
-    if (!perms.grace_and_shift) return;
+    if (!canUseGraceAndShift) {
+      showNotice(
+        'Grace Period management is disabled for Dealers/Sub-Dealers unless explicitly permitted by Admin.',
+        'error'
+      );
+      return;
+    }
     setEditGraceTarget(sub);
     setEditGraceDateTimeLocal(toDateTimeLocalValue(sub.graceEndsMs || Date.now() + 24 * 3_600_000));
     setEditGraceNote(sub.extraGraceNote || '');
@@ -1006,7 +1032,13 @@ export const ExpiryAutomationView: React.FC<ExpiryAutomationViewProps> = ({
 
   const handleSaveEditGrace = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (!perms.grace_and_shift) return;
+    if (!canUseGraceAndShift) {
+      showNotice(
+        'Grace Period management is disabled for Dealers/Sub-Dealers unless explicitly permitted by Admin.',
+        'error'
+      );
+      return;
+    }
     if (!editGraceTarget || !editGraceDateTimeLocal) return;
     const targetMs = Date.parse(editGraceDateTimeLocal);
     if (Number.isNaN(targetMs)) {
@@ -1046,7 +1078,7 @@ export const ExpiryAutomationView: React.FC<ExpiryAutomationViewProps> = ({
 
   // Remove / Cancel Grace Period (suspends immediately if past-due unpaid & not shifted, else restores ACTIVE)
   const handleConfirmRemoveGrace = async () => {
-    if (!perms.grace_and_shift) return;
+    if (!canUseGraceAndShift) return;
     if (!removeGraceTarget) return;
     const sub = removeGraceTarget;
     const uname = String(sub.username || '').trim().toLowerCase();
@@ -1088,7 +1120,13 @@ export const ExpiryAutomationView: React.FC<ExpiryAutomationViewProps> = ({
   const handleShiftBillToNextMonth = async (
     sub: SupabasePortalUser & { isSyntheticRecord?: boolean }
   ) => {
-    if (!perms.grace_and_shift) return;
+    if (!canUseGraceAndShift) {
+      showNotice(
+        'Shift Bill to Next Month is disabled for Dealers/Sub-Dealers unless explicitly permitted by Admin.',
+        'error'
+      );
+      return;
+    }
     const uname = String(sub.username || '').trim().toLowerCase();
     setBusyUsernames((p) => ({ ...p, [uname]: true }));
     try {
@@ -1120,11 +1158,29 @@ export const ExpiryAutomationView: React.FC<ExpiryAutomationViewProps> = ({
     }
   };
 
+  // Gate Collect & Restore with live Wallet Deduction Preview modal whenever a Dealer/Sub-Dealer owns the subscriber
+  const handleRequestCollectAndRestore = (
+    sub: SupabasePortalUser & { amountDue: number; adoptedProfile?: string }
+  ) => {
+    if (!perms.collect_fee) return;
+    const activeResellerOwner = resolveActiveResellerIdForSubscriber(
+      sub,
+      currentUser || getStoredUser()
+    );
+    if (activeResellerOwner || activeResellerScope?.isIsolated) {
+      setCollectConfirmError(null);
+      setCollectWalletStatus(null);
+      setCollectConfirmTarget(sub);
+      return;
+    }
+    void handleCollectAndRestore(sub);
+  };
+
   // 1-Click Collect & Restore (Marks open invoices PAID + DB +30d + MikroTik profile restore + kick 16.16.16.x)
   const handleCollectAndRestore = async (
     sub: SupabasePortalUser & { amountDue: number }
-  ) => {
-    if (!perms.collect_fee) return;
+  ): Promise<boolean> => {
+    if (!perms.collect_fee) return false;
     const uname = String(sub.username || '').trim().toLowerCase();
     setBusyUsernames((p) => ({ ...p, [uname]: true }));
     const nowIso = new Date().toISOString();
@@ -1135,6 +1191,10 @@ export const ExpiryAutomationView: React.FC<ExpiryAutomationViewProps> = ({
       // 1. Atomic DB +30d + Reseller Wallet Deduction + MikroTik exact profile restore + active 16.16.16.x kick
       const restoreRes = await restoreSubscriberOnInvoicePaid(uname, {
         triggeredBy: 'ADMIN',
+        performedBy:
+          (currentUser || getStoredUser())?.fullName ||
+          (currentUser || getStoredUser())?.username ||
+          'NOC Expiry Desk',
         expiryProfileName: settings.expiry_ppp_profile,
         activeRouter: activeRouterRef.current,
         preloadedSecrets: mkSecrets,
@@ -1143,12 +1203,12 @@ export const ExpiryAutomationView: React.FC<ExpiryAutomationViewProps> = ({
         notes: `1-Click Collect & Restore (${formatCurrency(sub.amountDue, 0)} settled)`,
       });
 
-      if (restoreRes.insufficientWalletFunds || (!restoreRes.success && restoreRes.error)) {
-        showNotice(
-          restoreRes.error || `Insufficient Dealer Wallet Balance to restore @${uname}.`,
-          'error'
-        );
-        return;
+      if (restoreRes.insufficientWalletFunds || !restoreRes.success) {
+        const errMsg =
+          restoreRes.error || `Insufficient Dealer Wallet Balance to restore @${uname}.`;
+        setCollectConfirmError(errMsg);
+        showNotice(errMsg, 'error');
+        return false;
       }
 
       // 2. Settle any open invoices in Supabase for this subscriber after wallet & restore check succeeds
@@ -1189,9 +1249,15 @@ export const ExpiryAutomationView: React.FC<ExpiryAutomationViewProps> = ({
         )} · Kicked ${restoreRes.kickedSessions} session${restoreRes.kickedSessions === 1 ? '' : 's'}).`,
         'success'
       );
+      setCollectConfirmTarget(null);
+      setCollectConfirmError(null);
       await Promise.all([fetchAllDatabaseState(), fetchMikrotikProfilesList()]);
+      return true;
     } catch (err: any) {
-      showNotice(`Collect & Restore error for @${uname}: ${err?.message}`, 'error');
+      const errMsg = `Collect & Restore error for @${uname}: ${err?.message}`;
+      setCollectConfirmError(errMsg);
+      showNotice(errMsg, 'error');
+      return false;
     } finally {
       setBusyUsernames((p) => ({ ...p, [uname]: false }));
     }
@@ -1201,7 +1267,13 @@ export const ExpiryAutomationView: React.FC<ExpiryAutomationViewProps> = ({
   const handleOpenExtraGraceModal = (
     sub: SupabasePortalUser & { amountDue: number; effectiveExpiryMs?: number | null; isSyntheticRecord?: boolean }
   ) => {
-    if (!perms.grace_and_shift) return;
+    if (!canUseGraceAndShift) {
+      showNotice(
+        'Extra Grace is disabled for Dealers/Sub-Dealers unless explicitly permitted by Admin.',
+        'error'
+      );
+      return;
+    }
     setExtraGraceTarget(sub);
     setExtraGracePreset('24');
     setExtraGraceCustomHours('36');
@@ -1219,7 +1291,13 @@ export const ExpiryAutomationView: React.FC<ExpiryAutomationViewProps> = ({
   // Grant Extra Grace: Set grace_until = NOW + hours, is_suspended = false, restore exact MikroTik profile & kick 16.16.16.x
   const handleConfirmExtraGrace = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (!perms.grace_and_shift) return;
+    if (!canUseGraceAndShift) {
+      showNotice(
+        'Extra Grace is disabled for Dealers/Sub-Dealers unless explicitly permitted by Admin.',
+        'error'
+      );
+      return;
+    }
     if (!extraGraceTarget) return;
 
     const sub = extraGraceTarget;
@@ -1899,7 +1977,7 @@ export const ExpiryAutomationView: React.FC<ExpiryAutomationViewProps> = ({
                         </td>
                         <td className="py-2.5 px-3 text-right">
                           <div className="inline-flex items-center gap-2 justify-end">
-                            {perms.grace_and_shift && (
+                            {canUseGraceAndShift && (
                               <button
                                 type="button"
                                 disabled={Boolean(busyUsernames[uname])}
@@ -2017,7 +2095,7 @@ export const ExpiryAutomationView: React.FC<ExpiryAutomationViewProps> = ({
                         </td>
                         <td className="py-2.5 px-3 text-right">
                           <div className="inline-flex flex-wrap items-center justify-end gap-1.5">
-                            {perms.grace_and_shift && (
+                            {canUseGraceAndShift && (
                               <>
                                 <button
                                   type="button"
@@ -2055,14 +2133,14 @@ export const ExpiryAutomationView: React.FC<ExpiryAutomationViewProps> = ({
                               <button
                                 type="button"
                                 disabled={busy}
-                                onClick={() => handleCollectAndRestore(sub)}
+                                onClick={() => handleRequestCollectAndRestore(sub)}
                                 className="px-3 py-1.5 rounded-lg bg-emerald-500 hover:bg-emerald-400 text-slate-950 font-bold text-xs inline-flex items-center gap-1 transition cursor-pointer disabled:opacity-50 whitespace-nowrap"
                               >
                                 <Zap className="w-3 h-3" />
                                 <span>Collect &amp; Restore</span>
                               </button>
                             )}
-                            {!perms.grace_and_shift && !perms.collect_fee && (
+                            {!canUseGraceAndShift && !perms.collect_fee && (
                               <span className="text-[11px] font-mono text-slate-500">View-only</span>
                             )}
                           </div>
@@ -2157,7 +2235,7 @@ export const ExpiryAutomationView: React.FC<ExpiryAutomationViewProps> = ({
                         </td>
                         <td className="py-2.5 px-3 text-right">
                           <div className="inline-flex flex-wrap items-center gap-1.5 justify-end">
-                            {perms.grace_and_shift && (
+                            {canUseGraceAndShift && (
                               <>
                                 <button
                                   type="button"
@@ -2185,14 +2263,14 @@ export const ExpiryAutomationView: React.FC<ExpiryAutomationViewProps> = ({
                               <button
                                 type="button"
                                 disabled={busy}
-                                onClick={() => handleCollectAndRestore(sub)}
+                                onClick={() => handleRequestCollectAndRestore(sub)}
                                 className="px-3.5 py-1.5 rounded-lg bg-emerald-500 hover:bg-emerald-400 text-slate-950 font-bold text-xs inline-flex items-center gap-1.5 transition cursor-pointer disabled:opacity-50 whitespace-nowrap"
                               >
                                 <RotateCcw className="w-3.5 h-3.5" />
                                 <span>{busy ? 'Restoring...' : 'Collect & Restore'}</span>
                               </button>
                             )}
-                            {!perms.grace_and_shift && !perms.collect_fee && (
+                            {!canUseGraceAndShift && !perms.collect_fee && (
                               <span className="text-[11px] font-mono text-slate-500">View-only</span>
                             )}
                           </div>
@@ -2592,6 +2670,96 @@ export const ExpiryAutomationView: React.FC<ExpiryAutomationViewProps> = ({
                 >
                   <Trash2 className="w-3.5 h-3.5" />
                   <span>{isRemovingGrace ? 'Removing Grace...' : 'Confirm Remove Grace'}</span>
+                </button>
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Prepaid Reseller Collect & Restore Confirmation Modal */}
+      {collectConfirmTarget && (
+        <div className="fixed inset-0 z-[9999] flex items-center justify-center bg-black/75 backdrop-blur-sm p-3 overflow-y-auto">
+          <div className="w-[95vw] sm:w-full max-w-md rounded-2xl bg-[#111A2E] border border-emerald-700/60 shadow-2xl overflow-hidden">
+            <div className="px-5 py-4 bg-slate-950 border-b border-slate-800 flex items-center justify-between">
+              <div className="flex items-center gap-2.5">
+                <div className="p-2 rounded-lg bg-emerald-500/15 border border-emerald-500/40 text-emerald-300">
+                  <RotateCcw className="w-4 h-4" />
+                </div>
+                <div>
+                  <h3 className="text-sm font-bold text-white">Collect &amp; Restore Subscriber</h3>
+                  <p className="text-[11px] font-mono text-emerald-300">
+                    @{collectConfirmTarget.username} · Due {formatCurrency(collectConfirmTarget.amountDue || 0, 0)}
+                  </p>
+                </div>
+              </div>
+              <button
+                type="button"
+                onClick={() => {
+                  setCollectConfirmTarget(null);
+                  setCollectConfirmError(null);
+                }}
+                className="text-slate-400 hover:text-white text-xs px-2 py-1 rounded bg-slate-800 hover:bg-slate-700 cursor-pointer"
+              >
+                Close
+              </button>
+            </div>
+
+            <div className="p-5 space-y-4">
+              <p className="text-xs text-slate-300 leading-relaxed">
+                Restoring <strong className="text-white">@{collectConfirmTarget.username}</strong> verifies your reseller prepaid wholesale tariff, deducts the package cost from the reseller wallet, restores the MikroTik PPPoE profile, and kicks any isolated <code className="text-amber-300">16.16.16.0/24</code> session.
+              </p>
+
+              <ResellerWalletGatePreview
+                subscriberUsername={collectConfirmTarget.username}
+                profileName={
+                  collectConfirmTarget.adoptedProfile ||
+                  collectConfirmTarget.original_package_profile ||
+                  collectConfirmTarget.package_profile_name ||
+                  collectConfirmTarget.package_name ||
+                  collectConfirmTarget.package_speed ||
+                  ''
+                }
+                actionLabel="restore"
+                onStatusChange={setCollectWalletStatus}
+              />
+
+              {collectConfirmError && (
+                <div className="rounded-xl border border-rose-500/70 bg-rose-950/90 px-3 py-2.5 text-xs font-semibold text-rose-200 flex items-start gap-2">
+                  <AlertTriangle className="w-4 h-4 text-rose-400 shrink-0 mt-0.5" />
+                  <span>{collectConfirmError}</span>
+                </div>
+              )}
+
+              <div className="flex items-center justify-end gap-2 pt-2 border-t border-slate-800">
+                <button
+                  type="button"
+                  onClick={() => {
+                    setCollectConfirmTarget(null);
+                    setCollectConfirmError(null);
+                  }}
+                  className="px-4 py-2 rounded-xl bg-slate-800 hover:bg-slate-700 text-slate-300 text-xs font-semibold cursor-pointer"
+                >
+                  Cancel
+                </button>
+                <button
+                  type="button"
+                  disabled={
+                    Boolean(
+                      busyUsernames[String(collectConfirmTarget.username || '').toLowerCase()]
+                    ) || Boolean(collectWalletStatus?.blocked)
+                  }
+                  onClick={() => handleCollectAndRestore(collectConfirmTarget)}
+                  className="px-4 py-2 rounded-xl bg-emerald-500 hover:bg-emerald-400 text-slate-950 font-bold text-xs flex items-center gap-1.5 transition cursor-pointer disabled:opacity-50 disabled:cursor-not-allowed"
+                >
+                  <Zap className="w-3.5 h-3.5" />
+                  <span>
+                    {busyUsernames[String(collectConfirmTarget.username || '').toLowerCase()]
+                      ? 'Deducting & Restoring...'
+                      : collectWalletStatus?.blocked
+                      ? 'Wallet Payment Gate Blocked'
+                      : 'Confirm Collect & Restore'}
+                  </span>
                 </button>
               </div>
             </div>

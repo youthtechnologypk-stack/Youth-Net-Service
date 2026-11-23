@@ -39,6 +39,7 @@ import { getStoredUser } from '../lib/auth';
 import { UserAccount } from '../types/auth';
 import {
   buildOwnershipStamp,
+  filterFieldAgentsForUser,
   isResellerUser,
   resolveResellerScope,
 } from '../lib/resellerEngine';
@@ -117,7 +118,9 @@ export const GenerateInvoiceModal: React.FC<GenerateInvoiceModalProps> = ({
           const rows = data as SupabasePortalUser[];
           setAllPortalUsers(rows);
           setPortalAgents(
-            isResellerSession ? [] : rows.filter((u) => (u.role || '').toUpperCase() === 'AGENT')
+            filterFieldAgentsForUser(rows, activeUser, {
+              allPortalUsers: rows,
+            })
           );
         }
       } catch (err) {

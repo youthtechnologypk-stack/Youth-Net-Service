@@ -34,6 +34,7 @@ import {
 import { getStoredUser } from '../lib/auth';
 import {
   buildOwnershipStamp,
+  filterFieldAgentsForUser,
   isResellerUser,
   isVisibleToCurrentUser,
   resolveResellerScope,
@@ -304,16 +305,21 @@ export const CreateInvoiceModal: React.FC<CreateInvoiceModalProps> = ({
     }
   };
 
-  // 2. Fetch live agents directly from Supabase portal_users
+  // 2. Fetch live field agents strictly scoped to the logged-in Master ISP / Dealer / Sub-Dealer
   const loadPortalAgents = async () => {
     try {
       const { data, error } = await supabase
         .from('portal_users')
-        .select('id, full_name, username, area, role')
-        .eq('role', 'AGENT');
+        .select('*')
+        .order('full_name', { ascending: true });
 
-      if (!error && data) {
-        setPortalAgents(data as SupabasePortalUser[]);
+      if (!error && Array.isArray(data)) {
+        const allRows = data as SupabasePortalUser[];
+        const activeUser = getStoredUser();
+        const scoped = filterFieldAgentsForUser(allRows, activeUser, {
+          allPortalUsers: allRows,
+        });
+        setPortalAgents(scoped);
       }
     } catch (err) {
       console.warn('Failed to load agents from portal_users:', err);

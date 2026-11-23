@@ -9,7 +9,13 @@ import {
   resolveExactSubscriberProfile,
   upsertOrigPkgComment,
 } from './mikrotikProfileSync';
-import { checkAndDeductResellerWallet } from './resellerEngine';
+import {
+  checkAndDeductResellerWallet,
+  refundResellerWallet,
+  resolveActiveResellerIdForSubscriber,
+} from './resellerEngine';
+import { getStoredUser } from './auth';
+import { hasExplicitAdminGracePermission } from './staffPermissions';
 
 export const PARENT_FLEET_ROUTER = 'SADDAR FLEET ROUTER';
 
@@ -301,18 +307,33 @@ export async function syncMikrotikSecretProfile(
       patchFields.comment = options.comment;
     }
 
+    const reqHeaders: Record<string, string> = {
+      'Content-Type': 'application/json',
+      'x-subscriber-username': cleanUser,
+    };
+
     if (secretId) {
       const patchRes = await safeMikrotikFetch(
         `/api/mikrotik/ppp/secret/${encodeURIComponent(secretId)}`,
         {
           method: 'PATCH',
-          headers: { 'Content-Type': 'application/json' },
+          headers: reqHeaders,
           body: JSON.stringify(patchFields),
         },
         activeRouter
       );
       if (patchRes.ok) {
         return { ok: true, previousProfile, secretId, secretComment };
+      }
+      if (patchRes.status === 402 || patchRes.status === 403) {
+        const errBody = await patchRes.json().catch(() => ({} as any));
+        return {
+          ok: false,
+          previousProfile,
+          secretId,
+          secretComment,
+          error: errBody?.error || 'Blocked by Prepaid Wallet Payment Gate.',
+        } as any;
       }
     }
 
@@ -325,15 +346,26 @@ export async function syncMikrotikSecretProfile(
       '/api/mikrotik/ppp/secret/set',
       {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers: reqHeaders,
         body: JSON.stringify(setPayload),
       },
       activeRouter
     );
 
+    if (!setRes.ok && (setRes.status === 402 || setRes.status === 403)) {
+      const errBody = await setRes.json().catch(() => ({} as any));
+      return {
+        ok: false,
+        previousProfile,
+        secretId,
+        secretComment,
+        error: errBody?.error || 'Blocked by Prepaid Wallet Payment Gate.',
+      } as any;
+    }
+
     return { ok: setRes.ok, previousProfile, secretId, secretComment };
-  } catch {
-    return { ok: false };
+  } catch (err: any) {
+    return { ok: false, error: err?.message || 'MikroTik update failed' } as any;
   }
 }
 
@@ -668,17 +700,16 @@ export async function restoreSubscriberOnInvoicePaid(
       });
     }
 
-    // 1b. Reseller Automatic Wallet Deduction Guard on Renewal / Restore
+    // 1b. Strict Prepaid Reseller Wallet Payment Gate on Renewal / Restore
     let walletChargedAmount = 0;
-    const ownerResellerId = (userRecord as any)?.dealer_id || null;
-    if (ownerResellerId && !options?.skipWalletDeduction) {
+    const ownerResellerId = resolveActiveResellerIdForSubscriber(userRecord as any, getStoredUser());
+    if (ownerResellerId && !options?.skipWalletDeduction && !isExpiryOrBlockedProfile(restoredProfile, options?.expiryProfileName)) {
       const walletRes = await checkAndDeductResellerWallet({
         resellerId: ownerResellerId,
         profileName: restoredProfile,
         subscriberUsername: cleanUser,
         txType: 'RENEWAL_DEDUCTION',
         performedBy: options?.performedBy || triggeredBy,
-        fallbackWholesalePrice: Number((userRecord as any)?.monthly_fee || 0),
         notes: options?.notes || `Renewal / restore for @${cleanUser} (${restoredProfile})`,
       });
       if (!walletRes.ok) {
@@ -687,14 +718,48 @@ export async function restoreSubscriberOnInvoicePaid(
           restoredProfile,
           kickedSessions: 0,
           newExpiryIso: nextAnniversaryYmd,
-          insufficientWalletFunds: Boolean(walletRes.insufficientFunds),
-          error: walletRes.error || 'Insufficient Dealer Wallet Balance',
+          insufficientWalletFunds: Boolean(walletRes.insufficientFunds || walletRes.tariffMissing),
+          error: walletRes.error || 'Insufficient Wallet Balance',
         };
       }
       walletChargedAmount = walletRes.chargedAmount;
     }
 
-    // 2. Update Supabase (+1 calendar month anniversary expiry, ACTIVE status, clear grace/suspension, persist adopted profile)
+    // 2. Restore MikroTik secret back to exact adopted profile & disabled='false'
+    //    If RouterOS fails AFTER a reseller wallet deduction, automatically refund the wallet!
+    const syncRes: any = await syncMikrotikSecretProfile(
+      cleanUser,
+      restoredProfile,
+      { disabled: 'false', preloadedSecret: liveSecret },
+      options?.activeRouter
+    );
+
+    if (!syncRes.ok && ownerResellerId && walletChargedAmount > 0) {
+      await refundResellerWallet({
+        resellerId: ownerResellerId,
+        amount: walletChargedAmount,
+        subscriberUsername: cleanUser,
+        profileName: restoredProfile,
+        reason: syncRes.error || 'MikroTik /ppp/secret profile restore failed',
+        performedBy: options?.performedBy || triggeredBy,
+      });
+      return {
+        success: false,
+        restoredProfile,
+        kickedSessions: 0,
+        newExpiryIso: nextAnniversaryYmd,
+        walletChargedAmount: 0,
+        error: `MikroTik restore failed (${syncRes.error || 'Router unreachable'}). Rs. ${walletChargedAmount.toLocaleString()} was automatically refunded to your wallet.`,
+      };
+    }
+
+    previousProfile =
+      syncRes.previousProfile ||
+      ((userRecord as any)?.billing_status === 'SUSPENDED_EXPIRED'
+        ? options?.expiryProfileName || 'EXPIRED-16-POOL'
+        : null);
+
+    // 3. Update Supabase (+1 calendar month anniversary expiry, ACTIVE status, clear grace/suspension, persist adopted profile)
     if (userRecord?.id) {
       await safeUpdatePortalUserFields(
         userRecord.id,
@@ -728,19 +793,6 @@ export async function restoreSubscriberOnInvoicePaid(
         }
       ).catch(() => {});
     }
-
-    // 3. Restore MikroTik secret back to exact adopted profile & disabled='false'
-    const syncRes = await syncMikrotikSecretProfile(
-      cleanUser,
-      restoredProfile,
-      { disabled: 'false', preloadedSecret: liveSecret },
-      options?.activeRouter
-    );
-    previousProfile =
-      syncRes.previousProfile ||
-      ((userRecord as any)?.billing_status === 'SUSPENDED_EXPIRED'
-        ? options?.expiryProfileName || 'EXPIRED-16-POOL'
-        : null);
 
     // 4. Kick any stale or 16.16.16.x active PPPoE session so CPE reconnects immediately on real speed profile
     const kickedSessions = await kickMikrotikActiveSessionForUser(
@@ -969,36 +1021,78 @@ export async function syncSubscriberPackageAndRestoreIfPaid(params: {
   try {
     const { data: userRow } = await supabase
       .from('portal_users')
-      .select('id, billing_status, account_status, dealer_id, is_suspended')
+      .select('id, billing_status, account_status, dealer_id, sub_dealer_id, is_suspended')
       .ilike('username', cleanUser)
       .limit(1)
       .maybeSingle();
 
-    if (userRow?.id) {
-      subscriberId = String(userRow.id);
-      const isNonExpiry = !isExpiryOrBlockedProfile(cleanProfile);
+    const isNonExpiry = !isExpiryOrBlockedProfile(cleanProfile);
+    const ownerResellerId = resolveActiveResellerIdForSubscriber(userRow as any, getStoredUser());
+    let walletChargedAmount = 0;
 
-      if (params.isPaid) {
-        if (userRow.dealer_id && isNonExpiry) {
-          const walletCheck = await checkAndDeductResellerWallet({
-            resellerId: String(userRow.dealer_id),
-            profileName: cleanProfile,
-            subscriberUsername: cleanUser,
-            txType: 'RENEWAL_DEDUCTION',
-            notes: `Invoice ${params.invoiceNo || ''} marked PAID — ${cleanProfile}`.trim(),
-          });
-          if (!walletCheck.ok) {
-            return {
-              subscriberUpdated: false,
-              mikrotikUpdated: false,
-              kickedSessions: 0,
-              appliedProfile: cleanProfile,
-              insufficientWalletFunds: Boolean(walletCheck.insufficientFunds),
-              error: walletCheck.error || 'Insufficient Dealer Wallet Balance',
-            };
-          }
-        }
+    if (params.isPaid && ownerResellerId && isNonExpiry) {
+      const walletCheck = await checkAndDeductResellerWallet({
+        resellerId: ownerResellerId,
+        profileName: cleanProfile,
+        subscriberUsername: cleanUser,
+        txType: 'RENEWAL_DEDUCTION',
+        notes: `Invoice ${params.invoiceNo || ''} marked PAID — ${cleanProfile}`.trim(),
+      });
+      if (!walletCheck.ok) {
+        return {
+          subscriberUpdated: false,
+          mikrotikUpdated: false,
+          kickedSessions: 0,
+          appliedProfile: cleanProfile,
+          insufficientWalletFunds: Boolean(walletCheck.insufficientFunds || walletCheck.tariffMissing),
+          error: walletCheck.error || 'Insufficient Wallet Balance',
+        };
+      }
+      walletChargedAmount = walletCheck.chargedAmount;
+    }
 
+    const liveSecret =
+      params.preloadedSecrets?.find(
+        (s) => String(s?.name || '').trim().toLowerCase() === cleanUser
+      ) || null;
+
+    if (params.isPaid) {
+      const updatedComment = isNonExpiry
+        ? upsertOrigPkgComment(liveSecret?.comment, cleanProfile)
+        : undefined;
+
+      const mkRes: any = await syncMikrotikSecretProfile(
+        cleanUser,
+        cleanProfile,
+        {
+          disabled: 'false',
+          comment: updatedComment,
+          preloadedSecret: liveSecret,
+        },
+        params.activeRouter
+      );
+      mikrotikUpdated = mkRes.ok;
+
+      if (!mkRes.ok && ownerResellerId && walletChargedAmount > 0) {
+        await refundResellerWallet({
+          resellerId: ownerResellerId,
+          amount: walletChargedAmount,
+          subscriberUsername: cleanUser,
+          profileName: cleanProfile,
+          reason: mkRes.error || 'MikroTik /ppp/secret profile update failed',
+          performedBy: params.triggeredBy || 'ADMIN',
+        });
+        return {
+          subscriberUpdated: false,
+          mikrotikUpdated: false,
+          kickedSessions: 0,
+          appliedProfile: cleanProfile,
+          error: `MikroTik update failed (${mkRes.error || 'Router unreachable'}). Rs. ${walletChargedAmount.toLocaleString()} was automatically refunded to wallet.`,
+        };
+      }
+
+      if (userRow?.id) {
+        subscriberId = String(userRow.id);
         await safeUpdatePortalUserFields(
           subscriberId,
           {
@@ -1026,47 +1120,8 @@ export async function syncSubscriberPackageAndRestoreIfPaid(params: {
             account_status: 'ACTIVE',
           }
         );
-      } else if (isNonExpiry) {
-        await safeUpdatePortalUserFields(
-          subscriberId,
-          {
-            original_package_profile: cleanProfile,
-            package_name: cleanProfile,
-            package_profile_name: cleanProfile,
-          },
-          {
-            original_package_profile: cleanProfile,
-            package_profile_name: cleanProfile,
-          },
-          {
-            package_profile_name: cleanProfile,
-          }
-        );
+        subscriberUpdated = true;
       }
-      subscriberUpdated = true;
-    }
-
-    const liveSecret =
-      params.preloadedSecrets?.find(
-        (s) => String(s?.name || '').trim().toLowerCase() === cleanUser
-      ) || null;
-
-    if (params.isPaid) {
-      const updatedComment = !isExpiryOrBlockedProfile(cleanProfile)
-        ? upsertOrigPkgComment(liveSecret?.comment, cleanProfile)
-        : undefined;
-
-      const mkRes = await syncMikrotikSecretProfile(
-        cleanUser,
-        cleanProfile,
-        {
-          disabled: 'false',
-          comment: updatedComment,
-          preloadedSecret: liveSecret,
-        },
-        params.activeRouter
-      );
-      mikrotikUpdated = mkRes.ok;
 
       kickedSessions = await kickMikrotikActiveSessionForUser(
         cleanUser,
@@ -1088,6 +1143,24 @@ export async function syncSubscriberPackageAndRestoreIfPaid(params: {
           },
         ]);
       } catch {}
+    } else if (userRow?.id && isNonExpiry) {
+      subscriberId = String(userRow.id);
+      await safeUpdatePortalUserFields(
+        subscriberId,
+        {
+          original_package_profile: cleanProfile,
+          package_name: cleanProfile,
+          package_profile_name: cleanProfile,
+        },
+        {
+          original_package_profile: cleanProfile,
+          package_profile_name: cleanProfile,
+        },
+        {
+          package_profile_name: cleanProfile,
+        }
+      );
+      subscriberUpdated = true;
     }
   } catch (err) {
     console.warn('syncSubscriberPackageAndRestoreIfPaid notice:', err);
@@ -1188,29 +1261,25 @@ export async function bulkActivateSubscribers(params: {
             expiryProfileName,
           });
 
-      // 0. Enforce Reseller Wallet Deduction if subscriber is owned by a Dealer / Sub-Dealer
-      let ownerResellerId: string | null = (sub as any)?.dealer_id || null;
-      let subMonthlyFee = Number((sub as any)?.monthly_fee || 0);
+      // 0. Enforce Strict Prepaid Reseller Wallet Payment Gate if subscriber is owned by a Dealer / Sub-Dealer
+      let ownerResellerId: string | null = resolveActiveResellerIdForSubscriber(sub as any, null);
       if (!ownerResellerId) {
         const { data: ownerRow } = await supabase
           .from('portal_users')
-          .select('dealer_id, monthly_fee')
+          .select('sub_dealer_id, dealer_id, monthly_fee')
           .ilike('username', uname)
           .limit(1)
           .maybeSingle();
-        if (ownerRow) {
-          ownerResellerId = (ownerRow as any).dealer_id || null;
-          subMonthlyFee = Number((ownerRow as any).monthly_fee || subMonthlyFee);
-        }
+        ownerResellerId = resolveActiveResellerIdForSubscriber(ownerRow as any, getStoredUser());
       }
-      if (ownerResellerId) {
+      let chargedAmount = 0;
+      if (ownerResellerId && !isExpiryOrBlockedProfile(targetProfile, expiryProfileName)) {
         const walletRes = await checkAndDeductResellerWallet({
           resellerId: ownerResellerId,
           profileName: targetProfile,
           subscriberUsername: uname,
           txType: 'RENEWAL_DEDUCTION',
           performedBy: triggeredBy,
-          fallbackWholesalePrice: subMonthlyFee,
           notes: `Bulk activate renewal for @${uname} (${targetProfile})`,
         });
         if (!walletRes.ok) {
@@ -1220,19 +1289,39 @@ export async function bulkActivateSubscribers(params: {
             profile: targetProfile,
             ok: false,
             kicked: 0,
-            error: walletRes.error || 'Insufficient Dealer Wallet Balance',
+            error: walletRes.error || 'Insufficient Wallet Balance',
           });
           continue;
         }
+        chargedAmount = walletRes.chargedAmount;
       }
 
-      // 1. Update MikroTik secret & kick active 16.16.16.x session
-      const mkSync = await syncMikrotikSecretProfile(
+      // 1. Update MikroTik secret & kick active 16.16.16.x session (auto-refund if MikroTik fails)
+      const mkSync: any = await syncMikrotikSecretProfile(
         uname,
         targetProfile,
         { disabled: 'false', preloadedSecret: liveSecret },
         activeRouter
       );
+      if (!mkSync.ok && ownerResellerId && chargedAmount > 0) {
+        await refundResellerWallet({
+          resellerId: ownerResellerId,
+          amount: chargedAmount,
+          subscriberUsername: uname,
+          profileName: targetProfile,
+          reason: mkSync.error || 'MikroTik bulk activate failed',
+          performedBy: triggeredBy,
+        });
+        failedCount++;
+        results.push({
+          username: uname,
+          profile: targetProfile,
+          ok: false,
+          kicked: 0,
+          error: `MikroTik update failed (${mkSync.error || 'Router error'}) — Rs. ${chargedAmount.toLocaleString()} refunded.`,
+        });
+        continue;
+      }
       const kicked = await kickMikrotikActiveSessionForUser(uname, activeRouter, activeList);
       totalKicked += kicked;
 
@@ -1851,6 +1940,13 @@ export async function updateSubscriberGracePeriod(params: {
   restoredProfile: string;
   kickedSessions: number;
 }> {
+  const activeActor = getStoredUser();
+  if (activeActor && !hasExplicitAdminGracePermission(activeActor as any)) {
+    throw new Error(
+      'Blocked: Dealers and Sub-Dealers cannot use Extra Grace to bypass prepaid wallet payment unless explicitly permitted by Admin.'
+    );
+  }
+
   const uname = String(params.username || '').trim().toLowerCase();
   const nowIso = new Date().toISOString();
   const expiryProf = params.expiryProfileName || 'EXPIRED-16-POOL';
@@ -2213,6 +2309,13 @@ export async function shiftBillToNextMonth(params: {
   kickedSessions: number;
   appliedProfile: string;
 }> {
+  const activeActor = getStoredUser();
+  if (activeActor && !hasExplicitAdminGracePermission(activeActor as any)) {
+    throw new Error(
+      'Blocked: Dealers and Sub-Dealers cannot use Shift Bill to Next Month to bypass prepaid wallet payment unless explicitly permitted by Admin.'
+    );
+  }
+
   const uname = String(params.username || '').trim().toLowerCase();
   const nowIso = new Date().toISOString();
   const todayYmd = nowIso.slice(0, 10);

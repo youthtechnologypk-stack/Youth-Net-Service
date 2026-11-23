@@ -109,6 +109,12 @@ export async function updateTicketSafe(
 export interface LiveFieldAgentLedger extends FieldAgent {
   username: string;
   role: string;
+  tier_level?: string | null;
+  dealer_id?: string | null;
+  sub_dealer_id?: string | null;
+  created_by_id?: string | null;
+  parent_dealer_id?: string | null;
+  account_status?: string | null;
   totalCashCollected: number;
   totalHandedOver: number;
   advanceBalance: number;
@@ -155,7 +161,16 @@ export async function fetchLiveFieldStaffWithBalances(
       .order('full_name', { ascending: true });
     staffRows = ((allRes.data || []) as Array<Record<string, any>>).filter((u) => {
       const r = String(u.role || '').trim().toUpperCase();
-      return r !== 'ADMIN' && r !== 'CLIENT' && u.account_status !== 'DELETED';
+      const t = String(u.tier_level || '').trim().toUpperCase();
+      return (
+        r !== 'ADMIN' &&
+        r !== 'CLIENT' &&
+        r !== 'DEALER' &&
+        r !== 'SUB_DEALER' &&
+        t !== 'DEALER' &&
+        t !== 'SUB_DEALER' &&
+        u.account_status !== 'DELETED'
+      );
     });
   }
 
@@ -279,6 +294,12 @@ export async function fetchLiveFieldStaffWithBalances(
       id,
       username: uname,
       role: String(u.role || 'AGENT').toUpperCase(),
+      tier_level: u.tier_level ?? null,
+      dealer_id: u.dealer_id ?? null,
+      sub_dealer_id: u.sub_dealer_id ?? null,
+      created_by_id: u.created_by_id ?? null,
+      parent_dealer_id: u.parent_dealer_id ?? null,
+      account_status: u.account_status ?? 'ACTIVE',
       name,
       phone: String(u.phone || ''),
       email: uname.includes('@') ? uname : `${uname || 'agent'}@youthnet.pk`,

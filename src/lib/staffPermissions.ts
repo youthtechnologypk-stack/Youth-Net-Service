@@ -273,7 +273,7 @@ export function getDefaultPermissionsForRole(role?: string | null): StaffPermiss
       outage_broadcast: false,
       collect_fee: true,
       edit_delete_invoice: false,
-      grace_and_shift: true,
+      grace_and_shift: false,
       bulk_billing: true,
       expenses_ledger: false,
       provision_pppoe: true,
@@ -305,6 +305,35 @@ export function getDefaultPermissionsForRole(role?: string | null): StaffPermiss
   }
   // Default for AGENT / FIELD_AGENT / RECOVERY
   return { ...STAFF_PERMISSION_PRESETS[0].permissions };
+}
+
+/**
+ * Prevents DEALER, SUB_DEALER, and reseller-owned agents from using Extra Grace or
+ * Shift Bill to Next Month to bypass prepaid wallet deduction unless explicitly
+ * permitted by Admin (`permissions.grace_and_shift === true`).
+ */
+export function hasExplicitAdminGracePermission(
+  user?: (StaffPermissionSubject & { tier_level?: string | null; dealer_id?: string | null; sub_dealer_id?: string | null }) | null,
+  resolvedPerms?: StaffPermissions | null
+): boolean {
+  if (!user) return false;
+  const role = String(user.role || '').trim().toUpperCase();
+  const tier = String(user.tier_level || '').trim().toUpperCase();
+  if (role === 'ADMIN' || tier === 'ADMIN' || tier === 'MASTER_ISP') return true;
+
+  const isResellerOrResellerStaff =
+    role === 'DEALER' ||
+    role === 'SUB_DEALER' ||
+    tier === 'DEALER' ||
+    tier === 'SUB_DEALER' ||
+    Boolean(user.dealer_id) ||
+    Boolean(user.sub_dealer_id);
+
+  if (isResellerOrResellerStaff) {
+    return user.permissions?.grace_and_shift === true;
+  }
+
+  return Boolean(resolvedPerms ? resolvedPerms.grace_and_shift : user.permissions?.grace_and_shift);
 }
 
 export function getPresetPermissions(presetKey: StaffPresetKey): StaffPermissions {

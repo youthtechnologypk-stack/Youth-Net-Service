@@ -118,6 +118,7 @@ export interface ResellerScope {
 
 export interface WalletEligibilityResult {
   allowed: boolean;
+  tariffMissing?: boolean;
   insufficientFunds: boolean;
   capExceeded: boolean;
   availableCreditAndWallet: number;
@@ -130,15 +131,73 @@ export interface WalletEligibilityResult {
 export interface WalletDeductionResult {
   ok: boolean;
   skipped?: boolean;
+  tariffMissing?: boolean;
   insufficientFunds?: boolean;
   capExceeded?: boolean;
   chargedAmount: number;
   balanceBefore: number;
   balanceAfter: number;
+  availableFunds?: number;
   resellerId?: string;
   resellerName?: string;
+  resellerUsername?: string;
   profileName?: string;
+  ledgerId?: string;
   error?: string;
+}
+
+export interface WalletGatePreviewResult {
+  applicable: boolean;
+  allowed: boolean;
+  blocked: boolean;
+  tariffMissing: boolean;
+  insufficientFunds: boolean;
+  resellerId: string | null;
+  resellerName: string;
+  resellerUsername: string;
+  resellerTier: ResellerTier | null;
+  profileName: string;
+  wholesalePrice: number;
+  retailPrice: number;
+  walletBalance: number;
+  creditLimit: number;
+  availableFunds: number;
+  projectedBalanceAfter: number;
+  error: string | null;
+}
+
+export const TARIFF_NOT_CONFIGURED_ERROR =
+  'Package tariff not configured for this reseller. Ask Admin/Dealer to set wholesale rate first.';
+
+export function formatInsufficientWalletError(availableFunds: number, requiredAmount: number): string {
+  const avail = Math.round(Number(availableFunds) || 0);
+  const req = Math.round(Number(requiredAmount) || 0);
+  return `Insufficient Wallet Balance (Available: Rs. ${avail.toLocaleString()} | Required: Rs. ${req.toLocaleString()}). Recharge wallet before assigning package.`;
+}
+
+/**
+ * Resolves the active reseller responsible for paying the prepaid wholesale tariff:
+ * 1. Subscriber's `sub_dealer_id` (Sub-Dealer pays from their own wallet first)
+ * 2. Subscriber's `dealer_id` (Dealer pays from their wallet)
+ * 3. Acting user if logged in as a SUB_DEALER / DEALER
+ * 4. Acting user's parent `sub_dealer_id || dealer_id` if logged in as a reseller-owned Field Agent
+ */
+export function resolveActiveResellerIdForSubscriber(
+  subscriber?: { sub_dealer_id?: string | null; dealer_id?: string | null } | null,
+  actingUser?: ResellerSubjectLike | null
+): string | null {
+  if (subscriber?.sub_dealer_id) return String(subscriber.sub_dealer_id);
+  if (subscriber?.dealer_id) return String(subscriber.dealer_id);
+
+  if (actingUser) {
+    const actorTier = getResellerTier(actingUser);
+    if ((actorTier === 'SUB_DEALER' || actorTier === 'DEALER') && actingUser.id) {
+      return String(actingUser.id);
+    }
+    if (actingUser.sub_dealer_id) return String(actingUser.sub_dealer_id);
+    if (actingUser.dealer_id) return String(actingUser.dealer_id);
+  }
+  return null;
 }
 
 export function formatSupabaseError(err: any): string {
@@ -200,6 +259,9 @@ const OPTIONAL_PORTAL_USER_COLUMNS = new Set([
   'created_at',
   'phone',
   'area',
+  'base_salary',
+  'cash_in_hand',
+  'advance_balance',
 ]);
 
 async function adaptivePortalUsersInsert(
@@ -614,6 +676,223 @@ export function resolveAdminDealerFilterIds(
   return { mode: 'RESELLER', resellerIds: ids, selectedTier };
 }
 
+export const FIELD_AGENT_ROLE_SET = new Set([
+  'AGENT',
+  'FIELD_AGENT',
+  'RECOVERY',
+  'TECHNICIAN',
+  'FIELD_STAFF',
+]);
+
+export function isFieldAgentRole(role?: string | null): boolean {
+  const clean = String(role || '').trim().toUpperCase();
+  return FIELD_AGENT_ROLE_SET.has(clean);
+}
+
+export interface FieldAgentOwnershipLike {
+  id?: string | null;
+  role?: string | null;
+  tier_level?: string | null;
+  dealer_id?: string | null;
+  sub_dealer_id?: string | null;
+  created_by_id?: string | null;
+  parent_dealer_id?: string | null;
+  account_status?: string | null;
+}
+
+/**
+ * Strict multi-tenant visibility rule for Field Agents / Recovery Staff:
+ * - ADMIN / Master ISP:
+ *     - Default ('DIRECT_ISP'): ONLY Master ISP field agents (dealer_id IS NULL && sub_dealer_id IS NULL)
+ *     - 'ALL': All field agents across Master ISP + all Dealers/Sub-Dealers
+ *     - Specific reseller UUID: Only field agents owned by that Dealer (and its child Sub-Dealers) or Sub-Dealer
+ * - DEALER: ONLY field agents where dealer_id === currentUser.id, created_by_id === currentUser.id,
+ *           or sub_dealer_id is one of their child Sub-Dealers. NEVER Master ISP or other Dealers' agents.
+ * - SUB_DEALER: ONLY field agents where sub_dealer_id === currentUser.id or created_by_id === currentUser.id.
+ *               NEVER Master ISP, parent Dealer, or sibling Sub-Dealers' agents.
+ */
+export function isFieldAgentVisibleToUser(
+  agent: FieldAgentOwnershipLike | null | undefined,
+  currentUser: ResellerSubjectLike | null | undefined,
+  options?: {
+    childSubDealerIds?: Set<string> | null;
+    adminOwnerFilter?: 'DIRECT_ISP' | 'ALL' | string;
+    allResellers?: Array<Partial<SupabasePortalUser>>;
+  }
+): boolean {
+  if (!agent) return false;
+  if (String(agent.account_status || '').toUpperCase() === 'DELETED') return false;
+  if (!isFieldAgentRole(agent.role)) return false;
+
+  // Reseller accounts themselves (DEALER / SUB_DEALER) are never field staff rows
+  const agentTier = getResellerTier(agent);
+  if (agentTier === 'DEALER' || agentTier === 'SUB_DEALER') return false;
+
+  const viewerTier = getResellerTier(currentUser);
+  const viewerRole = String(currentUser?.role || '').trim().toUpperCase();
+  const viewerId = currentUser?.id ? String(currentUser.id) : null;
+
+  const agDealerId = agent.dealer_id ? String(agent.dealer_id) : null;
+  const agSubDealerId = agent.sub_dealer_id ? String(agent.sub_dealer_id) : null;
+  const agCreatedById = agent.created_by_id ? String(agent.created_by_id) : null;
+
+  // 1. Sub-Dealer: strictly own field agents only
+  if (viewerTier === 'SUB_DEALER') {
+    if (!viewerId) return false;
+    if (agSubDealerId === viewerId) return true;
+    if (agCreatedById === viewerId) return true;
+    return false;
+  }
+
+  // 2. Dealer: strictly own field agents + field agents under their child Sub-Dealers
+  if (viewerTier === 'DEALER') {
+    if (!viewerId) return false;
+    if (agDealerId === viewerId) return true;
+    if (agCreatedById === viewerId) return true;
+    if (agSubDealerId && options?.childSubDealerIds?.has(agSubDealerId)) return true;
+    return false;
+  }
+
+  // 3. Master Admin / internal Master ISP staff
+  if (!viewerTier || viewerRole === 'ADMIN') {
+    const mode = options?.adminOwnerFilter || 'DIRECT_ISP';
+    if (mode === 'ALL') return true;
+    if (mode === 'DIRECT_ISP') {
+      return !agDealerId && !agSubDealerId;
+    }
+    const filterInfo = resolveAdminDealerFilterIds(mode, options?.allResellers || [], true);
+    if (filterInfo.mode === 'DIRECT_ISP') {
+      return !agDealerId && !agSubDealerId;
+    }
+    if (filterInfo.mode === 'RESELLER') {
+      if (filterInfo.selectedTier === 'SUB_DEALER') {
+        return Boolean(
+          (agSubDealerId && filterInfo.resellerIds.has(agSubDealerId)) ||
+            (agCreatedById && filterInfo.resellerIds.has(agCreatedById))
+        );
+      }
+      return Boolean(
+        (agDealerId && filterInfo.resellerIds.has(agDealerId)) ||
+          (agSubDealerId && filterInfo.resellerIds.has(agSubDealerId)) ||
+          (agCreatedById && filterInfo.resellerIds.has(agCreatedById))
+      );
+    }
+    return !agDealerId && !agSubDealerId;
+  }
+
+  return false;
+}
+
+export function filterFieldAgentsForUser<T extends FieldAgentOwnershipLike>(
+  agents: T[],
+  currentUser: ResellerSubjectLike | null | undefined,
+  options?: {
+    allPortalUsers?: Array<Partial<SupabasePortalUser>>;
+    childSubDealerIds?: Set<string> | null;
+    adminOwnerFilter?: 'DIRECT_ISP' | 'ALL' | string;
+    allResellers?: Array<Partial<SupabasePortalUser>>;
+  }
+): T[] {
+  if (!Array.isArray(agents) || agents.length === 0) return [];
+
+  let childSubDealerIds = options?.childSubDealerIds || null;
+  let allResellers = options?.allResellers;
+
+  if (!childSubDealerIds && options?.allPortalUsers && getResellerTier(currentUser) === 'DEALER') {
+    const scope = resolveResellerScope(currentUser, options.allPortalUsers);
+    childSubDealerIds = scope.allowedResellerIds;
+  }
+  if (!allResellers && options?.allPortalUsers) {
+    allResellers = options.allPortalUsers.filter((u) => getResellerTier(u) !== null);
+  }
+
+  return agents.filter((ag) =>
+    isFieldAgentVisibleToUser(ag, currentUser, {
+      childSubDealerIds,
+      adminOwnerFilter: options?.adminOwnerFilter,
+      allResellers,
+    })
+  );
+}
+
+export interface CreateScopedFieldAgentInput {
+  fullName: string;
+  username: string;
+  password: string;
+  phone: string;
+  area: string;
+  baseSalary?: number;
+  currentUser: ResellerSubjectLike | null | undefined;
+  explicitOwner?: Partial<SupabasePortalUser> | null;
+}
+
+/**
+ * Creates a Field Agent in portal_users with strict multi-tenant ownership stamping:
+ * - DEALER -> tier_level='STAFF', role='AGENT', dealer_id=currentUser.id, created_by_id=currentUser.id
+ * - SUB_DEALER -> tier_level='STAFF', role='AGENT', sub_dealer_id=currentUser.id, dealer_id=currentUser.parent_dealer_id, created_by_id=currentUser.id
+ * - ADMIN -> tier_level='STAFF', role='AGENT', dealer_id=null (or explicitOwner), created_by_id=currentUser.id
+ */
+export async function createScopedFieldAgent(
+  input: CreateScopedFieldAgentInput
+): Promise<{ data: SupabasePortalUser | null; error: string | null }> {
+  const cleanUsername = input.username.trim().toLowerCase().replace(/[^a-z0-9_.-]/g, '');
+  if (!cleanUsername) {
+    return { data: null, error: 'Please provide a valid login username.' };
+  }
+  if (!input.fullName.trim()) {
+    return { data: null, error: 'Full name is required.' };
+  }
+  if (!input.password.trim() || input.password.trim().length < 4) {
+    return { data: null, error: 'Password must be at least 4 characters.' };
+  }
+
+  // Ensure username does not already exist
+  const { data: existing } = await supabase
+    .from('portal_users')
+    .select('id, username')
+    .ilike('username', cleanUsername)
+    .maybeSingle();
+
+  if (existing?.id) {
+    return { data: null, error: `Username "@${cleanUsername}" is already in use.` };
+  }
+
+  const stamp = buildOwnershipStamp(input.currentUser, input.explicitOwner);
+  const defaultPerms = getDefaultPermissionsForRole('AGENT');
+  const salaryNum = Math.max(0, Number(input.baseSalary) || 0);
+
+  const payload: Record<string, any> = {
+    username: cleanUsername,
+    full_name: input.fullName.trim(),
+    password: input.password.trim(),
+    phone: input.phone.trim() || '+92 300 0000000',
+    area: input.area.trim() || 'Field Sector',
+    role: 'AGENT',
+    tier_level: 'STAFF',
+    dealer_id: stamp.dealer_id,
+    sub_dealer_id: stamp.sub_dealer_id,
+    created_by_id: stamp.created_by_id,
+    base_salary: salaryNum,
+    cash_in_hand: 0,
+    advance_balance: 0,
+    account_status: 'ACTIVE',
+    can_access_gis_map: false,
+    gis_map_permission: 'none',
+    permissions: defaultPerms,
+    created_at: new Date().toISOString(),
+  };
+
+  const { data, error } = await adaptivePortalUsersInsert(payload);
+  if (error || !data) {
+    return {
+      data: null,
+      error: formatSupabaseError(error || 'Unable to create field agent account'),
+    };
+  }
+
+  return { data: data as SupabasePortalUser, error: null };
+}
+
 export function doesRecordMatchAdminOwnerFilter(
   record: VisibilityRecordLike,
   filterState: { mode: 'ALL' | 'DIRECT_ISP' | 'RESELLER'; resellerIds: Set<string>; selectedTier?: ResellerTier | null },
@@ -797,7 +1076,7 @@ export function evaluateWalletEligibility(params: {
       requiredAmount: wholesalePrice,
       projectedBalanceAfter,
       shortfall,
-      error: `Insufficient Dealer Wallet Balance: Required Rs. ${wholesalePrice.toLocaleString()}, Available Rs. ${availableCreditAndWallet.toLocaleString()} (Wallet Rs. ${walletBalance.toLocaleString()} + Credit Limit Rs. ${creditLimit.toLocaleString()}). Recharge wallet to proceed.`,
+      error: formatInsufficientWalletError(availableCreditAndWallet, wholesalePrice),
     };
   }
 
@@ -810,6 +1089,54 @@ export function evaluateWalletEligibility(params: {
     projectedBalanceAfter,
     shortfall: 0,
   };
+}
+
+/**
+ * Pure strict prepaid wallet gate evaluator used by both UI previews and server/client enforcement:
+ * 1. Blocks if no reseller_tariffs row exists or wholesale_price <= 0 (unless explicitly free).
+ * 2. Blocks if (wallet_balance + credit_limit) < wholesale_price.
+ */
+export function evaluateStrictPrepaidWalletGate(params: {
+  walletBalance: number;
+  creditLimit: number;
+  matchedTariff: { wholesale_price?: number | null; retail_price?: number | null; is_free?: boolean | null } | null;
+  currentActiveUsers?: number;
+  maxActiveUsers?: number;
+  enforceUserCap?: boolean;
+}): WalletEligibilityResult {
+  const walletBalance = Number(params.walletBalance) || 0;
+  const creditLimit = Math.max(0, Number(params.creditLimit) || 0);
+  const availableCreditAndWallet = walletBalance + creditLimit;
+
+  const isExplicitlyFree = Boolean(params.matchedTariff?.is_free);
+  const wholesalePrice = params.matchedTariff ? Number(params.matchedTariff.wholesale_price) : NaN;
+
+  if (
+    !params.matchedTariff ||
+    !Number.isFinite(wholesalePrice) ||
+    (wholesalePrice <= 0 && !isExplicitlyFree)
+  ) {
+    return {
+      allowed: false,
+      tariffMissing: true,
+      insufficientFunds: false,
+      capExceeded: false,
+      availableCreditAndWallet,
+      requiredAmount: 0,
+      projectedBalanceAfter: walletBalance,
+      shortfall: 0,
+      error: TARIFF_NOT_CONFIGURED_ERROR,
+    };
+  }
+
+  return evaluateWalletEligibility({
+    walletBalance,
+    creditLimit,
+    wholesalePrice: Math.max(0, wholesalePrice),
+    currentActiveUsers: params.currentActiveUsers,
+    maxActiveUsers: params.maxActiveUsers,
+    enforceUserCap: params.enforceUserCap,
+  });
 }
 
 /**
@@ -1338,12 +1665,157 @@ export async function transferDealerToSubDealer(params: {
 }
 
 /**
- * Automatic Wallet Deduction Guard on PPPoE Provisioning & Renewal:
+ * Live Prepaid Wallet & Tariff Gate Preview (Read-Only):
+ * Resolves the active reseller (`sub_dealer_id` if present, otherwise `dealer_id`),
+ * fetches their live wallet balance, credit limit, and `reseller_tariffs` row for the
+ * requested MikroTik profile, and returns exact cost preview + blocking state.
+ */
+export async function previewResellerWalletGate(params: {
+  resellerId?: string | null;
+  subscriberUsername?: string | null;
+  profileName: string;
+  actingUser?: ResellerSubjectLike | null;
+}): Promise<WalletGatePreviewResult> {
+  const cleanProfile = String(params.profileName || '').trim();
+  const emptyResult: WalletGatePreviewResult = {
+    applicable: false,
+    allowed: true,
+    blocked: false,
+    tariffMissing: false,
+    insufficientFunds: false,
+    resellerId: null,
+    resellerName: '',
+    resellerUsername: '',
+    resellerTier: null,
+    profileName: cleanProfile,
+    wholesalePrice: 0,
+    retailPrice: 0,
+    walletBalance: 0,
+    creditLimit: 0,
+    availableFunds: 0,
+    projectedBalanceAfter: 0,
+    error: null,
+  };
+
+  let targetResellerId = params.resellerId ? String(params.resellerId) : null;
+
+  // If resellerId was not passed directly, look up subscriber's sub_dealer_id || dealer_id
+  if (!targetResellerId && params.subscriberUsername) {
+    const cleanUname = String(params.subscriberUsername).trim().toLowerCase();
+    if (cleanUname) {
+      const { data: subRow } = await supabase
+        .from('portal_users')
+        .select('sub_dealer_id, dealer_id')
+        .ilike('username', cleanUname)
+        .limit(1)
+        .maybeSingle();
+      targetResellerId = resolveActiveResellerIdForSubscriber(subRow, params.actingUser);
+    }
+  }
+  if (!targetResellerId && params.actingUser) {
+    targetResellerId = resolveActiveResellerIdForSubscriber(null, params.actingUser);
+  }
+
+  if (!targetResellerId) {
+    return emptyResult;
+  }
+
+  const [{ data: reseller, error: resErr }, { data: tariffRows }] = await Promise.all([
+    supabase.from('portal_users').select('*').eq('id', targetResellerId).maybeSingle(),
+    supabase.from('reseller_tariffs').select('*').eq('reseller_id', targetResellerId),
+  ]);
+
+  if (resErr || !reseller) {
+    return {
+      ...emptyResult,
+      applicable: true,
+      allowed: false,
+      blocked: true,
+      resellerId: targetResellerId,
+      error: resErr ? formatSupabaseError(resErr) : 'Reseller account not found.',
+    };
+  }
+
+  const tier = getResellerTier(reseller);
+  if (!tier) {
+    return emptyResult;
+  }
+
+  const walletBalance = Number(reseller.wallet_balance || 0);
+  const creditLimit = Math.max(0, Number(reseller.credit_limit || 0));
+  const availableFunds = walletBalance + creditLimit;
+
+  if (String(reseller.account_status || 'ACTIVE').toUpperCase() === 'SUSPENDED') {
+    return {
+      applicable: true,
+      allowed: false,
+      blocked: true,
+      tariffMissing: false,
+      insufficientFunds: false,
+      resellerId: reseller.id,
+      resellerName: reseller.full_name || reseller.username,
+      resellerUsername: reseller.username,
+      resellerTier: tier,
+      profileName: cleanProfile,
+      wholesalePrice: 0,
+      retailPrice: 0,
+      walletBalance,
+      creditLimit,
+      availableFunds,
+      projectedBalanceAfter: walletBalance,
+      error: `Reseller account @${reseller.username} is currently SUSPENDED. Contact Master ISP Admin.`,
+    };
+  }
+
+  const normalizedTariffs: SupabaseResellerTariff[] = Array.isArray(tariffRows)
+    ? (tariffRows as any[]).map((t) => ({
+        ...t,
+        profile_name: String(t.profile_name || t.package_name || t.mikrotik_profile || '').trim(),
+        wholesale_price: Number(t.wholesale_price ?? t.wholesale_rate ?? 0),
+        retail_price: Number(t.retail_price ?? t.retail_rate ?? 0),
+      }))
+    : [];
+
+  const { matchedTariff, wholesalePrice, retailPrice } = resolveTariffForProfile(
+    reseller.id,
+    cleanProfile,
+    normalizedTariffs,
+    0
+  );
+
+  const gate = evaluateStrictPrepaidWalletGate({
+    walletBalance,
+    creditLimit,
+    matchedTariff: matchedTariff as any,
+  });
+
+  return {
+    applicable: true,
+    allowed: gate.allowed,
+    blocked: !gate.allowed,
+    tariffMissing: Boolean(gate.tariffMissing),
+    insufficientFunds: gate.insufficientFunds,
+    resellerId: reseller.id,
+    resellerName: reseller.full_name || reseller.username,
+    resellerUsername: reseller.username,
+    resellerTier: tier,
+    profileName: cleanProfile,
+    wholesalePrice: matchedTariff ? wholesalePrice : 0,
+    retailPrice: matchedTariff ? retailPrice : 0,
+    walletBalance,
+    creditLimit,
+    availableFunds,
+    projectedBalanceAfter: gate.projectedBalanceAfter,
+    error: gate.allowed ? null : gate.error || TARIFF_NOT_CONFIGURED_ERROR,
+  };
+}
+
+/**
+ * Automatic Strict Prepaid Wallet Deduction Gate on PPPoE Provisioning, Package Change & Renewal:
  * 1. Fetches live reseller wallet_balance, credit_limit, max_active_users, and reseller_tariffs row for the MikroTik profile.
- * 2. Verifies `wallet_balance + credit_limit >= wholesale_price` and `max_active_users` cap (on new activations).
- * 3. Blocks activation immediately with `Insufficient Dealer Wallet Balance` when funds are low.
- * 4. Deducts `wholesale_price` from `portal_users.wallet_balance` and logs `USER_ACTIVATION` or `RENEWAL_DEDUCTION`
- *    into `reseller_wallet_ledger`.
+ * 2. Hard-blocks if no wholesale tariff is configured (or <= 0) OR if (wallet_balance + credit_limit) < wholesale_price.
+ * 3. Deducts `wholesale_price` from `portal_users.wallet_balance` BEFORE MikroTik API is invoked,
+ *    and logs `USER_ACTIVATION` or `RENEWAL_DEDUCTION` into `reseller_wallet_ledger`.
  */
 export async function checkAndDeductResellerWallet(params: {
   resellerId?: string | null;
@@ -1366,9 +1838,6 @@ export async function checkAndDeductResellerWallet(params: {
 
   if (resErr) {
     console.error('[ResellerEngine] checkAndDeductResellerWallet fetch failed:', resErr);
-    if (isResellerTableMissingError(resErr)) {
-      return { ok: true, skipped: true, chargedAmount: 0, balanceBefore: 0, balanceAfter: 0 };
-    }
     return {
       ok: false,
       chargedAmount: 0,
@@ -1382,14 +1851,20 @@ export async function checkAndDeductResellerWallet(params: {
     return { ok: true, skipped: true, chargedAmount: 0, balanceBefore: 0, balanceAfter: 0 };
   }
 
+  const balanceBefore = Number(reseller.wallet_balance || 0);
+  const creditLimit = Math.max(0, Number(reseller.credit_limit || 0));
+  const availableFunds = balanceBefore + creditLimit;
+
   if (String(reseller.account_status || 'ACTIVE').toUpperCase() === 'SUSPENDED') {
     return {
       ok: false,
       chargedAmount: 0,
-      balanceBefore: Number(reseller.wallet_balance || 0),
-      balanceAfter: Number(reseller.wallet_balance || 0),
+      balanceBefore,
+      balanceAfter: balanceBefore,
+      availableFunds,
       resellerId: reseller.id,
       resellerName: reseller.full_name,
+      resellerUsername: reseller.username,
       error: `Reseller account @${reseller.username} is currently SUSPENDED. Contact Master ISP Admin.`,
     };
   }
@@ -1405,24 +1880,45 @@ export async function checkAndDeductResellerWallet(params: {
           .from('portal_users')
           .select('id', { count: 'exact', head: true })
           .eq('role', 'CLIENT')
-          .eq('dealer_id', reseller.id)
+          .or(`sub_dealer_id.eq.${reseller.id},dealer_id.eq.${reseller.id}`)
           .neq('account_status', 'SUSPENDED')
       : Promise.resolve({ count: 0, error: null } as any),
   ]);
 
-  const tariffs = tariffRes.error ? [] : ((tariffRes.data || []) as SupabaseResellerTariff[]);
-  const { wholesalePrice } = resolveTariffForProfile(
+  if (tariffRes.error) {
+    return {
+      ok: false,
+      tariffMissing: true,
+      chargedAmount: 0,
+      balanceBefore,
+      balanceAfter: balanceBefore,
+      availableFunds,
+      resellerId: reseller.id,
+      resellerName: reseller.full_name,
+      resellerUsername: reseller.username,
+      profileName: params.profileName,
+      error: TARIFF_NOT_CONFIGURED_ERROR,
+    };
+  }
+
+  const normalizedTariffs: SupabaseResellerTariff[] = ((tariffRes.data || []) as any[]).map((t) => ({
+    ...t,
+    profile_name: String(t.profile_name || t.package_name || t.mikrotik_profile || '').trim(),
+    wholesale_price: Number(t.wholesale_price ?? t.wholesale_rate ?? 0),
+    retail_price: Number(t.retail_price ?? t.retail_rate ?? 0),
+  }));
+
+  const { matchedTariff, wholesalePrice } = resolveTariffForProfile(
     reseller.id,
     params.profileName,
-    tariffs,
-    params.fallbackWholesalePrice ?? 0
+    normalizedTariffs,
+    0
   );
 
-  const balanceBefore = Number(reseller.wallet_balance || 0);
-  const eligibility = evaluateWalletEligibility({
+  const eligibility = evaluateStrictPrepaidWalletGate({
     walletBalance: balanceBefore,
-    creditLimit: Number(reseller.credit_limit || 0),
-    wholesalePrice,
+    creditLimit,
+    matchedTariff: matchedTariff as any,
     currentActiveUsers: Number(activeCountRes?.count || 0),
     maxActiveUsers: Number(reseller.max_active_users || 0),
     enforceUserCap: params.txType === 'USER_ACTIVATION',
@@ -1431,13 +1927,16 @@ export async function checkAndDeductResellerWallet(params: {
   if (!eligibility.allowed) {
     return {
       ok: false,
+      tariffMissing: Boolean(eligibility.tariffMissing),
       insufficientFunds: eligibility.insufficientFunds,
       capExceeded: eligibility.capExceeded,
-      chargedAmount: wholesalePrice,
+      chargedAmount: eligibility.requiredAmount,
       balanceBefore,
       balanceAfter: balanceBefore,
+      availableFunds,
       resellerId: reseller.id,
       resellerName: reseller.full_name,
+      resellerUsername: reseller.username,
       profileName: params.profileName,
       error: eligibility.error,
     };
@@ -1457,12 +1956,15 @@ export async function checkAndDeductResellerWallet(params: {
         chargedAmount: wholesalePrice,
         balanceBefore,
         balanceAfter: balanceBefore,
+        availableFunds,
         resellerId: reseller.id,
         resellerName: reseller.full_name,
+        resellerUsername: reseller.username,
         error: updErr.message || 'Failed to deduct reseller wallet balance.',
       };
     }
 
+    const cleanSub = params.subscriberUsername.trim().toLowerCase();
     await adaptiveLedgerInsert([
       {
         reseller_id: reseller.id,
@@ -1472,14 +1974,15 @@ export async function checkAndDeductResellerWallet(params: {
         amount: -wholesalePrice,
         balance_before: balanceBefore,
         balance_after: balanceAfter,
-        subscriber_username: params.subscriberUsername.trim().toLowerCase(),
+        subscriber_username: cleanSub,
+        reference_username: cleanSub,
         profile_name: params.profileName.trim(),
         performed_by: params.performedBy || reseller.username,
         notes:
           params.notes ||
           (params.txType === 'USER_ACTIVATION'
-            ? `PPPoE activation for @${params.subscriberUsername} (${params.profileName})`
-            : `Monthly renewal / restore for @${params.subscriberUsername} (${params.profileName})`),
+            ? `PPPoE activation for @${cleanSub} (${params.profileName})`
+            : `Monthly renewal / restore for @${cleanSub} (${params.profileName})`),
       },
     ]);
 
@@ -1491,10 +1994,78 @@ export async function checkAndDeductResellerWallet(params: {
     chargedAmount: wholesalePrice,
     balanceBefore,
     balanceAfter,
+    availableFunds,
     resellerId: reseller.id,
     resellerName: reseller.full_name,
+    resellerUsername: reseller.username,
     profileName: params.profileName,
   };
+}
+
+/**
+ * Automatic Wallet Refund on MikroTik RouterOS Failure:
+ * Credits back `amount` to `portal_users.wallet_balance` and inserts a verified
+ * `REFUND` ledger entry in `reseller_wallet_ledger` so resellers never lose funds
+ * if RouterOS rejects or times out after wallet deduction.
+ */
+export async function refundResellerWallet(params: {
+  resellerId: string;
+  amount: number;
+  subscriberUsername: string;
+  profileName: string;
+  reason: string;
+  performedBy?: string;
+}): Promise<{ ok: boolean; balanceAfter?: number; error?: string }> {
+  const amt = Math.round(Math.max(0, Number(params.amount) || 0) * 100) / 100;
+  if (!params.resellerId || amt <= 0) {
+    return { ok: true };
+  }
+
+  const { data: reseller, error: fetchErr } = await supabase
+    .from('portal_users')
+    .select('id, full_name, username, wallet_balance')
+    .eq('id', params.resellerId)
+    .maybeSingle();
+
+  if (fetchErr || !reseller) {
+    return {
+      ok: false,
+      error: fetchErr ? formatSupabaseError(fetchErr) : 'Reseller not found for refund.',
+    };
+  }
+
+  const balanceBefore = Number(reseller.wallet_balance || 0);
+  const balanceAfter = Math.round((balanceBefore + amt) * 100) / 100;
+
+  const { error: updErr } = await supabase
+    .from('portal_users')
+    .update({ wallet_balance: balanceAfter })
+    .eq('id', reseller.id);
+
+  if (updErr) {
+    return { ok: false, error: formatSupabaseError(updErr) };
+  }
+
+  const cleanSub = String(params.subscriberUsername || '').trim().toLowerCase();
+  await adaptiveLedgerInsert([
+    {
+      reseller_id: reseller.id,
+      reseller_name: reseller.full_name,
+      reseller_username: reseller.username,
+      tx_type: 'REFUND',
+      amount: amt,
+      balance_before: balanceBefore,
+      balance_after: balanceAfter,
+      subscriber_username: cleanSub,
+      reference_username: cleanSub,
+      profile_name: String(params.profileName || '').trim(),
+      performed_by: params.performedBy || 'AUTO_REFUND_SYSTEM',
+      notes: `Auto-refund (MikroTik activation failed): ${params.reason}`,
+    },
+  ]);
+
+  broadcastResellerWalletUpdated({ resellerId: reseller.id, walletBalance: balanceAfter });
+  return { ok: true, balanceAfter };
 }
 
 /**

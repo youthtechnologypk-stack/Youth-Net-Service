@@ -17,11 +17,16 @@ import { getStoredUser } from '../lib/auth';
 import {
   buildOwnershipStamp,
   checkAndDeductResellerWallet,
+  filterFieldAgentsForUser,
   getResellerTier,
   isResellerUser,
+  refundResellerWallet,
+  resolveActiveResellerIdForSubscriber,
   resolveTariffForProfile,
   stampOwnershipOnPortalUserAndInvoices,
+  WalletGatePreviewResult,
 } from '../lib/resellerEngine';
+import { ResellerWalletGatePreview } from './ResellerWalletGatePreview';
 
 interface ProvisionSecretModalProps {
   isOpen: boolean;
@@ -38,7 +43,6 @@ export const ProvisionSecretModal: React.FC<ProvisionSecretModalProps> = ({ isOp
     provisionPppoeSecret,
     dynamicPppProfiles,
     bandwidthProfiles: contextProfiles,
-    agents,
   } = useISP();
 
   const [storedProfiles, setStoredProfiles] = useState<BandwidthProfile[]>(() =>
@@ -73,7 +77,7 @@ export const ProvisionSecretModal: React.FC<ProvisionSecretModalProps> = ({ isOp
   const [pppoeUsername, setPppoeUsername] = useState('');
   const [pppoePassword, setPppoePassword] = useState('fiber1234');
   const [packageId, setPackageId] = useState(defaultProfileName);
-  const [assignedAgentId, setAssignedAgentId] = useState(agents[0]?.id || '');
+  const [assignedAgentId, setAssignedAgentId] = useState('');
   const [ponPort, setPonPort] = useState('PON-01');
   const [cnic, setCnic] = useState('');
   const [portalAgents, setPortalAgents] = useState<SupabasePortalUser[]>([]);
@@ -88,6 +92,7 @@ export const ProvisionSecretModal: React.FC<ProvisionSecretModalProps> = ({ isOp
   const [selectedDealerId, setSelectedDealerId] = useState<string>('');
   const [resellerTariffs, setResellerTariffs] = useState<SupabaseResellerTariff[]>([]);
   const [walletError, setWalletError] = useState<string | null>(null);
+  const [walletGateStatus, setWalletGateStatus] = useState<WalletGatePreviewResult | null>(null);
 
   useEffect(() => {
     const loadAreas = () => {
@@ -111,7 +116,11 @@ export const ProvisionSecretModal: React.FC<ProvisionSecretModalProps> = ({ isOp
       .then(({ data }) => {
         if (Array.isArray(data)) {
           const allRows = data as SupabasePortalUser[];
-          setPortalAgents(allRows.filter((u) => String(u.role || '').toUpperCase() === 'AGENT'));
+          setPortalAgents(
+            filterFieldAgentsForUser(allRows, activeLoggedInUser, {
+              allPortalUsers: allRows,
+            })
+          );
           setResellerOptions(allRows.filter((u) => getResellerTier(u) !== null));
         }
       });
@@ -200,16 +209,21 @@ export const ProvisionSecretModal: React.FC<ProvisionSecretModalProps> = ({ isOp
   }, [availableProfiles, defaultProfileName]);
 
   useEffect(() => {
-    if (agents.length > 0 && !assignedAgentId) {
-      setAssignedAgentId(agents[0].id);
+    if (portalAgents.length === 0) {
+      if (assignedAgentId) setAssignedAgentId('');
+      return;
     }
-  }, [agents, assignedAgentId]);
+    if (assignedAgentId && !portalAgents.some((a) => a.id === assignedAgentId)) {
+      setAssignedAgentId(portalAgents[0].id);
+    }
+  }, [portalAgents, assignedAgentId]);
 
   if (!isOpen) return null;
 
   const currentRouter = routers.find((r) => r.id === selectedRouterId) || routers[0];
 
-  const effectiveDealerId = isResellerSession ? activeLoggedInUser?.id || '' : selectedDealerId;
+  const effectiveDealerId =
+    resolveActiveResellerIdForSubscriber(null, activeLoggedInUser) || selectedDealerId;
   const activeResellerRecord = resellerOptions.find((r) => r.id === effectiveDealerId) || null;
   const resolvedResellerTariff = effectiveDealerId
     ? resolveTariffForProfile(effectiveDealerId, packageId, resellerTariffs, selectedProfilePrice)
@@ -218,11 +232,20 @@ export const ProvisionSecretModal: React.FC<ProvisionSecretModalProps> = ({ isOp
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!name || !pppoeUsername) return;
+    if (walletGateStatus?.blocked) {
+      setWalletError(
+        walletGateStatus.error || 'Prepaid reseller wallet gate blocked this package assignment.'
+      );
+      return;
+    }
 
     setIsSubmitting(true);
     setWalletError(null);
 
-    // Reseller Prepaid Wallet Deduction Guard BEFORE calling MikroTik API
+    let chargedAmount = 0;
+    let chargedResellerId = '';
+
+    // Strict Reseller Prepaid Wallet Deduction Gate BEFORE calling MikroTik API
     if (effectiveDealerId) {
       const walletCheck = await checkAndDeductResellerWallet({
         resellerId: effectiveDealerId,
@@ -230,7 +253,6 @@ export const ProvisionSecretModal: React.FC<ProvisionSecretModalProps> = ({ isOp
         subscriberUsername: pppoeUsername,
         txType: 'USER_ACTIVATION',
         performedBy: activeLoggedInUser?.fullName || activeLoggedInUser?.username || 'Reseller',
-        fallbackWholesalePrice: selectedProfilePrice,
         notes: `New PPPoE activation for @${pppoeUsername.trim().toLowerCase()} (${packageId})`,
       });
 
@@ -239,37 +261,61 @@ export const ProvisionSecretModal: React.FC<ProvisionSecretModalProps> = ({ isOp
         setIsSubmitting(false);
         return;
       }
+      chargedAmount = Number(walletCheck.chargedAmount || 0);
+      chargedResellerId = effectiveDealerId;
     }
 
-    const selectedAgent = agents.find((a) => a.id === assignedAgentId) || agents[0];
+    const selectedAgent = portalAgents.find((a) => a.id === assignedAgentId) || null;
 
     // Compute validity in fractional days or hours
     const now = new Date();
     const diffHours = Math.max(1, Math.round((targetExpiryDate.getTime() - now.getTime()) / (1000 * 60 * 60)));
     const diffDays = Math.max(1, Math.round(diffHours / 24));
 
-    await provisionPppoeSecret({
-      name,
-      phone,
-      address,
-      areaNode,
-      pppoeUsername,
-      pppoePassword,
-      packageId,
-      assignedIp: `10.50.${Math.floor(Math.random() * 40 + 10)}.${Math.floor(Math.random() * 240 + 10)}`,
-      macAddress: `00:1E:67:${Math.floor(10 + Math.random() * 89)}:${Math.floor(10 + Math.random() * 89)}:${Math.floor(10 + Math.random() * 89)}`,
-      ...({
-        cnic,
-        ponPort,
-        assignedAgentId: selectedAgent?.id,
-        assignedAgentName: selectedAgent?.name,
-        validityDays: diffDays,
-        validityPreset,
-        targetExpiryDate: targetExpiryDate.toISOString(),
-        priceMonthly: resolvedResellerTariff?.retailPrice || selectedProfilePrice,
-        dealerId: effectiveDealerId || null,
-      } as any),
-    });
+    try {
+      await provisionPppoeSecret({
+        name,
+        phone,
+        address,
+        areaNode,
+        pppoeUsername,
+        pppoePassword,
+        packageId,
+        assignedIp: `10.50.${Math.floor(Math.random() * 40 + 10)}.${Math.floor(Math.random() * 240 + 10)}`,
+        macAddress: `00:1E:67:${Math.floor(10 + Math.random() * 89)}:${Math.floor(10 + Math.random() * 89)}:${Math.floor(10 + Math.random() * 89)}`,
+        ...({
+          cnic,
+          ponPort,
+          assignedAgentId: selectedAgent?.id || undefined,
+          assignedAgentName: selectedAgent?.full_name || selectedAgent?.username || undefined,
+          validityDays: diffDays,
+          validityPreset,
+          targetExpiryDate: targetExpiryDate.toISOString(),
+          priceMonthly: resolvedResellerTariff?.retailPrice || selectedProfilePrice,
+          dealerId: effectiveDealerId || null,
+        } as any),
+      });
+    } catch (provErr: any) {
+      let refundMsg = '';
+      if (chargedAmount > 0 && chargedResellerId) {
+        const refundRes = await refundResellerWallet({
+          resellerId: chargedResellerId,
+          amount: chargedAmount,
+          profileName: packageId,
+          subscriberUsername: pppoeUsername,
+          performedBy: activeLoggedInUser?.fullName || activeLoggedInUser?.username || 'System Auto-Refund',
+          reason: `Auto-refund: MikroTik provisioning failed for @${pppoeUsername.trim().toLowerCase()} (${provErr?.message || 'Router error'})`,
+        });
+        refundMsg = refundRes.ok
+          ? ` Wallet automatically refunded Rs. ${chargedAmount.toLocaleString()}.`
+          : ` Refund warning: ${refundRes.error || 'Please reconcile wallet.'}`;
+      }
+      setWalletError(
+        `${provErr?.message || 'MikroTik provisioning failed.'}${refundMsg}`
+      );
+      setIsSubmitting(false);
+      return;
+    }
 
     // Link subscriber ownership to Dealer / Sub-Dealer / Creator in Supabase portal_users & invoices
     const cleanSubUsername = pppoeUsername.trim().toLowerCase();
@@ -343,17 +389,17 @@ export const ProvisionSecretModal: React.FC<ProvisionSecretModalProps> = ({ isOp
         {/* Form */}
         <form onSubmit={handleSubmit} className="p-5 space-y-4 text-xs">
           {walletError && (
-            <div className="rounded-xl border border-rose-500/50 bg-rose-950/70 px-3.5 py-3 text-rose-200 flex items-start gap-2.5">
+            <div className="rounded-xl border border-rose-500/60 bg-rose-950/80 px-3.5 py-3 text-rose-200 flex items-start gap-2.5">
               <ShieldCheck className="w-4 h-4 text-rose-400 shrink-0 mt-0.5" />
               <div>
-                <div className="font-bold text-rose-100">Insufficient Dealer Wallet Balance</div>
-                <div className="text-[11px] mt-0.5 text-rose-200/90">{walletError}</div>
+                <div className="font-bold text-rose-100">Prepaid Wallet Payment Gate Blocked</div>
+                <div className="text-[11px] mt-0.5 text-rose-200/95">{walletError}</div>
               </div>
             </div>
           )}
 
           {/* Reseller Ownership & Prepaid Wallet Preview */}
-          {(isResellerSession || resellerOptions.length > 0) && (
+          {(isResellerSession || resellerOptions.length > 0 || Boolean(effectiveDealerId)) && (
             <div className="rounded-xl border border-slate-800 bg-slate-950/80 p-3.5 space-y-2.5">
               <div className="flex flex-wrap items-center justify-between gap-2">
                 <span className="font-semibold text-slate-200">
@@ -368,7 +414,7 @@ export const ProvisionSecretModal: React.FC<ProvisionSecretModalProps> = ({ isOp
                 )}
               </div>
 
-              {!isResellerSession && (
+              {!isResellerSession && !resolveActiveResellerIdForSubscriber(null, activeLoggedInUser) && (
                 <select
                   value={selectedDealerId}
                   onChange={(e) => {
@@ -386,13 +432,14 @@ export const ProvisionSecretModal: React.FC<ProvisionSecretModalProps> = ({ isOp
                 </select>
               )}
 
-              {effectiveDealerId && resolvedResellerTariff && (
-                <div className="flex items-center justify-between text-[11px] font-mono text-slate-400 pt-1 border-t border-slate-800">
-                  <span>Wholesale Deduction ({packageId}):</span>
-                  <span className="text-amber-300 font-semibold">
-                    Rs. {resolvedResellerTariff.wholesalePrice.toLocaleString()}
-                  </span>
-                </div>
+              {effectiveDealerId && (
+                <ResellerWalletGatePreview
+                  resellerId={effectiveDealerId}
+                  profileName={packageId}
+                  actionLabel="provisioning"
+                  compact
+                  onStatusChange={setWalletGateStatus}
+                />
               )}
             </div>
           )}
@@ -501,9 +548,10 @@ export const ProvisionSecretModal: React.FC<ProvisionSecretModalProps> = ({ isOp
                 onChange={(e) => setAssignedAgentId(e.target.value)}
                 className="w-full bg-slate-950 border border-slate-700 text-slate-100 p-2.5 rounded-lg focus:outline-none focus:border-cyan-500"
               >
-                {agents.map((ag) => (
+                <option value="">-- Unassigned / Direct --</option>
+                {portalAgents.map((ag) => (
                   <option key={ag.id} value={ag.id}>
-                    {ag.name} ({ag.assignedArea})
+                    {ag.full_name} ({ag.area || 'Field'})
                   </option>
                 ))}
               </select>
@@ -668,10 +716,14 @@ export const ProvisionSecretModal: React.FC<ProvisionSecretModalProps> = ({ isOp
             </button>
             <button
               type="submit"
-              disabled={isSubmitting}
-              className="px-6 py-2.5 rounded-lg bg-cyan-600 hover:bg-cyan-500 text-slate-950 font-bold transition disabled:opacity-50 cursor-pointer shadow-lg shadow-cyan-600/20"
+              disabled={isSubmitting || Boolean(effectiveDealerId && walletGateStatus?.blocked)}
+              className="px-6 py-2.5 rounded-lg bg-cyan-600 hover:bg-cyan-500 text-slate-950 font-bold transition disabled:opacity-50 disabled:cursor-not-allowed cursor-pointer shadow-lg shadow-cyan-600/20"
             >
-              {isSubmitting ? 'Executing Pipeline...' : 'Provision on MikroTik'}
+              {isSubmitting
+                ? 'Executing Pipeline...'
+                : effectiveDealerId && walletGateStatus?.blocked
+                ? 'Wallet Payment Gate Blocked'
+                : 'Provision on MikroTik'}
             </button>
           </div>
         </form>

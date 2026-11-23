@@ -5,7 +5,9 @@ import { useSubscribers, UnifiedSubscriber } from '../hooks/useSubscribers';
 import { TicketCategory, TicketPriority } from '../types/isp';
 import { supabase, SupabasePortalUser } from '../services/supabaseClient';
 import { safeMikrotikFetch } from '../services/mikrotikRestClient';
-import { FIELD_STAFF_ROLES, insertTicketSafe, normalizeTicketPriority } from '../lib/anniversaryBilling';
+import { insertTicketSafe, normalizeTicketPriority } from '../lib/anniversaryBilling';
+import { getStoredUser } from '../lib/auth';
+import { filterFieldAgentsForUser, isResellerUser } from '../lib/resellerEngine';
 
 export interface CreateTicketModalProps {
   isOpen: boolean;
@@ -71,25 +73,36 @@ export const NewTicketModal: React.FC<CreateTicketModalProps> = ({
     setIsDropdownOpen(false);
   }, []);
 
-  // Fetch real technicians directly from Supabase portal_users (fallback strictly to live context agents)
+  // Fetch real technicians strictly scoped to the logged-in Master ISP / Dealer / Sub-Dealer
   const fetchPortalAgents = async () => {
-    const contextStaffFallback = (agents || []).map((a) => ({
-      id: a.id,
-      full_name: a.name,
-      username: a.name.toLowerCase().replace(/[^a-z0-9]+/g, '_'),
-      area: a.assignedArea || 'Field Sector',
-      role: 'AGENT',
-    }));
+    const activeUser = getStoredUser();
+    const resellerSession = isResellerUser(activeUser);
+    const contextStaffFallback = resellerSession
+      ? []
+      : (agents || []).map((a) => ({
+          id: a.id,
+          full_name: a.name,
+          username: a.name.toLowerCase().replace(/[^a-z0-9]+/g, '_'),
+          area: a.assignedArea || 'Field Sector',
+          role: 'AGENT',
+        }));
 
     try {
       const { data, error } = await supabase
         .from('portal_users')
-        .select('id, full_name, username, area, role')
-        .in('role', [...FIELD_STAFF_ROLES])
+        .select('*')
         .order('full_name', { ascending: true });
 
-      if (!error && data && data.length > 0) {
-        setPortalAgents(data as SupabasePortalUser[]);
+      if (!error && Array.isArray(data)) {
+        const allRows = data as SupabasePortalUser[];
+        const scoped = filterFieldAgentsForUser(allRows, activeUser, {
+          allPortalUsers: allRows,
+        });
+        if (scoped.length > 0 || resellerSession) {
+          setPortalAgents(scoped);
+        } else {
+          setPortalAgents(contextStaffFallback as any);
+        }
       } else {
         setPortalAgents(contextStaffFallback as any);
       }

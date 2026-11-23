@@ -28,9 +28,14 @@ import { getStoredUser } from '../lib/auth';
 import {
   buildOwnershipStamp,
   checkAndDeductResellerWallet,
+  filterFieldAgentsForUser,
   isResellerUser,
+  refundResellerWallet,
+  resolveActiveResellerIdForSubscriber,
   stampOwnershipOnPortalUserAndInvoices,
+  WalletGatePreviewResult,
 } from '../lib/resellerEngine';
+import { ResellerWalletGatePreview } from './ResellerWalletGatePreview';
 import { safeResponseJson } from '../lib/safeFetch';
 import { saveUnifiedPortalUser } from '../lib/userRepository';
 import { AreaNodeSelector } from './AreaNodeSelector';
@@ -87,7 +92,6 @@ export const AddUserModal: React.FC<AddUserModalProps> = ({ isOpen, onClose, onS
     syncSelectedRouterNow,
     dynamicPppProfiles,
     bandwidthProfiles,
-    agents,
   } = useISP();
   const { provisionSubscriber } = useSubscribers();
 
@@ -96,7 +100,7 @@ export const AddUserModal: React.FC<AddUserModalProps> = ({ isOpen, onClose, onS
   const [password, setPassword] = useState('fiber1234');
   const [service, setService] = useState('pppoe');
   const [profile, setProfile] = useState('');
-  const [assignedAgentId, setAssignedAgentId] = useState(agents[0]?.id || '');
+  const [assignedAgentId, setAssignedAgentId] = useState('');
   const [remoteIp, setRemoteIp] = useState('');
   const [fullName, setFullName] = useState('');
   const [phone, setPhone] = useState('+92 ');
@@ -121,14 +125,21 @@ export const AddUserModal: React.FC<AddUserModalProps> = ({ isOpen, onClose, onS
 
   useEffect(() => {
     if (!isOpen) return;
+    const activeUser = getStoredUser();
     supabase
       .from('portal_users')
-      .select('id,username,full_name,area,role')
-      .eq('role', 'AGENT')
+      .select('*')
       .order('full_name', { ascending: true })
       .then(({ data }) => {
         if (Array.isArray(data)) {
-          setPortalAgents(data as SupabasePortalUser[]);
+          const allRows = data as SupabasePortalUser[];
+          const scoped = filterFieldAgentsForUser(allRows, activeUser, {
+            allPortalUsers: allRows,
+          });
+          setPortalAgents(scoped);
+          setAssignedAgentId((prev) =>
+            prev && scoped.some((a) => a.id === prev) ? prev : ''
+          );
         }
       });
   }, [isOpen]);
@@ -223,6 +234,12 @@ export const AddUserModal: React.FC<AddUserModalProps> = ({ isOpen, onClose, onS
   const [submissionError, setSubmissionError] = useState<string | null>(null);
   const [successData, setSuccessData] = useState<any | null>(null);
   const [copiedSuccess, setCopiedSuccess] = useState(false);
+  const [walletGateStatus, setWalletGateStatus] = useState<WalletGatePreviewResult | null>(null);
+  const activeLoggedInUser = React.useMemo(() => getStoredUser(), [isOpen]);
+  const activeResellerOwnerId = React.useMemo(
+    () => resolveActiveResellerIdForSubscriber(null, activeLoggedInUser),
+    [activeLoggedInUser]
+  );
 
   // Sync selected router
   useEffect(() => {
@@ -342,23 +359,31 @@ export const AddUserModal: React.FC<AddUserModalProps> = ({ isOpen, onClose, onS
       return;
     }
 
+    if (activeResellerOwnerId && walletGateStatus?.blocked) {
+      setSubmissionError(
+        walletGateStatus.error || 'Prepaid reseller wallet gate blocked this package assignment.'
+      );
+      return;
+    }
+
     setIsSubmitting(true);
     setSubmissionError(null);
     setSchedulerWarning(null);
 
+    let chargedAmount = 0;
+    let chargedResellerId: string | null = null;
+    const loggedInUser = getStoredUser();
+
     try {
-      const loggedInUser = getStoredUser();
-      const resellerOwnerId = isResellerUser(loggedInUser) ? loggedInUser?.id || null : null;
+      const resellerOwnerId = resolveActiveResellerIdForSubscriber(null, loggedInUser);
 
       if (resellerOwnerId) {
-        const matchedPkg = packages.find((p) => p.mikrotikProfile === profile || p.name === profile);
         const walletCheck = await checkAndDeductResellerWallet({
           resellerId: resellerOwnerId,
           profileName: profile || 'default',
           subscriberUsername: username.trim(),
           txType: 'USER_ACTIVATION',
           performedBy: loggedInUser?.fullName || loggedInUser?.username || 'Reseller',
-          fallbackWholesalePrice: matchedPkg?.priceMonthly || 0,
           notes: `PPPoE provisioning for @${username.trim().toLowerCase()} (${profile || 'default'})`,
         });
 
@@ -367,9 +392,11 @@ export const AddUserModal: React.FC<AddUserModalProps> = ({ isOpen, onClose, onS
           setIsSubmitting(false);
           return;
         }
+        chargedAmount = Number(walletCheck.chargedAmount || 0);
+        chargedResellerId = resellerOwnerId;
       }
 
-      const selectedAgent = agents.find((a) => a.id === assignedAgentId) || agents[0];
+      const selectedAgent = portalAgents.find((a) => a.id === assignedAgentId) || null;
       const res = await provisionSubscriber({
         username: username.trim(),
         password: password.trim(),
@@ -391,10 +418,14 @@ export const AddUserModal: React.FC<AddUserModalProps> = ({ isOpen, onClose, onS
         expiryDate: scheduleInfo.startDate,
         expiredPool,
         routerId,
-        assignedAgentId: selectedAgent?.id,
-        assignedAgentName: selectedAgent?.name,
+        assignedAgentId: selectedAgent?.id || undefined,
+        assignedAgentName: selectedAgent?.full_name || selectedAgent?.username || undefined,
         sendWhatsApp: true,
       });
+
+      if ((res as any)?.success === false) {
+        throw new Error((res as any)?.error || 'MikroTik PPPoE provisioning failed.');
+      }
 
       const ownershipStamp = buildOwnershipStamp(loggedInUser);
       if (
@@ -481,7 +512,23 @@ export const AddUserModal: React.FC<AddUserModalProps> = ({ isOpen, onClose, onS
         onSuccess(res);
       }
     } catch (err: any) {
-      setSubmissionError(err.message || 'An unexpected error occurred during provisioning.');
+      let refundNotice = '';
+      if (chargedAmount > 0 && chargedResellerId) {
+        const refundRes = await refundResellerWallet({
+          resellerId: chargedResellerId,
+          amount: chargedAmount,
+          profileName: profile || 'default',
+          subscriberUsername: username.trim(),
+          performedBy: loggedInUser?.fullName || loggedInUser?.username || 'System Auto-Refund',
+          reason: `Auto-refund: MikroTik provisioning failed for @${username.trim().toLowerCase()} (${err?.message || 'Router error'})`,
+        });
+        refundNotice = refundRes.ok
+          ? ` Wallet automatically refunded Rs. ${chargedAmount.toLocaleString()}.`
+          : ` Refund warning: ${refundRes.error || 'Please reconcile wallet.'}`;
+      }
+      setSubmissionError(
+        `${err?.message || 'An unexpected error occurred during provisioning.'}${refundNotice}`
+      );
     } finally {
       setIsSubmitting(false);
     }
@@ -1031,9 +1078,10 @@ export const AddUserModal: React.FC<AddUserModalProps> = ({ isOpen, onClose, onS
                   onChange={(e) => setAssignedAgentId(e.target.value)}
                   className="w-full bg-slate-950 border border-slate-700 text-slate-100 p-2 rounded-lg focus:outline-none focus:border-cyan-500 font-sans"
                 >
-                  {agents.map((ag) => (
+                  <option value="">-- Unassigned / Direct --</option>
+                  {portalAgents.map((ag) => (
                     <option key={ag.id} value={ag.id}>
-                      {ag.name} ({ag.assignedArea}) - Cash Limit: Rs. 50,000
+                      {ag.full_name} ({ag.area || 'Field'})
                     </option>
                   ))}
                 </select>
@@ -1087,6 +1135,16 @@ export const AddUserModal: React.FC<AddUserModalProps> = ({ isOpen, onClose, onS
               </div>
             </div>
 
+            {/* Live Reseller Prepaid Wallet Gate Preview */}
+            {activeResellerOwnerId && (
+              <ResellerWalletGatePreview
+                resellerId={activeResellerOwnerId}
+                profileName={profile}
+                actionLabel="provisioning"
+                onStatusChange={setWalletGateStatus}
+              />
+            )}
+
             {/* Action Buttons */}
             <div className="flex items-center justify-end gap-2.5 pt-3 border-t border-slate-800">
               <button
@@ -1099,13 +1157,18 @@ export const AddUserModal: React.FC<AddUserModalProps> = ({ isOpen, onClose, onS
 
               <button
                 type="submit"
-                disabled={isSubmitting}
-                className="px-5 py-2 rounded-lg bg-cyan-600 hover:bg-cyan-500 text-slate-950 font-bold transition flex items-center gap-2 shadow-lg shadow-cyan-950/40 disabled:opacity-50 cursor-pointer"
+                disabled={isSubmitting || Boolean(activeResellerOwnerId && walletGateStatus?.blocked)}
+                className="px-5 py-2 rounded-lg bg-cyan-600 hover:bg-cyan-500 text-slate-950 font-bold transition flex items-center gap-2 shadow-lg shadow-cyan-950/40 disabled:opacity-50 disabled:cursor-not-allowed cursor-pointer"
               >
                 {isSubmitting ? (
                   <>
                     <Loader2 className="w-4 h-4 animate-spin text-slate-950" />
                     <span>Executing /ppp/secret/add...</span>
+                  </>
+                ) : activeResellerOwnerId && walletGateStatus?.blocked ? (
+                  <>
+                    <ShieldAlert className="w-4 h-4" />
+                    <span>Wallet Payment Gate Blocked</span>
                   </>
                 ) : (
                   <>

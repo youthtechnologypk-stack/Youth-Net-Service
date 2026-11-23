@@ -95,18 +95,23 @@ import {
 
 import {
   StaffPermissions,
+  hasExplicitAdminGracePermission,
   resolveStaffPermissions,
 } from '../lib/staffPermissions';
 import {
   buildOwnershipStamp,
   doesInvoiceMatchScope,
   doesRecordMatchAdminOwnerFilter,
+  filterFieldAgentsForUser,
   getResellerTier,
   isResellerUser,
   isVisibleToCurrentUser,
   resolveAdminDealerFilterIds,
   resolveResellerScope,
+  WalletGatePreviewResult,
 } from '../lib/resellerEngine';
+import { AddScopedFieldAgentModal } from './AddScopedFieldAgentModal';
+import { ResellerWalletGatePreview } from './ResellerWalletGatePreview';
 
 export interface BillingViewProps {
   currentRole?: SystemRole;
@@ -126,6 +131,10 @@ export const BillingView: React.FC<BillingViewProps> = ({
     [staffPermissions, currentUser, currentRole]
   );
   const canBulkReceive = perms.bulk_billing && perms.collect_fee;
+  const canUseGraceAndShift = useMemo(
+    () => hasExplicitAdminGracePermission(currentUser as any, perms),
+    [currentUser, perms]
+  );
   const { formatCurrency, currencySymbol } = useCurrency();
   const { customers, agents, routers, selectedRouterId, packages, profilePriceMap } = useISP();
   const activeRouter = routers.find((r) => r.id === selectedRouterId) || routers[0];
@@ -139,6 +148,8 @@ export const BillingView: React.FC<BillingViewProps> = ({
   const [portalClients, setPortalClients] = useState<SupabasePortalUser[]>([]);
   const [allResellers, setAllResellers] = useState<SupabasePortalUser[]>([]);
   const [dealerFilter, setDealerFilter] = useState<string>('ALL');
+  const [staffOwnerFilter, setStaffOwnerFilter] = useState<string>('DIRECT_ISP');
+  const [isAddFieldAgentModalOpen, setIsAddFieldAgentModalOpen] = useState<boolean>(false);
   const [isRunningCron, setIsRunningCron] = useState<boolean>(false);
   const [paymentAccounts, setPaymentAccounts] = useState<SupabasePaymentAccount[]>([]);
   const [whatsappConfig, setWhatsappConfig] = useState<SupabaseWhatsappBillingConfig>(() =>
@@ -175,6 +186,10 @@ export const BillingView: React.FC<BillingViewProps> = ({
   const [collectingAgentId, setCollectingAgentId] = useState<string>('');
   const [paidPaymentMethod, setPaidPaymentMethod] = useState<string>('Cash Handover');
   const [paymentReceivedInput, setPaymentReceivedInput] = useState<number | string>('');
+  const [markPaidError, setMarkPaidError] = useState<string | null>(null);
+  const [markPaidWalletStatus, setMarkPaidWalletStatus] = useState<WalletGatePreviewResult | null>(null);
+  const [editInvoiceError, setEditInvoiceError] = useState<string | null>(null);
+  const [editInvoiceWalletStatus, setEditInvoiceWalletStatus] = useState<WalletGatePreviewResult | null>(null);
 
   // Live MikroTik RouterOS Profiles & Secrets (Single Source of Truth)
   const [liveMikrotikProfiles, setLiveMikrotikProfiles] = useState<
@@ -361,7 +376,7 @@ export const BillingView: React.FC<BillingViewProps> = ({
   const handleGenerateInvoice = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!newSubUsername.trim()) {
-      alert('Please specify a subscriber username.');
+      setActionNotice('Please specify a subscriber username.');
       return;
     }
 
@@ -410,7 +425,7 @@ export const BillingView: React.FC<BillingViewProps> = ({
       setNewSubUsername('');
       await fetchInvoices();
     } catch (err: any) {
-      alert(`Failed to generate invoice: ${err.message}`);
+      setActionNotice(`Failed to generate invoice: ${err.message}`);
     } finally {
       setIsSubmitting(false);
     }
@@ -420,14 +435,20 @@ export const BillingView: React.FC<BillingViewProps> = ({
   const handleOpenMarkPaid = (inv: SupabaseInvoice) => {
     if (!perms.collect_fee) return;
     setSelectedInvoice(inv);
+    setMarkPaidError(null);
+    setMarkPaidWalletStatus(null);
     const alreadyPaid = Number(inv.paid_amount) || 0;
     const remainingDue = Math.max(0, (Number(inv.amount) || 0) - alreadyPaid);
     if (remainingDue <= 0) {
-      alert('This invoice has already been settled and marked PAID.');
+      setActionNotice('This invoice has already been settled and marked PAID.');
       return;
     }
     setPaymentReceivedInput(remainingDue);
-    setCollectingAgentId(inv.assigned_agent_id || (portalAgents[0]?.id ?? ''));
+    setCollectingAgentId(
+      inv.assigned_agent_id && scopedPortalAgents.some((a) => a.id === inv.assigned_agent_id)
+        ? inv.assigned_agent_id
+        : scopedPortalAgents[0]?.id ?? ''
+    );
     setIsMarkPaidModalOpen(true);
   };
 
@@ -438,10 +459,11 @@ export const BillingView: React.FC<BillingViewProps> = ({
 
     const enteredVal = Number(paymentReceivedInput);
     if (isNaN(enteredVal) || enteredVal <= 0) {
-      alert('Please enter a valid payment amount greater than 0.');
+      setMarkPaidError('Please enter a valid payment amount greater than 0.');
       return;
     }
 
+    setMarkPaidError(null);
     setIsSubmitting(true);
     try {
       const invoiceId = selectedInvoice.id;
@@ -470,7 +492,32 @@ export const BillingView: React.FC<BillingViewProps> = ({
           ? selectedInvoice.due_date
           : new Date();
 
-      // 1. Update invoice in Supabase: status, paid_amount, paid_at, and extend +1 calendar month when PAID
+      // STRICT PREPAID WALLET PAYMENT GATE BEFORE MARKING INVOICE PAID OR RESTORING MIKROTIK
+      if (newStatus === 'PAID') {
+        if (markPaidWalletStatus?.blocked) {
+          const msg =
+            markPaidWalletStatus.error || 'Insufficient Dealer Wallet Balance: Renewal blocked.';
+          setMarkPaidError(msg);
+          setActionNotice(msg);
+          setIsSubmitting(false);
+          return;
+        }
+        const restoreRes = await restoreSubscriberOnInvoicePaid(selectedInvoice.subscriber_username, {
+          triggeredBy: 'ADMIN',
+          performedBy: currentUser?.fullName || currentUser?.username || 'Billing Desk',
+          notes: `Payment recorded on Invoice #${selectedInvoice.invoice_no} (${paidPaymentMethod})`,
+          activeRouter: activeRouterRef.current,
+        });
+        if (restoreRes.insufficientWalletFunds || !restoreRes.success) {
+          const msg = restoreRes.error || 'Insufficient Dealer Wallet Balance: Renewal blocked.';
+          setMarkPaidError(msg);
+          setActionNotice(msg);
+          setIsSubmitting(false);
+          return;
+        }
+      }
+
+      // 1. Update invoice in Supabase ONLY AFTER prepaid wallet & MikroTik restore succeed
       const invoiceUpdateData: Partial<SupabaseInvoice> = {
         status: newStatus,
         paid_amount: finalPaidAmount,
@@ -489,30 +536,6 @@ export const BillingView: React.FC<BillingViewProps> = ({
 
       if (invError) {
         throw new Error(invError.message);
-      }
-
-      // Immediately verify & deduct reseller wallet + restore subscriber ACTIVE status & MikroTik profile on PAID
-      if (newStatus === 'PAID') {
-        const restoreRes = await restoreSubscriberOnInvoicePaid(selectedInvoice.subscriber_username, {
-          triggeredBy: 'ADMIN',
-          performedBy: currentUser?.fullName || currentUser?.username || 'Billing Desk',
-          notes: `Payment recorded on Invoice #${selectedInvoice.invoice_no} (${paidPaymentMethod})`,
-          activeRouter: activeRouterRef.current,
-        });
-        if (restoreRes.insufficientWalletFunds || (!restoreRes.success && restoreRes.error)) {
-          // Rollback invoice update if reseller wallet could not cover wholesale renewal
-          await safeUpdateInvoiceInSupabase(
-            { id: invoiceId, invoiceNo: selectedInvoice.invoice_no },
-            {
-              status: selectedInvoice.status,
-              paid_amount: selectedInvoice.paid_amount ?? 0,
-              due_date: selectedInvoice.due_date,
-            }
-          );
-          setActionNotice(`⚠️ ${restoreRes.error || 'Insufficient Dealer Wallet Balance: Renewal blocked.'}`);
-          setIsSubmitting(false);
-          return;
-        }
       }
 
       // 2. Update collecting agent's cash_in_hand in portal_users by ONLY enteredVal
@@ -593,7 +616,7 @@ export const BillingView: React.FC<BillingViewProps> = ({
       setSelectedInvoice(null);
       await fetchInvoices();
     } catch (err: any) {
-      alert(`Failed to record payment: ${err.message}`);
+      setMarkPaidError(`Failed to record payment: ${err.message}`);
     } finally {
       setIsSubmitting(false);
     }
@@ -602,6 +625,8 @@ export const BillingView: React.FC<BillingViewProps> = ({
   // 5. Open Edit Invoice Modal with auto-preselected live MikroTik secret profile
   const handleOpenEditModal = (inv: SupabaseInvoice) => {
     if (!perms.edit_delete_invoice) return;
+    setEditInvoiceError(null);
+    setEditInvoiceWalletStatus(null);
     setInvoiceToEdit(inv);
     setEditAmount(Number(inv.amount) || 0);
     setEditDueDate(inv.due_date || '');
@@ -679,9 +704,17 @@ export const BillingView: React.FC<BillingViewProps> = ({
     if (!perms.edit_delete_invoice) return;
     if (!invoiceToEdit) return;
 
+    if (editStatus === 'PAID' && editInvoiceWalletStatus?.blocked) {
+      setEditInvoiceError(
+        editInvoiceWalletStatus.error || 'Insufficient Dealer Wallet Balance: Renewal blocked.'
+      );
+      return;
+    }
+
+    setEditInvoiceError(null);
     setIsSubmitting(true);
     try {
-      const selectedAgent = portalAgents.find((a) => a.id === editAssignedAgentId);
+      const selectedAgent = scopedPortalAgents.find((a) => a.id === editAssignedAgentId);
       const selectedProfileClean = (editPackageProfile || '').trim();
       const updatedData: Partial<SupabaseInvoice> = {
         amount: Number(editAmount) || 0,
@@ -754,7 +787,7 @@ export const BillingView: React.FC<BillingViewProps> = ({
       setInvoiceToEdit(null);
       await fetchInvoices();
     } catch (err: any) {
-      alert(`Failed to update invoice: ${err.message}`);
+      setEditInvoiceError(err?.message || 'Failed to update invoice.');
     } finally {
       setIsSubmitting(false);
     }
@@ -786,7 +819,7 @@ export const BillingView: React.FC<BillingViewProps> = ({
       setTimeout(() => setActionNotice(null), 5000);
       setInvoiceToDelete(null);
     } catch (err: any) {
-      alert(`Failed to delete invoice: ${err.message}`);
+      setActionNotice(`Failed to delete invoice: ${err.message}`);
     } finally {
       setIsSubmitting(false);
     }
@@ -838,6 +871,64 @@ export const BillingView: React.FC<BillingViewProps> = ({
       return doesRecordMatchAdminOwnerFilter(client, adminDealerSelection, subscriberOwnerByUsername);
     });
   }, [portalClients, resellerScope, currentUser, adminDealerSelection, subscriberOwnerByUsername]);
+
+  // Strict Multi-Tenant Field Agents & Recovery Staff Isolation
+  // - ADMIN: Master ISP direct field agents by default (with optional Dealer/Sub-Dealer inspector dropdown)
+  // - DEALER: ONLY own created agents + child Sub-Dealers' agents
+  // - SUB_DEALER: ONLY own created agents (sub_dealer_id === self || created_by_id === self)
+  const scopedPortalAgents = useMemo(() => {
+    if (resellerScope.isIsolated && isLoading && portalAgents.length === 0) return [];
+    return filterFieldAgentsForUser(portalAgents, currentUser, {
+      childSubDealerIds: resellerScope.allowedResellerIds,
+      adminOwnerFilter: staffOwnerFilter,
+      allResellers,
+    });
+  }, [portalAgents, currentUser, resellerScope, staffOwnerFilter, allResellers, isLoading]);
+
+  const scopedLiveFieldStaff = useMemo(() => {
+    if (resellerScope.isIsolated && isLoading && liveFieldStaff.length === 0) return [];
+    const filteredLedger = filterFieldAgentsForUser(liveFieldStaff, currentUser, {
+      childSubDealerIds: resellerScope.allowedResellerIds,
+      adminOwnerFilter: staffOwnerFilter,
+      allResellers,
+    });
+    if (filteredLedger.length > 0) return filteredLedger;
+    // Also synthesize clean cards for newly created scoped agents before their first transaction
+    return scopedPortalAgents.map((a) => ({
+      id: a.id,
+      username: a.username,
+      role: String(a.role || 'AGENT').toUpperCase(),
+      tier_level: a.tier_level ?? 'STAFF',
+      dealer_id: a.dealer_id ?? null,
+      sub_dealer_id: a.sub_dealer_id ?? null,
+      created_by_id: a.created_by_id ?? null,
+      name: a.full_name || a.username,
+      phone: a.phone || '',
+      email: `${a.username}@youthnet.pk`,
+      assignedArea: a.area || 'Field Sector',
+      status: 'active' as const,
+      cashInHand: Number(a.cash_in_hand) || 0,
+      totalCollectedToday: 0,
+      activeTicketsAssigned: 0,
+      baseSalary: Number(a.base_salary) || 0,
+      advanceSalaryTaken: Number(a.advance_balance) || 0,
+      advanceSalaryReturned: 0,
+      totalCashCollected: 0,
+      totalHandedOver: 0,
+      advanceBalance: Number(a.advance_balance) || 0,
+      netPayable: Math.max(0, (Number(a.base_salary) || 0) - (Number(a.advance_balance) || 0)),
+      totalSalaryPaid: 0,
+      expensesRecorded: 0,
+    }));
+  }, [
+    liveFieldStaff,
+    scopedPortalAgents,
+    currentUser,
+    resellerScope,
+    staffOwnerFilter,
+    allResellers,
+    isLoading,
+  ]);
 
   const scopedInvoices = useMemo(() => {
     return (invoices || []).filter((inv) => {
@@ -1022,21 +1113,21 @@ export const BillingView: React.FC<BillingViewProps> = ({
   };
 
   const bulkAgentOptions = useMemo(() => {
-    if (liveFieldStaff.length > 0) {
-      return liveFieldStaff.map((s) => ({
+    if (scopedLiveFieldStaff.length > 0) {
+      return scopedLiveFieldStaff.map((s) => ({
         id: s.id,
         full_name: s.name,
         area: s.assignedArea,
         role: s.role,
       }));
     }
-    return portalAgents.map((a) => ({
+    return scopedPortalAgents.map((a) => ({
       id: a.id,
       full_name: a.full_name,
       area: a.area,
       role: a.role,
     }));
-  }, [liveFieldStaff, portalAgents]);
+  }, [scopedLiveFieldStaff, scopedPortalAgents]);
 
   const handleConfirmBulkReceive = async (payload: {
     paymentMethod: string;
@@ -1098,9 +1189,9 @@ export const BillingView: React.FC<BillingViewProps> = ({
   const totalDue = dateFilteredInvoices
     .reduce((acc, i) => acc + Math.max(0, (Number(i.amount) || 0) - (Number(i.paid_amount) || 0)), 0);
   const totalAgentCash =
-    liveFieldStaff.length > 0
-      ? liveFieldStaff.reduce((acc, a) => acc + (Number(a.cashInHand) || 0), 0)
-      : (portalAgents || []).reduce((acc, a) => acc + (Number(a.cash_in_hand) || 0), 0);
+    scopedLiveFieldStaff.length > 0
+      ? scopedLiveFieldStaff.reduce((acc, a) => acc + (Number(a.cashInHand) || 0), 0)
+      : (scopedPortalAgents || []).reduce((acc, a) => acc + (Number(a.cash_in_hand) || 0), 0);
 
   const activePaymentAccounts = useMemo(
     () => (paymentAccounts || []).filter((acc) => acc.is_active !== false),
@@ -1108,7 +1199,12 @@ export const BillingView: React.FC<BillingViewProps> = ({
   );
 
   const handleShiftInvoiceNextMonth = async (inv: SupabaseInvoice) => {
-    if (!perms.grace_and_shift) return;
+    if (!canUseGraceAndShift) {
+      setActionNotice(
+        'Shift Bill to Next Month is disabled for Dealers/Sub-Dealers unless explicitly permitted by Admin.'
+      );
+      return;
+    }
     const uname = String(inv.subscriber_username || '').trim().toLowerCase();
     const client = clientByUsername[uname] || null;
     setShiftingInvoiceId(inv.id);
@@ -1375,7 +1471,7 @@ export const BillingView: React.FC<BillingViewProps> = ({
             <Users className="w-4 h-4 text-purple-400" />
           </div>
           <div className="text-2xl font-bold text-purple-400 mt-2 font-mono tabular-nums">{formatCurrency(totalAgentCash)}</div>
-          <div className="text-slate-500 text-xs mt-1 font-mono tabular-nums">{liveFieldStaff.length || portalAgents.length} active field staff</div>
+          <div className="text-slate-500 text-xs mt-1 font-mono tabular-nums">{scopedLiveFieldStaff.length} active field staff</div>
         </div>
       </div>
 
@@ -1797,7 +1893,7 @@ export const BillingView: React.FC<BillingViewProps> = ({
                         </button>
                       )}
                       <div className="flex flex-wrap items-center gap-2 w-full min-w-0">
-                        {perms.grace_and_shift && (
+                        {canUseGraceAndShift && (
                           <button
                             type="button"
                             disabled={shiftingInvoiceId === inv.id}
@@ -2045,7 +2141,7 @@ export const BillingView: React.FC<BillingViewProps> = ({
                                   <span>{isPartial ? 'Add Payment' : 'Mark Paid'}</span>
                                 </button>
                               )}
-                              {perms.grace_and_shift && (
+                              {canUseGraceAndShift && (
                                 <button
                                   type="button"
                                   disabled={shiftingInvoiceId === inv.id}
@@ -2130,24 +2226,84 @@ export const BillingView: React.FC<BillingViewProps> = ({
         </div>
       </div>
 
-      {/* Field Agents Cash Overview */}
+      {/* Field Agents Cash Overview (Strictly Isolated per Master ISP / Dealer / Sub-Dealer) */}
       <div className="p-4 rounded-xl border border-slate-800 bg-[#111A2E]">
-        <h3 className="text-sm font-bold text-white mb-3 flex items-center justify-between gap-2">
-          <span className="flex items-center gap-2">
-            <Users className="w-4 h-4 text-purple-400" />
-            <span>Field Agent Cash Recovery &amp; Payroll Status (Live portal_users)</span>
-          </span>
-          <span className="text-[11px] font-mono text-slate-400">
-            {liveFieldStaff.length} Active Staff
-          </span>
-        </h3>
-        {liveFieldStaff.length === 0 ? (
-          <div className="p-6 text-center text-xs text-slate-500 font-mono bg-slate-900/50 rounded-lg border border-slate-800">
-            No active field staff found in Supabase portal_users.
+        <div className="mb-3 flex flex-wrap items-center justify-between gap-2">
+          <h3 className="text-sm font-bold text-white flex items-center gap-2">
+            <Users className="w-4 h-4 text-purple-400 shrink-0" />
+            <span>
+              {resellerScope.isIsolated
+                ? 'My Field Agent Cash Recovery & Payroll Status'
+                : 'Field Agent Cash Recovery & Payroll Status (Live portal_users)'}
+            </span>
+          </h3>
+          <div className="flex flex-wrap items-center gap-2">
+            {!resellerScope.isIsolated && allResellers.length > 0 && (
+              <select
+                value={staffOwnerFilter}
+                onChange={(e) => setStaffOwnerFilter(e.target.value)}
+                className="px-2.5 py-1.5 rounded-lg bg-slate-950 border border-slate-700 text-slate-200 text-[11px] font-mono focus:outline-none focus:border-cyan-500"
+                title="Filter Field Agents by Owner"
+              >
+                <option value="DIRECT_ISP">Master ISP Agents (Direct)</option>
+                <option value="ALL">All Agents (Master + Resellers)</option>
+                {allResellers
+                  .filter((r) => getResellerTier(r) === 'DEALER')
+                  .map((d) => (
+                    <React.Fragment key={d.id}>
+                      <option value={d.id}>
+                        [Dealer] {d.full_name || d.username} (@{d.username})
+                      </option>
+                      {allResellers
+                        .filter((s) => s.parent_dealer_id === d.id)
+                        .map((s) => (
+                          <option key={s.id} value={s.id}>
+                            &nbsp;&nbsp;↳ [Sub-Dealer] {s.full_name || s.username} (@{s.username})
+                          </option>
+                        ))}
+                    </React.Fragment>
+                  ))}
+              </select>
+            )}
+            <span className="text-[11px] font-mono text-slate-400">
+              {scopedLiveFieldStaff.length} Active Staff
+            </span>
+            <button
+              type="button"
+              onClick={() => setIsAddFieldAgentModalOpen(true)}
+              className="px-3 py-1.5 rounded-lg bg-cyan-600 hover:bg-cyan-500 text-slate-950 font-bold text-xs flex items-center gap-1.5 transition cursor-pointer shadow-sm"
+            >
+              <Plus className="w-3.5 h-3.5" />
+              <span>{resellerScope.isIsolated ? '+ Add My Field Agent' : '+ Add Field Agent'}</span>
+            </button>
+          </div>
+        </div>
+        {scopedLiveFieldStaff.length === 0 ? (
+          <div className="p-6 text-center text-xs text-slate-400 bg-slate-900/50 rounded-lg border border-slate-800 space-y-3">
+            <div className="font-mono text-slate-300">
+              {resellerScope.isIsolated
+                ? 'You have not added any Field Recovery Agents yet.'
+                : 'No active field staff found for this selection.'}
+            </div>
+            <p className="text-[11px] text-slate-500 max-w-md mx-auto">
+              {resellerScope.isIsolated
+                ? 'Add your own field recovery agents to track their cash-in-hand, collections, and assign them to your subscriber invoices.'
+                : 'Create a new field recovery agent or switch the owner filter above.'}
+            </p>
+            <div>
+              <button
+                type="button"
+                onClick={() => setIsAddFieldAgentModalOpen(true)}
+                className="inline-flex items-center gap-1.5 px-4 py-2 rounded-xl bg-cyan-600 hover:bg-cyan-500 text-slate-950 font-bold text-xs transition cursor-pointer shadow-md shadow-cyan-950/40"
+              >
+                <Plus className="w-3.5 h-3.5" />
+                <span>{resellerScope.isIsolated ? '+ Add My Field Agent' : '+ Add Field Agent'}</span>
+              </button>
+            </div>
           </div>
         ) : (
           <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-5 gap-3">
-            {liveFieldStaff.map((ag) => (
+            {scopedLiveFieldStaff.map((ag) => (
               <div key={ag.id} className="p-3.5 bg-slate-900/80 rounded-lg border border-slate-800 space-y-2">
                 <div className="flex items-start justify-between gap-2">
                   <div className="min-w-0">
@@ -2184,6 +2340,18 @@ export const BillingView: React.FC<BillingViewProps> = ({
           </div>
         )}
       </div>
+
+      {/* Modal: + Add Scoped Field Agent */}
+      <AddScopedFieldAgentModal
+        isOpen={isAddFieldAgentModalOpen}
+        onClose={() => setIsAddFieldAgentModalOpen(false)}
+        currentUser={currentUser}
+        onSuccess={(created) => {
+          setActionNotice(`Field Agent ${created.full_name} (@${created.username}) added to your team.`);
+          setTimeout(() => setActionNotice(null), 6000);
+          void fetchInvoices();
+        }}
+      />
 
       {/* Modal: + Generate Invoice */}
       <CreateInvoiceModal
@@ -2332,10 +2500,10 @@ export const BillingView: React.FC<BillingViewProps> = ({
                       onChange={(e) => setCollectingAgentId(e.target.value)}
                       className="w-full min-w-0 px-3 py-2.5 bg-slate-900 border border-slate-700 rounded-xl text-base text-white focus:outline-none focus:border-cyan-500"
                     >
-                      <option value="">-- Direct NOC Collection --</option>
-                      {portalAgents.map((ag) => (
+                      <option value="">{resellerScope.isIsolated ? '-- Direct Self / Counter Collection --' : '-- Direct NOC Collection --'}</option>
+                      {scopedPortalAgents.map((ag) => (
                         <option key={ag.id} value={ag.id}>
-                          {ag.full_name} ({ag.area})
+                          {ag.full_name} ({ag.area || 'Field'})
                         </option>
                       ))}
                     </select>
@@ -2365,17 +2533,53 @@ export const BillingView: React.FC<BillingViewProps> = ({
                     </select>
                   </div>
 
+                  {willBeFullyPaid && (
+                    <ResellerWalletGatePreview
+                      subscriberUsername={selectedInvoice.subscriber_username}
+                      profileName={
+                        selectedInvoice.package_profile ||
+                        selectedInvoice.package_name ||
+                        clientByUsername[(selectedInvoice.subscriber_username || '').trim().toLowerCase()]
+                          ?.original_package_profile ||
+                        clientByUsername[(selectedInvoice.subscriber_username || '').trim().toLowerCase()]
+                          ?.package_profile_name ||
+                        clientByUsername[(selectedInvoice.subscriber_username || '').trim().toLowerCase()]
+                          ?.package_speed ||
+                        ''
+                      }
+                      actionLabel="renewal"
+                      compact
+                      onStatusChange={setMarkPaidWalletStatus}
+                    />
+                  )}
+
+                  {markPaidError && (
+                    <div className="rounded-xl border border-rose-500/70 bg-rose-950/90 px-3 py-2.5 text-xs font-semibold text-rose-200 flex items-start gap-2">
+                      <AlertTriangle className="w-4 h-4 text-rose-400 shrink-0 mt-0.5" />
+                      <span>{markPaidError}</span>
+                    </div>
+                  )}
+
                   <div className="flex flex-col gap-2 pt-3 border-t border-slate-800 w-full min-w-0">
                     <button
                       type="button"
                       onClick={handleConfirmMarkPaid}
-                      disabled={isSubmitting || Number(paymentReceivedInput) <= 0}
+                      disabled={
+                        isSubmitting ||
+                        Number(paymentReceivedInput) <= 0 ||
+                        Boolean(willBeFullyPaid && markPaidWalletStatus?.blocked)
+                      }
                       className="w-full min-w-0 py-3 px-4 bg-emerald-600 hover:bg-emerald-500 disabled:opacity-50 disabled:cursor-not-allowed text-white font-bold rounded-xl text-base transition shadow-sm flex items-center justify-center gap-2 cursor-pointer"
                     >
                       {isSubmitting ? (
                         <>
                           <RefreshCw className="w-4 h-4 animate-spin shrink-0" />
                           <span>Recording Payment...</span>
+                        </>
+                      ) : willBeFullyPaid && markPaidWalletStatus?.blocked ? (
+                        <>
+                          <AlertTriangle className="w-4 h-4 shrink-0" />
+                          <span>Wallet Payment Gate Blocked</span>
                         </>
                       ) : (
                         <>
@@ -2577,24 +2781,54 @@ export const BillingView: React.FC<BillingViewProps> = ({
                     className="w-full min-w-0 px-3 py-2 bg-slate-900 border border-slate-700 rounded-xl text-base text-white focus:outline-none focus:border-cyan-500"
                   >
                     <option value="">-- Unassigned --</option>
-                    {portalAgents.map((ag) => (
+                    {scopedPortalAgents.map((ag) => (
                       <option key={ag.id} value={ag.id}>
-                        {ag.full_name} ({ag.area})
+                        {ag.full_name} ({ag.area || 'Field'})
                       </option>
                     ))}
                   </select>
                 </div>
 
+                {editStatus === 'PAID' && (
+                  <ResellerWalletGatePreview
+                    subscriberUsername={invoiceToEdit.subscriber_username}
+                    profileName={
+                      editPackageProfile ||
+                      invoiceToEdit.package_profile ||
+                      invoiceToEdit.package_name ||
+                      ''
+                    }
+                    actionLabel="renewal"
+                    compact
+                    onStatusChange={setEditInvoiceWalletStatus}
+                  />
+                )}
+
+                {editInvoiceError && (
+                  <div className="rounded-xl border border-rose-500/70 bg-rose-950/90 px-3 py-2.5 text-xs font-semibold text-rose-200 flex items-start gap-2">
+                    <AlertTriangle className="w-4 h-4 text-rose-400 shrink-0 mt-0.5" />
+                    <span>{editInvoiceError}</span>
+                  </div>
+                )}
+
                 <div className="flex flex-col gap-2 pt-3 border-t border-slate-800 w-full min-w-0">
                   <button
                     type="submit"
-                    disabled={isSubmitting}
-                    className="w-full min-w-0 py-2.5 px-4 bg-indigo-600 hover:bg-indigo-500 text-white font-bold rounded-xl text-base transition shadow-lg flex items-center justify-center gap-1.5 cursor-pointer"
+                    disabled={
+                      isSubmitting ||
+                      Boolean(editStatus === 'PAID' && editInvoiceWalletStatus?.blocked)
+                    }
+                    className="w-full min-w-0 py-2.5 px-4 bg-indigo-600 hover:bg-indigo-500 disabled:opacity-50 disabled:cursor-not-allowed text-white font-bold rounded-xl text-base transition shadow-lg flex items-center justify-center gap-1.5 cursor-pointer"
                   >
                     {isSubmitting ? (
                       <>
                         <RefreshCw className="w-4 h-4 animate-spin" />
                         <span>Saving...</span>
+                      </>
+                    ) : editStatus === 'PAID' && editInvoiceWalletStatus?.blocked ? (
+                      <>
+                        <AlertTriangle className="w-4 h-4" />
+                        <span>Wallet Payment Gate Blocked</span>
                       </>
                     ) : (
                       <span>Save Changes</span>
