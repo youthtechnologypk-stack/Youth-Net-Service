@@ -11,7 +11,7 @@ export interface PortalUser {
   username: string;
   password?: string;
   passwordHash?: string;
-  role: 'ADMIN' | 'MANAGER' | 'AGENT' | 'CLIENT';
+  role: 'ADMIN' | 'MANAGER' | 'AGENT' | 'CLIENT' | 'DEALER' | 'SUB_DEALER';
   fullName: string;
   phone: string;
   email?: string;
@@ -104,7 +104,7 @@ export interface AuditLogEntry {
   id: string;
   timestamp: string;
   actor: string;
-  actorRole: 'ADMIN' | 'MANAGER' | 'AGENT' | 'CLIENT' | 'SYSTEM';
+  actorRole: 'ADMIN' | 'MANAGER' | 'AGENT' | 'CLIENT' | 'DEALER' | 'SUB_DEALER' | 'SYSTEM';
   actionType: AuditActionType;
   actionTitle: string;
   target?: string;

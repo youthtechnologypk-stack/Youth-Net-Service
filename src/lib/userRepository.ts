@@ -14,7 +14,7 @@ export interface UnifiedPortalUser {
   username: string; // trimmed & lowercase
   originalUsername: string;
   password: string; // plain text
-  role: 'ADMIN' | 'MANAGER' | 'AGENT' | 'CLIENT';
+  role: SystemRole;
   fullName: string;
   phone: string;
   area: string;
@@ -123,7 +123,7 @@ export function getStandardPortalUsers(): UnifiedPortalUser[] {
 export function saveUnifiedPortalUser(params: {
   username: string;
   password: string;
-  role: 'ADMIN' | 'MANAGER' | 'AGENT' | 'CLIENT';
+  role: SystemRole;
   fullName: string;
   phone?: string;
   area?: string;

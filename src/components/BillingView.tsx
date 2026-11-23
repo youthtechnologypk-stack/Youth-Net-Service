@@ -96,6 +96,12 @@ import {
   StaffPermissions,
   resolveStaffPermissions,
 } from '../lib/staffPermissions';
+import {
+  doesInvoiceMatchScope,
+  getResellerTier,
+  resolveAdminDealerFilterIds,
+  resolveResellerScope,
+} from '../lib/resellerEngine';
 
 export interface BillingViewProps {
   currentRole?: SystemRole;
@@ -126,6 +132,8 @@ export const BillingView: React.FC<BillingViewProps> = ({
   const [portalAgents, setPortalAgents] = useState<SupabasePortalUser[]>([]);
   const [liveFieldStaff, setLiveFieldStaff] = useState<LiveFieldAgentLedger[]>([]);
   const [portalClients, setPortalClients] = useState<SupabasePortalUser[]>([]);
+  const [allResellers, setAllResellers] = useState<SupabasePortalUser[]>([]);
+  const [dealerFilter, setDealerFilter] = useState<string>('ALL');
   const [isRunningCron, setIsRunningCron] = useState<boolean>(false);
   const [paymentAccounts, setPaymentAccounts] = useState<SupabasePaymentAccount[]>([]);
   const [whatsappConfig, setWhatsappConfig] = useState<SupabaseWhatsappBillingConfig>(() =>
@@ -219,35 +227,32 @@ export const BillingView: React.FC<BillingViewProps> = ({
           .catch(() => {});
       }
 
-      // Also fetch portal_users field staff/clients, live agent balances, payment_transactions, payment_accounts & whatsapp config
+      // Also fetch portal_users (all staff/clients/resellers), live agent balances, payment_transactions, payment_accounts & whatsapp config
       const [
-        { data: agentUsers },
-        { data: clientUsers },
+        { data: allPortalUsersData },
         { data: paymentRows },
         loadedAccounts,
         loadedWaConfig,
         computedStaff,
       ] = await Promise.all([
-        supabase
-          .from('portal_users')
-          .select('*')
-          .in('role', [...FIELD_STAFF_ROLES])
-          .order('full_name', { ascending: true }),
-        supabase.from('portal_users').select('*').eq('role', 'CLIENT'),
+        supabase.from('portal_users').select('*').order('full_name', { ascending: true }),
         supabase.from('payment_transactions').select('*').order('payment_date', { ascending: false }),
         fetchPaymentAccounts(),
         fetchWhatsappBillingConfig(),
         fetchLiveFieldStaffWithBalances(supabase),
       ]);
 
-      if (agentUsers) {
-        setPortalAgents(agentUsers as SupabasePortalUser[]);
-      }
+      const allPortalList = (allPortalUsersData || []) as SupabasePortalUser[];
+      const fieldRoleSet = new Set(FIELD_STAFF_ROLES.map((r) => r.toUpperCase()));
+      setPortalAgents(
+        allPortalList.filter((u) => fieldRoleSet.has(String(u.role || '').toUpperCase()))
+      );
+      setPortalClients(
+        allPortalList.filter((u) => String(u.role || '').toUpperCase() === 'CLIENT')
+      );
+      setAllResellers(allPortalList.filter((u) => getResellerTier(u) !== null));
       if (Array.isArray(computedStaff)) {
         setLiveFieldStaff(computedStaff);
-      }
-      if (clientUsers) {
-        setPortalClients(clientUsers as SupabasePortalUser[]);
       }
       if (paymentRows) {
         setPaymentTransactions(paymentRows as SupabasePaymentTransaction[]);
@@ -474,13 +479,28 @@ export const BillingView: React.FC<BillingViewProps> = ({
         throw new Error(invError.message);
       }
 
-      // Immediately restore subscriber ACTIVE status & MikroTik active PPPoE package profile on PAID
+      // Immediately verify & deduct reseller wallet + restore subscriber ACTIVE status & MikroTik profile on PAID
       if (newStatus === 'PAID') {
-        await restoreSubscriberOnInvoicePaid(selectedInvoice.subscriber_username, {
+        const restoreRes = await restoreSubscriberOnInvoicePaid(selectedInvoice.subscriber_username, {
           triggeredBy: 'ADMIN',
+          performedBy: currentUser?.fullName || currentUser?.username || 'Billing Desk',
           notes: `Payment recorded on Invoice #${selectedInvoice.invoice_no} (${paidPaymentMethod})`,
           activeRouter: activeRouterRef.current,
         });
+        if (restoreRes.insufficientWalletFunds || (!restoreRes.success && restoreRes.error)) {
+          // Rollback invoice update if reseller wallet could not cover wholesale renewal
+          await safeUpdateInvoiceInSupabase(
+            { id: invoiceId, invoiceNo: selectedInvoice.invoice_no },
+            {
+              status: selectedInvoice.status,
+              paid_amount: selectedInvoice.paid_amount ?? 0,
+              due_date: selectedInvoice.due_date,
+            }
+          );
+          setActionNotice(`⚠️ ${restoreRes.error || 'Insufficient Dealer Wallet Balance: Renewal blocked.'}`);
+          setIsSubmitting(false);
+          return;
+        }
       }
 
       // 2. Update collecting agent's cash_in_hand in portal_users by ONLY enteredVal
@@ -671,15 +691,6 @@ export const BillingView: React.FC<BillingViewProps> = ({
         updatedData.paid_amount = Number(editAmount) || Number(invoiceToEdit.amount) || 0;
       }
 
-      const { error } = await safeUpdateInvoiceInSupabase(
-        { id: invoiceToEdit.id, invoiceNo: invoiceToEdit.invoice_no },
-        updatedData as Record<string, any>
-      );
-
-      if (error) {
-        throw new Error(error.message);
-      }
-
       let syncNote = '';
       if (selectedProfileClean) {
         const syncRes = await syncSubscriberPackageAndRestoreIfPaid({
@@ -691,6 +702,9 @@ export const BillingView: React.FC<BillingViewProps> = ({
           activeRouter: activeRouterRef.current,
           preloadedSecrets: liveMikrotikSecrets,
         });
+        if (syncRes.insufficientWalletFunds || syncRes.error) {
+          throw new Error(syncRes.error || 'Insufficient Dealer Wallet Balance');
+        }
         if (editStatus === 'PAID') {
           syncNote = ` MikroTik set to "${syncRes.appliedProfile}" & kicked ${syncRes.kickedSessions} session(s).`;
         } else {
@@ -702,7 +716,19 @@ export const BillingView: React.FC<BillingViewProps> = ({
           notes: `Invoice #${invoiceToEdit.invoice_no} updated to PAID`,
           activeRouter: activeRouterRef.current,
         });
+        if (restoreRes.insufficientWalletFunds || (!restoreRes.success && restoreRes.error)) {
+          throw new Error(restoreRes.error || 'Insufficient Dealer Wallet Balance');
+        }
         syncNote = ` Restored to "${restoreRes.restoredProfile}" & kicked ${restoreRes.kickedSessions} session(s).`;
+      }
+
+      const { error } = await safeUpdateInvoiceInSupabase(
+        { id: invoiceToEdit.id, invoiceNo: invoiceToEdit.invoice_no },
+        updatedData as Record<string, any>
+      );
+
+      if (error) {
+        throw new Error(error.message);
       }
 
       // Update local state immediately
@@ -754,19 +780,6 @@ export const BillingView: React.FC<BillingViewProps> = ({
     }
   };
 
-  // Date-filtered Invoices & Payments
-  const dateFilteredInvoices = useMemo(() => {
-    return (invoices || []).filter((inv) =>
-      matchesDateFilter([inv.created_at, inv.due_date, inv.paid_at], dateFilter)
-    );
-  }, [invoices, dateFilter]);
-
-  const dateFilteredPayments = useMemo(() => {
-    return (paymentTransactions || []).filter((tx) =>
-      matchesDateFilter(tx.payment_date || tx.created_at, dateFilter)
-    );
-  }, [paymentTransactions, dateFilter]);
-
   // Client lookup map (used for grace/overdue/shifted badges & filters)
   const clientByUsername = useMemo(() => {
     const map: Record<string, SupabasePortalUser> = {};
@@ -776,6 +789,56 @@ export const BillingView: React.FC<BillingViewProps> = ({
     }
     return map;
   }, [portalClients]);
+
+  // Multi-Tier Reseller Scope Isolation + Admin Dealer/Sub-Dealer Filter
+  const resellerScope = useMemo(
+    () => resolveResellerScope(currentUser, [...allResellers, ...portalClients]),
+    [currentUser, allResellers, portalClients]
+  );
+
+  const adminDealerSelection = useMemo(
+    () => resolveAdminDealerFilterIds(dealerFilter, allResellers, true),
+    [dealerFilter, allResellers]
+  );
+
+  const scopedInvoices = useMemo(() => {
+    return (invoices || []).filter((inv) => {
+      const uname = (inv.subscriber_username || '').trim().toLowerCase();
+      const client = clientByUsername[uname];
+      const ownerId = inv.dealer_id || client?.dealer_id || client?.parent_dealer_id || null;
+
+      if (resellerScope.isIsolated) {
+        return doesInvoiceMatchScope({ subscriber_username: uname, dealer_id: ownerId }, resellerScope);
+      }
+      if (adminDealerSelection.mode === 'DIRECT_ISP') {
+        return !ownerId;
+      }
+      if (adminDealerSelection.mode === 'RESELLER') {
+        return Boolean(ownerId && adminDealerSelection.resellerIds.has(ownerId));
+      }
+      return true;
+    });
+  }, [invoices, clientByUsername, resellerScope, adminDealerSelection]);
+
+  // Date-filtered Invoices & Payments (strictly scoped by reseller/dealer filter)
+  const dateFilteredInvoices = useMemo(() => {
+    return scopedInvoices.filter((inv) =>
+      matchesDateFilter([inv.created_at, inv.due_date, inv.paid_at], dateFilter)
+    );
+  }, [scopedInvoices, dateFilter]);
+
+  const dateFilteredPayments = useMemo(() => {
+    const scopedUsernames = new Set(
+      scopedInvoices.map((i) => String(i.subscriber_username || '').trim().toLowerCase())
+    );
+    return (paymentTransactions || []).filter((tx) => {
+      if (resellerScope.isIsolated || adminDealerSelection.mode !== 'ALL') {
+        const u = String(tx.subscriber_username || '').trim().toLowerCase();
+        if (!scopedUsernames.has(u)) return false;
+      }
+      return matchesDateFilter(tx.payment_date || tx.created_at, dateFilter);
+    });
+  }, [paymentTransactions, dateFilter, scopedInvoices, resellerScope.isIsolated, adminDealerSelection.mode]);
 
   const invoiceStatusCounts = useMemo(() => {
     let due = 0;
@@ -1371,15 +1434,45 @@ export const BillingView: React.FC<BillingViewProps> = ({
 
       {/* Search and Filters Bar */}
       <div className="flex flex-col sm:flex-row items-stretch sm:items-center justify-between gap-3 p-3 bg-[#111A2E] rounded-xl border border-slate-800">
-        <div className="relative flex-1">
-          <Search className="w-4 h-4 text-slate-400 absolute left-3 top-1/2 -translate-y-1/2" />
-          <input
-            type="text"
-            placeholder="Search by Invoice #, subscriber username, or agent..."
-            value={searchTerm}
-            onChange={(e) => setSearchTerm(e.target.value)}
-            className="w-full pl-9 pr-4 py-2 bg-slate-900 border border-slate-700 rounded-lg text-sm text-slate-200 placeholder-slate-500 focus:outline-none focus:border-cyan-500"
-          />
+        <div className="flex flex-col sm:flex-row items-stretch sm:items-center gap-2.5 flex-1">
+          <div className="relative flex-1">
+            <Search className="w-4 h-4 text-slate-400 absolute left-3 top-1/2 -translate-y-1/2" />
+            <input
+              type="text"
+              placeholder="Search by Invoice #, subscriber username, or agent..."
+              value={searchTerm}
+              onChange={(e) => setSearchTerm(e.target.value)}
+              className="w-full pl-9 pr-4 py-2 bg-slate-900 border border-slate-700 rounded-lg text-sm text-slate-200 placeholder-slate-500 focus:outline-none focus:border-cyan-500"
+            />
+          </div>
+
+          {!resellerScope.isIsolated && allResellers.length > 0 && (
+            <select
+              value={dealerFilter}
+              onChange={(e) => setDealerFilter(e.target.value)}
+              className="px-3 py-2 bg-slate-900 border border-slate-700 rounded-lg text-xs text-slate-200 focus:outline-none focus:border-cyan-500 shrink-0"
+              title="Filter Invoices by Dealer or Sub-Dealer"
+            >
+              <option value="ALL">All Dealers &amp; Direct ISP</option>
+              <option value="DIRECT_ISP">Direct Master ISP Only</option>
+              {allResellers
+                .filter((r) => getResellerTier(r) === 'DEALER')
+                .map((d) => (
+                  <React.Fragment key={d.id}>
+                    <option value={d.id}>
+                      [Dealer] {d.full_name || d.username} (@{d.username})
+                    </option>
+                    {allResellers
+                      .filter((s) => s.parent_dealer_id === d.id)
+                      .map((s) => (
+                        <option key={s.id} value={s.id}>
+                          &nbsp;&nbsp;↳ [Sub-Dealer] {s.full_name || s.username} (@{s.username})
+                        </option>
+                      ))}
+                  </React.Fragment>
+                ))}
+            </select>
+          )}
         </div>
 
         <div className="flex items-center gap-2 overflow-x-auto pb-0.5">

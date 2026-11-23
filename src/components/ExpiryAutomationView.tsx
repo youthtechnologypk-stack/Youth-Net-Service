@@ -63,6 +63,11 @@ import {
   fetchLiveFieldStaffWithBalances,
 } from '../lib/anniversaryBilling';
 import {
+  doesInvoiceMatchScope,
+  doesSubscriberMatchScope,
+  resolveResellerScope,
+} from '../lib/resellerEngine';
+import {
   extractOrigPkgFromComment,
   isExpiryOrBlockedProfile,
   resolveExactSubscriberProfile,
@@ -225,9 +230,9 @@ export const ExpiryAutomationView: React.FC<ExpiryAutomationViewProps> = ({
     setIsLoading(true);
     const missing = new Set<string>();
     try {
-      const [settingsRes, clientsRes, invRes, auditRes, waRes, staffRes] = await Promise.all([
+      const [settingsRes, allUsersRes, invRes, auditRes, waRes, staffRes] = await Promise.all([
         loadBillingSettingsFromDb(supabase),
-        supabase.from('portal_users').select('*').eq('role', 'CLIENT').order('username', { ascending: true }),
+        supabase.from('portal_users').select('*').order('username', { ascending: true }),
         supabase.from('invoices').select('*').order('created_at', { ascending: false }),
         supabase
           .from('expiry_audit_logs')
@@ -247,11 +252,23 @@ export const ExpiryAutomationView: React.FC<ExpiryAutomationViewProps> = ({
         missing.add('isp_billing_settings');
       }
 
-      if (clientsRes.data) {
-        setSubscribers(clientsRes.data as SupabasePortalUser[]);
-      }
+      const allPortalUsers = (allUsersRes.data || []) as SupabasePortalUser[];
+      const effectiveUser = currentUser || getStoredUser();
+      const resellerScope = resolveResellerScope(effectiveUser, allPortalUsers);
+      const clientRows = allPortalUsers.filter(
+        (u) => String(u.role || '').toUpperCase() === 'CLIENT'
+      );
+      const scopedClients = resellerScope.isIsolated
+        ? clientRows.filter((u) => doesSubscriberMatchScope(u, resellerScope))
+        : clientRows;
+      setSubscribers(scopedClients);
+
       if (invRes.data) {
-        setAllInvoices(invRes.data as SupabaseInvoice[]);
+        const rawInvs = invRes.data as SupabaseInvoice[];
+        const scopedInvs = resellerScope.isIsolated
+          ? rawInvs.filter((inv) => doesInvoiceMatchScope(inv, resellerScope))
+          : rawInvs;
+        setAllInvoices(scopedInvs);
       }
       if (Array.isArray(staffRes)) {
         setFieldAgents(
@@ -686,10 +703,20 @@ export const ExpiryAutomationView: React.FC<ExpiryAutomationViewProps> = ({
       });
 
       setSelectedUsernames({});
+      const failedReasons = (res.results || [])
+        .filter((r) => !r.ok && r.error)
+        .map((r) => `@${r.username}: ${r.error}`);
+      const walletBlockedCount = failedReasons.filter((msg) =>
+        msg.toLowerCase().includes('insufficient dealer wallet balance')
+      ).length;
       showNotice(
-        `Bulk Activate complete: Restored ${res.restoredCount} subscriber(s) to their exact MikroTik profiles & kicked ${res.kickedSessions} session(s)${
-          res.failedCount > 0 ? ` (${res.failedCount} failed)` : ''
-        }.`,
+        walletBlockedCount > 0 && res.restoredCount === 0
+          ? `Insufficient Dealer Wallet Balance: ${failedReasons[0]}`
+          : `Bulk Activate complete: Restored ${res.restoredCount} subscriber(s) to their exact MikroTik profiles & kicked ${res.kickedSessions} session(s)${
+              res.failedCount > 0
+                ? ` (${res.failedCount} blocked/failed${failedReasons[0] ? ` — ${failedReasons[0]}` : ''})`
+                : ''
+            }.`,
         res.failedCount > 0 && res.restoredCount === 0 ? 'error' : 'success'
       );
       await Promise.all([fetchAllDatabaseState(), fetchMikrotikProfilesList()]);
@@ -817,12 +844,15 @@ export const ExpiryAutomationView: React.FC<ExpiryAutomationViewProps> = ({
 
       setIsBulkReceiveModalOpen(false);
       setSelectedUsernames({});
+      const firstErr = res.errors && res.errors.length > 0 ? res.errors[0] : '';
       showNotice(
         `Bulk Receive Complete: Settled ${res.settledInvoicesCount} invoice(s) totaling ${formatCurrency(
           res.totalCollected,
           0
-        )} (${payload.paymentMethod}) & auto-restored ${res.restoredSubscribersCount} subscriber(s) (kicked ${res.kickedSessions} session(s)).`,
-        res.errors.length > 0 && res.settledInvoicesCount === 0 ? 'error' : 'success'
+        )} (${payload.paymentMethod}) & auto-restored ${res.restoredSubscribersCount} subscriber(s) (kicked ${res.kickedSessions} session(s))${
+          firstErr ? ` · Notice: ${firstErr}` : ''
+        }.`,
+        res.errors.length > 0 && res.restoredSubscribersCount === 0 ? 'error' : 'success'
       );
       await Promise.all([fetchAllDatabaseState(), fetchMikrotikProfilesList()]);
     } catch (err: any) {
@@ -1066,7 +1096,26 @@ export const ExpiryAutomationView: React.FC<ExpiryAutomationViewProps> = ({
     const nextDueDate = addCalendarMonthDateString(new Date(), anchorDay);
 
     try {
-      // 1. Settle any open invoices in Supabase for this subscriber
+      // 1. Atomic DB +30d + Reseller Wallet Deduction + MikroTik exact profile restore + active 16.16.16.x kick
+      const restoreRes = await restoreSubscriberOnInvoicePaid(uname, {
+        triggeredBy: 'ADMIN',
+        expiryProfileName: settings.expiry_ppp_profile,
+        activeRouter: activeRouterRef.current,
+        preloadedSecrets: mkSecrets,
+        preloadedProfiles: mikrotikProfiles,
+        preloadedActive: mkActive,
+        notes: `1-Click Collect & Restore (${formatCurrency(sub.amountDue, 0)} settled)`,
+      });
+
+      if (restoreRes.insufficientWalletFunds || (!restoreRes.success && restoreRes.error)) {
+        showNotice(
+          restoreRes.error || `Insufficient Dealer Wallet Balance to restore @${uname}.`,
+          'error'
+        );
+        return;
+      }
+
+      // 2. Settle any open invoices in Supabase for this subscriber after wallet & restore check succeeds
       const userOpenInvoices = openInvoices.filter(
         (inv) => String(inv.subscriber_username || '').trim().toLowerCase() === uname
       );
@@ -1096,17 +1145,6 @@ export const ExpiryAutomationView: React.FC<ExpiryAutomationViewProps> = ({
           ]);
         }
       }
-
-      // 2. Atomic DB +30d + MikroTik exact profile restore + active 16.16.16.x kick + RESTORED_ON_PAYMENT log
-      const restoreRes = await restoreSubscriberOnInvoicePaid(uname, {
-        triggeredBy: 'ADMIN',
-        expiryProfileName: settings.expiry_ppp_profile,
-        activeRouter: activeRouterRef.current,
-        preloadedSecrets: mkSecrets,
-        preloadedProfiles: mikrotikProfiles,
-        preloadedActive: mkActive,
-        notes: `1-Click Collect & Restore (${formatCurrency(sub.amountDue, 0)} settled)`,
-      });
 
       showNotice(
         `Restored @${uname} to "${restoreRes.restoredProfile}" (+1 mo expiry: ${restoreRes.newExpiryIso.slice(

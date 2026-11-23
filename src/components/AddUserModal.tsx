@@ -24,6 +24,8 @@ import { useISP } from '../context/ISPContext';
 import { useSubscribers } from '../hooks/useSubscribers';
 import { supabase, SupabasePortalUser } from '../services/supabaseClient';
 import { createAgentCommission } from '../services/erpInventoryService';
+import { getStoredUser } from '../lib/auth';
+import { checkAndDeductResellerWallet, isResellerUser } from '../lib/resellerEngine';
 import { safeResponseJson } from '../lib/safeFetch';
 import { saveUnifiedPortalUser } from '../lib/userRepository';
 import { AreaNodeSelector } from './AreaNodeSelector';
@@ -340,6 +342,28 @@ export const AddUserModal: React.FC<AddUserModalProps> = ({ isOpen, onClose, onS
     setSchedulerWarning(null);
 
     try {
+      const loggedInUser = getStoredUser();
+      const resellerOwnerId = isResellerUser(loggedInUser) ? loggedInUser?.id || null : null;
+
+      if (resellerOwnerId) {
+        const matchedPkg = packages.find((p) => p.mikrotikProfile === profile || p.name === profile);
+        const walletCheck = await checkAndDeductResellerWallet({
+          resellerId: resellerOwnerId,
+          profileName: profile || 'default',
+          subscriberUsername: username.trim(),
+          txType: 'USER_ACTIVATION',
+          performedBy: loggedInUser?.fullName || loggedInUser?.username || 'Reseller',
+          fallbackWholesalePrice: matchedPkg?.priceMonthly || 0,
+          notes: `PPPoE provisioning for @${username.trim().toLowerCase()} (${profile || 'default'})`,
+        });
+
+        if (!walletCheck.ok) {
+          setSubmissionError(walletCheck.error || 'Insufficient Dealer Wallet Balance');
+          setIsSubmitting(false);
+          return;
+        }
+      }
+
       const selectedAgent = agents.find((a) => a.id === assignedAgentId) || agents[0];
       const res = await provisionSubscriber({
         username: username.trim(),
@@ -366,6 +390,18 @@ export const AddUserModal: React.FC<AddUserModalProps> = ({ isOpen, onClose, onS
         assignedAgentName: selectedAgent?.name,
         sendWhatsApp: true,
       });
+
+      if (resellerOwnerId) {
+        const cleanUname = username.trim().toLowerCase();
+        await supabase
+          .from('portal_users')
+          .update({ dealer_id: resellerOwnerId } as any)
+          .ilike('username', cleanUname);
+        await supabase
+          .from('invoices')
+          .update({ dealer_id: resellerOwnerId } as any)
+          .ilike('subscriber_username', cleanUname);
+      }
 
       // Standardize: Save new user to USERS_STORAGE_KEY ('youthnet_portal_users')
       try {

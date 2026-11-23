@@ -31,25 +31,30 @@ import {
 } from '../lib/dateFilter';
 
 import { getStoredUser } from '../lib/auth';
+import { UserAccount } from '../types/auth';
 import {
   StaffPermissions,
   resolveStaffPermissions,
 } from '../lib/staffPermissions';
+import { isResellerUser, resolveResellerScope } from '../lib/resellerEngine';
 
 interface ComplaintsStudioProps {
   onOpenTicketModal: () => void;
   onOpenOutageModal: () => void;
+  currentUser?: UserAccount | null;
   staffPermissions?: StaffPermissions;
 }
 
 export const ComplaintsStudio: React.FC<ComplaintsStudioProps> = ({
   onOpenTicketModal,
   onOpenOutageModal,
+  currentUser,
   staffPermissions,
 }) => {
+  const effectiveUser = currentUser || getStoredUser();
   const perms = useMemo(
-    () => staffPermissions || resolveStaffPermissions(getStoredUser()),
-    [staffPermissions]
+    () => staffPermissions || resolveStaffPermissions(effectiveUser),
+    [staffPermissions, effectiveUser]
   );
   const {
     complaints,
@@ -76,18 +81,26 @@ export const ComplaintsStudio: React.FC<ComplaintsStudioProps> = ({
   const [pendingAgentSelection, setPendingAgentSelection] = useState<Record<string, string>>({});
   const [assignmentFeedback, setAssignmentFeedback] = useState<Record<string, string>>({});
   const [realAgents, setRealAgents] = useState<SupabasePortalUser[]>([]);
+  const [resellerAllowedUsernames, setResellerAllowedUsernames] = useState<Set<string> | null>(null);
+  const isReseller = isResellerUser(effectiveUser);
 
-  // Fetch real technicians from Supabase portal_users
+  // Fetch real technicians from Supabase portal_users & reseller ticket scope
   const fetchRealAgents = async () => {
     try {
       const { data } = await supabase
         .from('portal_users')
-        .select('id, full_name, username, role, area')
-        .eq('role', 'AGENT')
+        .select('id, full_name, username, role, area, tier_level, parent_dealer_id, dealer_id')
         .order('full_name', { ascending: true });
 
       if (data) {
-        setRealAgents(data as SupabasePortalUser[]);
+        const allRows = data as SupabasePortalUser[];
+        setRealAgents(allRows.filter((u) => String(u.role || '').toUpperCase() === 'AGENT'));
+        if (isReseller) {
+          const scope = resolveResellerScope(effectiveUser, allRows);
+          setResellerAllowedUsernames(scope.allowedSubscriberUsernames);
+        } else {
+          setResellerAllowedUsernames(null);
+        }
       }
     } catch (err) {
       console.warn('ComplaintsStudio fetchRealAgents notice:', err);
@@ -96,7 +109,7 @@ export const ComplaintsStudio: React.FC<ComplaintsStudioProps> = ({
 
   useEffect(() => {
     fetchRealAgents();
-  }, []);
+  }, [effectiveUser?.id, effectiveUser?.role]);
 
   const handleConfirmAssignment = async (ticketId: string) => {
     const selected = pendingAgentSelection[ticketId];
@@ -161,7 +174,19 @@ export const ComplaintsStudio: React.FC<ComplaintsStudioProps> = ({
     return () => clearInterval(timer);
   }, []);
 
-  const dateFilteredTickets = (complaints || []).filter((tkt) =>
+  const scopedComplaints = useMemo(() => {
+    const base = complaints || [];
+    if (!isReseller) return base;
+    if (!resellerAllowedUsernames) return [];
+    return base.filter((tkt) => {
+      const uname = String((tkt as any)?.subscriberUsername || (tkt as any)?.subscriber_username || tkt?.customerName || '')
+        .trim()
+        .toLowerCase();
+      return Boolean(uname && resellerAllowedUsernames.has(uname));
+    });
+  }, [complaints, isReseller, resellerAllowedUsernames]);
+
+  const dateFilteredTickets = scopedComplaints.filter((tkt) =>
     matchesDateFilter(tkt?.createdAt, dateFilter)
   );
 

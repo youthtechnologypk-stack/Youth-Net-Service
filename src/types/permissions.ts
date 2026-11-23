@@ -245,6 +245,18 @@ export const DEFAULT_ROLE_PERMISSIONS: Record<SystemRole, Record<string, boolean
     client_download_invoices_receipts: true,
     client_wifi_password_self_service: true,
   },
+  DEALER: {
+    manager_view_billing_revenue: true,
+    manager_manual_cash_approval: true,
+    manager_edit_subscribers: true,
+    manager_tickets_create_assign: true,
+  },
+  SUB_DEALER: {
+    manager_view_billing_revenue: true,
+    manager_manual_cash_approval: true,
+    manager_edit_subscribers: true,
+    manager_tickets_create_assign: true,
+  },
 };
 
 export interface RolePermissionsState {

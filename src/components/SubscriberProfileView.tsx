@@ -88,6 +88,11 @@ import {
   maskSensitiveCnic,
   resolveStaffPermissions,
 } from '../lib/staffPermissions';
+import {
+  doesSubscriberMatchScope,
+  isResellerUser,
+  resolveResellerScope,
+} from '../lib/resellerEngine';
 
 export interface SubscriberProfileViewProps {
   username: string;
@@ -237,6 +242,8 @@ export const SubscriberProfileView: React.FC<SubscriberProfileViewProps> = ({
     assignedAgentName: '',
   });
   const [isSavingTicket, setIsSavingTicket] = useState<boolean>(false);
+  const [isAccessDenied, setIsAccessDenied] = useState<boolean>(false);
+  const [owningDealerLabel, setOwningDealerLabel] = useState<string | null>(null);
 
   const speedPollingTimerRef = useRef<any>(null);
 
@@ -290,6 +297,46 @@ export const SubscriberProfileView: React.FC<SubscriberProfileViewProps> = ({
 
       if (userError) {
         console.warn('Error fetching portal user:', userError);
+      }
+
+      // Enforce multi-tier Dealer / Sub-Dealer strict data isolation
+      const loggedInUser = getStoredUser();
+      if (isResellerUser(loggedInUser)) {
+        const { data: hierarchyRows } = await supabase
+          .from('portal_users')
+          .select('id, username, full_name, role, tier_level, parent_dealer_id, dealer_id');
+        const scope = resolveResellerScope(
+          loggedInUser,
+          (hierarchyRows || []) as SupabasePortalUser[]
+        );
+        if (!userData || !doesSubscriberMatchScope(userData as SupabasePortalUser, scope)) {
+          setIsAccessDenied(true);
+          setUser(null);
+          setIsLoading(false);
+          return;
+        }
+        setIsAccessDenied(false);
+      } else {
+        setIsAccessDenied(false);
+      }
+
+      if (userData?.dealer_id) {
+        const { data: dealerRow } = await supabase
+          .from('portal_users')
+          .select('full_name, username, tier_level, role')
+          .eq('id', userData.dealer_id)
+          .maybeSingle();
+        if (dealerRow) {
+          const tierTag =
+            String(dealerRow.tier_level || dealerRow.role || '').toUpperCase() === 'SUB_DEALER'
+              ? 'Sub-Dealer'
+              : 'Dealer';
+          setOwningDealerLabel(`${dealerRow.full_name || dealerRow.username} (${tierTag})`);
+        } else {
+          setOwningDealerLabel(null);
+        }
+      } else {
+        setOwningDealerLabel(null);
       }
 
       if (userData) {
@@ -1059,14 +1106,21 @@ export const SubscriberProfileView: React.FC<SubscriberProfileViewProps> = ({
           anchorDay
         );
       }
-      await supabase.from('invoices').update(invUpdate).eq('id', inv.id);
-
       if (newStatus === 'PAID') {
-        await restoreSubscriberOnInvoicePaid(cleanUsername, {
+        const restoreRes = await restoreSubscriberOnInvoicePaid(cleanUsername, {
           triggeredBy: 'ADMIN',
           notes: `Payment recorded via 360 Profile on Invoice #${inv.invoice_no}`,
         });
+        if (restoreRes.insufficientWalletFunds || (!restoreRes.success && restoreRes.error)) {
+          showToast(
+            restoreRes.error || 'Insufficient Dealer Wallet Balance. Renewal blocked.',
+            'error'
+          );
+          return;
+        }
       }
+
+      await supabase.from('invoices').update(invUpdate).eq('id', inv.id);
 
       // 2. Increment collecting agent cash
       if (collectingAgentInput) {
@@ -1106,6 +1160,28 @@ export const SubscriberProfileView: React.FC<SubscriberProfileViewProps> = ({
     liveSecretProfile || mikrotikSecret?.profile || user?.package_speed || 'Standard Plan';
   const effectivePassword = user?.password || mikrotikSecret?.password || '';
   const isOnline = Boolean(activeSession);
+
+  if (isAccessDenied) {
+    return (
+      <div className="space-y-4 animate-fade-in font-sans pb-12">
+        <button
+          type="button"
+          onClick={onBack}
+          className="flex items-center gap-1.5 px-3 py-1.5 bg-slate-900 hover:bg-slate-800 text-slate-300 hover:text-white border border-slate-700/80 rounded-xl text-xs font-bold transition cursor-pointer"
+        >
+          <ArrowLeft className="w-3.5 h-3.5 text-cyan-400" />
+          <span>← Back to User Directory</span>
+        </button>
+        <div className="bg-slate-900 border border-rose-800/70 rounded-2xl p-8 text-center space-y-2.5 max-w-xl mx-auto">
+          <AlertTriangle className="w-10 h-10 text-rose-400 mx-auto" />
+          <h2 className="text-lg font-bold text-white">Subscriber Outside Reseller Scope</h2>
+          <p className="text-xs text-slate-400 leading-relaxed">
+            Account <span className="font-mono text-rose-300">@{cleanUsername}</span> does not belong to your Dealer or Sub-Dealer hierarchy. Access is restricted by multi-tier reseller isolation.
+          </p>
+        </div>
+      </div>
+    );
+  }
 
   return (
     <div className="space-y-5 animate-fade-in font-sans pb-12">
@@ -1324,6 +1400,12 @@ export const SubscriberProfileView: React.FC<SubscriberProfileViewProps> = ({
               <span className="text-slate-400 font-sans">Coverage Area:</span>
               <span className="text-cyan-400 font-bold">{user?.area || 'N/A'}</span>
             </div>
+            {owningDealerLabel && (
+              <div className="flex justify-between items-center">
+                <span className="text-slate-400 font-sans">Assigned Reseller:</span>
+                <span className="text-indigo-300 font-bold">{owningDealerLabel}</span>
+              </div>
+            )}
             <div className="flex justify-between items-center">
               <span className="text-slate-400 font-sans">Installation Date:</span>
               <span className="text-slate-300">

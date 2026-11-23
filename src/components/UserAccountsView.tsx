@@ -38,15 +38,22 @@ import {
 
 export interface UserAccountsViewProps {
   currentSimulatedRole?: SystemRole;
+  currentUser?: UserAccount | null;
   onSwitchSimulatedRole?: (role: SystemRole) => void;
   onBack?: () => void;
 }
 
 export const UserAccountsView: React.FC<UserAccountsViewProps> = ({
   currentSimulatedRole = 'ADMIN',
+  currentUser,
   onSwitchSimulatedRole,
   onBack,
 }) => {
+  const isResellerView =
+    currentSimulatedRole === 'DEALER' ||
+    currentSimulatedRole === 'SUB_DEALER' ||
+    currentUser?.role === 'DEALER' ||
+    currentUser?.role === 'SUB_DEALER';
   const { routers, selectedRouterId, logWhatsAppNotice, deletePppoeUser } = useISP();
   const [liveSubscribers, setLiveSubscribers] = useState<RealMikrotikSubscriber[]>([]);
 
@@ -420,7 +427,7 @@ export const UserAccountsView: React.FC<UserAccountsViewProps> = ({
             <span className="text-slate-500">(Supabase RBAC active)</span>
           </div>
 
-          {onSwitchSimulatedRole && (
+          {!isResellerView && onSwitchSimulatedRole && (
             <div className="flex items-center gap-2 self-end md:self-auto font-mono text-[11px]">
               <span className="text-slate-400">Simulate View:</span>
               <div className="flex bg-slate-900 p-0.5 rounded-lg border border-slate-700">
@@ -454,22 +461,24 @@ export const UserAccountsView: React.FC<UserAccountsViewProps> = ({
           }`}
         >
           <Users className="w-4 h-4" />
-          <span>User Accounts &amp; Credentials ({userMetrics.total})</span>
+          <span>{isResellerView ? 'My Scoped Subscribers' : `User Accounts & Credentials (${userMetrics.total})`}</span>
         </button>
-        <button
-          onClick={() => setActiveManagementTab('permissions')}
-          className={`flex items-center gap-2 px-4 py-2 rounded-xl font-bold text-xs transition cursor-pointer ${
-            activeManagementTab === 'permissions'
-              ? 'bg-cyan-600 text-slate-950 shadow-md shadow-cyan-900/30'
-              : 'bg-slate-900 text-slate-400 hover:text-white border border-slate-800'
-          }`}
-        >
-          <ShieldCheck className="w-4 h-4 text-emerald-400" />
-          <span>Granular Feature &amp; Permission Matrix</span>
-          <span className="px-1.5 py-0.2 rounded text-[10px] bg-slate-950 text-cyan-300 font-mono font-bold">
-            RBAC
-          </span>
-        </button>
+        {!isResellerView && (
+          <button
+            onClick={() => setActiveManagementTab('permissions')}
+            className={`flex items-center gap-2 px-4 py-2 rounded-xl font-bold text-xs transition cursor-pointer ${
+              activeManagementTab === 'permissions'
+                ? 'bg-cyan-600 text-slate-950 shadow-md shadow-cyan-900/30'
+                : 'bg-slate-900 text-slate-400 hover:text-white border border-slate-800'
+            }`}
+          >
+            <ShieldCheck className="w-4 h-4 text-emerald-400" />
+            <span>Granular Feature &amp; Permission Matrix</span>
+            <span className="px-1.5 py-0.2 rounded text-[10px] bg-slate-950 text-cyan-300 font-mono font-bold">
+              RBAC
+            </span>
+          </button>
+        )}
       </div>
 
       {activeManagementTab === 'permissions' ? (
@@ -532,6 +541,7 @@ export const UserAccountsView: React.FC<UserAccountsViewProps> = ({
 
           {/* Dedicated Strict Users Table */}
           <UsersTable
+            currentUser={currentUser}
             onSelectSubscriber={(username) => setSelectedProfileUsername(username)}
             onSelectAgent={(agentUsername) => setSelectedAgentUsername(agentUsername)}
             onEditUser={(user) => {

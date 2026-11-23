@@ -10,9 +10,16 @@ import {
   NetworkAreaNode,
   NETWORK_AREAS_UPDATED_EVENT,
 } from '../lib/billingAndNetwork';
-import { supabase, SupabasePortalUser } from '../services/supabaseClient';
+import { supabase, SupabasePortalUser, SupabaseResellerTariff } from '../services/supabaseClient';
 import { createAgentCommission } from '../services/erpInventoryService';
 import { addCalendarMonthsYmd, extractYmdString } from '../lib/anniversaryBilling';
+import { getStoredUser } from '../lib/auth';
+import {
+  checkAndDeductResellerWallet,
+  getResellerTier,
+  isResellerUser,
+  resolveTariffForProfile,
+} from '../lib/resellerEngine';
 
 interface ProvisionSecretModalProps {
   isOpen: boolean;
@@ -72,6 +79,14 @@ export const ProvisionSecretModal: React.FC<ProvisionSecretModalProps> = ({ isOp
   const [commissionAmount, setCommissionAmount] = useState('500');
   const [isSubmitting, setIsSubmitting] = useState(false);
 
+  // Reseller Wallet & Ownership State
+  const activeLoggedInUser = useMemo(() => getStoredUser(), [isOpen]);
+  const isResellerSession = useMemo(() => isResellerUser(activeLoggedInUser), [activeLoggedInUser]);
+  const [resellerOptions, setResellerOptions] = useState<SupabasePortalUser[]>([]);
+  const [selectedDealerId, setSelectedDealerId] = useState<string>('');
+  const [resellerTariffs, setResellerTariffs] = useState<SupabaseResellerTariff[]>([]);
+  const [walletError, setWalletError] = useState<string | null>(null);
+
   useEffect(() => {
     const loadAreas = () => {
       fetchNetworkAreas().then(setNetworkAreas).catch(() => {});
@@ -83,17 +98,28 @@ export const ProvisionSecretModal: React.FC<ProvisionSecretModalProps> = ({ isOp
 
   useEffect(() => {
     if (!isOpen) return;
+    setWalletError(null);
+    if (isResellerSession && activeLoggedInUser?.id) {
+      setSelectedDealerId(activeLoggedInUser.id);
+    }
     supabase
       .from('portal_users')
-      .select('id,username,full_name,area,role')
-      .eq('role', 'AGENT')
+      .select('id,username,full_name,area,role,tier_level,parent_dealer_id,wallet_balance,credit_limit,max_active_users')
       .order('full_name', { ascending: true })
       .then(({ data }) => {
         if (Array.isArray(data)) {
-          setPortalAgents(data as SupabasePortalUser[]);
+          const allRows = data as SupabasePortalUser[];
+          setPortalAgents(allRows.filter((u) => String(u.role || '').toUpperCase() === 'AGENT'));
+          setResellerOptions(allRows.filter((u) => getResellerTier(u) !== null));
         }
       });
-  }, [isOpen]);
+    supabase
+      .from('reseller_tariffs')
+      .select('*')
+      .then(({ data }) => {
+        if (Array.isArray(data)) setResellerTariffs(data as SupabaseResellerTariff[]);
+      });
+  }, [isOpen, isResellerSession, activeLoggedInUser?.id]);
 
   const handlePppoeUsernameChange = (rawVal: string) => {
     const clean = rawVal.toLowerCase().replace(/[^a-z0-9_]/g, '');
@@ -181,11 +207,38 @@ export const ProvisionSecretModal: React.FC<ProvisionSecretModalProps> = ({ isOp
 
   const currentRouter = routers.find((r) => r.id === selectedRouterId) || routers[0];
 
+  const effectiveDealerId = isResellerSession ? activeLoggedInUser?.id || '' : selectedDealerId;
+  const activeResellerRecord = resellerOptions.find((r) => r.id === effectiveDealerId) || null;
+  const resolvedResellerTariff = effectiveDealerId
+    ? resolveTariffForProfile(effectiveDealerId, packageId, resellerTariffs, selectedProfilePrice)
+    : null;
+
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!name || !pppoeUsername) return;
 
     setIsSubmitting(true);
+    setWalletError(null);
+
+    // Reseller Prepaid Wallet Deduction Guard BEFORE calling MikroTik API
+    if (effectiveDealerId) {
+      const walletCheck = await checkAndDeductResellerWallet({
+        resellerId: effectiveDealerId,
+        profileName: packageId,
+        subscriberUsername: pppoeUsername,
+        txType: 'USER_ACTIVATION',
+        performedBy: activeLoggedInUser?.fullName || activeLoggedInUser?.username || 'Reseller',
+        fallbackWholesalePrice: selectedProfilePrice,
+        notes: `New PPPoE activation for @${pppoeUsername.trim().toLowerCase()} (${packageId})`,
+      });
+
+      if (!walletCheck.ok) {
+        setWalletError(walletCheck.error || 'Insufficient Dealer Wallet Balance');
+        setIsSubmitting(false);
+        return;
+      }
+    }
+
     const selectedAgent = agents.find((a) => a.id === assignedAgentId) || agents[0];
 
     // Compute validity in fractional days or hours
@@ -211,15 +264,30 @@ export const ProvisionSecretModal: React.FC<ProvisionSecretModalProps> = ({ isOp
         validityDays: diffDays,
         validityPreset,
         targetExpiryDate: targetExpiryDate.toISOString(),
-        priceMonthly: selectedProfilePrice,
+        priceMonthly: resolvedResellerTariff?.retailPrice || selectedProfilePrice,
+        dealerId: effectiveDealerId || null,
       } as any),
     });
+
+    // Link subscriber ownership to Dealer / Sub-Dealer in Supabase portal_users & invoices
+    const cleanSubUsername = pppoeUsername.trim().toLowerCase();
+    if (effectiveDealerId && cleanSubUsername) {
+      try {
+        await supabase
+          .from('portal_users')
+          .update({ dealer_id: effectiveDealerId } as any)
+          .ilike('username', cleanSubUsername);
+        await supabase
+          .from('invoices')
+          .update({ dealer_id: effectiveDealerId } as any)
+          .ilike('subscriber_username', cleanSubUsername);
+      } catch {}
+    }
 
     const commAmtNum = Number(commissionAmount) || 0;
     const refAgent = portalAgents.find((a) => a.id === referredByAgentId);
     if (refAgent && commAmtNum > 0) {
       try {
-        const cleanSubUsername = pppoeUsername.trim().toLowerCase();
         const { data: subRow } = await supabase
           .from('portal_users')
           .select('id')
@@ -270,6 +338,61 @@ export const ProvisionSecretModal: React.FC<ProvisionSecretModalProps> = ({ isOp
 
         {/* Form */}
         <form onSubmit={handleSubmit} className="p-5 space-y-4 text-xs">
+          {walletError && (
+            <div className="rounded-xl border border-rose-500/50 bg-rose-950/70 px-3.5 py-3 text-rose-200 flex items-start gap-2.5">
+              <ShieldCheck className="w-4 h-4 text-rose-400 shrink-0 mt-0.5" />
+              <div>
+                <div className="font-bold text-rose-100">Insufficient Dealer Wallet Balance</div>
+                <div className="text-[11px] mt-0.5 text-rose-200/90">{walletError}</div>
+              </div>
+            </div>
+          )}
+
+          {/* Reseller Ownership & Prepaid Wallet Preview */}
+          {(isResellerSession || resellerOptions.length > 0) && (
+            <div className="rounded-xl border border-slate-800 bg-slate-950/80 p-3.5 space-y-2.5">
+              <div className="flex flex-wrap items-center justify-between gap-2">
+                <span className="font-semibold text-slate-200">
+                  {isResellerSession
+                    ? `Reseller Account: ${activeLoggedInUser?.fullName || activeLoggedInUser?.username}`
+                    : 'Assign Subscriber to Dealer / Sub-Dealer (Optional)'}
+                </span>
+                {activeResellerRecord && (
+                  <span className="font-mono text-[11px] text-emerald-400 tabular-nums">
+                    Wallet: Rs. {Number(activeResellerRecord.wallet_balance || 0).toLocaleString()} · Credit: Rs. {Number(activeResellerRecord.credit_limit || 0).toLocaleString()}
+                  </span>
+                )}
+              </div>
+
+              {!isResellerSession && (
+                <select
+                  value={selectedDealerId}
+                  onChange={(e) => {
+                    setSelectedDealerId(e.target.value);
+                    setWalletError(null);
+                  }}
+                  className="w-full bg-slate-900 border border-slate-700 text-slate-100 p-2 rounded-lg focus:outline-none focus:border-cyan-500"
+                >
+                  <option value="">Direct Master ISP Subscriber (No Wallet Deduction)</option>
+                  {resellerOptions.map((r) => (
+                    <option key={r.id} value={r.id}>
+                      [{getResellerTier(r) === 'DEALER' ? 'Dealer' : 'Sub-Dealer'}] {r.full_name} (@{r.username}) — Wallet Rs. {Number(r.wallet_balance || 0).toLocaleString()}
+                    </option>
+                  ))}
+                </select>
+              )}
+
+              {effectiveDealerId && resolvedResellerTariff && (
+                <div className="flex items-center justify-between text-[11px] font-mono text-slate-400 pt-1 border-t border-slate-800">
+                  <span>Wholesale Deduction ({packageId}):</span>
+                  <span className="text-amber-300 font-semibold">
+                    Rs. {resolvedResellerTariff.wholesalePrice.toLocaleString()}
+                  </span>
+                </div>
+              )}
+            </div>
+          )}
+
           {/* Identity & Contact */}
           <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
             <div>

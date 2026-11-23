@@ -19,7 +19,7 @@ export interface SupabasePortalUser {
   id: string;
   username: string;
   password?: string;
-  role: 'ADMIN' | 'MANAGER' | 'AGENT' | 'CLIENT';
+  role: 'ADMIN' | 'MANAGER' | 'AGENT' | 'CLIENT' | 'DEALER' | 'SUB_DEALER';
   full_name: string;
   phone: string;
   area: string;
@@ -56,6 +56,50 @@ export interface SupabasePortalUser {
   can_access_gis_map?: boolean | null;
   gis_map_permission?: 'none' | 'view' | 'edit' | string | null;
   permissions?: Record<string, any> | null;
+  tier_level?: 'MASTER' | 'DEALER' | 'SUB_DEALER' | string | null;
+  parent_dealer_id?: string | null;
+  dealer_id?: string | null;
+  wallet_balance?: number | null;
+  credit_limit?: number | null;
+  bandwidth_pool_cap_mbps?: number | null;
+  max_active_users?: number | null;
+  can_create_subdealers?: boolean | null;
+  created_at?: string;
+}
+
+export interface SupabaseResellerTariff {
+  id: string;
+  reseller_id: string;
+  profile_name: string;
+  wholesale_price: number;
+  retail_price: number;
+  updated_by?: string | null;
+  updated_at?: string;
+  created_at?: string;
+}
+
+export type ResellerWalletTxType =
+  | 'RECHARGE'
+  | 'SUBDEALER_TRANSFER'
+  | 'USER_ACTIVATION'
+  | 'RENEWAL_DEDUCTION'
+  | 'REFUND'
+  | 'ADJUSTMENT';
+
+export interface SupabaseResellerWalletLedger {
+  id: string;
+  reseller_id: string;
+  reseller_name?: string | null;
+  reseller_username?: string | null;
+  tx_type: ResellerWalletTxType;
+  amount: number;
+  balance_before?: number | null;
+  balance_after: number;
+  subscriber_username?: string | null;
+  profile_name?: string | null;
+  counterparty_reseller_id?: string | null;
+  performed_by?: string | null;
+  notes?: string | null;
   created_at?: string;
 }
 
@@ -64,6 +108,7 @@ export interface SupabaseInvoice {
   invoice_no: string;
   subscriber_id?: string | null;
   subscriber_username: string;
+  dealer_id?: string | null;
   assigned_agent_id?: string | null;
   assigned_agent_name?: string | null;
   package_profile?: string | null;

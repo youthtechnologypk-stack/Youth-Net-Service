@@ -1,11 +1,12 @@
 // Authentication & RBAC (Role-Based Access Control) Types
 
-export type SystemRole = 'ADMIN' | 'MANAGER' | 'AGENT' | 'CLIENT';
+export type SystemRole = 'ADMIN' | 'MANAGER' | 'AGENT' | 'CLIENT' | 'DEALER' | 'SUB_DEALER';
+export type ResellerTierLevel = 'MASTER' | 'DEALER' | 'SUB_DEALER';
 export type GisMapPermissionLevel = 'none' | 'view' | 'edit';
 
 export interface UserAccount {
   id: string;
-  username: string; // e.g. "admin", "manager", "agent", "client"
+  username: string; // e.g. "admin", "manager", "agent", "client", "dealer1"
   fullName: string;
   displayName?: string;
   email?: string;
@@ -35,6 +36,15 @@ export interface UserAccount {
   permissions?: Record<string, any>; // Granular feature override flags (JSONB)
   can_access_gis_map?: boolean; // Role-based Fiber GIS & Map enable/disable flag
   gis_map_permission?: GisMapPermissionLevel; // 'none' | 'view' | 'edit'
+  // Multi-Tier Reseller (Dealer & Sub-Dealer) fields
+  tier_level?: ResellerTierLevel | string | null;
+  parent_dealer_id?: string | null;
+  dealer_id?: string | null;
+  wallet_balance?: number;
+  credit_limit?: number;
+  bandwidth_pool_cap_mbps?: number;
+  max_active_users?: number;
+  can_create_subdealers?: boolean;
   createdAt: string;
   lastLoginAt?: string;
 }

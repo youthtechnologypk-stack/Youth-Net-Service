@@ -37,6 +37,10 @@ export function getLandingRouteForRole(role: SystemRole): string {
       return '/admin/noc';
     case 'MANAGER':
       return '/manager/dashboard';
+    case 'DEALER':
+      return '/dealers';
+    case 'SUB_DEALER':
+      return '/billing';
     case 'AGENT':
       return '/agent/portal';
     case 'CLIENT':
@@ -53,6 +57,7 @@ export function getTabFromPath(path: string): string | null {
   if (clean === 'admin/noc' || clean === 'admin' || clean === 'dashboard/admin' || clean === 'noc' || clean === '') return 'noc';
   if (clean === 'capacity' || clean === 'capacity-pools' || clean === 'admin/capacity') return 'capacity';
   if (clean === 'manager/dashboard' || clean === 'manager' || clean === 'dashboard/operations' || clean === 'operations') return 'operations';
+  if (clean === 'dealers' || clean === 'resellers' || clean === 'dealers-subdealers') return 'dealers';
   if (clean === 'billing') return 'billing';
   if (clean === 'profit-expenses' || clean === 'profit_expenses') return 'profit_expenses';
   if (clean === 'inventory' || clean === 'hardware-inventory') return 'inventory';
@@ -80,6 +85,8 @@ export function getPathFromTab(tab: string): string {
       return '/admin/noc';
     case 'operations':
       return '/manager/dashboard';
+    case 'dealers':
+      return '/dealers';
     case 'profit_expenses':
       return '/profit-expenses';
     case 'logs':
@@ -121,6 +128,23 @@ export function isRouteAllowedForRole(
     return perms.expenses_ledger;
   }
 
+  if (clean === 'dealers' || clean === 'resellers') {
+    return (
+      role === 'DEALER' ||
+      String(user?.tier_level || '').toUpperCase() === 'DEALER'
+    );
+  }
+
+  if (role === 'DEALER' || String(user?.tier_level || '').toUpperCase() === 'DEALER') {
+    const dealerAllowed = ['dealers', 'billing', 'users', 'complaints', 'subscribers'];
+    return dealerAllowed.some((a) => clean === a || clean.includes(a));
+  }
+
+  if (role === 'SUB_DEALER' || String(user?.tier_level || '').toUpperCase() === 'SUB_DEALER') {
+    const subDealerAllowed = ['billing', 'users', 'complaints', 'subscribers'];
+    return subDealerAllowed.some((a) => clean === a || clean.includes(a));
+  }
+
   if (role === 'MANAGER') {
     const managerAllowed = [
       'noc',
@@ -133,7 +157,7 @@ export function isRouteAllowedForRole(
       'inventory',
       'logs',
     ];
-    const managerForbidden = ['settings', 'architecture', 'users', 'permissions'];
+    const managerForbidden = ['settings', 'architecture', 'users', 'permissions', 'dealers'];
     if (managerForbidden.some((f) => clean.includes(f))) return false;
     return managerAllowed.some((a) => clean.includes(a));
   }
@@ -201,6 +225,14 @@ export function getStoredUser(): UserAccount | null {
           : undefined,
         permissions:
           u.permissions && typeof u.permissions === 'object' ? u.permissions : undefined,
+        tier_level: u.tier_level ?? (u.role === 'DEALER' || u.role === 'SUB_DEALER' ? u.role : null),
+        parent_dealer_id: u.parent_dealer_id ?? null,
+        dealer_id: u.dealer_id ?? null,
+        wallet_balance: Number(u.wallet_balance ?? 0),
+        credit_limit: Number(u.credit_limit ?? 0),
+        bandwidth_pool_cap_mbps: Number(u.bandwidth_pool_cap_mbps ?? 0),
+        max_active_users: Number(u.max_active_users ?? 0),
+        can_create_subdealers: Boolean(u.can_create_subdealers),
         createdAt: u.createdAt || new Date().toISOString(),
       };
     }
@@ -356,31 +388,40 @@ export async function apiLogin(
     }
 
     if (user) {
+      const resolvedRoleUpper = String(user.role || 'CLIENT').toUpperCase();
+      const resolvedTierUpper = String(user.tier_level || '').toUpperCase();
+      const effectiveRole: SystemRole =
+        resolvedRoleUpper === 'DEALER' || resolvedTierUpper === 'DEALER'
+          ? 'DEALER'
+          : resolvedRoleUpper === 'SUB_DEALER' || resolvedTierUpper === 'SUB_DEALER'
+          ? 'SUB_DEALER'
+          : (resolvedRoleUpper as SystemRole);
+
       const userAccount: UserAccount = {
         id: user.id,
         username: user.username,
         fullName: user.full_name || user.username,
         displayName: user.full_name || user.username,
         phone: user.phone || '+92 300 0000000',
-        role: user.role,
+        role: effectiveRole,
         area: user.area || 'Central NOC Core',
         assignedArea: user.area || 'Central NOC Core',
         cashInHand: Number(user.cash_in_hand || 0),
         balance: Number(user.cash_in_hand || 0),
         email: user.username.includes('@') ? user.username : `${user.username}@youthnet.pk`,
-        isActive: true,
+        isActive: user.account_status !== 'SUSPENDED',
         can_access_gis_map:
-          user.role === 'ADMIN'
+          effectiveRole === 'ADMIN'
             ? true
-            : user.role === 'CLIENT'
+            : effectiveRole === 'CLIENT'
             ? false
             : typeof user.can_access_gis_map === 'boolean'
             ? user.can_access_gis_map
-            : normalizeGisMapPermission(user.gis_map_permission, user.can_access_gis_map, user.role) !== 'none',
+            : normalizeGisMapPermission(user.gis_map_permission, user.can_access_gis_map, effectiveRole) !== 'none',
         gis_map_permission: normalizeGisMapPermission(
           user.gis_map_permission,
           user.can_access_gis_map,
-          user.role
+          effectiveRole
         ),
         permissions:
           user.permissions && typeof user.permissions === 'object'
@@ -389,12 +430,25 @@ export async function apiLogin(
                 {
                   id: user.id,
                   username: user.username,
-                  role: user.role,
+                  role: effectiveRole,
                   can_access_gis_map: user.can_access_gis_map,
                   gis_map_permission: user.gis_map_permission,
                 },
-                user.role
+                effectiveRole
               ),
+        tier_level:
+          resolvedTierUpper === 'DEALER' || resolvedTierUpper === 'SUB_DEALER' || resolvedTierUpper === 'MASTER'
+            ? resolvedTierUpper
+            : effectiveRole === 'DEALER' || effectiveRole === 'SUB_DEALER'
+            ? effectiveRole
+            : null,
+        parent_dealer_id: user.parent_dealer_id || null,
+        dealer_id: user.dealer_id || null,
+        wallet_balance: Number(user.wallet_balance ?? 0),
+        credit_limit: Number(user.credit_limit ?? 0),
+        bandwidth_pool_cap_mbps: Number(user.bandwidth_pool_cap_mbps ?? 0),
+        max_active_users: Number(user.max_active_users ?? 0),
+        can_create_subdealers: Boolean(user.can_create_subdealers),
         createdAt: user.created_at || new Date().toISOString(),
       };
 

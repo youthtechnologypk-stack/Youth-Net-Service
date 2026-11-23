@@ -36,6 +36,8 @@ export const PermissionProvider: React.FC<{ children: React.ReactNode }> = ({ ch
           MANAGER: { ...DEFAULT_ROLE_PERMISSIONS.MANAGER, ...(parsed.MANAGER || {}) },
           AGENT: { ...DEFAULT_ROLE_PERMISSIONS.AGENT, ...(parsed.AGENT || {}) },
           CLIENT: { ...DEFAULT_ROLE_PERMISSIONS.CLIENT, ...(parsed.CLIENT || {}) },
+          DEALER: { ...DEFAULT_ROLE_PERMISSIONS.DEALER, ...(parsed.DEALER || {}) },
+          SUB_DEALER: { ...DEFAULT_ROLE_PERMISSIONS.SUB_DEALER, ...(parsed.SUB_DEALER || {}) },
         };
       }
     } catch {
@@ -84,6 +86,8 @@ export const PermissionProvider: React.FC<{ children: React.ReactNode }> = ({ ch
             MANAGER: { ...DEFAULT_ROLE_PERMISSIONS.MANAGER, ...(data.roles.MANAGER || {}) },
             AGENT: { ...DEFAULT_ROLE_PERMISSIONS.AGENT, ...(data.roles.AGENT || {}) },
             CLIENT: { ...DEFAULT_ROLE_PERMISSIONS.CLIENT, ...(data.roles.CLIENT || {}) },
+            DEALER: { ...DEFAULT_ROLE_PERMISSIONS.DEALER, ...(data.roles.DEALER || {}) },
+            SUB_DEALER: { ...DEFAULT_ROLE_PERMISSIONS.SUB_DEALER, ...(data.roles.SUB_DEALER || {}) },
           };
           setPermissions(merged);
           if (data.userOverrides) {

@@ -9,6 +9,7 @@ import {
   resolveExactSubscriberProfile,
   upsertOrigPkgComment,
 } from './mikrotikProfileSync';
+import { checkAndDeductResellerWallet } from './resellerEngine';
 
 export const PARENT_FLEET_ROUTER = 'SADDAR FLEET ROUTER';
 
@@ -558,12 +559,17 @@ export async function restoreSubscriberOnInvoicePaid(
     preloadedSecrets?: Array<Record<string, any>>;
     preloadedProfiles?: string[];
     preloadedActive?: Array<Record<string, any>>;
+    performedBy?: string;
+    skipWalletDeduction?: boolean;
   }
 ): Promise<{
   success: boolean;
   restoredProfile: string;
   kickedSessions: number;
   newExpiryIso: string;
+  insufficientWalletFunds?: boolean;
+  walletChargedAmount?: number;
+  error?: string;
 }> {
   const cleanUser = (subscriberUsername || '').trim().toLowerCase();
   const nowIso = new Date().toISOString();
@@ -662,6 +668,32 @@ export async function restoreSubscriberOnInvoicePaid(
       });
     }
 
+    // 1b. Reseller Automatic Wallet Deduction Guard on Renewal / Restore
+    let walletChargedAmount = 0;
+    const ownerResellerId = (userRecord as any)?.dealer_id || null;
+    if (ownerResellerId && !options?.skipWalletDeduction) {
+      const walletRes = await checkAndDeductResellerWallet({
+        resellerId: ownerResellerId,
+        profileName: restoredProfile,
+        subscriberUsername: cleanUser,
+        txType: 'RENEWAL_DEDUCTION',
+        performedBy: options?.performedBy || triggeredBy,
+        fallbackWholesalePrice: Number((userRecord as any)?.monthly_fee || 0),
+        notes: options?.notes || `Renewal / restore for @${cleanUser} (${restoredProfile})`,
+      });
+      if (!walletRes.ok) {
+        return {
+          success: false,
+          restoredProfile,
+          kickedSessions: 0,
+          newExpiryIso: nextAnniversaryYmd,
+          insufficientWalletFunds: Boolean(walletRes.insufficientFunds),
+          error: walletRes.error || 'Insufficient Dealer Wallet Balance',
+        };
+      }
+      walletChargedAmount = walletRes.chargedAmount;
+    }
+
     // 2. Update Supabase (+1 calendar month anniversary expiry, ACTIVE status, clear grace/suspension, persist adopted profile)
     if (userRecord?.id) {
       await safeUpdatePortalUserFields(
@@ -740,6 +772,7 @@ export async function restoreSubscriberOnInvoicePaid(
       restoredProfile,
       kickedSessions,
       newExpiryIso: nextAnniversaryYmd,
+      walletChargedAmount,
     };
   } catch (err) {
     console.warn('restoreSubscriberOnInvoicePaid notice:', err);
@@ -882,6 +915,8 @@ export async function syncSubscriberPackageAndRestoreIfPaid(params: {
   mikrotikUpdated: boolean;
   kickedSessions: number;
   appliedProfile: string;
+  insufficientWalletFunds?: boolean;
+  error?: string;
 }> {
   const cleanUser = String(params.username || '').trim().toLowerCase();
   const cleanProfile = String(params.selectedProfile || '').trim();
@@ -904,7 +939,7 @@ export async function syncSubscriberPackageAndRestoreIfPaid(params: {
   try {
     const { data: userRow } = await supabase
       .from('portal_users')
-      .select('id, billing_status, account_status')
+      .select('id, billing_status, account_status, dealer_id, is_suspended')
       .ilike('username', cleanUser)
       .limit(1)
       .maybeSingle();
@@ -914,6 +949,26 @@ export async function syncSubscriberPackageAndRestoreIfPaid(params: {
       const isNonExpiry = !isExpiryOrBlockedProfile(cleanProfile);
 
       if (params.isPaid) {
+        if (userRow.dealer_id && isNonExpiry) {
+          const walletCheck = await checkAndDeductResellerWallet({
+            resellerId: String(userRow.dealer_id),
+            profileName: cleanProfile,
+            subscriberUsername: cleanUser,
+            txType: 'RENEWAL_DEDUCTION',
+            notes: `Invoice ${params.invoiceNo || ''} marked PAID — ${cleanProfile}`.trim(),
+          });
+          if (!walletCheck.ok) {
+            return {
+              subscriberUpdated: false,
+              mikrotikUpdated: false,
+              kickedSessions: 0,
+              appliedProfile: cleanProfile,
+              insufficientWalletFunds: Boolean(walletCheck.insufficientFunds),
+              error: walletCheck.error || 'Insufficient Dealer Wallet Balance',
+            };
+          }
+        }
+
         await safeUpdatePortalUserFields(
           subscriberId,
           {
@@ -1102,6 +1157,44 @@ export async function bulkActivateSubscribers(params: {
             mikrotikProfiles,
             expiryProfileName,
           });
+
+      // 0. Enforce Reseller Wallet Deduction if subscriber is owned by a Dealer / Sub-Dealer
+      let ownerResellerId: string | null = (sub as any)?.dealer_id || null;
+      let subMonthlyFee = Number((sub as any)?.monthly_fee || 0);
+      if (!ownerResellerId) {
+        const { data: ownerRow } = await supabase
+          .from('portal_users')
+          .select('dealer_id, monthly_fee')
+          .ilike('username', uname)
+          .limit(1)
+          .maybeSingle();
+        if (ownerRow) {
+          ownerResellerId = (ownerRow as any).dealer_id || null;
+          subMonthlyFee = Number((ownerRow as any).monthly_fee || subMonthlyFee);
+        }
+      }
+      if (ownerResellerId) {
+        const walletRes = await checkAndDeductResellerWallet({
+          resellerId: ownerResellerId,
+          profileName: targetProfile,
+          subscriberUsername: uname,
+          txType: 'RENEWAL_DEDUCTION',
+          performedBy: triggeredBy,
+          fallbackWholesalePrice: subMonthlyFee,
+          notes: `Bulk activate renewal for @${uname} (${targetProfile})`,
+        });
+        if (!walletRes.ok) {
+          failedCount++;
+          results.push({
+            username: uname,
+            profile: targetProfile,
+            ok: false,
+            kicked: 0,
+            error: walletRes.error || 'Insufficient Dealer Wallet Balance',
+          });
+          continue;
+        }
+      }
 
       // 1. Update MikroTik secret & kick active 16.16.16.x session
       const mkSync = await syncMikrotikSecretProfile(

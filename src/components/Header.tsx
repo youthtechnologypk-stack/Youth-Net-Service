@@ -26,6 +26,7 @@ import {
   Wallet,
   MapPin,
   Package,
+  Building2,
 } from 'lucide-react';
 import { useISP } from '../context/ISPContext';
 import { SystemRole, UserAccount } from '../types/auth';
@@ -40,6 +41,7 @@ export type ActiveTab =
   | 'noc'
   | 'capacity'
   | 'operations'
+  | 'dealers'
   | 'mikrotik'
   | 'olt'
   | 'fiber_gis'
@@ -421,7 +423,7 @@ export const Header: React.FC<HeaderProps> = ({
                   ? 'bg-rose-50 dark:bg-rose-950 text-rose-700 dark:text-rose-300 border border-rose-200 dark:border-rose-800'
                   : currentRole === 'MANAGER'
                   ? 'bg-indigo-50 dark:bg-indigo-950 text-indigo-700 dark:text-indigo-300 border border-indigo-200 dark:border-indigo-800'
-                  : currentRole === 'AGENT'
+                  : currentRole === 'DEALER'
                   ? 'bg-cyan-50 dark:bg-cyan-950 text-cyan-700 dark:text-cyan-300 border border-cyan-200 dark:border-cyan-800'
                   : 'bg-emerald-50 dark:bg-emerald-950 text-emerald-700 dark:text-emerald-300 border border-emerald-200 dark:border-emerald-800'
               }`}>
@@ -455,6 +457,17 @@ export const Header: React.FC<HeaderProps> = ({
                 <Megaphone className="w-3.5 h-3.5" />
                 <span>Outage Broadcast</span>
               </button>
+            )}
+
+            {/* Reseller Live Wallet Balance Strip */}
+            {(currentRole === 'DEALER' || currentRole === 'SUB_DEALER') && currentUser && (
+              <div
+                className="hidden sm:flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg border border-emerald-500/30 bg-emerald-500/10 text-emerald-700 dark:text-emerald-300 text-xs font-mono tabular-nums shrink-0"
+                title={`Credit Limit: Rs. ${Number(currentUser.credit_limit || 0).toLocaleString()}`}
+              >
+                <Wallet className="w-3.5 h-3.5 shrink-0" />
+                <span>Wallet: Rs. {Number(currentUser.wallet_balance || 0).toLocaleString()}</span>
+              </div>
             )}
 
             {/* PWA Install Button (Admin only) */}
@@ -540,6 +553,14 @@ export const Header: React.FC<HeaderProps> = ({
               >
                 <MapPin className={`w-4 h-4 shrink-0 ${activeTab === 'fiber_gis' ? 'text-white dark:text-sky-300' : 'text-sky-500 dark:text-sky-400'}`} />
                 <span>Fiber GIS &amp; Map</span>
+              </button>
+
+              <button
+                onClick={() => setActiveTab('dealers')}
+                className={`shrink-0 whitespace-nowrap snap-start flex items-center gap-2 px-3 py-2 text-xs sm:text-sm font-medium rounded-xl transition cursor-pointer ${getTabClassName('dealers')}`}
+              >
+                <Building2 className={`w-4 h-4 shrink-0 ${activeTab === 'dealers' ? 'text-white dark:text-sky-300' : 'text-cyan-500 dark:text-cyan-400'}`} />
+                <span>Dealers &amp; Sub-Dealers</span>
               </button>
 
               <button
@@ -724,6 +745,55 @@ export const Header: React.FC<HeaderProps> = ({
                 <Package className={`w-4 h-4 shrink-0 ${activeTab === 'inventory' ? 'text-white dark:text-indigo-300' : 'text-amber-500 dark:text-amber-400'}`} />
                 <span>Inventory &amp; Hardware</span>
               </button>
+            </>
+          )}
+
+          {/* DEALER & SUB-DEALER RESELLER TABS */}
+          {(currentRole === 'DEALER' || currentRole === 'SUB_DEALER') && (
+            <>
+              {currentRole === 'DEALER' && (
+                <button
+                  onClick={() => setActiveTab('dealers')}
+                  className={`shrink-0 whitespace-nowrap snap-start flex items-center gap-2 px-3 py-2 text-xs sm:text-sm font-medium rounded-xl transition cursor-pointer ${getTabClassName('dealers')}`}
+                >
+                  <Building2 className="w-4 h-4 shrink-0" />
+                  <span>Dealers &amp; Sub-Dealers</span>
+                </button>
+              )}
+
+              <button
+                onClick={() => setActiveTab('billing')}
+                className={`shrink-0 whitespace-nowrap snap-start flex items-center gap-2 px-3 py-2 text-xs sm:text-sm font-medium rounded-xl transition cursor-pointer ${getTabClassName('billing')}`}
+              >
+                <CreditCard className="w-4 h-4 shrink-0" />
+                <span>Billing &amp; Renewals</span>
+              </button>
+
+              <button
+                onClick={() => setActiveTab('users')}
+                className={`shrink-0 whitespace-nowrap snap-start flex items-center gap-2 px-3 py-2 text-xs sm:text-sm font-medium rounded-xl transition cursor-pointer ${getTabClassName('users')}`}
+              >
+                <Users className="w-4 h-4 shrink-0" />
+                <span>My Subscribers</span>
+              </button>
+
+              <button
+                onClick={() => setActiveTab('complaints')}
+                className={`shrink-0 whitespace-nowrap snap-start flex items-center gap-2 px-3 py-2 text-xs sm:text-sm font-medium rounded-xl transition cursor-pointer ${getTabClassName('complaints')}`}
+              >
+                <AlertTriangle className="w-4 h-4 shrink-0" />
+                <span>Complaints &amp; SLA</span>
+              </button>
+
+              {effectiveCanAccessGisMap && (
+                <button
+                  onClick={() => setActiveTab('fiber_gis')}
+                  className={`shrink-0 whitespace-nowrap snap-start flex items-center gap-2 px-3 py-2 text-xs sm:text-sm font-medium rounded-xl transition cursor-pointer ${getTabClassName('fiber_gis')}`}
+                >
+                  <MapPin className="w-4 h-4 shrink-0" />
+                  <span>Fiber GIS &amp; Map</span>
+                </button>
+              )}
             </>
           )}
         </nav>

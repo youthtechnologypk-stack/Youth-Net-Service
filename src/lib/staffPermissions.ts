@@ -255,7 +255,9 @@ export function isStaffRoleEligibleForPermissions(role?: string | null): boolean
     r === 'TECHNICIAN' ||
     r === 'NOC' ||
     r === 'NOC_OPERATOR' ||
-    r === 'RECOVERY'
+    r === 'RECOVERY' ||
+    r === 'DEALER' ||
+    r === 'SUB_DEALER'
   );
 }
 
@@ -263,6 +265,38 @@ export function getDefaultPermissionsForRole(role?: string | null): StaffPermiss
   const r = String(role || '').trim().toUpperCase();
   if (r === 'ADMIN') return { ...ADMIN_FULL_PERMISSIONS };
   if (r === 'CLIENT') return { ...CLIENT_NO_PERMISSIONS };
+  if (r === 'DEALER') {
+    return {
+      gis_map: 'view',
+      mikrotik_panel: false,
+      olt_panel: false,
+      outage_broadcast: false,
+      collect_fee: true,
+      edit_delete_invoice: false,
+      grace_and_shift: true,
+      bulk_billing: true,
+      expenses_ledger: false,
+      provision_pppoe: true,
+      view_passwords: true,
+      export_reports: true,
+    };
+  }
+  if (r === 'SUB_DEALER') {
+    return {
+      gis_map: 'none',
+      mikrotik_panel: false,
+      olt_panel: false,
+      outage_broadcast: false,
+      collect_fee: true,
+      edit_delete_invoice: false,
+      grace_and_shift: false,
+      bulk_billing: false,
+      expenses_ledger: false,
+      provision_pppoe: true,
+      view_passwords: true,
+      export_reports: false,
+    };
+  }
   if (r === 'NOC' || r === 'NOC_OPERATOR' || r === 'TECHNICIAN') {
     return { ...STAFF_PERMISSION_PRESETS[1].permissions };
   }

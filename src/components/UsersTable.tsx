@@ -35,8 +35,16 @@ import {
   countEnabledPermissions,
   resolveStaffPermissions,
 } from '../lib/staffPermissions';
+import { getStoredUser } from '../lib/auth';
+import { UserAccount } from '../types/auth';
+import {
+  doesSubscriberMatchScope,
+  getResellerTier,
+  resolveAdminDealerFilterIds,
+  resolveResellerScope,
+} from '../lib/resellerEngine';
 
-export type TabType = 'ALL' | 'CLIENT' | 'AGENT' | 'MANAGER' | 'ADMIN';
+export type TabType = 'ALL' | 'CLIENT' | 'AGENT' | 'MANAGER' | 'ADMIN' | 'DEALER' | 'SUB_DEALER';
 
 export interface PortalUserRow {
   id: string;
@@ -66,9 +74,15 @@ export interface PortalUserRow {
   can_access_gis_map?: boolean | null;
   gis_map_permission?: GisMapPermission | string | null;
   permissions?: Record<string, any> | null;
+  tier_level?: string | null;
+  parent_dealer_id?: string | null;
+  dealer_id?: string | null;
+  wallet_balance?: number | null;
+  credit_limit?: number | null;
 }
 
 export interface UsersTableProps {
+  currentUser?: UserAccount | null;
   onSelectSubscriber?: (username: string) => void;
   onSelectAgent?: (agentIdOrUsername: string) => void;
   onEditUser?: (user: PortalUserRow) => void;
@@ -81,6 +95,7 @@ export interface UsersTableProps {
 }
 
 export const UsersTable: React.FC<UsersTableProps> = ({
+  currentUser,
   onSelectSubscriber,
   onSelectAgent,
   onEditUser,
@@ -91,8 +106,10 @@ export const UsersTable: React.FC<UsersTableProps> = ({
   onRefresh,
   refreshTrigger = 0,
 }) => {
+  const effectiveUser = currentUser || getStoredUser();
   // 1. Strict Role Tabs State
   const [activeTab, setActiveTab] = useState<TabType>('ALL');
+  const [dealerFilter, setDealerFilter] = useState<string>('ALL');
   const [searchQuery, setSearchQuery] = useState('');
   const [users, setUsers] = useState<PortalUserRow[]>([]);
   const [isLoading, setIsLoading] = useState(false);
@@ -172,9 +189,40 @@ export const UsersTable: React.FC<UsersTableProps> = ({
     };
   }, [fetchUsers, refreshTrigger]);
 
-  // 4. Strict Filter Evaluation
+  // 4. Strict Multi-Tier Reseller Scope + Admin Dealer Filter Evaluation
+  const resellerScope = resolveResellerScope(effectiveUser, users as any);
+  const allResellers = (users || []).filter((u) => getResellerTier(u) !== null);
+  const adminDealerSelection = resolveAdminDealerFilterIds(dealerFilter, allResellers as any, true);
+
+  const scopedUsers = (users || []).filter((u) => {
+    if (resellerScope.isIsolated) {
+      const roleUpper = (u?.role || '').toUpperCase();
+      if (roleUpper === 'CLIENT') {
+        return doesSubscriberMatchScope(u, resellerScope);
+      }
+      // Dealers may also inspect their own Sub-Dealers in the table if desired; Sub-Dealers only see own subscribers
+      if (resellerScope.tier === 'DEALER' && getResellerTier(u) === 'SUB_DEALER') {
+        return u.parent_dealer_id === resellerScope.resellerId;
+      }
+      return false;
+    }
+
+    // Admin Filter by Dealer / Sub-Dealer
+    if (adminDealerSelection.mode === 'DIRECT_ISP') {
+      return !u.dealer_id && !u.parent_dealer_id && getResellerTier(u) === null;
+    }
+    if (adminDealerSelection.mode === 'RESELLER') {
+      const ownerId = u.dealer_id || u.parent_dealer_id || null;
+      return Boolean(
+        (u.id && adminDealerSelection.resellerIds.has(u.id)) ||
+          (ownerId && adminDealerSelection.resellerIds.has(ownerId))
+      );
+    }
+    return true;
+  });
+
   const cleanSearch = (searchQuery || '').trim().toLowerCase();
-  const filteredUsers = (users || []).filter((u) => {
+  const filteredUsers = scopedUsers.filter((u) => {
     // Search filter
     const displayName = (u?.full_name || u?.fullName || u?.displayName || '').toLowerCase();
     const username = (u?.username || '').toLowerCase();
@@ -188,19 +236,22 @@ export const UsersTable: React.FC<UsersTableProps> = ({
 
     // Strict Role filter (exact match)
     const userRole = (u?.role || '').toUpperCase();
+    const userTier = getResellerTier(u);
     const matchesRole =
       activeTab === 'ALL' ||
-      userRole === (activeTab || '').toUpperCase();
+      userRole === (activeTab || '').toUpperCase() ||
+      (activeTab === 'DEALER' && userTier === 'DEALER') ||
+      (activeTab === 'SUB_DEALER' && userTier === 'SUB_DEALER');
 
     return matchesSearch && matchesRole;
   });
 
-  // Dynamic Badge Counts based on live data
-  const totalCount = users.length;
-  const clientCount = users.filter((u) => (u.role || '').toUpperCase() === 'CLIENT').length;
-  const agentCount = users.filter((u) => (u.role || '').toUpperCase() === 'AGENT').length;
-  const managerCount = users.filter((u) => (u.role || '').toUpperCase() === 'MANAGER').length;
-  const adminCount = users.filter((u) => (u.role || '').toUpperCase() === 'ADMIN').length;
+  // Dynamic Badge Counts based on live scoped data
+  const totalCount = scopedUsers.length;
+  const clientCount = scopedUsers.filter((u) => (u.role || '').toUpperCase() === 'CLIENT').length;
+  const agentCount = scopedUsers.filter((u) => (u.role || '').toUpperCase() === 'AGENT').length;
+  const managerCount = scopedUsers.filter((u) => (u.role || '').toUpperCase() === 'MANAGER').length;
+  const adminCount = scopedUsers.filter((u) => (u.role || '').toUpperCase() === 'ADMIN').length;
 
   // Status toggle handler directly updating Supabase
   const handleToggleStatus = async (user: PortalUserRow) => {
@@ -354,8 +405,35 @@ export const UsersTable: React.FC<UsersTableProps> = ({
           ))}
         </div>
 
-        {/* Search Input & Refresh Button */}
-        <div className="flex items-center gap-2">
+        {/* Search Input, Admin Dealer Filter & Refresh Button */}
+        <div className="flex flex-wrap items-center gap-2">
+          {!resellerScope.isIsolated && allResellers.length > 0 && (
+            <select
+              value={dealerFilter}
+              onChange={(e) => setDealerFilter(e.target.value)}
+              className="px-2.5 py-1.5 bg-slate-950 border border-slate-700 rounded-lg text-slate-200 text-xs focus:outline-none focus:border-cyan-500"
+              title="Filter User Directory by Dealer or Sub-Dealer"
+            >
+              <option value="ALL">All Dealers &amp; Direct ISP</option>
+              <option value="DIRECT_ISP">Direct Master ISP Only</option>
+              {allResellers
+                .filter((r) => getResellerTier(r) === 'DEALER')
+                .map((d) => (
+                  <React.Fragment key={d.id}>
+                    <option value={d.id}>
+                      [Dealer] {d.full_name || d.username} (@{d.username})
+                    </option>
+                    {allResellers
+                      .filter((s) => s.parent_dealer_id === d.id)
+                      .map((s) => (
+                        <option key={s.id} value={s.id}>
+                          &nbsp;&nbsp;↳ [Sub-Dealer] {s.full_name || s.username} (@{s.username})
+                        </option>
+                      ))}
+                  </React.Fragment>
+                ))}
+            </select>
+          )}
           <div className="relative flex-1 sm:flex-none">
             <Search className="w-3.5 h-3.5 absolute left-3 top-1/2 -translate-y-1/2 text-slate-500" />
             <input

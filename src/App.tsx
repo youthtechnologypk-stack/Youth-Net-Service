@@ -12,6 +12,7 @@ import { MikrotikStudio } from './components/MikrotikStudio';
 import { VsolOltStudio } from './components/VsolOltStudio';
 import { FiberGisMapView } from './components/FiberGisMapView';
 import { BillingStudio } from './components/BillingStudio';
+import { DealersManagementView } from './components/DealersManagementView';
 import { ProfitLossLedgerView } from './components/ProfitLossLedgerView';
 import { InventoryHardwareView } from './components/InventoryHardwareView';
 import { ComplaintsStudio } from './components/ComplaintsStudio';
@@ -60,6 +61,11 @@ import {
   fetchLiveStaffPermissionsFromSupabase,
   resolveStaffPermissions,
 } from './lib/staffPermissions';
+import {
+  RESELLER_WALLET_UPDATED_EVENT,
+  fetchLiveResellerWalletSnapshot,
+  isResellerUser,
+} from './lib/resellerEngine';
 import { supabase } from './services/supabaseClient';
 import { Radio, ShieldCheck, Database, ShieldAlert, ArrowLeft, WifiOff, RefreshCw, CheckCircle2, X } from 'lucide-react';
 import {
@@ -98,6 +104,10 @@ function getLandingTabForRole(role: SystemRole): ActiveTab {
       return 'noc';
     case 'MANAGER':
       return 'operations';
+    case 'DEALER':
+      return 'dealers';
+    case 'SUB_DEALER':
+      return 'billing';
     case 'AGENT':
       return 'agent_portal';
     case 'CLIENT':
@@ -175,7 +185,10 @@ function ISPAppContent() {
     };
 
     const syncFromDb = async () => {
-      const live = await fetchLiveStaffPermissionsFromSupabase(currentUser);
+      const [live, liveWallet] = await Promise.all([
+        fetchLiveStaffPermissionsFromSupabase(currentUser),
+        isResellerUser(currentUser) ? fetchLiveResellerWalletSnapshot(currentUser) : Promise.resolve(null),
+      ]);
       if (!cancelled && live?.permissions) {
         const resolved = resolveStaffPermissions(
           {
@@ -188,9 +201,37 @@ function ISPAppContent() {
         );
         applyPermissionUpdate(resolved);
       }
+      if (!cancelled && liveWallet) {
+        setCurrentUser((prev) => {
+          if (!prev) return prev;
+          if (
+            prev.wallet_balance === liveWallet.wallet_balance &&
+            prev.credit_limit === liveWallet.credit_limit &&
+            prev.can_create_subdealers === liveWallet.can_create_subdealers
+          ) {
+            return prev;
+          }
+          const nextUser: UserAccount = { ...prev, ...liveWallet };
+          const token = getStoredToken();
+          if (token) saveAuthSession(token, nextUser, true);
+          return nextUser;
+        });
+      }
     };
 
     void syncFromDb();
+
+    const handleWalletUpdated = (evt: Event) => {
+      const detail = (evt as CustomEvent).detail;
+      if (!detail || detail.resellerId !== currentUser.id) return;
+      setCurrentUser((prev) => {
+        if (!prev) return prev;
+        const nextUser: UserAccount = { ...prev, wallet_balance: Number(detail.walletBalance ?? prev.wallet_balance ?? 0) };
+        const token = getStoredToken();
+        if (token) saveAuthSession(token, nextUser, true);
+        return nextUser;
+      });
+    };
 
     const handleStaffPermsEvent = (evt: Event) => {
       const detail = (evt as CustomEvent).detail;
@@ -222,6 +263,7 @@ function ISPAppContent() {
 
     window.addEventListener(STAFF_PERMISSIONS_UPDATED_EVENT, handleStaffPermsEvent);
     window.addEventListener(GIS_PERMISSION_UPDATED_EVENT, handleGisEvent);
+    window.addEventListener(RESELLER_WALLET_UPDATED_EVENT, handleWalletUpdated);
 
     const channel = supabase
       .channel(`portal_user_rbac_${currentUser.id || currentUser.username}`)
@@ -238,6 +280,22 @@ function ISPAppContent() {
           if (matchesId || matchesUsername) {
             const resolved = resolveStaffPermissions(row, row.role || currentUser.role);
             applyPermissionUpdate(resolved);
+            if (typeof row.wallet_balance === 'number' || typeof row.credit_limit === 'number') {
+              setCurrentUser((prev) => {
+                if (!prev) return prev;
+                const nextUser: UserAccount = {
+                  ...prev,
+                  wallet_balance: Number(row.wallet_balance ?? prev.wallet_balance ?? 0),
+                  credit_limit: Number(row.credit_limit ?? prev.credit_limit ?? 0),
+                  bandwidth_pool_cap_mbps: Number(row.bandwidth_pool_cap_mbps ?? prev.bandwidth_pool_cap_mbps ?? 0),
+                  max_active_users: Number(row.max_active_users ?? prev.max_active_users ?? 0),
+                  can_create_subdealers: Boolean(row.can_create_subdealers ?? prev.can_create_subdealers),
+                };
+                const token = getStoredToken();
+                if (token) saveAuthSession(token, nextUser, true);
+                return nextUser;
+              });
+            }
           }
         }
       )
@@ -247,6 +305,7 @@ function ISPAppContent() {
       cancelled = true;
       window.removeEventListener(STAFF_PERMISSIONS_UPDATED_EVENT, handleStaffPermsEvent);
       window.removeEventListener(GIS_PERMISSION_UPDATED_EVENT, handleGisEvent);
+      window.removeEventListener(RESELLER_WALLET_UPDATED_EVENT, handleWalletUpdated);
       supabase.removeChannel(channel);
     };
   }, [currentUser?.id, currentUser?.username, currentUser?.role]);
@@ -997,6 +1056,14 @@ function ISPAppContent() {
                   </div>
                 )}
 
+                {/* Multi-Tier Dealers & Sub-Dealers Reseller Console */}
+                {activeTab === 'dealers' && (
+                  <DealersManagementView
+                    currentUser={currentUser}
+                    currentRole={currentRole}
+                  />
+                )}
+
                 {/* Billing & Invoices */}
                 {activeTab === 'billing' && (
                   <BillingStudio
@@ -1038,6 +1105,7 @@ function ISPAppContent() {
                     onOpenTicketModal={() => setIsTicketOpen(true)}
                     onOpenOutageModal={handleGuardedOpenOutage}
                     staffPermissions={staffPerms}
+                    currentUser={currentUser}
                   />
                 )}
 
@@ -1053,6 +1121,7 @@ function ISPAppContent() {
                 {activeTab === 'users' && (
                   <UserManagementStudio
                     currentSimulatedRole={currentRole}
+                    currentUser={currentUser}
                     onSwitchSimulatedRole={handleSwitchRole}
                   />
                 )}

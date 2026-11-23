@@ -23,6 +23,7 @@ import {
   Wallet,
   MapPin,
   Package,
+  Building2,
 } from 'lucide-react';
 import { ActiveTab } from './Header';
 import { SystemRole, UserAccount } from '../types/auth';
@@ -109,13 +110,22 @@ export const Sidebar: React.FC<SidebarProps> = ({
       roles: ['ADMIN', 'MANAGER'],
     },
     {
+      id: 'dealers' as ActiveTab,
+      label: 'Dealers & Sub-Dealers',
+      subtitle: 'Reseller Wallets & Tariffs',
+      icon: Building2,
+      badge: 'Resellers',
+      badgeColor: 'bg-cyan-950 text-cyan-300 border-cyan-800',
+      roles: ['ADMIN', 'DEALER'],
+    },
+    {
       id: 'billing' as ActiveTab,
       label: 'Billing & Invoices',
       subtitle: 'MRR Recovery & Agent Cash',
       icon: CreditCard,
       badge: `${currencySymbol} Recv`,
       badgeColor: 'bg-indigo-950 text-indigo-300 border-indigo-800',
-      roles: ['ADMIN', 'MANAGER'],
+      roles: ['ADMIN', 'MANAGER', 'DEALER', 'SUB_DEALER'],
     },
     {
       id: 'profit_expenses' as ActiveTab,
@@ -160,7 +170,7 @@ export const Sidebar: React.FC<SidebarProps> = ({
       icon: MapPin,
       badge: 'FTTH GIS',
       badgeColor: 'bg-sky-950 text-sky-300 border-sky-800',
-      roles: ['ADMIN', 'MANAGER', 'AGENT'],
+      roles: ['ADMIN', 'MANAGER', 'AGENT', 'DEALER'],
     },
     {
       id: 'complaints' as ActiveTab,
@@ -172,7 +182,7 @@ export const Sidebar: React.FC<SidebarProps> = ({
         criticalTickets.length > 0
           ? 'bg-rose-950 text-rose-300 border-rose-800 animate-pulse'
           : 'bg-slate-800 text-slate-300 border-slate-700',
-      roles: ['ADMIN', 'MANAGER'],
+      roles: ['ADMIN', 'MANAGER', 'DEALER', 'SUB_DEALER'],
     },
     {
       id: 'agent_portal' as ActiveTab,
@@ -194,12 +204,12 @@ export const Sidebar: React.FC<SidebarProps> = ({
     },
     {
       id: 'users' as ActiveTab,
-      label: 'User & Access Management',
-      subtitle: 'Clients, Agents & Managers',
+      label: currentRole === 'DEALER' || currentRole === 'SUB_DEALER' ? 'My Subscribers' : 'User & Access Management',
+      subtitle: currentRole === 'DEALER' || currentRole === 'SUB_DEALER' ? 'Scoped PPPoE Directory' : 'Clients, Agents & Managers',
       icon: Users,
       badge: 'Portal Passwords',
       badgeColor: 'bg-cyan-950 text-cyan-300 border-cyan-800',
-      roles: ['ADMIN'],
+      roles: ['ADMIN', 'DEALER', 'SUB_DEALER'],
     },
     {
       id: 'permissions' as ActiveTab,
