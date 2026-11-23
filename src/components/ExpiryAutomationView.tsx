@@ -140,6 +140,7 @@ export const ExpiryAutomationView: React.FC<ExpiryAutomationViewProps> = ({
   const [allInvoices, setAllInvoices] = useState<SupabaseInvoice[]>([]);
   const [auditLogs, setAuditLogs] = useState<SupabaseExpiryAuditLog[]>([]);
   const [waLogs, setWaLogs] = useState<SupabaseWhatsappReminderLog[]>([]);
+  const [activeResellerScope, setActiveResellerScope] = useState<ReturnType<typeof resolveResellerScope> | null>(null);
 
   const openInvoices = useMemo(
     () => (allInvoices || []).filter((inv) => String(inv.status || '').toUpperCase() !== 'PAID'),
@@ -255,6 +256,7 @@ export const ExpiryAutomationView: React.FC<ExpiryAutomationViewProps> = ({
       const allPortalUsers = (allUsersRes.data || []) as SupabasePortalUser[];
       const effectiveUser = currentUser || getStoredUser();
       const resellerScope = resolveResellerScope(effectiveUser, allPortalUsers);
+      setActiveResellerScope(resellerScope);
       const clientRows = allPortalUsers.filter(
         (u) => String(u.role || '').toUpperCase() === 'CLIENT'
       );
@@ -262,6 +264,10 @@ export const ExpiryAutomationView: React.FC<ExpiryAutomationViewProps> = ({
         ? clientRows.filter((u) => doesSubscriberMatchScope(u, resellerScope))
         : clientRows;
       setSubscribers(scopedClients);
+
+      const allowedNameSet = resellerScope.isIsolated
+        ? resellerScope.allowedSubscriberUsernames || new Set<string>()
+        : null;
 
       if (invRes.data) {
         const rawInvs = invRes.data as SupabaseInvoice[];
@@ -284,13 +290,27 @@ export const ExpiryAutomationView: React.FC<ExpiryAutomationViewProps> = ({
       if (auditRes.error && isMissingTableOrColumnError(auditRes.error)) {
         missing.add('expiry_audit_logs');
       } else if (auditRes.data) {
-        setAuditLogs(auditRes.data as SupabaseExpiryAuditLog[]);
+        const rawAudits = auditRes.data as SupabaseExpiryAuditLog[];
+        setAuditLogs(
+          allowedNameSet
+            ? rawAudits.filter((a) =>
+                allowedNameSet.has(String(a.username || '').trim().toLowerCase())
+              )
+            : rawAudits
+        );
       }
 
       if (waRes.error && isMissingTableOrColumnError(waRes.error)) {
         missing.add('whatsapp_reminder_logs');
       } else if (waRes.data) {
-        setWaLogs(waRes.data as SupabaseWhatsappReminderLog[]);
+        const rawWa = waRes.data as SupabaseWhatsappReminderLog[];
+        setWaLogs(
+          allowedNameSet
+            ? rawWa.filter((w) =>
+                allowedNameSet.has(String(w.username || '').trim().toLowerCase())
+              )
+            : rawWa
+        );
       }
 
       setMissingSchemaItems(Array.from(missing));
@@ -480,6 +500,22 @@ export const ExpiryAutomationView: React.FC<ExpiryAutomationViewProps> = ({
     }
   };
 
+  const scopedMkSecrets = useMemo(() => {
+    if (!activeResellerScope?.isIsolated) return mkSecrets;
+    const allowed = activeResellerScope.allowedSubscriberUsernames || new Set<string>();
+    return mkSecrets.filter((s) =>
+      allowed.has(String(s?.name || s?.user || '').trim().toLowerCase())
+    );
+  }, [mkSecrets, activeResellerScope]);
+
+  const scopedMkActive = useMemo(() => {
+    if (!activeResellerScope?.isIsolated) return mkActive;
+    const allowed = activeResellerScope.allowedSubscriberUsernames || new Set<string>();
+    return mkActive.filter((a) =>
+      allowed.has(String(a?.name || a?.user || '').trim().toLowerCase())
+    );
+  }, [mkActive, activeResellerScope]);
+
   const categorizedSubscribers = useMemo(() => {
     const evaluated = evaluateSubscribersExpiryBuckets({
       subscribers,
@@ -488,8 +524,8 @@ export const ExpiryAutomationView: React.FC<ExpiryAutomationViewProps> = ({
       cutoffTimePkt: settings.cutoff_time_pkt || '14:00',
       graceHours: Math.max(0, Number(settings.grace_hours) || 24),
       expiryProfileName: settings.expiry_ppp_profile,
-      mikrotikSecrets: mkSecrets,
-      mikrotikActive: mkActive,
+      mikrotikSecrets: scopedMkSecrets,
+      mikrotikActive: scopedMkActive,
       nowMs: nowTickMs,
     });
 
@@ -545,8 +581,8 @@ export const ExpiryAutomationView: React.FC<ExpiryAutomationViewProps> = ({
     settings.cutoff_time_pkt,
     settings.grace_hours,
     settings.expiry_ppp_profile,
-    mkSecrets,
-    mkActive,
+    scopedMkSecrets,
+    scopedMkActive,
     mikrotikProfiles,
     nowTickMs,
   ]);

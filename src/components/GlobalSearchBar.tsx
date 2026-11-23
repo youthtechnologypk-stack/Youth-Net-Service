@@ -21,11 +21,21 @@ import { Customer, Invoice, ActiveSession } from '../types/isp';
 import { OnuDevice } from '../types/olt';
 import { ActiveTab } from './Header';
 import { CustomerQuickDetailModal } from './CustomerQuickDetailModal';
+import { getStoredUser } from '../lib/auth';
+import { UserAccount } from '../types/auth';
+import { supabase, SupabasePortalUser } from '../services/supabaseClient';
+import {
+  isResellerUser,
+  isVisibleToCurrentUser,
+  resolveResellerScope,
+  ResellerScope,
+} from '../lib/resellerEngine';
 
 interface GlobalSearchBarProps {
   onNavigateTab: (tab: ActiveTab) => void;
   onOpenPaymentModal?: (invoice: Invoice) => void;
   onOpenReceiptModal?: (invoice: Invoice) => void;
+  currentUser?: UserAccount | null;
   className?: string;
 }
 
@@ -33,15 +43,65 @@ export const GlobalSearchBar: React.FC<GlobalSearchBarProps> = ({
   onNavigateTab,
   onOpenPaymentModal,
   onOpenReceiptModal,
+  currentUser,
   className = '',
 }) => {
   const { customers, invoices, activeSessions, onus, packages } = useISP();
   const { formatCurrency } = useCurrency();
 
+  const effectiveUser = currentUser || getStoredUser();
+  const isResellerSession = isResellerUser(effectiveUser);
+  const [resellerScope, setResellerScope] = useState<ResellerScope | null>(null);
+  const [isScopeReady, setIsScopeReady] = useState<boolean>(() => !isResellerSession);
+
   const [query, setQuery] = useState('');
   const [isOpen, setIsOpen] = useState(false);
   const [selectedCustomer, setSelectedCustomer] = useState<Customer | null>(null);
   const [activeFilter, setActiveFilter] = useState<'all' | 'customers' | 'invoices' | 'sessions'>('all');
+
+  // Load strict multi-tier reseller isolation scope from Supabase portal_users
+  useEffect(() => {
+    let active = true;
+    if (!isResellerSession) {
+      setResellerScope(null);
+      setIsScopeReady(true);
+      return;
+    }
+
+    const loadScope = async () => {
+      try {
+        const { data } = await supabase.from('portal_users').select('*');
+        if (!active) return;
+        const rows = (data || []) as SupabasePortalUser[];
+        setResellerScope(resolveResellerScope(effectiveUser, rows));
+      } catch {
+        if (!active) return;
+        // Fail-closed: empty allowed set for isolated reseller
+        setResellerScope({
+          isIsolated: true,
+          tier: effectiveUser?.tier_level === 'SUB_DEALER' ? 'SUB_DEALER' : 'DEALER',
+          resellerId: effectiveUser?.id || null,
+          allowedResellerIds: effectiveUser?.id ? new Set([effectiveUser.id]) : new Set(),
+          allowedSubscriberUsernames: new Set(),
+        });
+      } finally {
+        if (active) setIsScopeReady(true);
+      }
+    };
+
+    void loadScope();
+    const channel = supabase
+      .channel('public:global_search_reseller_scope')
+      .on('postgres_changes', { event: '*', schema: 'public', table: 'portal_users' }, () => {
+        void loadScope();
+      })
+      .subscribe();
+
+    return () => {
+      active = false;
+      supabase.removeChannel(channel);
+    };
+  }, [isResellerSession, effectiveUser?.id, effectiveUser?.tier_level, effectiveUser?.role]);
 
   const inputRef = useRef<HTMLInputElement>(null);
   const containerRef = useRef<HTMLDivElement>(null);
@@ -75,43 +135,93 @@ export const GlobalSearchBar: React.FC<GlobalSearchBarProps> = ({
     return () => document.removeEventListener('mousedown', handleClickOutside);
   }, []);
 
-  // Filter Data
+  // Filter Data (with strict fail-closed multi-tier reseller isolation)
   const cleanQ = query.trim().toLowerCase();
+  const canReturnResults = !isResellerSession || (isScopeReady && Boolean(resellerScope?.isIsolated));
+  const scopeOptions = resellerScope
+    ? {
+        childSubDealerIds: resellerScope.allowedResellerIds,
+        allowedSubscriberUsernames: resellerScope.allowedSubscriberUsernames,
+      }
+    : undefined;
 
-  const matchingCustomers: Customer[] = cleanQ
-    ? (customers || []).filter((c) => {
-        return (
-          (c?.name || '').toLowerCase().includes(cleanQ) ||
-          (c?.assignedIp || '').toLowerCase().includes(cleanQ) ||
-          (c?.pppoeUsername || '').toLowerCase().includes(cleanQ) ||
-          (c?.accountNumber || '').toLowerCase().includes(cleanQ) ||
-          (c?.phone || '').toLowerCase().includes(cleanQ) ||
-          (c?.macAddress || '').toLowerCase().includes(cleanQ) ||
-          (c?.areaNode || '').toLowerCase().includes(cleanQ)
-        );
-      })
-    : [];
+  const matchingCustomers: Customer[] =
+    cleanQ && canReturnResults
+      ? (customers || []).filter((c) => {
+          if (isResellerSession) {
+            const visible = isVisibleToCurrentUser(
+              {
+                id: c?.id,
+                username: c?.pppoeUsername,
+                pppoeUsername: c?.pppoeUsername,
+                dealer_id: (c as any)?.dealer_id || (c as any)?.dealerId || null,
+                sub_dealer_id: (c as any)?.sub_dealer_id || (c as any)?.subDealerId || null,
+                created_by_id: (c as any)?.created_by_id || (c as any)?.createdById || null,
+              },
+              effectiveUser,
+              scopeOptions
+            );
+            if (!visible) return false;
+          }
+          return (
+            (c?.name || '').toLowerCase().includes(cleanQ) ||
+            (c?.assignedIp || '').toLowerCase().includes(cleanQ) ||
+            (c?.pppoeUsername || '').toLowerCase().includes(cleanQ) ||
+            (c?.accountNumber || '').toLowerCase().includes(cleanQ) ||
+            (c?.phone || '').toLowerCase().includes(cleanQ) ||
+            (c?.macAddress || '').toLowerCase().includes(cleanQ) ||
+            (c?.areaNode || '').toLowerCase().includes(cleanQ)
+          );
+        })
+      : [];
 
-  const matchingInvoices: Invoice[] = cleanQ
-    ? (invoices || []).filter((inv) => {
-        return (
-          (inv?.invoiceNumber || (inv as any)?.invoice_no || '').toLowerCase().includes(cleanQ) ||
-          (inv?.customerName || (inv as any)?.subscriber_username || '').toLowerCase().includes(cleanQ) ||
-          (inv?.billingMonth || '').toLowerCase().includes(cleanQ) ||
-          Boolean(inv?.receiptNumber && (inv.receiptNumber || '').toLowerCase().includes(cleanQ))
-        );
-      })
-    : [];
+  const matchingInvoices: Invoice[] =
+    cleanQ && canReturnResults
+      ? (invoices || []).filter((inv) => {
+          if (isResellerSession) {
+            const visible = isVisibleToCurrentUser(
+              {
+                id: inv?.id,
+                subscriber_username:
+                  (inv as any)?.subscriber_username ||
+                  (inv as any)?.pppoeUsername ||
+                  inv?.customerId ||
+                  inv?.customerName ||
+                  '',
+                dealer_id: (inv as any)?.dealer_id || null,
+                sub_dealer_id: (inv as any)?.sub_dealer_id || null,
+                created_by_id: (inv as any)?.created_by_id || null,
+              },
+              effectiveUser,
+              scopeOptions
+            );
+            if (!visible) return false;
+          }
+          return (
+            (inv?.invoiceNumber || (inv as any)?.invoice_no || '').toLowerCase().includes(cleanQ) ||
+            (inv?.customerName || (inv as any)?.subscriber_username || '').toLowerCase().includes(cleanQ) ||
+            (inv?.billingMonth || '').toLowerCase().includes(cleanQ) ||
+            Boolean(inv?.receiptNumber && (inv.receiptNumber || '').toLowerCase().includes(cleanQ))
+          );
+        })
+      : [];
 
-  const matchingSessions: ActiveSession[] = cleanQ
-    ? (activeSessions || []).filter((s) => {
-        return (
-          (s?.username || '').toLowerCase().includes(cleanQ) ||
-          (s?.address || '').toLowerCase().includes(cleanQ) ||
-          (s?.callerId || '').toLowerCase().includes(cleanQ)
-        );
-      })
-    : [];
+  const matchingSessions: ActiveSession[] =
+    cleanQ && canReturnResults
+      ? (activeSessions || []).filter((s) => {
+          if (isResellerSession) {
+            const uname = String(s?.username || '').trim().toLowerCase();
+            if (!uname || !resellerScope?.allowedSubscriberUsernames?.has(uname)) {
+              return false;
+            }
+          }
+          return (
+            (s?.username || '').toLowerCase().includes(cleanQ) ||
+            (s?.address || '').toLowerCase().includes(cleanQ) ||
+            (s?.callerId || '').toLowerCase().includes(cleanQ)
+          );
+        })
+      : [];
 
   const totalResults =
     matchingCustomers.length + matchingInvoices.length + matchingSessions.length;

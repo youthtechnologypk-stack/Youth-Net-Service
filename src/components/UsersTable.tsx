@@ -38,8 +38,10 @@ import {
 import { getStoredUser } from '../lib/auth';
 import { UserAccount } from '../types/auth';
 import {
+  doesRecordMatchAdminOwnerFilter,
   doesSubscriberMatchScope,
   getResellerTier,
+  isVisibleToCurrentUser,
   resolveAdminDealerFilterIds,
   resolveResellerScope,
 } from '../lib/resellerEngine';
@@ -77,6 +79,8 @@ export interface PortalUserRow {
   tier_level?: string | null;
   parent_dealer_id?: string | null;
   dealer_id?: string | null;
+  sub_dealer_id?: string | null;
+  created_by_id?: string | null;
   wallet_balance?: number | null;
   credit_limit?: number | null;
 }
@@ -198,27 +202,20 @@ export const UsersTable: React.FC<UsersTableProps> = ({
     if (resellerScope.isIsolated) {
       const roleUpper = (u?.role || '').toUpperCase();
       if (roleUpper === 'CLIENT') {
-        return doesSubscriberMatchScope(u, resellerScope);
+        return isVisibleToCurrentUser(u, effectiveUser, {
+          childSubDealerIds: resellerScope.allowedResellerIds,
+          allowedSubscriberUsernames: resellerScope.allowedSubscriberUsernames,
+        });
       }
-      // Dealers may also inspect their own Sub-Dealers in the table if desired; Sub-Dealers only see own subscribers
+      // Dealers may also inspect their own Sub-Dealers in the table; Sub-Dealers only see own subscribers
       if (resellerScope.tier === 'DEALER' && getResellerTier(u) === 'SUB_DEALER') {
         return u.parent_dealer_id === resellerScope.resellerId;
       }
       return false;
     }
 
-    // Admin Filter by Dealer / Sub-Dealer
-    if (adminDealerSelection.mode === 'DIRECT_ISP') {
-      return !u.dealer_id && !u.parent_dealer_id && getResellerTier(u) === null;
-    }
-    if (adminDealerSelection.mode === 'RESELLER') {
-      const ownerId = u.dealer_id || u.parent_dealer_id || null;
-      return Boolean(
-        (u.id && adminDealerSelection.resellerIds.has(u.id)) ||
-          (ownerId && adminDealerSelection.resellerIds.has(ownerId))
-      );
-    }
-    return true;
+    // Admin Filter by Owner (All / Master Direct / Specific Dealer / Sub-Dealer)
+    return doesRecordMatchAdminOwnerFilter(u, adminDealerSelection);
   });
 
   const cleanSearch = (searchQuery || '').trim().toLowerCase();
@@ -412,10 +409,10 @@ export const UsersTable: React.FC<UsersTableProps> = ({
               value={dealerFilter}
               onChange={(e) => setDealerFilter(e.target.value)}
               className="px-2.5 py-1.5 bg-slate-950 border border-slate-700 rounded-lg text-slate-200 text-xs focus:outline-none focus:border-cyan-500"
-              title="Filter User Directory by Dealer or Sub-Dealer"
+              title="Filter by Owner (All / Master Direct / Specific Dealer / Sub-Dealer)"
             >
-              <option value="ALL">All Dealers &amp; Direct ISP</option>
-              <option value="DIRECT_ISP">Direct Master ISP Only</option>
+              <option value="ALL">Filter by Owner: All Owners</option>
+              <option value="DIRECT_ISP">Master Direct ISP Only</option>
               {allResellers
                 .filter((r) => getResellerTier(r) === 'DEALER')
                 .map((d) => (
@@ -431,6 +428,13 @@ export const UsersTable: React.FC<UsersTableProps> = ({
                         </option>
                       ))}
                   </React.Fragment>
+                ))}
+              {allResellers
+                .filter((r) => getResellerTier(r) === 'SUB_DEALER' && !r.parent_dealer_id)
+                .map((s) => (
+                  <option key={s.id} value={s.id}>
+                    [Sub-Dealer] {s.full_name || s.username} (@{s.username})
+                  </option>
                 ))}
             </select>
           )}

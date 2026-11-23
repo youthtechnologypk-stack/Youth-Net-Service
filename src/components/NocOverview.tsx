@@ -34,9 +34,18 @@ import {
   SupabaseInvoice,
   SupabaseIspExpense,
   SupabasePaymentTransaction,
+  SupabasePortalUser,
 } from '../services/supabaseClient';
 import { createDefaultDateFilter } from '../lib/dateFilter';
 import { computeProfitLossSummary } from '../lib/profitLoss';
+import { getStoredUser } from '../lib/auth';
+import {
+  doesInvoiceMatchScope,
+  isResellerUser,
+  isVisibleToCurrentUser,
+  resolveResellerScope,
+  ResellerScope,
+} from '../lib/resellerEngine';
 
 interface NocOverviewProps {
   onNavigateTab: (tab: ActiveTab) => void;
@@ -77,7 +86,12 @@ export const NocOverview: React.FC<NocOverviewProps> = ({
   const { formatCurrency } = useCurrency();
 
   const currentRouter = routers.find((r) => r.id === selectedRouterId) || routers[0];
+  const loggedInUser = getStoredUser();
+  const isResellerSession = isResellerUser(loggedInUser);
 
+  const [resellerScope, setResellerScope] = useState<ResellerScope | null>(null);
+  const [scopedPortalClientCount, setScopedPortalClientCount] = useState<number>(0);
+  const [scopedSupabaseInvoices, setScopedSupabaseInvoices] = useState<SupabaseInvoice[] | null>(null);
   const [provisionedSecretsCount, setProvisionedSecretsCount] = useState<number>(0);
   const [monthlyNetProfitState, setMonthlyNetProfitState] = useState<{
     loaded: boolean;
@@ -97,23 +111,66 @@ export const NocOverview: React.FC<NocOverviewProps> = ({
     let isMounted = true;
     const loadMonthlyNetProfit = async () => {
       try {
-        const [expRes, invRes, payRes, salRes] = await Promise.all([
-          supabase
-            .from('isp_expenses')
-            .select('id,expense_category,title,amount,payment_method,expense_date,notes,recorded_by,created_at'),
+        const [usersRes, expRes, invRes, payRes, salRes] = await Promise.all([
+          supabase.from('portal_users').select('*'),
+          isResellerSession
+            ? Promise.resolve({ data: [] as SupabaseIspExpense[] })
+            : supabase
+                .from('isp_expenses')
+                .select('id,expense_category,title,amount,payment_method,expense_date,notes,recorded_by,created_at'),
           supabase.from('invoices').select('*'),
           supabase.from('payment_transactions').select('*'),
-          supabase
-            .from('agent_cash_transactions')
-            .select('*')
-            .eq('transaction_type', 'SALARY_PAYOUT'),
+          isResellerSession
+            ? Promise.resolve({ data: [] as SupabaseAgentCashTransaction[] })
+            : supabase
+                .from('agent_cash_transactions')
+                .select('*')
+                .eq('transaction_type', 'SALARY_PAYOUT'),
         ]);
         if (!isMounted) return;
+
+        const allPortalRows = (usersRes.data || []) as SupabasePortalUser[];
+        const computedScope = resolveResellerScope(loggedInUser, allPortalRows);
+        setResellerScope(computedScope);
+
+        const rawInvoices = (invRes.data as SupabaseInvoice[]) || [];
+        const rawPayments = (payRes.data as SupabasePaymentTransaction[]) || [];
+
+        let effectiveInvoices = rawInvoices;
+        let effectivePayments = rawPayments;
+
+        if (computedScope.isIsolated) {
+          const ownClientsCount = allPortalRows.filter(
+            (u) =>
+              String(u.role || '').toUpperCase() === 'CLIENT' &&
+              isVisibleToCurrentUser(u, loggedInUser, {
+                childSubDealerIds: computedScope.allowedResellerIds,
+                allowedSubscriberUsernames: computedScope.allowedSubscriberUsernames,
+              })
+          ).length;
+          setScopedPortalClientCount(ownClientsCount);
+
+          effectiveInvoices = rawInvoices.filter((inv) => doesInvoiceMatchScope(inv, computedScope));
+          setScopedSupabaseInvoices(effectiveInvoices);
+
+          const allowedNames = new Set<string>([
+            ...(computedScope.allowedSubscriberUsernames || []),
+            ...effectiveInvoices.map((i) => String(i.subscriber_username || '').trim().toLowerCase()),
+          ]);
+          effectivePayments = rawPayments.filter((tx) =>
+            allowedNames.has(String(tx.subscriber_username || '').trim().toLowerCase())
+          );
+        } else {
+          setScopedSupabaseInvoices(null);
+        }
+
         const summary = computeProfitLossSummary({
-          invoices: (invRes.data as SupabaseInvoice[]) || [],
-          paymentTransactions: (payRes.data as SupabasePaymentTransaction[]) || [],
-          expenses: (expRes.data as SupabaseIspExpense[]) || [],
-          salaryTransactions: (salRes.data as SupabaseAgentCashTransaction[]) || [],
+          invoices: effectiveInvoices,
+          paymentTransactions: effectivePayments,
+          expenses: isResellerSession ? [] : ((expRes.data as SupabaseIspExpense[]) || []),
+          salaryTransactions: isResellerSession
+            ? []
+            : ((salRes.data as SupabaseAgentCashTransaction[]) || []),
           filter: createDefaultDateFilter('month'),
         });
         setMonthlyNetProfitState({
@@ -132,6 +189,7 @@ export const NocOverview: React.FC<NocOverviewProps> = ({
 
     const pnlChannel = supabase
       .channel('public:noc_overview_monthly_pnl')
+      .on('postgres_changes', { event: '*', schema: 'public', table: 'portal_users' }, loadMonthlyNetProfit)
       .on('postgres_changes', { event: '*', schema: 'public', table: 'isp_expenses' }, loadMonthlyNetProfit)
       .on('postgres_changes', { event: '*', schema: 'public', table: 'payment_transactions' }, loadMonthlyNetProfit)
       .on('postgres_changes', { event: '*', schema: 'public', table: 'invoices' }, loadMonthlyNetProfit)
@@ -142,11 +200,16 @@ export const NocOverview: React.FC<NocOverviewProps> = ({
       isMounted = false;
       supabase.removeChannel(pnlChannel);
     };
-  }, []);
+  }, [isResellerSession, loggedInUser?.id]);
 
   useEffect(() => {
     let isMounted = true;
-    if (currentRouter?.id && currentRouter.status === 'online' && (!provisionedSecrets || provisionedSecrets.length === 0)) {
+    if (
+      !isResellerSession &&
+      currentRouter?.id &&
+      currentRouter.status === 'online' &&
+      (!provisionedSecrets || provisionedSecrets.length === 0)
+    ) {
       fetchMikrotikPppSecrets(currentRouter)
         .then((res) => {
           if (isMounted && res.success && Array.isArray(res.secrets)) {
@@ -158,40 +221,138 @@ export const NocOverview: React.FC<NocOverviewProps> = ({
     return () => {
       isMounted = false;
     };
-  }, [currentRouter?.id, currentRouter?.status, provisionedSecrets?.length]);
+  }, [isResellerSession, currentRouter?.id, currentRouter?.status, provisionedSecrets?.length]);
 
-  const safeInvoices = Array.isArray(invoices) ? invoices : [];
-  const safeComplaints = Array.isArray(complaints) ? complaints : [];
-  const safeSessions = Array.isArray(activeSessions) ? activeSessions : [];
-  const safeCustomers = Array.isArray(customers) ? customers : [];
-  const safeSecrets = Array.isArray(provisionedSecrets) ? provisionedSecrets : [];
+  const allowedUsernamesSet = resellerScope?.isIsolated
+    ? resellerScope.allowedSubscriberUsernames || new Set<string>()
+    : null;
+
+  const rawSafeInvoices = Array.isArray(invoices) ? invoices : [];
+  const rawSafeComplaints = Array.isArray(complaints) ? complaints : [];
+  const rawSafeSessions = Array.isArray(activeSessions) ? activeSessions : [];
+  const rawSafeCustomers = Array.isArray(customers) ? customers : [];
+  const rawSafeSecrets = Array.isArray(provisionedSecrets) ? provisionedSecrets : [];
   const safeOnus = Array.isArray(onus) ? onus : [];
   const safeOlts = Array.isArray(olts) ? olts : [];
-  const safeWhatsAppLogs = Array.isArray(whatsAppLogs) ? whatsAppLogs : [];
+  const rawSafeWhatsAppLogs = Array.isArray(whatsAppLogs) ? whatsAppLogs : [];
+
+  const safeCustomers = isResellerSession
+    ? allowedUsernamesSet
+      ? rawSafeCustomers.filter((c) =>
+          isVisibleToCurrentUser(
+            {
+              id: c?.id,
+              pppoeUsername: c?.pppoeUsername,
+              dealer_id: (c as any)?.dealer_id || (c as any)?.dealerId || null,
+              sub_dealer_id: (c as any)?.sub_dealer_id || (c as any)?.subDealerId || null,
+              created_by_id: (c as any)?.created_by_id || (c as any)?.createdById || null,
+            },
+            loggedInUser,
+            {
+              childSubDealerIds: resellerScope?.allowedResellerIds,
+              allowedSubscriberUsernames: allowedUsernamesSet,
+            }
+          )
+        )
+      : []
+    : rawSafeCustomers;
+
+  const safeSecrets = isResellerSession
+    ? allowedUsernamesSet
+      ? rawSafeSecrets.filter((s) =>
+          allowedUsernamesSet.has(String((s as any)?.name || (s as any)?.username || '').trim().toLowerCase())
+        )
+      : []
+    : rawSafeSecrets;
+
+  const safeSessions = isResellerSession
+    ? allowedUsernamesSet
+      ? rawSafeSessions.filter((s) =>
+          allowedUsernamesSet.has(String(s?.username || '').trim().toLowerCase())
+        )
+      : []
+    : rawSafeSessions;
+
+  const safeInvoices = isResellerSession
+    ? scopedSupabaseInvoices !== null
+      ? (scopedSupabaseInvoices as any[])
+      : allowedUsernamesSet
+      ? rawSafeInvoices.filter((inv) =>
+          isVisibleToCurrentUser(
+            {
+              id: inv?.id,
+              subscriber_username:
+                (inv as any)?.subscriber_username || inv?.customerId || inv?.customerName || '',
+              dealer_id: (inv as any)?.dealer_id || null,
+              sub_dealer_id: (inv as any)?.sub_dealer_id || null,
+              created_by_id: (inv as any)?.created_by_id || null,
+            },
+            loggedInUser,
+            {
+              childSubDealerIds: resellerScope?.allowedResellerIds,
+              allowedSubscriberUsernames: allowedUsernamesSet,
+            }
+          )
+        )
+      : []
+    : rawSafeInvoices;
+
+  const safeComplaints = isResellerSession
+    ? allowedUsernamesSet
+      ? rawSafeComplaints.filter((c) => {
+          const uname = String(
+            (c as any)?.subscriber_username || (c as any)?.pppoeUsername || c?.customerId || ''
+          )
+            .trim()
+            .toLowerCase();
+          return Boolean(uname && allowedUsernamesSet.has(uname));
+        })
+      : []
+    : rawSafeComplaints;
+
+  const safeWhatsAppLogs = isResellerSession
+    ? allowedUsernamesSet
+      ? rawSafeWhatsAppLogs.filter((log) => {
+          const recipient = String((log as any)?.recipientUsername || log?.recipientName || '')
+            .trim()
+            .toLowerCase();
+          return Boolean(recipient && allowedUsernamesSet.has(recipient));
+        })
+      : []
+    : rawSafeWhatsAppLogs;
 
   const activeCount = safeSessions.length;
-  const totalSubscribersCount =
-    safeSecrets.length > 0
-      ? safeSecrets.length
-      : provisionedSecretsCount > 0
-      ? provisionedSecretsCount
-      : safeCustomers.length > 0
-      ? safeCustomers.length
-      : activeCount;
+  const totalSubscribersCount = isResellerSession
+    ? Math.max(scopedPortalClientCount, safeCustomers.length, safeSecrets.length, activeCount)
+    : safeSecrets.length > 0
+    ? safeSecrets.length
+    : provisionedSecretsCount > 0
+    ? provisionedSecretsCount
+    : safeCustomers.length > 0
+    ? safeCustomers.length
+    : activeCount;
   const offlineCount = Math.max(0, totalSubscribersCount - activeCount);
 
   const totalDueAmount = safeInvoices
     .filter((i) => (i?.status || '').toLowerCase() !== 'paid')
-    .reduce((sum, i) => sum + (Number(i?.totalAmount || (i as any)?.amount) || 0), 0);
+    .reduce((sum, i) => {
+      const amt = Number(i?.totalAmount ?? (i as any)?.amount ?? 0);
+      const paid = Number((i as any)?.paid_amount ?? 0);
+      return sum + Math.max(0, amt - paid);
+    }, 0);
 
   const totalMonthlyBilled = safeInvoices.reduce(
-    (sum, i) => sum + (Number(i?.totalAmount || (i as any)?.amount) || 0),
+    (sum, i) => sum + (Number(i?.totalAmount ?? (i as any)?.amount) || 0),
     0
   );
 
-  const totalCollected = safeInvoices
-    .filter((i) => (i?.status || '').toLowerCase() === 'paid')
-    .reduce((sum, i) => sum + (Number(i?.totalAmount || (i as any)?.amount) || 0), 0);
+  const totalCollected = safeInvoices.reduce((sum, i) => {
+    const st = (i?.status || '').toLowerCase();
+    const amt = Number(i?.totalAmount ?? (i as any)?.amount ?? 0);
+    const paid = Number((i as any)?.paid_amount ?? 0);
+    if (st === 'paid') return sum + (paid > 0 ? paid : amt);
+    return sum + paid;
+  }, 0);
 
   const urgentComplaints = safeComplaints.filter(
     (c) =>
@@ -264,7 +425,14 @@ export const NocOverview: React.FC<NocOverviewProps> = ({
             <span className="text-slate-700">|</span>
             <span className="flex items-center gap-1">
               <span className="w-1.5 h-1.5 rounded-full bg-indigo-400" />
-              Sessions: <span className="text-indigo-300 font-bold">{safeSessions.filter(s => s?.routerId === currentRouter.id).length || currentRouter.activePppoeCount || 0}</span>
+              Sessions:{' '}
+              <span className="text-indigo-300 font-bold">
+                {isResellerSession
+                  ? activeCount
+                  : safeSessions.filter((s) => s?.routerId === currentRouter.id).length ||
+                    currentRouter.activePppoeCount ||
+                    0}
+              </span>
             </span>
           </div>
         </div>
@@ -611,7 +779,7 @@ export const NocOverview: React.FC<NocOverviewProps> = ({
           </div>
 
           <div className="space-y-2.5 max-h-56 overflow-y-auto pr-1">
-            {whatsAppLogs.slice(0, 4).map((log) => (
+            {safeWhatsAppLogs.slice(0, 4).map((log) => (
               <div
                 key={log.id}
                 className="bg-slate-950/70 border border-slate-800/80 p-2.5 rounded text-xs space-y-1"

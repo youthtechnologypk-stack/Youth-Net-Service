@@ -59,6 +59,8 @@ export interface SupabasePortalUser {
   tier_level?: 'MASTER' | 'DEALER' | 'SUB_DEALER' | string | null;
   parent_dealer_id?: string | null;
   dealer_id?: string | null;
+  sub_dealer_id?: string | null;
+  created_by_id?: string | null;
   wallet_balance?: number | null;
   credit_limit?: number | null;
   bandwidth_pool_cap_mbps?: number | null;
@@ -110,6 +112,8 @@ export interface SupabaseInvoice {
   subscriber_id?: string | null;
   subscriber_username: string;
   dealer_id?: string | null;
+  sub_dealer_id?: string | null;
+  created_by_id?: string | null;
   assigned_agent_id?: string | null;
   assigned_agent_name?: string | null;
   package_profile?: string | null;

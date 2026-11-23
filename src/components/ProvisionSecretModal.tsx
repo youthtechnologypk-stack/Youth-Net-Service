@@ -15,10 +15,12 @@ import { createAgentCommission } from '../services/erpInventoryService';
 import { addCalendarMonthsYmd, extractYmdString } from '../lib/anniversaryBilling';
 import { getStoredUser } from '../lib/auth';
 import {
+  buildOwnershipStamp,
   checkAndDeductResellerWallet,
   getResellerTier,
   isResellerUser,
   resolveTariffForProfile,
+  stampOwnershipOnPortalUserAndInvoices,
 } from '../lib/resellerEngine';
 
 interface ProvisionSecretModalProps {
@@ -104,7 +106,7 @@ export const ProvisionSecretModal: React.FC<ProvisionSecretModalProps> = ({ isOp
     }
     supabase
       .from('portal_users')
-      .select('id,username,full_name,area,role,tier_level,parent_dealer_id,wallet_balance,credit_limit,max_active_users')
+      .select('*')
       .order('full_name', { ascending: true })
       .then(({ data }) => {
         if (Array.isArray(data)) {
@@ -269,18 +271,20 @@ export const ProvisionSecretModal: React.FC<ProvisionSecretModalProps> = ({ isOp
       } as any),
     });
 
-    // Link subscriber ownership to Dealer / Sub-Dealer in Supabase portal_users & invoices
+    // Link subscriber ownership to Dealer / Sub-Dealer / Creator in Supabase portal_users & invoices
     const cleanSubUsername = pppoeUsername.trim().toLowerCase();
-    if (effectiveDealerId && cleanSubUsername) {
+    const ownershipStamp = buildOwnershipStamp(
+      activeLoggedInUser,
+      isResellerSession ? null : activeResellerRecord
+    );
+    if (
+      cleanSubUsername &&
+      (ownershipStamp.dealer_id || ownershipStamp.sub_dealer_id || ownershipStamp.created_by_id)
+    ) {
       try {
-        await supabase
-          .from('portal_users')
-          .update({ dealer_id: effectiveDealerId } as any)
-          .ilike('username', cleanSubUsername);
-        await supabase
-          .from('invoices')
-          .update({ dealer_id: effectiveDealerId } as any)
-          .ilike('subscriber_username', cleanSubUsername);
+        await stampOwnershipOnPortalUserAndInvoices(cleanSubUsername, ownershipStamp, {
+          updateInvoices: true,
+        });
       } catch {}
     }
 

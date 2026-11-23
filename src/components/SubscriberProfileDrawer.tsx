@@ -39,6 +39,7 @@ import {
 import { apiClient } from '../services/apiClient';
 import { storageService } from '../services/storageService';
 import { supabase, SupabaseSubscriberSessionLog } from '../services/supabaseClient';
+import { getStoredToken, getStoredUser } from '../lib/auth';
 import {
   sessionSyncEngine,
   formatBytesTransfer,
@@ -216,10 +217,24 @@ export const SubscriberProfileDrawer: React.FC<SubscriberProfileDrawerProps> = (
     const abortController = new AbortController();
     setIsLoadingServerData(true);
 
+    const getPortalScopeHeaders = (): Record<string, string> => {
+      const u = getStoredUser();
+      const token = getStoredToken();
+      const h: Record<string, string> = {};
+      if (u?.id) h['x-portal-user-id'] = String(u.id);
+      if (u?.username) h['x-portal-username'] = String(u.username);
+      if (u?.role) h['x-portal-role'] = String(u.role);
+      if (u?.tier_level) h['x-portal-tier'] = String(u.tier_level);
+      if (u?.parent_dealer_id) h['x-portal-parent-dealer-id'] = String(u.parent_dealer_id);
+      if (token) h['x-portal-auth-token'] = `Bearer ${token}`;
+      return h;
+    };
+
     fetch(`/api/subscribers/${encodeURIComponent(username)}/360`, {
       headers: {
         Accept: 'application/json',
         Connection: 'close',
+        ...getPortalScopeHeaders(),
       },
       signal: abortController.signal,
     })
@@ -625,6 +640,19 @@ export const SubscriberProfileDrawer: React.FC<SubscriberProfileDrawerProps> = (
     }
   };
 
+  const buildCallerScopeHeaders = (): Record<string, string> => {
+    const u = getStoredUser();
+    const token = getStoredToken();
+    const h: Record<string, string> = { 'Content-Type': 'application/json' };
+    if (u?.id) h['x-portal-user-id'] = String(u.id);
+    if (u?.username) h['x-portal-username'] = String(u.username);
+    if (u?.role) h['x-portal-role'] = String(u.role);
+    if (u?.tier_level) h['x-portal-tier'] = String(u.tier_level);
+    if (u?.parent_dealer_id) h['x-portal-parent-dealer-id'] = String(u.parent_dealer_id);
+    if (token) h['x-portal-auth-token'] = `Bearer ${token}`;
+    return h;
+  };
+
   // Operational Action: Shift to Expired Pool (Restricted Profile & Disconnect)
   const handleShiftToExpiredPool = async () => {
     if (!username) return;
@@ -633,7 +661,7 @@ export const SubscriberProfileDrawer: React.FC<SubscriberProfileDrawerProps> = (
     try {
       await fetch(`/api/subscribers/${encodeURIComponent(username)}/isolate`, {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers: buildCallerScopeHeaders(),
         body: JSON.stringify({ status: 'walled_garden', targetProfile: 'EXPIRED-POOL', routerId: selectedRouterId }),
       }).catch(() => {});
 
@@ -679,7 +707,7 @@ export const SubscriberProfileDrawer: React.FC<SubscriberProfileDrawerProps> = (
         await sessionSyncEngine.finalizeSessionKick(username);
         await fetch(`/api/subscribers/${encodeURIComponent(username)}/kick`, {
           method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
+          headers: buildCallerScopeHeaders(),
           body: JSON.stringify({ routerId: selectedRouterId }),
         });
       }
@@ -714,7 +742,7 @@ export const SubscriberProfileDrawer: React.FC<SubscriberProfileDrawerProps> = (
       // Also notify backend API to update secret & kick session
       await fetch(`/api/subscribers/${encodeURIComponent(username)}/isolate`, {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers: buildCallerScopeHeaders(),
         body: JSON.stringify({ status: targetStatus, routerId: selectedRouterId }),
       });
 
@@ -743,7 +771,7 @@ export const SubscriberProfileDrawer: React.FC<SubscriberProfileDrawerProps> = (
     try {
       const res = await fetch(`/api/subscribers/${encodeURIComponent(username)}/reset-mac`, {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers: buildCallerScopeHeaders(),
         body: JSON.stringify({ routerId: selectedRouterId }),
       });
       const data = await res.json();

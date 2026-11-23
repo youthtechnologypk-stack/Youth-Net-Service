@@ -58,6 +58,7 @@ import {
   addCalendarMonthDateString,
   bulkReceivePayments,
   fetchLiveMikrotikProfilesAndSecrets,
+  safeInsertInvoiceInSupabase,
   safeUpdateInvoiceInSupabase,
   syncSubscriberPackageAndRestoreIfPaid,
   shiftBillToNextMonth,
@@ -97,8 +98,12 @@ import {
   resolveStaffPermissions,
 } from '../lib/staffPermissions';
 import {
+  buildOwnershipStamp,
   doesInvoiceMatchScope,
+  doesRecordMatchAdminOwnerFilter,
   getResellerTier,
+  isResellerUser,
+  isVisibleToCurrentUser,
   resolveAdminDealerFilterIds,
   resolveResellerScope,
 } from '../lib/resellerEngine';
@@ -370,7 +375,15 @@ export const BillingView: React.FC<BillingViewProps> = ({
       const anchorDay = clientMatch ? computeBillingAnchorDay(clientMatch) : new Date().getDate();
       const generatedInvoiceNo = `INV-${new Date().getFullYear()}${String(new Date().getMonth() + 1).padStart(2, '0')}-${Math.floor(1000 + Math.random() * 9000)}`;
 
-      const newInvoicePayload = {
+      const ownershipStamp = isResellerUser(currentUser)
+        ? buildOwnershipStamp(currentUser)
+        : {
+            dealer_id: clientMatch?.dealer_id || null,
+            sub_dealer_id: clientMatch?.sub_dealer_id || null,
+            created_by_id: currentUser?.id || null,
+          };
+
+      const newInvoicePayload: Record<string, any> = {
         invoice_no: generatedInvoiceNo,
         subscriber_username: subClean,
         assigned_agent_id: newAssignedAgentId || null,
@@ -380,13 +393,12 @@ export const BillingView: React.FC<BillingViewProps> = ({
         status: 'DUE',
         cycle_day: anchorDay,
         created_at: new Date().toISOString(),
+        ...(ownershipStamp.dealer_id ? { dealer_id: ownershipStamp.dealer_id } : {}),
+        ...(ownershipStamp.sub_dealer_id ? { sub_dealer_id: ownershipStamp.sub_dealer_id } : {}),
+        ...(ownershipStamp.created_by_id ? { created_by_id: ownershipStamp.created_by_id } : {}),
       };
 
-      const { data, error } = await supabase
-        .from('invoices')
-        .insert([newInvoicePayload])
-        .select()
-        .maybeSingle();
+      const { error } = await safeInsertInvoiceInSupabase(newInvoicePayload);
 
       if (error) {
         throw new Error(error.message);
@@ -801,24 +813,54 @@ export const BillingView: React.FC<BillingViewProps> = ({
     [dealerFilter, allResellers]
   );
 
+  const subscriberOwnerByUsername = useMemo(() => {
+    const map = new Map<string, { dealer_id?: string | null; sub_dealer_id?: string | null }>();
+    for (const c of portalClients) {
+      const key = String(c.username || '').trim().toLowerCase();
+      if (key) {
+        map.set(key, {
+          dealer_id: c.dealer_id || null,
+          sub_dealer_id: c.sub_dealer_id || null,
+        });
+      }
+    }
+    return map;
+  }, [portalClients]);
+
+  const scopedPortalClients = useMemo(() => {
+    return (portalClients || []).filter((client) => {
+      if (resellerScope.isIsolated) {
+        return isVisibleToCurrentUser(client, currentUser, {
+          childSubDealerIds: resellerScope.allowedResellerIds,
+          allowedSubscriberUsernames: resellerScope.allowedSubscriberUsernames,
+        });
+      }
+      return doesRecordMatchAdminOwnerFilter(client, adminDealerSelection, subscriberOwnerByUsername);
+    });
+  }, [portalClients, resellerScope, currentUser, adminDealerSelection, subscriberOwnerByUsername]);
+
   const scopedInvoices = useMemo(() => {
     return (invoices || []).filter((inv) => {
       const uname = (inv.subscriber_username || '').trim().toLowerCase();
       const client = clientByUsername[uname];
-      const ownerId = inv.dealer_id || client?.dealer_id || client?.parent_dealer_id || null;
+      const enrichedRecord = {
+        ...inv,
+        subscriber_username: uname,
+        dealer_id: inv.dealer_id || client?.dealer_id || null,
+        sub_dealer_id: inv.sub_dealer_id || client?.sub_dealer_id || null,
+        created_by_id: inv.created_by_id || client?.created_by_id || null,
+      };
 
       if (resellerScope.isIsolated) {
-        return doesInvoiceMatchScope({ subscriber_username: uname, dealer_id: ownerId }, resellerScope);
+        return doesInvoiceMatchScope(enrichedRecord, resellerScope);
       }
-      if (adminDealerSelection.mode === 'DIRECT_ISP') {
-        return !ownerId;
-      }
-      if (adminDealerSelection.mode === 'RESELLER') {
-        return Boolean(ownerId && adminDealerSelection.resellerIds.has(ownerId));
-      }
-      return true;
+      return doesRecordMatchAdminOwnerFilter(
+        enrichedRecord,
+        adminDealerSelection,
+        subscriberOwnerByUsername
+      );
     });
-  }, [invoices, clientByUsername, resellerScope, adminDealerSelection]);
+  }, [invoices, clientByUsername, resellerScope, adminDealerSelection, subscriberOwnerByUsername]);
 
   // Date-filtered Invoices & Payments (strictly scoped by reseller/dealer filter)
   const dateFilteredInvoices = useMemo(() => {
@@ -828,9 +870,10 @@ export const BillingView: React.FC<BillingViewProps> = ({
   }, [scopedInvoices, dateFilter]);
 
   const dateFilteredPayments = useMemo(() => {
-    const scopedUsernames = new Set(
-      scopedInvoices.map((i) => String(i.subscriber_username || '').trim().toLowerCase())
-    );
+    const scopedUsernames = new Set<string>([
+      ...scopedInvoices.map((i) => String(i.subscriber_username || '').trim().toLowerCase()),
+      ...scopedPortalClients.map((c) => String(c.username || '').trim().toLowerCase()),
+    ]);
     return (paymentTransactions || []).filter((tx) => {
       if (resellerScope.isIsolated || adminDealerSelection.mode !== 'ALL') {
         const u = String(tx.subscriber_username || '').trim().toLowerCase();
@@ -838,7 +881,14 @@ export const BillingView: React.FC<BillingViewProps> = ({
       }
       return matchesDateFilter(tx.payment_date || tx.created_at, dateFilter);
     });
-  }, [paymentTransactions, dateFilter, scopedInvoices, resellerScope.isIsolated, adminDealerSelection.mode]);
+  }, [
+    paymentTransactions,
+    dateFilter,
+    scopedInvoices,
+    scopedPortalClients,
+    resellerScope.isIsolated,
+    adminDealerSelection.mode,
+  ]);
 
   const invoiceStatusCounts = useMemo(() => {
     let due = 0;
@@ -1091,11 +1141,11 @@ export const BillingView: React.FC<BillingViewProps> = ({
   const preExpiryReminderQueue = useMemo(
     () =>
       buildPreExpiryReminderQueue({
-        subscribers: portalClients,
-        invoices,
+        subscribers: scopedPortalClients,
+        invoices: scopedInvoices,
         maxDays: whatsappConfig.auto_remind_days_before ?? 3,
       }),
-    [portalClients, invoices, whatsappConfig.auto_remind_days_before]
+    [scopedPortalClients, scopedInvoices, whatsappConfig.auto_remind_days_before]
   );
 
   const supportWhatsapp = whatsappConfig.support_whatsapp || DEFAULT_SUPPORT_WHATSAPP;
@@ -1451,10 +1501,10 @@ export const BillingView: React.FC<BillingViewProps> = ({
               value={dealerFilter}
               onChange={(e) => setDealerFilter(e.target.value)}
               className="px-3 py-2 bg-slate-900 border border-slate-700 rounded-lg text-xs text-slate-200 focus:outline-none focus:border-cyan-500 shrink-0"
-              title="Filter Invoices by Dealer or Sub-Dealer"
+              title="Filter by Owner (All / Master Direct / Dealer / Sub-Dealer)"
             >
-              <option value="ALL">All Dealers &amp; Direct ISP</option>
-              <option value="DIRECT_ISP">Direct Master ISP Only</option>
+              <option value="ALL">Filter by Owner: All Owners</option>
+              <option value="DIRECT_ISP">Master Direct ISP Only</option>
               {allResellers
                 .filter((r) => getResellerTier(r) === 'DEALER')
                 .map((d) => (
@@ -1470,6 +1520,13 @@ export const BillingView: React.FC<BillingViewProps> = ({
                         </option>
                       ))}
                   </React.Fragment>
+                ))}
+              {allResellers
+                .filter((r) => getResellerTier(r) === 'SUB_DEALER' && !r.parent_dealer_id)
+                .map((s) => (
+                  <option key={s.id} value={s.id}>
+                    [Sub-Dealer] {s.full_name || s.username} (@{s.username})
+                  </option>
                 ))}
             </select>
           )}

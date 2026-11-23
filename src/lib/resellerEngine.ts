@@ -17,6 +17,8 @@ ALTER TABLE public.portal_users
   ADD COLUMN IF NOT EXISTS tier_level TEXT DEFAULT NULL,
   ADD COLUMN IF NOT EXISTS parent_dealer_id UUID REFERENCES public.portal_users(id) ON DELETE SET NULL,
   ADD COLUMN IF NOT EXISTS dealer_id UUID REFERENCES public.portal_users(id) ON DELETE SET NULL,
+  ADD COLUMN IF NOT EXISTS sub_dealer_id UUID REFERENCES public.portal_users(id) ON DELETE SET NULL,
+  ADD COLUMN IF NOT EXISTS created_by_id UUID REFERENCES public.portal_users(id) ON DELETE SET NULL,
   ADD COLUMN IF NOT EXISTS wallet_balance NUMERIC(12, 2) NOT NULL DEFAULT 0,
   ADD COLUMN IF NOT EXISTS credit_limit NUMERIC(12, 2) NOT NULL DEFAULT 0,
   ADD COLUMN IF NOT EXISTS bandwidth_pool_cap_mbps INTEGER NOT NULL DEFAULT 0,
@@ -42,7 +44,9 @@ ALTER TABLE public.portal_users
   CHECK (UPPER(role) IN ('ADMIN', 'MANAGER', 'AGENT', 'CLIENT', 'DEALER', 'SUB_DEALER', 'TECHNICIAN', 'FIELD_AGENT', 'RECOVERY', 'NOC', 'NOC_OPERATOR'));
 
 ALTER TABLE public.invoices
-  ADD COLUMN IF NOT EXISTS dealer_id UUID REFERENCES public.portal_users(id) ON DELETE SET NULL;
+  ADD COLUMN IF NOT EXISTS dealer_id UUID REFERENCES public.portal_users(id) ON DELETE SET NULL,
+  ADD COLUMN IF NOT EXISTS sub_dealer_id UUID REFERENCES public.portal_users(id) ON DELETE SET NULL,
+  ADD COLUMN IF NOT EXISTS created_by_id UUID REFERENCES public.portal_users(id) ON DELETE SET NULL;
 
 CREATE TABLE IF NOT EXISTS public.reseller_tariffs (
   id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
@@ -87,6 +91,8 @@ export interface ResellerSubjectLike {
   tier_level?: string | null;
   parent_dealer_id?: string | null;
   dealer_id?: string | null;
+  sub_dealer_id?: string | null;
+  created_by_id?: string | null;
   wallet_balance?: number | null;
   credit_limit?: number | null;
   bandwidth_pool_cap_mbps?: number | null;
@@ -188,6 +194,8 @@ const OPTIONAL_PORTAL_USER_COLUMNS = new Set([
   'wallet_balance',
   'parent_dealer_id',
   'dealer_id',
+  'sub_dealer_id',
+  'created_by_id',
   'tier_level',
   'created_at',
   'phone',
@@ -360,6 +368,166 @@ export function canAccessDealersTab(
   return tier === 'DEALER' || role === 'DEALER';
 }
 
+export interface OwnershipStamp {
+  dealer_id: string | null;
+  sub_dealer_id: string | null;
+  created_by_id: string | null;
+}
+
+export interface VisibilityRecordLike {
+  id?: string | null;
+  username?: string | null;
+  subscriber_username?: string | null;
+  pppoeUsername?: string | null;
+  customerName?: string | null;
+  role?: string | null;
+  tier_level?: string | null;
+  dealer_id?: string | null;
+  sub_dealer_id?: string | null;
+  parent_dealer_id?: string | null;
+  created_by_id?: string | null;
+  reseller_id?: string | null;
+}
+
+/**
+ * Builds canonical ownership columns (`dealer_id`, `sub_dealer_id`, `created_by_id`)
+ * when provisioning a new subscriber or generating an invoice:
+ * - Logged-in SUB_DEALER -> sub_dealer_id = self, dealer_id = parent_dealer_id, created_by_id = self
+ * - Logged-in DEALER -> dealer_id = self, sub_dealer_id = null, created_by_id = self
+ * - Logged-in ADMIN (with optional assigned dealer/sub-dealer) -> stamps selected reseller hierarchy
+ */
+export function buildOwnershipStamp(
+  currentUser?: ResellerSubjectLike | null,
+  explicitOwner?: Partial<SupabasePortalUser> | null
+): OwnershipStamp {
+  const actorId = currentUser?.id ? String(currentUser.id) : null;
+  const actorTier = getResellerTier(currentUser);
+
+  if (actorTier === 'SUB_DEALER' && actorId) {
+    return {
+      sub_dealer_id: actorId,
+      dealer_id: currentUser?.parent_dealer_id ? String(currentUser.parent_dealer_id) : null,
+      created_by_id: actorId,
+    };
+  }
+
+  if (actorTier === 'DEALER' && actorId) {
+    if (explicitOwner && getResellerTier(explicitOwner) === 'SUB_DEALER' && explicitOwner.id) {
+      return {
+        dealer_id: actorId,
+        sub_dealer_id: String(explicitOwner.id),
+        created_by_id: actorId,
+      };
+    }
+    return {
+      dealer_id: actorId,
+      sub_dealer_id: null,
+      created_by_id: actorId,
+    };
+  }
+
+  // Master Admin or internal staff: respect explicit owner assignment if chosen
+  if (explicitOwner && explicitOwner.id) {
+    const ownerTier = getResellerTier(explicitOwner);
+    if (ownerTier === 'SUB_DEALER') {
+      return {
+        dealer_id: explicitOwner.parent_dealer_id ? String(explicitOwner.parent_dealer_id) : null,
+        sub_dealer_id: String(explicitOwner.id),
+        created_by_id: actorId,
+      };
+    }
+    if (ownerTier === 'DEALER') {
+      return {
+        dealer_id: String(explicitOwner.id),
+        sub_dealer_id: null,
+        created_by_id: actorId,
+      };
+    }
+  }
+
+  return {
+    dealer_id: null,
+    sub_dealer_id: null,
+    created_by_id: actorId,
+  };
+}
+
+/**
+ * Single shared multi-tenant visibility predicate enforced across Users, Billing,
+ * Search, Expiry Engine, Tickets, and Dashboard KPIs.
+ */
+export function isVisibleToCurrentUser(
+  record: VisibilityRecordLike | null | undefined,
+  currentUser: ResellerSubjectLike | null | undefined,
+  options?: {
+    childSubDealerIds?: Set<string> | null;
+    allowedSubscriberUsernames?: Set<string> | null;
+  }
+): boolean {
+  if (!record) return false;
+  const tier = getResellerTier(currentUser);
+  const roleUpper = String(currentUser?.role || '').trim().toUpperCase();
+  const tierUpper = String(currentUser?.tier_level || '').trim().toUpperCase();
+
+  // Master Admin / non-reseller staff see everything
+  if (!tier || roleUpper === 'ADMIN' || tierUpper === 'ADMIN' || tierUpper === 'MASTER_ISP') {
+    return true;
+  }
+
+  const uid = currentUser?.id ? String(currentUser.id) : null;
+  if (!uid) return false;
+
+  const recDealerId = record.dealer_id ? String(record.dealer_id) : null;
+  const recSubDealerId = record.sub_dealer_id ? String(record.sub_dealer_id) : null;
+  const recCreatedById = record.created_by_id ? String(record.created_by_id) : null;
+  const recParentDealerId = record.parent_dealer_id ? String(record.parent_dealer_id) : null;
+  const recResellerId = record.reseller_id ? String(record.reseller_id) : null;
+  const recId = record.id ? String(record.id) : null;
+
+  const recUsername = String(
+    record.subscriber_username || record.pppoeUsername || record.username || ''
+  )
+    .trim()
+    .toLowerCase();
+
+  if (tier === 'DEALER') {
+    if (recDealerId === uid) return true;
+    if (recCreatedById === uid) return true;
+    if (recParentDealerId === uid) return true;
+    if (recId && recId === uid) return true;
+    if (recResellerId && (recResellerId === uid || options?.childSubDealerIds?.has(recResellerId))) {
+      return true;
+    }
+    if (recSubDealerId && options?.childSubDealerIds?.has(recSubDealerId)) {
+      return true;
+    }
+    if (recDealerId && options?.childSubDealerIds?.has(recDealerId)) {
+      return true;
+    }
+    // Fallback for records without FK columns (e.g. MikroTik active sessions, legacy invoices)
+    if (recUsername && options?.allowedSubscriberUsernames?.has(recUsername)) {
+      return true;
+    }
+    return false;
+  }
+
+  // Strict SUB_DEALER isolation: ONLY own records (`sub_dealer_id === self` or `created_by_id === self`,
+  // plus backwards-compatible `dealer_id === self` rows created before `sub_dealer_id` column existed)
+  if (tier === 'SUB_DEALER') {
+    if (recSubDealerId === uid) return true;
+    if (recCreatedById === uid) return true;
+    if (recDealerId === uid && !recSubDealerId) return true;
+    if (recResellerId === uid) return true;
+    if (recId && recId === uid) return true;
+    if (recUsername && options?.allowedSubscriberUsernames?.has(recUsername)) {
+      return true;
+    }
+    return false;
+  }
+
+  return false;
+}
+
 /**
  * Computes strict multi-tenant data isolation scope:
  * - ADMIN / internal staff: unrestricted (`isIsolated: false`)
@@ -382,6 +550,7 @@ export function resolveResellerScope(
   }
 
   const allowedResellerIds = new Set<string>([currentUser.id]);
+  const childSubDealerIds = new Set<string>();
 
   if (tier === 'DEALER') {
     for (const u of allPortalUsers) {
@@ -391,6 +560,7 @@ export function resolveResellerScope(
         getResellerTier(u) === 'SUB_DEALER'
       ) {
         allowedResellerIds.add(u.id);
+        childSubDealerIds.add(u.id);
       }
     }
   }
@@ -399,8 +569,7 @@ export function resolveResellerScope(
   for (const u of allPortalUsers) {
     const roleUpper = String(u.role || '').toUpperCase();
     if (roleUpper !== 'CLIENT') continue;
-    const ownerDealerId = u.dealer_id || u.parent_dealer_id || null;
-    if (ownerDealerId && allowedResellerIds.has(ownerDealerId)) {
+    if (isVisibleToCurrentUser(u, currentUser, { childSubDealerIds })) {
       const uname = String(u.username || '').trim().toLowerCase();
       if (uname) allowedSubscriberUsernames.add(uname);
     }
@@ -418,55 +587,171 @@ export function resolveResellerScope(
 /**
  * Resolves the set of reseller IDs matching an Admin's selected dealer filter value:
  * - 'ALL': null (no filtering)
- * - 'DIRECT_ISP': direct ISP subscribers with no dealer_id
+ * - 'DIRECT_ISP': direct ISP subscribers with no dealer_id / sub_dealer_id
  * - '<dealer_uuid>': that dealer + if it's a DEALER, optionally its nested Sub-Dealers (controlled via includeChildren)
  */
 export function resolveAdminDealerFilterIds(
   selectedFilter: string,
   allResellers: Array<Partial<SupabasePortalUser>>,
   includeSubDealers = true
-): { mode: 'ALL' | 'DIRECT_ISP' | 'RESELLER'; resellerIds: Set<string> } {
+): { mode: 'ALL' | 'DIRECT_ISP' | 'RESELLER'; resellerIds: Set<string>; selectedTier: ResellerTier | null } {
   if (!selectedFilter || selectedFilter === 'ALL') {
-    return { mode: 'ALL', resellerIds: new Set() };
+    return { mode: 'ALL', resellerIds: new Set(), selectedTier: null };
   }
   if (selectedFilter === 'DIRECT_ISP') {
-    return { mode: 'DIRECT_ISP', resellerIds: new Set() };
+    return { mode: 'DIRECT_ISP', resellerIds: new Set(), selectedTier: null };
   }
   const ids = new Set<string>([selectedFilter]);
-  if (includeSubDealers) {
-    const target = allResellers.find((r) => r.id === selectedFilter);
-    if (target && getResellerTier(target) === 'DEALER') {
-      for (const r of allResellers) {
-        if (r.id && r.parent_dealer_id === selectedFilter) {
-          ids.add(r.id);
-        }
+  const target = allResellers.find((r) => r.id === selectedFilter);
+  const selectedTier = target ? getResellerTier(target) : null;
+  if (includeSubDealers && selectedTier === 'DEALER') {
+    for (const r of allResellers) {
+      if (r.id && r.parent_dealer_id === selectedFilter) {
+        ids.add(r.id);
       }
     }
   }
-  return { mode: 'RESELLER', resellerIds: ids };
+  return { mode: 'RESELLER', resellerIds: ids, selectedTier };
+}
+
+export function doesRecordMatchAdminOwnerFilter(
+  record: VisibilityRecordLike,
+  filterState: { mode: 'ALL' | 'DIRECT_ISP' | 'RESELLER'; resellerIds: Set<string>; selectedTier?: ResellerTier | null },
+  subscriberOwnerByUsername?: Map<string, { dealer_id?: string | null; sub_dealer_id?: string | null }>
+): boolean {
+  if (filterState.mode === 'ALL') return true;
+  const uname = String(record.subscriber_username || record.pppoeUsername || record.username || '')
+    .trim()
+    .toLowerCase();
+  const mappedSub = uname ? subscriberOwnerByUsername?.get(uname) : undefined;
+  const dealerId = record.dealer_id || mappedSub?.dealer_id || null;
+  const subDealerId = record.sub_dealer_id || mappedSub?.sub_dealer_id || null;
+
+  if (filterState.mode === 'DIRECT_ISP') {
+    return !dealerId && !subDealerId && !record.parent_dealer_id && getResellerTier(record as any) === null;
+  }
+
+  // If Admin explicitly selected a specific SUB_DEALER, match ONLY that Sub-Dealer's records
+  if (filterState.selectedTier === 'SUB_DEALER') {
+    const selectedId = Array.from(filterState.resellerIds)[0];
+    return Boolean(
+      (record.id && record.id === selectedId) ||
+        subDealerId === selectedId ||
+        (dealerId === selectedId && !subDealerId)
+    );
+  }
+
+  return Boolean(
+    (record.id && filterState.resellerIds.has(record.id)) ||
+      (dealerId && filterState.resellerIds.has(dealerId)) ||
+      (subDealerId && filterState.resellerIds.has(subDealerId)) ||
+      (record.parent_dealer_id && filterState.resellerIds.has(record.parent_dealer_id))
+  );
 }
 
 export function doesSubscriberMatchScope(
-  subscriber: { username?: string | null; dealer_id?: string | null; parent_dealer_id?: string | null },
+  subscriber: VisibilityRecordLike,
   scope: ResellerScope
 ): boolean {
-  if (!scope.isIsolated) return true;
-  const ownerId = subscriber.dealer_id || subscriber.parent_dealer_id || null;
-  if (ownerId && scope.allowedResellerIds?.has(ownerId)) return true;
-  const uname = String(subscriber.username || '').trim().toLowerCase();
-  if (uname && scope.allowedSubscriberUsernames?.has(uname)) return true;
-  return false;
+  if (!scope.isIsolated || !scope.resellerId || !scope.tier) return true;
+  return isVisibleToCurrentUser(
+    subscriber,
+    { id: scope.resellerId, tier_level: scope.tier, role: scope.tier },
+    {
+      childSubDealerIds: scope.allowedResellerIds,
+      allowedSubscriberUsernames: scope.allowedSubscriberUsernames,
+    }
+  );
 }
 
 export function doesInvoiceMatchScope(
-  invoice: { subscriber_username?: string | null; dealer_id?: string | null },
+  invoice: VisibilityRecordLike,
   scope: ResellerScope
 ): boolean {
-  if (!scope.isIsolated) return true;
-  if (invoice.dealer_id && scope.allowedResellerIds?.has(invoice.dealer_id)) return true;
-  const uname = String(invoice.subscriber_username || '').trim().toLowerCase();
-  if (uname && scope.allowedSubscriberUsernames?.has(uname)) return true;
-  return false;
+  if (!scope.isIsolated || !scope.resellerId || !scope.tier) return true;
+  return isVisibleToCurrentUser(
+    invoice,
+    { id: scope.resellerId, tier_level: scope.tier, role: scope.tier },
+    {
+      childSubDealerIds: scope.allowedResellerIds,
+      allowedSubscriberUsernames: scope.allowedSubscriberUsernames,
+    }
+  );
+}
+
+/**
+ * Stamps `dealer_id`, `sub_dealer_id`, and `created_by_id` onto both `portal_users`
+ * and `invoices` for a subscriber, gracefully stripping columns if an optional column
+ * is absent in the target Supabase table.
+ */
+export async function stampOwnershipOnPortalUserAndInvoices(
+  subscriberUsername: string,
+  stamp: OwnershipStamp,
+  options?: { updateInvoices?: boolean; userId?: string | null }
+): Promise<{ ok: boolean; error?: string }> {
+  const cleanUsername = String(subscriberUsername || '').trim().toLowerCase();
+  if (!cleanUsername && !options?.userId) return { ok: false, error: 'Missing subscriber identifier.' };
+
+  // 1. Update portal_users with adaptive column stripping
+  const userPatch: Record<string, any> = {
+    dealer_id: stamp.dealer_id,
+    sub_dealer_id: stamp.sub_dealer_id,
+    created_by_id: stamp.created_by_id,
+  };
+  let lastUserError: any = null;
+  for (let i = 0; i < 6; i++) {
+    if (Object.keys(userPatch).length === 0) break;
+    const query = options?.userId
+      ? supabase.from('portal_users').update(userPatch).eq('id', options.userId)
+      : supabase.from('portal_users').update(userPatch).ilike('username', cleanUsername);
+    const { error } = await query;
+    if (!error) {
+      lastUserError = null;
+      break;
+    }
+    lastUserError = error;
+    const missing = extractMissingColumnName(error);
+    if (missing && missing in userPatch) {
+      delete userPatch[missing];
+      // If sub_dealer_id column doesn't exist yet and this is a sub-dealer record, store sub_dealer_id in dealer_id so isolation still holds!
+      if (missing === 'sub_dealer_id' && stamp.sub_dealer_id && 'dealer_id' in userPatch) {
+        userPatch.dealer_id = stamp.sub_dealer_id;
+      }
+      continue;
+    }
+    break;
+  }
+
+  // 2. Optionally update invoices for this subscriber
+  if (options?.updateInvoices !== false && cleanUsername) {
+    const invPatch: Record<string, any> = {
+      dealer_id: stamp.dealer_id,
+      sub_dealer_id: stamp.sub_dealer_id,
+      created_by_id: stamp.created_by_id,
+    };
+    for (let i = 0; i < 6; i++) {
+      if (Object.keys(invPatch).length === 0) break;
+      const { error } = await supabase
+        .from('invoices')
+        .update(invPatch)
+        .ilike('subscriber_username', cleanUsername);
+      if (!error) break;
+      const missing = extractMissingColumnName(error);
+      if (missing && missing in invPatch) {
+        delete invPatch[missing];
+        if (missing === 'sub_dealer_id' && stamp.sub_dealer_id && 'dealer_id' in invPatch) {
+          invPatch.dealer_id = stamp.sub_dealer_id;
+        }
+        continue;
+      }
+      break;
+    }
+  }
+
+  if (lastUserError) {
+    return { ok: false, error: formatSupabaseError(lastUserError) };
+  }
+  return { ok: true };
 }
 
 /**

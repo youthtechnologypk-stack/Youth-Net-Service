@@ -14,7 +14,10 @@ import {
   supabase,
   SupabaseInvoice,
   SupabasePaymentTransaction,
+  SupabasePortalUser,
 } from '../services/supabaseClient';
+import { getStoredUser } from '../lib/auth';
+import { doesInvoiceMatchScope, resolveResellerScope } from '../lib/resellerEngine';
 import { useCurrency } from '../context/CurrencyContext';
 import {
   DateFilterState,
@@ -84,12 +87,34 @@ export const ReceivingVsDuesChart: React.FC<ReceivingVsDuesChartProps> = ({
   const loadSupabaseFinancials = useCallback(async () => {
     if (!autoFetch) return;
     try {
-      const [invRes, txRes] = await Promise.all([
+      const loggedInUser = getStoredUser();
+      const [invRes, txRes, usersRes] = await Promise.all([
         supabase.from('invoices').select('*').order('created_at', { ascending: false }),
         supabase.from('payment_transactions').select('*').order('payment_date', { ascending: false }),
+        supabase.from('portal_users').select('*'),
       ]);
-      if (Array.isArray(invRes.data)) setFetchedInvoices(invRes.data as SupabaseInvoice[]);
-      if (Array.isArray(txRes.data)) setFetchedPayments(txRes.data as SupabasePaymentTransaction[]);
+      const allUsers = (usersRes.data || []) as SupabasePortalUser[];
+      const scope = resolveResellerScope(loggedInUser, allUsers);
+
+      const rawInvs = Array.isArray(invRes.data) ? (invRes.data as SupabaseInvoice[]) : [];
+      const rawTxs = Array.isArray(txRes.data) ? (txRes.data as SupabasePaymentTransaction[]) : [];
+
+      if (scope.isIsolated) {
+        const scopedInvs = rawInvs.filter((inv) => doesInvoiceMatchScope(inv, scope));
+        const allowedUsernames = new Set<string>([
+          ...(scope.allowedSubscriberUsernames || []),
+          ...scopedInvs.map((i) => String(i.subscriber_username || '').trim().toLowerCase()),
+        ]);
+        setFetchedInvoices(scopedInvs);
+        setFetchedPayments(
+          rawTxs.filter((tx) =>
+            allowedUsernames.has(String(tx.subscriber_username || '').trim().toLowerCase())
+          )
+        );
+      } else {
+        setFetchedInvoices(rawInvs);
+        setFetchedPayments(rawTxs);
+      }
     } catch (err) {
       console.warn('ReceivingVsDuesChart load notice:', err);
     } finally {

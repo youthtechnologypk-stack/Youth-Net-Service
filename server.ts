@@ -61,6 +61,14 @@ import {
 } from './src/server/whatsappBotEngine.ts';
 import { syncSessionsFromMikrotik } from './src/server/sessionGeneratorEngine.ts';
 import { runExpirySweep } from './src/server/expirySweepEngine.ts';
+import { createClient } from '@supabase/supabase-js';
+import { supabase as defaultSupabaseClient } from './src/services/supabaseClient.ts';
+import {
+  getResellerTier,
+  isVisibleToCurrentUser,
+  resolveResellerScope,
+  ResellerScope,
+} from './src/lib/resellerEngine.ts';
 
 dotenv.config();
 
@@ -77,6 +85,121 @@ initPostgres()
   .catch((err) => {
     console.warn('[DB] Postgres init check completed:', err.message);
   });
+
+const serverSupabase =
+  process.env.SUPABASE_URL && process.env.SUPABASE_SERVICE_ROLE_KEY
+    ? createClient(process.env.SUPABASE_URL, process.env.SUPABASE_SERVICE_ROLE_KEY, {
+        auth: { persistSession: false, autoRefreshToken: false },
+      })
+    : defaultSupabaseClient;
+
+/**
+ * Authoritatively resolves the caller's multi-tier Dealer / Sub-Dealer isolation scope
+ * by verifying JWT Bearer tokens (when present) and querying Supabase `portal_users`.
+ * Fails closed whenever caller context indicates a reseller session.
+ */
+async function resolveServerResellerScope(req: Request): Promise<{
+  scope: ResellerScope;
+  caller: Record<string, any> | null;
+}> {
+  const unrestricted: ResellerScope = {
+    isIsolated: false,
+    tier: null,
+    resellerId: null,
+    allowedResellerIds: null,
+    allowedSubscriberUsernames: null,
+  };
+
+  let callerId = String(req.headers['x-portal-user-id'] || '').trim();
+  let callerUsername = String(req.headers['x-portal-username'] || '').trim().toLowerCase();
+  const claimedRole = String(req.headers['x-portal-role'] || '').trim().toUpperCase();
+  const claimedTier = String(req.headers['x-portal-tier'] || '').trim().toUpperCase();
+  const claimedParentId = String(req.headers['x-portal-parent-dealer-id'] || '').trim() || null;
+
+  // Verify Bearer JWT token if provided (never blindly trust unverified role headers)
+  const rawAuth = String(req.headers['x-portal-auth-token'] || req.headers['authorization'] || '');
+  if (rawAuth.startsWith('Bearer ')) {
+    const token = rawAuth.slice(7).trim();
+    const verified = verifyJwtToken(token);
+    if (verified) {
+      if (verified.userId) callerId = String(verified.userId);
+      if (verified.username) callerUsername = String(verified.username).trim().toLowerCase();
+    }
+  }
+
+  const looksReseller =
+    claimedRole === 'DEALER' ||
+    claimedRole === 'SUB_DEALER' ||
+    claimedTier === 'DEALER' ||
+    claimedTier === 'SUB_DEALER';
+
+  if (!callerId && !callerUsername && !looksReseller) {
+    return { scope: unrestricted, caller: null };
+  }
+
+  try {
+    const { data: allRows, error } = await serverSupabase.from('portal_users').select('*');
+    if (error || !Array.isArray(allRows)) {
+      if (looksReseller) {
+        return {
+          caller: { id: callerId || null, role: claimedRole, tier_level: claimedTier || claimedRole, parent_dealer_id: claimedParentId },
+          scope: {
+            isIsolated: true,
+            tier: claimedTier === 'SUB_DEALER' || claimedRole === 'SUB_DEALER' ? 'SUB_DEALER' : 'DEALER',
+            resellerId: callerId || null,
+            allowedResellerIds: callerId ? new Set([callerId]) : new Set(),
+            allowedSubscriberUsernames: new Set(),
+          },
+        };
+      }
+      return { scope: unrestricted, caller: null };
+    }
+
+    const matchedCaller =
+      allRows.find((u: any) => callerId && String(u.id) === callerId) ||
+      allRows.find(
+        (u: any) => callerUsername && String(u.username || '').trim().toLowerCase() === callerUsername
+      ) ||
+      null;
+
+    if (matchedCaller) {
+      return {
+        caller: matchedCaller,
+        scope: resolveResellerScope(matchedCaller, allRows as any[]),
+      };
+    }
+
+    if (looksReseller) {
+      const syntheticCaller = {
+        id: callerId || null,
+        username: callerUsername || null,
+        role: claimedRole,
+        tier_level: claimedTier || claimedRole,
+        parent_dealer_id: claimedParentId,
+      };
+      return {
+        caller: syntheticCaller,
+        scope: resolveResellerScope(syntheticCaller, allRows as any[]),
+      };
+    }
+
+    return { scope: unrestricted, caller: null };
+  } catch {
+    if (looksReseller) {
+      return {
+        caller: { id: callerId || null, role: claimedRole, tier_level: claimedTier || claimedRole },
+        scope: {
+          isIsolated: true,
+          tier: claimedTier === 'SUB_DEALER' || claimedRole === 'SUB_DEALER' ? 'SUB_DEALER' : 'DEALER',
+          resellerId: callerId || null,
+          allowedResellerIds: callerId ? new Set([callerId]) : new Set(),
+          allowedSubscriberUsernames: new Set(),
+        },
+      };
+    }
+    return { scope: unrestricted, caller: null };
+  }
+}
 
 // ============================================================================
 // API ROUTES: /api/routers & /api/mikrotik
@@ -1155,10 +1278,35 @@ app.post('/api/auth/logout', async (_req: Request, res: Response) => {
  * GET /api/auth/users
  * Returns list of system users (Admin / Manager only)
  */
-app.get('/api/auth/users', async (_req: Request, res: Response) => {
+app.get('/api/auth/users', async (req: Request, res: Response) => {
   try {
+    const { scope, caller } = await resolveServerResellerScope(req);
     const users = await getAllUsersFromDb();
-    const safeUsers = users.map((u) => ({
+    const scopedUsers = scope.isIsolated
+      ? users.filter((u: any) => {
+          const uname = String(u.username || '').trim().toLowerCase();
+          if (scope.resellerId && String(u.id) === scope.resellerId) return true;
+          if (scope.allowedResellerIds?.has(String(u.id))) return true;
+          if (scope.allowedSubscriberUsernames?.has(uname)) return true;
+          return isVisibleToCurrentUser(
+            {
+              id: u.id,
+              username: u.username,
+              role: u.role,
+              dealer_id: u.dealer_id || null,
+              sub_dealer_id: u.sub_dealer_id || null,
+              created_by_id: u.created_by_id || null,
+            },
+            caller,
+            {
+              childSubDealerIds: scope.allowedResellerIds,
+              allowedSubscriberUsernames: scope.allowedSubscriberUsernames,
+            }
+          );
+        })
+      : users;
+
+    const safeUsers = scopedUsers.map((u) => ({
       id: u.id,
       username: u.username,
       fullName: u.full_name,
@@ -1763,10 +1911,29 @@ app.delete(['/api/packages/:id', '/api/mikrotik/profiles/:id'], async (req: Requ
  * GET /api/mikrotik/customers
  * Fetch all customers from PostgreSQL / database
  */
-app.get('/api/mikrotik/customers', async (_req: Request, res: Response) => {
+app.get('/api/mikrotik/customers', async (req: Request, res: Response) => {
   try {
+    const { scope, caller } = await resolveServerResellerScope(req);
     const customers = await getAllCustomersFromDb();
-    res.json({ success: true, customers });
+    const scopedCustomers = scope.isIsolated
+      ? customers.filter((c: any) =>
+          isVisibleToCurrentUser(
+            {
+              id: c.id,
+              pppoeUsername: c.pppoeUsername || c.username,
+              dealer_id: c.dealer_id || c.dealerId || null,
+              sub_dealer_id: c.sub_dealer_id || c.subDealerId || null,
+              created_by_id: c.created_by_id || c.createdById || null,
+            },
+            caller,
+            {
+              childSubDealerIds: scope.allowedResellerIds,
+              allowedSubscriberUsernames: scope.allowedSubscriberUsernames,
+            }
+          )
+        )
+      : customers;
+    res.json({ success: true, customers: scopedCustomers });
   } catch (err: any) {
     console.error('Error fetching customers:', err);
     res.status(500).json({ success: false, error: err.message || 'Failed to fetch customers' });
@@ -2040,6 +2207,14 @@ app.get('/api/subscribers/:username/360', async (req: Request, res: Response) =>
     }
     const username = rawUsername.trim().toLowerCase();
 
+    const { scope } = await resolveServerResellerScope(req);
+    if (scope.isIsolated && !scope.allowedSubscriberUsernames?.has(username)) {
+      return res.status(403).json({
+        success: false,
+        error: 'Access denied: subscriber is outside your Dealer / Sub-Dealer scope.',
+      });
+    }
+
     // 1. Fetch customers from DB
     const dbCustomers = await getAllCustomersFromDb().catch(() => []);
     let customer: any = dbCustomers.find((c) => c.pppoeUsername.toLowerCase() === username);
@@ -2104,6 +2279,17 @@ app.post('/api/subscribers/:username/kick', async (req: Request, res: Response) 
     const { username } = req.params;
     const { routerId } = req.body;
 
+    const { scope } = await resolveServerResellerScope(req);
+    if (
+      scope.isIsolated &&
+      !scope.allowedSubscriberUsernames?.has(String(username || '').trim().toLowerCase())
+    ) {
+      return res.status(403).json({
+        success: false,
+        error: 'Access denied: cannot kick a subscriber outside your Dealer / Sub-Dealer scope.',
+      });
+    }
+
     let creds = null;
     if (routerId) {
       creds = await getRouterCredentials(routerId);
@@ -2134,6 +2320,17 @@ app.post('/api/subscribers/:username/isolate', async (req: Request, res: Respons
   try {
     const { username } = req.params;
     const { status, routerId } = req.body; // status: 'walled_garden' | 'active'
+
+    const { scope } = await resolveServerResellerScope(req);
+    if (
+      scope.isIsolated &&
+      !scope.allowedSubscriberUsernames?.has(String(username || '').trim().toLowerCase())
+    ) {
+      return res.status(403).json({
+        success: false,
+        error: 'Access denied: cannot isolate a subscriber outside your Dealer / Sub-Dealer scope.',
+      });
+    }
 
     const targetStatus = status || 'walled_garden';
     await updateCustomerStatusInDb(username, targetStatus);
@@ -2176,6 +2373,17 @@ app.post('/api/subscribers/:username/reset-mac', async (req: Request, res: Respo
   try {
     const { username } = req.params;
     const { routerId } = req.body;
+
+    const { scope } = await resolveServerResellerScope(req);
+    if (
+      scope.isIsolated &&
+      !scope.allowedSubscriberUsernames?.has(String(username || '').trim().toLowerCase())
+    ) {
+      return res.status(403).json({
+        success: false,
+        error: 'Access denied: cannot reset MAC for a subscriber outside your Dealer / Sub-Dealer scope.',
+      });
+    }
 
     await resetCustomerMacInDb(username);
 

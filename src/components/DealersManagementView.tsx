@@ -104,6 +104,7 @@ export const DealersManagementView: React.FC<DealersManagementViewProps> = ({
   const isAdmin = currentRole === 'ADMIN';
   const currentTier = getResellerTier(currentUser);
   const isDealerSession = !isAdmin && currentTier === 'DEALER';
+  const isSubDealerSession = !isAdmin && currentTier === 'SUB_DEALER';
 
   const [activeSubTab, setActiveSubTab] = useState<'hierarchy' | 'ledger'>('hierarchy');
   const [dealers, setDealers] = useState<SupabasePortalUser[]>([]);
@@ -287,8 +288,11 @@ export const DealersManagementView: React.FC<DealersManagementViewProps> = ({
     if (isDealerSession && currentUser?.id) {
       return subDealers.filter((s) => s.parent_dealer_id === currentUser.id);
     }
+    if (isSubDealerSession && currentUser?.id) {
+      return subDealers.filter((s) => s.id === currentUser.id);
+    }
     return [];
-  }, [isAdmin, isDealerSession, currentUser?.id, subDealers]);
+  }, [isAdmin, isDealerSession, isSubDealerSession, currentUser?.id, subDealers]);
 
   const visibleResellerIdSet = useMemo(() => {
     const set = new Set<string>();
@@ -315,11 +319,11 @@ export const DealersManagementView: React.FC<DealersManagementViewProps> = ({
     return set;
   }, [activeSessions]);
 
-  // Subscriber counts per reseller
+  // Subscriber counts per reseller (attribute to leaf Sub-Dealer first, else Dealer, preventing double counting)
   const subscriberStatsByReseller = useMemo(() => {
     const map = new Map<string, { total: number; active: number; online: number }>();
     for (const sub of subscribers) {
-      const ownerId = sub.dealer_id || sub.parent_dealer_id || null;
+      const ownerId = sub.sub_dealer_id || sub.dealer_id || sub.parent_dealer_id || null;
       if (!ownerId) continue;
       const cur = map.get(ownerId) || { total: 0, active: 0, online: 0 };
       cur.total += 1;

@@ -22,6 +22,7 @@ import {
   RouterAuthInfo,
   resolveRestHostAndPort,
 } from './apiClient';
+import { getStoredToken, getStoredUser } from '../lib/auth';
 
 export interface FetchRouterLiveResult {
   success: boolean;
@@ -97,6 +98,18 @@ export async function safeMikrotikFetch(
     } catch {}
   }
 
+  const activePortalUser = getStoredUser();
+  const portalToken = getStoredToken();
+  const portalScopeHeaders: Record<string, string> = {};
+  if (activePortalUser?.id) portalScopeHeaders['x-portal-user-id'] = String(activePortalUser.id);
+  if (activePortalUser?.username) portalScopeHeaders['x-portal-username'] = String(activePortalUser.username);
+  if (activePortalUser?.role) portalScopeHeaders['x-portal-role'] = String(activePortalUser.role);
+  if (activePortalUser?.tier_level) portalScopeHeaders['x-portal-tier'] = String(activePortalUser.tier_level);
+  if (activePortalUser?.parent_dealer_id) {
+    portalScopeHeaders['x-portal-parent-dealer-id'] = String(activePortalUser.parent_dealer_id);
+  }
+  if (portalToken) portalScopeHeaders['x-portal-auth-token'] = `Bearer ${portalToken}`;
+
   const incomingHeaders = (init.headers as Record<string, string>) || {};
   const headers: Record<string, string> = {
     Authorization: auth.authHeader,
@@ -110,6 +123,7 @@ export async function safeMikrotikFetch(
     'x-router-port': String(resolved.port),
     'x-router-ssl': resolved.useSsl ? 'true' : 'false',
     'x-router-id': activeRouter?.id || '',
+    ...portalScopeHeaders,
     ...incomingHeaders,
   };
 

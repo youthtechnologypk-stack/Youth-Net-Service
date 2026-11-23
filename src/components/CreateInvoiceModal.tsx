@@ -31,6 +31,13 @@ import {
   resolvePreselectedInvoiceProfile,
   resolvePkrTariffForProfile,
 } from '../lib/mikrotikProfileSync';
+import { getStoredUser } from '../lib/auth';
+import {
+  buildOwnershipStamp,
+  isResellerUser,
+  isVisibleToCurrentUser,
+  resolveResellerScope,
+} from '../lib/resellerEngine';
 
 export interface PPPoESecretOption {
   name: string;
@@ -130,17 +137,55 @@ export const CreateInvoiceModal: React.FC<CreateInvoiceModalProps> = ({
       let fetchedSecrets: Array<Record<string, any>> = [];
       let fetchedClients: Array<Record<string, any>> = [];
 
+      const loggedInUser = getStoredUser();
+
+      // 1.0 Fetch portal_users FIRST so we can enforce strict multi-tier reseller isolation
+      let allPortalRows: SupabasePortalUser[] = [];
+      try {
+        const { data: allUsersData } = await supabase
+          .from('portal_users')
+          .select('*');
+        if (Array.isArray(allUsersData)) {
+          allPortalRows = allUsersData as SupabasePortalUser[];
+        }
+      } catch (err) {
+        console.warn('Could not query portal_users for clients:', err);
+      }
+
+      const resellerScope = resolveResellerScope(loggedInUser, allPortalRows);
+      const isIsolatedReseller = resellerScope.isIsolated;
+      const isAllowedUsername = (uname: string): boolean => {
+        if (!isIsolatedReseller) return true;
+        const clean = uname.trim().toLowerCase();
+        return Boolean(clean && resellerScope.allowedSubscriberUsernames?.has(clean));
+      };
+
+      const rawClients = allPortalRows.filter(
+        (u) => String(u.role || '').toUpperCase() === 'CLIENT'
+      );
+      fetchedClients = isIsolatedReseller
+        ? rawClients.filter((c) =>
+            isVisibleToCurrentUser(c, loggedInUser, {
+              childSubDealerIds: resellerScope.allowedResellerIds,
+              allowedSubscriberUsernames: resellerScope.allowedSubscriberUsernames,
+            })
+          )
+        : rawClients;
+      setPortalClients(fetchedClients as Array<Record<string, any>>);
+
       // 1.1 Fetch live MikroTik /ppp/profile and /ppp/secret via REST proxy
       try {
         const mk = await fetchLiveMikrotikProfilesAndSecrets(activeRouter);
         fetchedProfiles = mk.profiles;
-        fetchedSecrets = mk.secrets;
+        fetchedSecrets = isIsolatedReseller
+          ? mk.secrets.filter((sec: any) => isAllowedUsername(String(sec.name || sec.user || '')))
+          : mk.secrets;
         if (mk.profiles.length > 0) setLiveMikrotikProfiles(mk.profiles);
-        if (mk.secrets.length > 0) setLiveMikrotikSecrets(mk.secrets);
+        if (fetchedSecrets.length > 0) setLiveMikrotikSecrets(fetchedSecrets);
 
-        mk.secrets.forEach((sec: any) => {
+        fetchedSecrets.forEach((sec: any) => {
           const name = String(sec.name || sec.user || '').trim();
-          if (name) {
+          if (name && isAllowedUsername(name)) {
             const profile = sec.profile || 'Default';
             const remoteAddress = sec['remote-address'] || sec.remoteAddress || sec.address || 'Dynamic';
             optionsMap.set(name.toLowerCase(), {
@@ -155,7 +200,7 @@ export const CreateInvoiceModal: React.FC<CreateInvoiceModalProps> = ({
         console.warn('Could not query MikroTik profiles/secrets:', err);
       }
 
-      // 1.2 Fetch MikroTik active sessions from REST proxy
+      // 1.2 Fetch MikroTik active sessions from REST proxy (filtered strictly by reseller scope)
       try {
         const actRes = await safeMikrotikFetch('/api/mikrotik/ppp/active', {}, activeRouter);
         if (actRes.ok) {
@@ -163,7 +208,7 @@ export const CreateInvoiceModal: React.FC<CreateInvoiceModalProps> = ({
           if (Array.isArray(activeData)) {
             activeData.forEach((act: any) => {
               const name = String(act.name || act.user || '').trim();
-              if (name && !optionsMap.has(name.toLowerCase())) {
+              if (name && isAllowedUsername(name) && !optionsMap.has(name.toLowerCase())) {
                 const profile = act.profile || act.service || 'Default';
                 const remoteAddress = act.address || act['caller-id'] || 'Dynamic IP';
                 optionsMap.set(name.toLowerCase(), {
@@ -180,43 +225,32 @@ export const CreateInvoiceModal: React.FC<CreateInvoiceModalProps> = ({
         console.warn('Could not query /api/mikrotik/ppp/active:', err);
       }
 
-      // 1.3 Fetch subscribers from Supabase portal_users (role === 'CLIENT')
-      try {
-        const { data: dbClients } = await supabase
-          .from('portal_users')
-          .select(
-            'id, username, full_name, package_speed, monthly_fee, original_package_profile, package_name, package_profile_name, installation_date, created_at, billing_anchor_day, next_billing_date'
-          )
-          .eq('role', 'CLIENT');
-
-        if (dbClients && Array.isArray(dbClients)) {
-          fetchedClients = dbClients as Array<Record<string, any>>;
-          setPortalClients(fetchedClients);
-          dbClients.forEach((client: any) => {
-            const name = String(client.username || '').trim();
-            if (name && !optionsMap.has(name.toLowerCase())) {
-              const profile =
-                client.original_package_profile ||
-                client.package_name ||
-                client.package_profile_name ||
-                client.package_speed ||
-                'Active';
-              const remoteAddress = 'Supabase Client';
-              optionsMap.set(name.toLowerCase(), {
-                name,
-                profile,
-                remoteAddress,
-                displayName: `${name} (${profile} - ${remoteAddress})`,
-              });
-            }
+      // 1.3 Add scoped Supabase portal_users clients into optionsMap
+      fetchedClients.forEach((client: any) => {
+        const name = String(client.username || '').trim();
+        if (name && !optionsMap.has(name.toLowerCase())) {
+          const profile =
+            client.original_package_profile ||
+            client.package_name ||
+            client.package_profile_name ||
+            client.package_speed ||
+            'Active';
+          const remoteAddress = 'Supabase Client';
+          optionsMap.set(name.toLowerCase(), {
+            name,
+            profile,
+            remoteAddress,
+            displayName: `${name} (${profile} - ${remoteAddress})`,
           });
         }
-      } catch (err) {
-        console.warn('Could not query portal_users for clients:', err);
-      }
+      });
 
-      // 1.4 If lockedSubscriber provided, guarantee it exists in list
-      if (lockedSubscriber && !optionsMap.has(lockedSubscriber.toLowerCase())) {
+      // 1.4 If lockedSubscriber provided (and allowed in scope), guarantee it exists in list
+      if (
+        lockedSubscriber &&
+        isAllowedUsername(lockedSubscriber) &&
+        !optionsMap.has(lockedSubscriber.toLowerCase())
+      ) {
         optionsMap.set(lockedSubscriber.toLowerCase(), {
           name: lockedSubscriber,
           profile: 'Active Subscriber',
@@ -437,11 +471,22 @@ export const CreateInvoiceModal: React.FC<CreateInvoiceModalProps> = ({
         new Date().getMonth() + 1
       ).padStart(2, '0')}-${Math.floor(1000 + Math.random() * 9000)}`;
 
-      // 2. Identify assigned agent & selected package profile
+      // 2. Identify assigned agent, selected package profile & ownership stamp
       const selectedAgent = portalAgents.find((a) => a.id === selectedAgentId);
       const cleanProfile = (selectedPackageProfile || '').trim();
+      const loggedInUser = getStoredUser();
+      const matchedClient = portalClients.find(
+        (c) => String(c.username || '').trim().toLowerCase() === subUsername
+      );
+      const ownershipStamp = isResellerUser(loggedInUser)
+        ? buildOwnershipStamp(loggedInUser)
+        : {
+            dealer_id: matchedClient?.dealer_id || null,
+            sub_dealer_id: matchedClient?.sub_dealer_id || null,
+            created_by_id: loggedInUser?.id || null,
+          };
 
-      // 3. Exact database schema payload - calendar-month anniversary cycle
+      // 3. Exact database schema payload - calendar-month anniversary cycle + ownership stamp
       const invoicePayload: Record<string, any> = {
         invoice_no: generatedInvoiceNo,
         subscriber_username: subUsername,
@@ -452,10 +497,13 @@ export const CreateInvoiceModal: React.FC<CreateInvoiceModalProps> = ({
         status: 'DUE',
         due_date: dueDate, // YYYY-MM-DD
         cycle_day: anchorDay,
+        ...(ownershipStamp.dealer_id ? { dealer_id: ownershipStamp.dealer_id } : {}),
+        ...(ownershipStamp.sub_dealer_id ? { sub_dealer_id: ownershipStamp.sub_dealer_id } : {}),
+        ...(ownershipStamp.created_by_id ? { created_by_id: ownershipStamp.created_by_id } : {}),
         ...(cleanProfile ? { package_profile: cleanProfile, package_name: cleanProfile } : {}),
       };
 
-      // 4. Supabase Insert (safely retries without package_profile/package_name if migration isn't applied yet)
+      // 4. Supabase Insert (safely strips optional columns if migration isn't applied yet)
       const { data, error } = await safeInsertInvoiceInSupabase(invoicePayload);
 
       if (error || !data) {

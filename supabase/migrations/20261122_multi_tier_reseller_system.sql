@@ -7,6 +7,8 @@ ALTER TABLE public.portal_users
   ADD COLUMN IF NOT EXISTS tier_level TEXT DEFAULT NULL,
   ADD COLUMN IF NOT EXISTS parent_dealer_id UUID REFERENCES public.portal_users(id) ON DELETE SET NULL,
   ADD COLUMN IF NOT EXISTS dealer_id UUID REFERENCES public.portal_users(id) ON DELETE SET NULL,
+  ADD COLUMN IF NOT EXISTS sub_dealer_id UUID REFERENCES public.portal_users(id) ON DELETE SET NULL,
+  ADD COLUMN IF NOT EXISTS created_by_id UUID REFERENCES public.portal_users(id) ON DELETE SET NULL,
   ADD COLUMN IF NOT EXISTS wallet_balance NUMERIC(12, 2) NOT NULL DEFAULT 0,
   ADD COLUMN IF NOT EXISTS credit_limit NUMERIC(12, 2) NOT NULL DEFAULT 0,
   ADD COLUMN IF NOT EXISTS bandwidth_pool_cap_mbps INTEGER NOT NULL DEFAULT 0,
@@ -36,7 +38,9 @@ ALTER TABLE public.portal_users
 
 -- Optional dealer_id ownership index on invoices for fast dealer-scoped billing queries
 ALTER TABLE public.invoices
-  ADD COLUMN IF NOT EXISTS dealer_id UUID REFERENCES public.portal_users(id) ON DELETE SET NULL;
+  ADD COLUMN IF NOT EXISTS dealer_id UUID REFERENCES public.portal_users(id) ON DELETE SET NULL,
+  ADD COLUMN IF NOT EXISTS sub_dealer_id UUID REFERENCES public.portal_users(id) ON DELETE SET NULL,
+  ADD COLUMN IF NOT EXISTS created_by_id UUID REFERENCES public.portal_users(id) ON DELETE SET NULL;
 
 CREATE INDEX IF NOT EXISTS idx_portal_users_tier_level ON public.portal_users (tier_level);
 CREATE INDEX IF NOT EXISTS idx_portal_users_parent_dealer_id ON public.portal_users (parent_dealer_id);

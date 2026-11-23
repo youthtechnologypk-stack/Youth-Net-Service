@@ -71,6 +71,7 @@ import {
   resolveAreaFromUsername,
   NetworkAreaNode,
   PARENT_FLEET_ROUTER,
+  safeInsertInvoiceInSupabase,
 } from '../lib/billingAndNetwork';
 import { buildWhatsAppUrl } from '../lib/whatsappBilling';
 import {
@@ -89,9 +90,12 @@ import {
   resolveStaffPermissions,
 } from '../lib/staffPermissions';
 import {
+  buildOwnershipStamp,
   doesSubscriberMatchScope,
+  getResellerTier,
   isResellerUser,
   resolveResellerScope,
+  stampOwnershipOnPortalUserAndInvoices,
 } from '../lib/resellerEngine';
 
 export interface SubscriberProfileViewProps {
@@ -204,8 +208,14 @@ export const SubscriberProfileView: React.FC<SubscriberProfileViewProps> = ({
     dropWireMeters: 0,
     fiberBoxLocation: '',
     patchCordQty: 1,
+    assignedOwnerId: '',
   });
   const [isSavingEdit, setIsSavingEdit] = useState<boolean>(false);
+  const [allResellers, setAllResellers] = useState<SupabasePortalUser[]>([]);
+  const isAdminSession = useMemo(() => {
+    const u = getStoredUser();
+    return String(u?.role || '').toUpperCase() === 'ADMIN' && !isResellerUser(u);
+  }, []);
 
   const editAnchorDay = useMemo(
     () =>
@@ -299,16 +309,17 @@ export const SubscriberProfileView: React.FC<SubscriberProfileViewProps> = ({
         console.warn('Error fetching portal user:', userError);
       }
 
-      // Enforce multi-tier Dealer / Sub-Dealer strict data isolation
+      // Enforce multi-tier Dealer / Sub-Dealer strict data isolation & resolve ownership hierarchy
       const loggedInUser = getStoredUser();
+      const { data: allPortalRowsData } = await supabase
+        .from('portal_users')
+        .select('*');
+      const allPortalRows = (allPortalRowsData || []) as SupabasePortalUser[];
+      const resellerRows = allPortalRows.filter((r) => getResellerTier(r) !== null);
+      setAllResellers(resellerRows);
+
       if (isResellerUser(loggedInUser)) {
-        const { data: hierarchyRows } = await supabase
-          .from('portal_users')
-          .select('id, username, full_name, role, tier_level, parent_dealer_id, dealer_id');
-        const scope = resolveResellerScope(
-          loggedInUser,
-          (hierarchyRows || []) as SupabasePortalUser[]
-        );
+        const scope = resolveResellerScope(loggedInUser, allPortalRows);
         if (!userData || !doesSubscriberMatchScope(userData as SupabasePortalUser, scope)) {
           setIsAccessDenied(true);
           setUser(null);
@@ -320,21 +331,23 @@ export const SubscriberProfileView: React.FC<SubscriberProfileViewProps> = ({
         setIsAccessDenied(false);
       }
 
-      if (userData?.dealer_id) {
-        const { data: dealerRow } = await supabase
-          .from('portal_users')
-          .select('full_name, username, tier_level, role')
-          .eq('id', userData.dealer_id)
-          .maybeSingle();
-        if (dealerRow) {
-          const tierTag =
-            String(dealerRow.tier_level || dealerRow.role || '').toUpperCase() === 'SUB_DEALER'
-              ? 'Sub-Dealer'
-              : 'Dealer';
-          setOwningDealerLabel(`${dealerRow.full_name || dealerRow.username} (${tierTag})`);
-        } else {
-          setOwningDealerLabel(null);
-        }
+      const subDealerRow = userData?.sub_dealer_id
+        ? resellerRows.find((r) => r.id === userData.sub_dealer_id) || null
+        : null;
+      const dealerRow = userData?.dealer_id
+        ? resellerRows.find((r) => r.id === userData.dealer_id) || null
+        : null;
+
+      if (subDealerRow) {
+        const parentSuffix = dealerRow
+          ? ` • Dealer: ${dealerRow.full_name || dealerRow.username}`
+          : '';
+        setOwningDealerLabel(
+          `${subDealerRow.full_name || subDealerRow.username} (Sub-Dealer)${parentSuffix}`
+        );
+      } else if (dealerRow) {
+        const tierTag = getResellerTier(dealerRow) === 'SUB_DEALER' ? 'Sub-Dealer' : 'Dealer';
+        setOwningDealerLabel(`${dealerRow.full_name || dealerRow.username} (${tierTag})`);
       } else {
         setOwningDealerLabel(null);
       }
@@ -361,6 +374,7 @@ export const SubscriberProfileView: React.FC<SubscriberProfileViewProps> = ({
           dropWireMeters: userData.drop_wire_meters || 0,
           fiberBoxLocation: userData.fiber_box_location || '',
           patchCordQty: userData.patch_cord_qty || 1,
+          assignedOwnerId: userData.sub_dealer_id || userData.dealer_id || '',
         });
       } else {
         setUser(null);
@@ -937,6 +951,22 @@ export const SubscriberProfileView: React.FC<SubscriberProfileViewProps> = ({
 
       if (error) throw new Error(error.message);
 
+      // Admin-only owner reassignment: move subscriber + their invoices to Master Direct / Dealer / Sub-Dealer
+      if (isAdminSession) {
+        const currentOwnerId = user?.sub_dealer_id || user?.dealer_id || '';
+        if (editForm.assignedOwnerId !== currentOwnerId) {
+          const selectedOwner = editForm.assignedOwnerId
+            ? allResellers.find((r) => r.id === editForm.assignedOwnerId) || null
+            : null;
+          const loggedInUser = getStoredUser();
+          const newStamp = buildOwnershipStamp(loggedInUser, selectedOwner);
+          await stampOwnershipOnPortalUserAndInvoices(cleanUsername, newStamp, {
+            userId: user?.id,
+            updateInvoices: true,
+          });
+        }
+      }
+
       showToast(
         `Subscriber @${cleanUsername} updated! Billing Day: ${anchorDay} of every month • Next Due: ${nextBillingDate}.`
       );
@@ -984,7 +1014,15 @@ export const SubscriberProfileView: React.FC<SubscriberProfileViewProps> = ({
         } else {
           const anchorDay = user ? computeBillingAnchorDay(user) : new Date().getDate();
           const nextDue = addCalendarMonthDateString(new Date(), anchorDay);
-          await supabase.from('invoices').insert([{
+          const loggedInActor = getStoredUser();
+          const matStamp = isResellerUser(loggedInActor)
+            ? buildOwnershipStamp(loggedInActor)
+            : {
+                dealer_id: user?.dealer_id || null,
+                sub_dealer_id: user?.sub_dealer_id || null,
+                created_by_id: loggedInActor?.id || null,
+              };
+          await safeInsertInvoiceInSupabase({
             invoice_no: `INV-MAT-${Math.floor(1000 + Math.random() * 9000)}`,
             subscriber_username: cleanUsername,
             amount: totalCharge,
@@ -993,7 +1031,10 @@ export const SubscriberProfileView: React.FC<SubscriberProfileViewProps> = ({
             due_date: nextDue,
             cycle_day: anchorDay,
             assigned_agent_name: materialForm.installedByAgent || 'NOC Billing',
-          }]);
+            ...(matStamp.dealer_id ? { dealer_id: matStamp.dealer_id } : {}),
+            ...(matStamp.sub_dealer_id ? { sub_dealer_id: matStamp.sub_dealer_id } : {}),
+            ...(matStamp.created_by_id ? { created_by_id: matStamp.created_by_id } : {}),
+          });
         }
       }
 
@@ -2543,6 +2584,49 @@ export const SubscriberProfileView: React.FC<SubscriberProfileViewProps> = ({
                   </select>
                 </div>
               </div>
+
+              {isAdminSession && (
+                <div className="p-3 bg-indigo-950/30 rounded-xl border border-indigo-500/30 space-y-1.5">
+                  <label className="block font-semibold text-indigo-300">
+                    Assigned Dealer / Sub-Dealer (Subscriber Ownership)
+                  </label>
+                  <select
+                    value={editForm.assignedOwnerId}
+                    onChange={(e) =>
+                      setEditForm({ ...editForm, assignedOwnerId: e.target.value })
+                    }
+                    className="w-full px-3 py-2 bg-slate-950 border border-indigo-500/40 rounded-lg text-white focus:outline-none focus:border-cyan-500"
+                  >
+                    <option value="">Master Direct ISP (No Dealer / Direct Subscriber)</option>
+                    {allResellers
+                      .filter((r) => getResellerTier(r) === 'DEALER')
+                      .map((d) => (
+                        <React.Fragment key={d.id}>
+                          <option value={d.id}>
+                            [Dealer] {d.full_name || d.username} (@{d.username})
+                          </option>
+                          {allResellers
+                            .filter((s) => s.parent_dealer_id === d.id)
+                            .map((s) => (
+                              <option key={s.id} value={s.id}>
+                                &nbsp;&nbsp;↳ [Sub-Dealer] {s.full_name || s.username} (@{s.username})
+                              </option>
+                            ))}
+                        </React.Fragment>
+                      ))}
+                    {allResellers
+                      .filter((r) => getResellerTier(r) === 'SUB_DEALER' && !r.parent_dealer_id)
+                      .map((s) => (
+                        <option key={s.id} value={s.id}>
+                          [Sub-Dealer] {s.full_name || s.username} (@{s.username})
+                        </option>
+                      ))}
+                  </select>
+                  <p className="text-[10px] text-slate-400">
+                    Reassigning ownership updates both the subscriber profile and their invoices to enforce strict Dealer / Sub-Dealer isolation.
+                  </p>
+                </div>
+              )}
 
               <div className="p-3 bg-slate-900/90 rounded-xl border border-slate-800 space-y-1.5">
                 <label className="block font-medium text-slate-300">

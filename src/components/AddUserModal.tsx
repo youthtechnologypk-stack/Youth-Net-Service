@@ -25,7 +25,12 @@ import { useSubscribers } from '../hooks/useSubscribers';
 import { supabase, SupabasePortalUser } from '../services/supabaseClient';
 import { createAgentCommission } from '../services/erpInventoryService';
 import { getStoredUser } from '../lib/auth';
-import { checkAndDeductResellerWallet, isResellerUser } from '../lib/resellerEngine';
+import {
+  buildOwnershipStamp,
+  checkAndDeductResellerWallet,
+  isResellerUser,
+  stampOwnershipOnPortalUserAndInvoices,
+} from '../lib/resellerEngine';
 import { safeResponseJson } from '../lib/safeFetch';
 import { saveUnifiedPortalUser } from '../lib/userRepository';
 import { AreaNodeSelector } from './AreaNodeSelector';
@@ -391,16 +396,16 @@ export const AddUserModal: React.FC<AddUserModalProps> = ({ isOpen, onClose, onS
         sendWhatsApp: true,
       });
 
-      if (resellerOwnerId) {
+      const ownershipStamp = buildOwnershipStamp(loggedInUser);
+      if (
+        ownershipStamp.dealer_id ||
+        ownershipStamp.sub_dealer_id ||
+        ownershipStamp.created_by_id
+      ) {
         const cleanUname = username.trim().toLowerCase();
-        await supabase
-          .from('portal_users')
-          .update({ dealer_id: resellerOwnerId } as any)
-          .ilike('username', cleanUname);
-        await supabase
-          .from('invoices')
-          .update({ dealer_id: resellerOwnerId } as any)
-          .ilike('subscriber_username', cleanUname);
+        await stampOwnershipOnPortalUserAndInvoices(cleanUname, ownershipStamp, {
+          updateInvoices: true,
+        });
       }
 
       // Standardize: Save new user to USERS_STORAGE_KEY ('youthnet_portal_users')

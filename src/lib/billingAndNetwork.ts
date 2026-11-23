@@ -871,28 +871,58 @@ export async function safeUpdateInvoiceInSupabase(
 export async function safeInsertInvoiceInSupabase(
   payload: Record<string, any>
 ): Promise<{ data: any; error: any }> {
-  const { data, error } = await supabase
-    .from('invoices')
-    .insert([payload as any])
-    .select()
-    .maybeSingle();
+  const working: Record<string, any> = { ...payload };
+  const optionalCols = new Set([
+    'package_profile',
+    'package_name',
+    'shifted_to_next_month',
+    'sub_dealer_id',
+    'created_by_id',
+    'dealer_id',
+  ]);
 
-  if (!error) return { data, error: null };
+  let lastResult: { data: any; error: any } = { data: null, error: null };
 
-  if (isMissingTableOrColumnError(error)) {
-    const stripped = { ...payload };
-    delete stripped.package_profile;
-    delete stripped.package_name;
-    delete stripped.shifted_to_next_month;
-    const retry = await supabase
+  for (let attempt = 0; attempt < 8; attempt++) {
+    const { data, error } = await supabase
       .from('invoices')
-      .insert([stripped as any])
+      .insert([working as any])
       .select()
       .maybeSingle();
-    return { data: retry.data, error: retry.error };
+
+    if (!error) return { data, error: null };
+    lastResult = { data, error };
+
+    const msg = String(error.message || error.details || '');
+    const match =
+      msg.match(/Could not find the ['"]([a-zA-Z0-9_]+)['"] column/i) ||
+      msg.match(/column\s+["']?([a-zA-Z0-9_]+)["']?\s+of\s+relation/i) ||
+      msg.match(/column\s+[a-zA-Z0-9_]+\.["']?([a-zA-Z0-9_]+)["']?\s+does not exist/i);
+    const missingCol = match?.[1] || null;
+
+    if (missingCol && missingCol in working && optionalCols.has(missingCol)) {
+      if (missingCol === 'sub_dealer_id' && working.sub_dealer_id && 'dealer_id' in working) {
+        working.dealer_id = working.sub_dealer_id;
+      }
+      delete working[missingCol];
+      continue;
+    }
+
+    if (isMissingTableOrColumnError(error)) {
+      let strippedAny = false;
+      for (const col of optionalCols) {
+        if (col in working) {
+          delete working[col];
+          strippedAny = true;
+        }
+      }
+      if (strippedAny) continue;
+    }
+
+    break;
   }
 
-  return { data, error };
+  return lastResult;
 }
 
 /**
