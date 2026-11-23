@@ -35,12 +35,20 @@ import {
   resolvePreselectedInvoiceProfile,
   resolvePkrTariffForProfile,
 } from '../lib/mikrotikProfileSync';
+import { getStoredUser } from '../lib/auth';
+import { UserAccount } from '../types/auth';
+import {
+  buildOwnershipStamp,
+  isResellerUser,
+  resolveResellerScope,
+} from '../lib/resellerEngine';
 
 export interface GenerateInvoiceModalProps {
   isOpen: boolean;
   onClose: () => void;
   defaultSubscriberUsername?: string;
   onSuccess?: (invoice: Invoice) => void;
+  currentUser?: UserAccount | null;
 }
 
 export const GenerateInvoiceModal: React.FC<GenerateInvoiceModalProps> = ({
@@ -48,7 +56,10 @@ export const GenerateInvoiceModal: React.FC<GenerateInvoiceModalProps> = ({
   onClose,
   defaultSubscriberUsername,
   onSuccess,
+  currentUser,
 }) => {
+  const activeUser = currentUser || getStoredUser();
+  const isResellerSession = isResellerUser(activeUser);
   const {
     setInvoices,
     packages,
@@ -94,37 +105,48 @@ export const GenerateInvoiceModal: React.FC<GenerateInvoiceModalProps> = ({
   const [portalClients, setPortalClients] = useState<Array<Record<string, any>>>([]);
   const [isLoadingMkProfiles, setIsLoadingMkProfiles] = useState(false);
 
-  // Fetch live agents directly from Supabase portal_users (single source of truth)
-  useEffect(() => {
-    const fetchPortalAgents = async () => {
-      try {
-        const { data } = await supabase
-          .from('portal_users')
-          .select('id, full_name, username, area, role')
-          .eq('role', 'AGENT');
+  const [allPortalUsers, setAllPortalUsers] = useState<SupabasePortalUser[]>([]);
+  const [isScopeReady, setIsScopeReady] = useState<boolean>(!isResellerSession);
 
-        if (data) {
-          setPortalAgents(data as SupabasePortalUser[]);
+  // Fetch live agents & portal_users scope directly from Supabase portal_users
+  useEffect(() => {
+    const fetchPortalUsersAndAgents = async () => {
+      try {
+        const { data } = await supabase.from('portal_users').select('*');
+        if (Array.isArray(data)) {
+          const rows = data as SupabasePortalUser[];
+          setAllPortalUsers(rows);
+          setPortalAgents(
+            isResellerSession ? [] : rows.filter((u) => (u.role || '').toUpperCase() === 'AGENT')
+          );
         }
       } catch (err) {
-        console.warn('Failed to query portal_users for agents:', err);
+        console.warn('Failed to query portal_users:', err);
+      } finally {
+        setIsScopeReady(true);
       }
     };
 
-    fetchPortalAgents();
+    setIsScopeReady(!isResellerSession);
+    void fetchPortalUsersAndAgents();
 
     // Listen for realtime changes on portal_users
     const ch = supabase
       .channel('public:gen_inv_agents')
       .on('postgres_changes', { event: '*', schema: 'public', table: 'portal_users' }, () => {
-        fetchPortalAgents();
+        void fetchPortalUsersAndAgents();
       })
       .subscribe();
 
     return () => {
       supabase.removeChannel(ch);
     };
-  }, []);
+  }, [isResellerSession]);
+
+  const resellerScope = useMemo(
+    () => resolveResellerScope(activeUser, allPortalUsers),
+    [activeUser, allPortalUsers]
+  );
 
   // Toast notification
   const [toastMessage, setToastMessage] = useState<string | null>(null);
@@ -261,11 +283,21 @@ export const GenerateInvoiceModal: React.FC<GenerateInvoiceModalProps> = ({
     packages,
   ]);
 
-  // Filtered subscribers list
+  // Filtered subscribers list (strictly isolated for Dealers & Sub-Dealers)
   const filteredSubscribers = useMemo(() => {
-    if (!subscriberSearch.trim()) return (unifiedSubscribers || []).slice(0, 30);
+    if (isResellerSession && !isScopeReady) return [];
+    const allowedSet = resellerScope.allowedSubscriberUsernames;
+    const baseList = isResellerSession
+      ? allowedSet
+        ? (unifiedSubscribers || []).filter((s) =>
+            allowedSet.has((s?.username || '').trim().toLowerCase())
+          )
+        : []
+      : unifiedSubscribers || [];
+
+    if (!subscriberSearch.trim()) return baseList.slice(0, 30);
     const q = subscriberSearch.toLowerCase().trim();
-    return (unifiedSubscribers || [])
+    return baseList
       .filter(
         (s) =>
           (s?.username || '').toLowerCase().includes(q) ||
@@ -276,7 +308,7 @@ export const GenerateInvoiceModal: React.FC<GenerateInvoiceModalProps> = ({
           Boolean(s?.profile && (s.profile || '').toLowerCase().includes(q))
       )
       .slice(0, 30);
-  }, [unifiedSubscribers, subscriberSearch]);
+  }, [unifiedSubscribers, subscriberSearch, isResellerSession, isScopeReady, resellerScope]);
 
   // Handler when selecting a subscriber
   const selectSubscriber = (sub: UnifiedSubscriber) => {
@@ -349,6 +381,15 @@ export const GenerateInvoiceModal: React.FC<GenerateInvoiceModalProps> = ({
     const finalCustPhone = customerPhone || '+92 300 0000000';
     const finalInvoiceNumber = invoiceNumber.trim() || generateNewInvoiceNumber();
 
+    const matchedPortalSub = allPortalUsers.find(
+      (u) => (u.username || '').trim().toLowerCase() === subUsername.trim().toLowerCase()
+    );
+    const ownershipStamp = buildOwnershipStamp(activeUser, {
+      dealer_id: matchedPortalSub?.dealer_id ?? null,
+      sub_dealer_id: matchedPortalSub?.sub_dealer_id ?? null,
+      created_by_id: matchedPortalSub?.created_by_id ?? null,
+    });
+
     const newInvoice: Invoice = {
       id: `inv-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`,
       invoiceNumber: finalInvoiceNumber,
@@ -370,6 +411,7 @@ export const GenerateInvoiceModal: React.FC<GenerateInvoiceModalProps> = ({
       receiptNumber: status === 'paid' ? `RCPT-${finalInvoiceNumber.replace('INV-', '')}` : undefined,
       whatsappNoticeSent: Boolean(sendWhatsApp),
       whatsappNoticeTimestamp: sendWhatsApp ? new Date().toISOString() : undefined,
+      ...(ownershipStamp as any),
       lineItems: [
         {
           id: `li-${Date.now()}-1`,
@@ -430,6 +472,7 @@ export const GenerateInvoiceModal: React.FC<GenerateInvoiceModalProps> = ({
           cycle_day: dueDate ? Number(dueDate.split('-')[2]) || new Date().getDate() : new Date().getDate(),
           paid_at: status === 'paid' ? new Date().toISOString() : null,
           created_at: new Date().toISOString(),
+          ...ownershipStamp,
           ...(cleanProfile ? { package_profile: cleanProfile, package_name: cleanProfile } : {}),
         });
         if (sbErr) console.warn('Supabase invoice insert notice:', sbErr);

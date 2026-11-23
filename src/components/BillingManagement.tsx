@@ -70,6 +70,11 @@ import {
   StaffPermissions,
   resolveStaffPermissions,
 } from '../lib/staffPermissions';
+import {
+  isResellerUser,
+  isVisibleToCurrentUser,
+  resolveResellerScope,
+} from '../lib/resellerEngine';
 
 export interface BillingManagementProps {
   onOpenReceiptModal?: (invoice: Invoice) => void;
@@ -109,6 +114,8 @@ export const BillingManagement: React.FC<BillingManagementProps> = ({
   const activeUser = currentUser || getStoredUser();
   const role = currentRole || activeUser?.role || 'ADMIN';
   const isAdmin = role === 'ADMIN';
+  const isResellerSession =
+    isResellerUser(activeUser) || role === 'DEALER' || role === 'SUB_DEALER';
   const perms = useMemo(
     () => staffPermissions || resolveStaffPermissions(activeUser, role),
     [staffPermissions, activeUser, role]
@@ -118,6 +125,12 @@ export const BillingManagement: React.FC<BillingManagementProps> = ({
   const [activeTab, setActiveTab] = useState<'invoices' | 'recurring' | 'ledger' | 'agents' | 'expenses' | 'whatsapp'>('invoices');
   const [recurringSearch, setRecurringSearch] = useState<string>('');
   const [ledgerSearch, setLedgerSearch] = useState<string>('');
+
+  useEffect(() => {
+    if (isResellerSession && (activeTab === 'agents' || activeTab === 'expenses')) {
+      setActiveTab('invoices');
+    }
+  }, [isResellerSession, activeTab]);
 
   // Filter states
   const [filterStatus, setFilterStatus] = useState<string>('all'); // 'all' | 'unpaid' | 'paid' | 'overdue'
@@ -180,26 +193,48 @@ export const BillingManagement: React.FC<BillingManagementProps> = ({
   const [selectedAuditRecord, setSelectedAuditRecord] = useState<WhatsAppAuditRecord | null>(null);
   const [waCategoryFilter, setWaCategoryFilter] = useState<string>('all');
 
-  // Live portal_users clients for Grace / Suspension / Shifted-Next-Month accuracy
+  // Live portal_users records for Grace / Suspension / Shifted-Next-Month + Reseller Isolation
+  const [allPortalUsers, setAllPortalUsers] = useState<SupabasePortalUser[]>([]);
   const [portalClients, setPortalClients] = useState<SupabasePortalUser[]>([]);
+  const [isScopeReady, setIsScopeReady] = useState<boolean>(!isResellerSession);
   const [shiftingInvoiceId, setShiftingInvoiceId] = useState<string | null>(null);
   const [studioNotice, setStudioNotice] = useState<{ type: 'success' | 'error'; text: string } | null>(null);
 
   const fetchPortalClients = useCallback(async () => {
     try {
-      const { data } = await supabase
-        .from('portal_users')
-        .select('*')
-        .eq('role', 'CLIENT');
+      const { data } = await supabase.from('portal_users').select('*');
       if (Array.isArray(data)) {
-        setPortalClients(data as SupabasePortalUser[]);
+        const rows = data as SupabasePortalUser[];
+        setAllPortalUsers(rows);
+        setPortalClients(rows.filter((u) => (u.role || '').toUpperCase() === 'CLIENT'));
       }
-    } catch {}
+    } catch {
+      // keep existing state on transient error
+    } finally {
+      setIsScopeReady(true);
+    }
   }, []);
 
   useEffect(() => {
+    setIsScopeReady(!isResellerSession);
     void fetchPortalClients();
-  }, [fetchPortalClients]);
+
+    const ch = supabase
+      .channel('billing_mgmt_portal_users_scope')
+      .on('postgres_changes', { event: '*', schema: 'public', table: 'portal_users' }, () => {
+        void fetchPortalClients();
+      })
+      .subscribe();
+
+    return () => {
+      supabase.removeChannel(ch);
+    };
+  }, [fetchPortalClients, isResellerSession]);
+
+  const resellerScope = useMemo(
+    () => resolveResellerScope(activeUser, allPortalUsers),
+    [activeUser, allPortalUsers]
+  );
 
   // Customer map for rapid PPPoE lookup
   const customerMap = useMemo(() => {
@@ -265,19 +300,100 @@ export const BillingManagement: React.FC<BillingManagementProps> = ({
     [resolvePortalClientForInvoice]
   );
 
+  // Strict Multi-Tenant Scoped Invoices (Fail-Closed for Dealers & Sub-Dealers)
+  const scopedInvoices = useMemo(() => {
+    if (!isResellerSession) return invoices || [];
+    if (!isScopeReady) return [];
+
+    return (invoices || []).filter((inv) => {
+      const portalSub = resolvePortalClientForInvoice(inv);
+      const custNameLower = (inv?.customerName || '').trim().toLowerCase();
+      const linkedCust =
+        customerMap.get(inv?.customerId) || (custNameLower ? customerMap.get(custNameLower) : undefined);
+      const inferredUsername =
+        (inv as any)?.subscriber_username ||
+        portalSub?.username ||
+        linkedCust?.pppoeUsername ||
+        '';
+
+      return isVisibleToCurrentUser(
+        {
+          dealer_id: (inv as any)?.dealer_id ?? portalSub?.dealer_id ?? null,
+          sub_dealer_id: (inv as any)?.sub_dealer_id ?? portalSub?.sub_dealer_id ?? null,
+          created_by_id: (inv as any)?.created_by_id ?? portalSub?.created_by_id ?? null,
+          subscriber_username: inferredUsername,
+          username: inferredUsername,
+        },
+        activeUser,
+        {
+          childSubDealerIds: resellerScope.allowedResellerIds,
+          allowedSubscriberUsernames: resellerScope.allowedSubscriberUsernames,
+        }
+      );
+    });
+  }, [
+    isResellerSession,
+    isScopeReady,
+    invoices,
+    resolvePortalClientForInvoice,
+    customerMap,
+    activeUser,
+    resellerScope,
+  ]);
+
+  const scopedCustomers = useMemo(() => {
+    if (!isResellerSession) return customers || [];
+    if (!isScopeReady) return [];
+    const allowedSet = resellerScope.allowedSubscriberUsernames;
+    if (!allowedSet) return [];
+    return (customers || []).filter((c) => {
+      const uname = (c.pppoeUsername || c.name || '').trim().toLowerCase();
+      return Boolean(uname && allowedSet.has(uname));
+    });
+  }, [isResellerSession, isScopeReady, customers, resellerScope]);
+
+  const scopedAllowedPhones = useMemo(() => {
+    const phones = new Set<string>();
+    if (!isResellerSession || !isScopeReady) return phones;
+    const allowedSet = resellerScope.allowedSubscriberUsernames;
+    if (!allowedSet) return phones;
+    portalClients.forEach((u) => {
+      const uname = (u.username || '').trim().toLowerCase();
+      if (uname && allowedSet.has(uname) && u.phone) {
+        const digits = String(u.phone).replace(/\D/g, '');
+        if (digits.length >= 7) phones.add(digits.slice(-10));
+      }
+    });
+    return phones;
+  }, [isResellerSession, isScopeReady, portalClients, resellerScope]);
+
+  const scopedWhatsAppLogs = useMemo(() => {
+    if (!isResellerSession) return whatsAppLogs || [];
+    if (!isScopeReady) return [];
+    const allowedSet = resellerScope.allowedSubscriberUsernames;
+    if (!allowedSet) return [];
+    return (whatsAppLogs || []).filter((log) => {
+      const nameLower = (log.recipientName || '').trim().toLowerCase();
+      if (nameLower && allowedSet.has(nameLower)) return true;
+      const digits = String(log.recipientPhone || '').replace(/\D/g, '');
+      if (digits.length >= 7 && scopedAllowedPhones.has(digits.slice(-10))) return true;
+      return false;
+    });
+  }, [isResellerSession, isScopeReady, whatsAppLogs, resellerScope, scopedAllowedPhones]);
+
   // Available unique billing cycle months
   const availableMonths = useMemo(() => {
     const monthsSet = new Set<string>();
     monthsSet.add('October 2026');
     monthsSet.add('September 2026');
     monthsSet.add('August 2026');
-    invoices.forEach((inv) => {
+    scopedInvoices.forEach((inv) => {
       if (inv.billingMonth) {
         monthsSet.add(inv.billingMonth.trim());
       }
     });
     return Array.from(monthsSet);
-  }, [invoices]);
+  }, [scopedInvoices]);
 
   // Helper date checking
   const isToday = (dateStr?: string) => {
@@ -302,15 +418,15 @@ export const BillingManagement: React.FC<BillingManagementProps> = ({
     return diffDays >= -1 && diffDays <= 7;
   };
 
-  // Instant Audit Summary Calculations
+  // Instant Audit Summary Calculations (Strictly Scoped for Dealers & Sub-Dealers)
   const auditSummary = useMemo(() => {
     // 1. Total Due Outstanding (unpaid + overdue)
-    const dueInvoices = invoices.filter((i) => i.status === 'unpaid' || i.status === 'overdue');
+    const dueInvoices = scopedInvoices.filter((i) => i.status === 'unpaid' || i.status === 'overdue');
     const totalDueCount = dueInvoices.length;
     const totalDueAmount = dueInvoices.reduce((sum, i) => sum + i.totalAmount, 0);
 
     // 2. Fees Collected Today (Payment Received Date = Today)
-    const collectedTodayInvoices = invoices.filter(
+    const collectedTodayInvoices = scopedInvoices.filter(
       (i) => i.status === 'paid' && isToday(i.paidAt)
     );
     const feesCollectedTodayCount = collectedTodayInvoices.length;
@@ -320,19 +436,19 @@ export const BillingManagement: React.FC<BillingManagementProps> = ({
     );
 
     // 3. Overdue / Grace Expired Defaulters Count (consistent with Expiry & Grace rules)
-    const overdueInvoices = invoices.filter((i) => isStudioInvoiceOverdue(i));
+    const overdueInvoices = scopedInvoices.filter((i) => isStudioInvoiceOverdue(i));
     const overdueDefaultersCount = overdueInvoices.length;
     const overdueDefaultersAmount = overdueInvoices.reduce((sum, i) => sum + i.totalAmount, 0);
 
     // 3b. Grace Period Assigned Count
-    const graceAssignedCount = invoices.filter((i) => isStudioInvoiceGraceAssigned(i)).length;
+    const graceAssignedCount = scopedInvoices.filter((i) => isStudioInvoiceGraceAssigned(i)).length;
 
     // 4. Paid invoices total
-    const paidInvoices = invoices.filter((i) => i.status === 'paid');
+    const paidInvoices = scopedInvoices.filter((i) => i.status === 'paid');
     const totalPaidAmount = paidInvoices.reduce((sum, i) => sum + i.totalAmount, 0);
 
     // 5. Total Billed
-    const totalBilledAmount = invoices.reduce((sum, i) => sum + i.totalAmount, 0);
+    const totalBilledAmount = scopedInvoices.reduce((sum, i) => sum + i.totalAmount, 0);
 
     return {
       totalDueCount,
@@ -345,26 +461,31 @@ export const BillingManagement: React.FC<BillingManagementProps> = ({
       totalPaidAmount,
       totalBilledAmount,
       paidCount: paidInvoices.length,
-      unpaidCount: invoices.filter((i) => i.status === 'unpaid').length,
-      allCount: invoices.length,
+      unpaidCount: scopedInvoices.filter((i) => i.status === 'unpaid').length,
+      allCount: scopedInvoices.length,
     };
-  }, [invoices, isStudioInvoiceOverdue, isStudioInvoiceGraceAssigned]);
+  }, [scopedInvoices, isStudioInvoiceOverdue, isStudioInvoiceGraceAssigned]);
 
-  // Unified MRR Subscribers (merging youthnet_billing_subscribers and registered customers)
+  // Unified MRR Subscribers (strictly scoped for Dealers & Sub-Dealers)
   const mrrSubscribers = useMemo(() => {
+    if (isResellerSession && !isScopeReady) return [];
+    const allowedSet = resellerScope.allowedSubscriberUsernames;
+    if (isResellerSession && !allowedSet) return [];
     const list: BillingSubscriber[] = [];
     const seen = new Set<string>();
 
     (billingSubscribers || []).forEach((b) => {
-      const u = (b.username || '').toLowerCase();
+      const u = (b.username || '').trim().toLowerCase();
       if (!u || seen.has(u)) return;
+      if (isResellerSession && !allowedSet?.has(u)) return;
       seen.add(u);
       list.push(b);
     });
 
-    (customers || []).forEach((c) => {
-      const u = (c.pppoeUsername || c.name || c.id).toLowerCase();
+    (scopedCustomers || []).forEach((c) => {
+      const u = (c.pppoeUsername || c.name || c.id).trim().toLowerCase();
       if (!u || seen.has(u)) return;
+      if (isResellerSession && !allowedSet?.has(u)) return;
       seen.add(u);
       const pkg = packages?.find((p) => p.id === c.packageId || p.mikrotikProfile === c.packageId);
       list.push({
@@ -389,15 +510,23 @@ export const BillingManagement: React.FC<BillingManagementProps> = ({
     });
 
     return list;
-  }, [billingSubscribers, customers, packages]);
+  }, [billingSubscribers, scopedCustomers, packages, isResellerSession, isScopeReady, resellerScope]);
 
   const totalMRR = useMemo(() => {
     return mrrSubscribers.reduce((sum, s) => sum + (s.packagePriceMonthly || 0), 0);
   }, [mrrSubscribers]);
 
   const ledgerEntries = useMemo(() => {
-    return getStoredBillingLedger();
-  }, [invoices, activeTab]);
+    const raw = getStoredBillingLedger();
+    if (!isResellerSession) return raw;
+    if (!isScopeReady) return [];
+    const allowedSet = resellerScope.allowedSubscriberUsernames;
+    if (!allowedSet) return [];
+    return (raw || []).filter((l) => {
+      const uname = (l?.subscriberUsername || '').trim().toLowerCase();
+      return Boolean(uname && allowedSet.has(uname));
+    });
+  }, [scopedInvoices, activeTab, isResellerSession, isScopeReady, resellerScope]);
 
   const filteredMrrSubscribers = useMemo(() => {
     if (!recurringSearch.trim()) return mrrSubscribers || [];
@@ -426,7 +555,7 @@ export const BillingManagement: React.FC<BillingManagementProps> = ({
 
   // Filtered invoices according to all active criteria
   const filteredInvoices = useMemo(() => {
-    return (invoices || []).filter((inv) => {
+    return (scopedInvoices || []).filter((inv) => {
       // 1. Billing Cycle Month filter
       if (
         selectedMonth !== 'all' &&
@@ -485,7 +614,7 @@ export const BillingManagement: React.FC<BillingManagementProps> = ({
       return true;
     });
   }, [
-    invoices,
+    scopedInvoices,
     selectedMonth,
     filterStatus,
     dueDateFilter,
@@ -998,7 +1127,7 @@ export const BillingManagement: React.FC<BillingManagementProps> = ({
                 activeTab === 'invoices' ? 'bg-white/20 text-white dark:bg-sky-500/30 dark:text-sky-200' : 'bg-slate-200 text-slate-700 dark:bg-slate-800 dark:text-slate-300'
               }`}
             >
-              {invoices.length}
+              {scopedInvoices.length}
             </span>
           </button>
 
@@ -1040,26 +1169,28 @@ export const BillingManagement: React.FC<BillingManagementProps> = ({
             </span>
           </button>
 
-          <button
-            onClick={() => setActiveTab('agents')}
-            className={`px-3.5 py-2 rounded-lg text-xs font-semibold flex items-center gap-2 transition cursor-pointer shrink-0 border ${
-              activeTab === 'agents'
-                ? 'bg-sky-600 text-white border-sky-600 font-bold shadow-sm dark:bg-sky-500/20 dark:text-sky-300 dark:border-sky-400/60 dark:shadow-[0_0_15px_rgba(56,189,248,0.18)]'
-                : 'text-slate-700 hover:text-slate-900 hover:bg-slate-100 border-transparent dark:text-slate-300 dark:hover:text-white dark:hover:bg-slate-800'
-            }`}
-          >
-            <Users className="w-4 h-4" />
-            <span>Field Agents &amp; Cash Recovery</span>
-            <span
-              className={`text-[10px] px-1.5 py-0.2 rounded-full font-mono ${
-                activeTab === 'agents' ? 'bg-white/20 text-white dark:bg-sky-500/30 dark:text-sky-200' : 'bg-slate-200 text-slate-700 dark:bg-slate-800 dark:text-slate-300'
+          {!isResellerSession && (
+            <button
+              onClick={() => setActiveTab('agents')}
+              className={`px-3.5 py-2 rounded-lg text-xs font-semibold flex items-center gap-2 transition cursor-pointer shrink-0 border ${
+                activeTab === 'agents'
+                  ? 'bg-sky-600 text-white border-sky-600 font-bold shadow-sm dark:bg-sky-500/20 dark:text-sky-300 dark:border-sky-400/60 dark:shadow-[0_0_15px_rgba(56,189,248,0.18)]'
+                  : 'text-slate-700 hover:text-slate-900 hover:bg-slate-100 border-transparent dark:text-slate-300 dark:hover:text-white dark:hover:bg-slate-800'
               }`}
             >
-              {agents.length}
-            </span>
-          </button>
+              <Users className="w-4 h-4" />
+              <span>Field Agents &amp; Cash Recovery</span>
+              <span
+                className={`text-[10px] px-1.5 py-0.2 rounded-full font-mono ${
+                  activeTab === 'agents' ? 'bg-white/20 text-white dark:bg-sky-500/30 dark:text-sky-200' : 'bg-slate-200 text-slate-700 dark:bg-slate-800 dark:text-slate-300'
+                }`}
+              >
+                {agents.length}
+              </span>
+            </button>
+          )}
 
-          {perms.expenses_ledger && (
+          {!isResellerSession && perms.expenses_ledger && (
             <button
               onClick={() => setActiveTab('expenses')}
               className={`px-3.5 py-2 rounded-lg text-xs font-semibold flex items-center gap-2 transition cursor-pointer shrink-0 border ${
@@ -1095,32 +1226,36 @@ export const BillingManagement: React.FC<BillingManagementProps> = ({
                 activeTab === 'whatsapp' ? 'bg-white/20 text-white dark:bg-sky-500/30 dark:text-sky-200' : 'bg-slate-200 text-slate-700 dark:bg-slate-800 dark:text-slate-300'
               }`}
             >
-              {whatsAppLogs.length}
+              {scopedWhatsAppLogs.length}
             </span>
           </button>
         </div>
 
-        {/* Global CRON Simulations */}
+        {/* Global CRON Simulations (Admin / Master ISP Staff Only) */}
         <div className="flex items-center gap-2 ml-auto">
-          <button
-            onClick={handleRunBilling}
-            disabled={isCronRunning}
-            className="flex items-center gap-1.5 bg-indigo-950 hover:bg-indigo-900 text-indigo-300 border border-indigo-800 text-xs font-semibold px-3 py-1.5 rounded-lg transition disabled:opacity-50"
-            title="Trigger automated 1st-of-month invoice generation for all active subscribers"
-          >
-            <RotateCw className={`w-3.5 h-3.5 ${isCronRunning ? 'animate-spin' : ''}`} />
-            <span className="hidden md:inline">Run Invoicing CRON</span>
-          </button>
+          {!isResellerSession && (
+            <>
+              <button
+                onClick={handleRunBilling}
+                disabled={isCronRunning}
+                className="flex items-center gap-1.5 bg-indigo-950 hover:bg-indigo-900 text-indigo-300 border border-indigo-800 text-xs font-semibold px-3 py-1.5 rounded-lg transition disabled:opacity-50"
+                title="Trigger automated 1st-of-month invoice generation for all active subscribers"
+              >
+                <RotateCw className={`w-3.5 h-3.5 ${isCronRunning ? 'animate-spin' : ''}`} />
+                <span className="hidden md:inline">Run Invoicing CRON</span>
+              </button>
 
-          <button
-            onClick={handleRunOverdue}
-            disabled={isCronRunning}
-            className="flex items-center gap-1.5 bg-amber-950 hover:bg-amber-900 text-amber-300 border border-amber-800 text-xs font-semibold px-3 py-1.5 rounded-lg transition disabled:opacity-50"
-            title="Scan past due invoices and switch subscribers to walled-garden pool"
-          >
-            <Clock className="w-3.5 h-3.5" />
-            <span className="hidden md:inline">Overdue Scan</span>
-          </button>
+              <button
+                onClick={handleRunOverdue}
+                disabled={isCronRunning}
+                className="flex items-center gap-1.5 bg-amber-950 hover:bg-amber-900 text-amber-300 border border-amber-800 text-xs font-semibold px-3 py-1.5 rounded-lg transition disabled:opacity-50"
+                title="Scan past due invoices and switch subscribers to walled-garden pool"
+              >
+                <Clock className="w-3.5 h-3.5" />
+                <span className="hidden md:inline">Overdue Scan</span>
+              </button>
+            </>
+          )}
 
           <button
             type="button"
@@ -1137,7 +1272,11 @@ export const BillingManagement: React.FC<BillingManagementProps> = ({
       {activeTab === 'invoices' && (
         <div className="space-y-5">
           {/* 30-Day Revenue Trend Analysis (Collected vs. Projected Fees) */}
-          <RevenueTrendChart />
+          <RevenueTrendChart
+            invoices={scopedInvoices}
+            customers={scopedCustomers}
+            isIsolatedReseller={isResellerSession}
+          />
 
           {/* TOP FILTER TOOLBAR */}
           <div className="bg-slate-900 border border-slate-800 rounded-xl p-4 shadow-lg space-y-4">
@@ -1461,11 +1600,11 @@ export const BillingManagement: React.FC<BillingManagementProps> = ({
                       <td colSpan={8} className="py-12 text-center text-slate-500 font-sans">
                         <AlertCircle className="w-8 h-8 text-slate-600 mx-auto mb-2" />
                         <span className="font-bold text-slate-300 block text-sm">
-                          {invoices.length === 0
+                          {scopedInvoices.length === 0
                             ? "No invoices generated yet. Click '+ Generate Invoice' to create one."
                             : "No Invoices Found"}
                         </span>
-                        {invoices.length === 0 ? (
+                        {scopedInvoices.length === 0 ? (
                           <div className="mt-3">
                             <button
                               type="button"
@@ -1721,7 +1860,7 @@ export const BillingManagement: React.FC<BillingManagementProps> = ({
             <div className="bg-slate-950 p-3 border-t border-slate-800 flex items-center justify-between text-xs text-slate-400 font-mono">
               <div>
                 Showing <strong className="text-white">{filteredInvoices.length}</strong> of{' '}
-                <strong className="text-white">{invoices.length}</strong> invoices
+                <strong className="text-white">{scopedInvoices.length}</strong> invoices
               </div>
               <div className="flex items-center gap-3">
                 <span>
@@ -2267,13 +2406,13 @@ export const BillingManagement: React.FC<BillingManagementProps> = ({
             <div className="flex items-center gap-3">
               <div className="bg-slate-900/80 border border-slate-800 rounded-lg px-3 py-1.5 text-center">
                 <span className="text-[10px] text-slate-400 block">Total Dispatches</span>
-                <span className="text-sm font-bold text-white font-mono">{whatsAppLogs.length}</span>
+                <span className="text-sm font-bold text-white font-mono">{scopedWhatsAppLogs.length}</span>
               </div>
               <div className="bg-slate-900/80 border border-slate-800 rounded-lg px-3 py-1.5 text-center">
                 <span className="text-[10px] text-slate-400 block">Read Rate</span>
                 <span className="text-sm font-bold text-cyan-400 font-mono">
-                  {whatsAppLogs.length > 0
-                    ? `${Math.round((whatsAppLogs.filter((l) => l.status === 'read').length / whatsAppLogs.length) * 100)}%`
+                  {scopedWhatsAppLogs.length > 0
+                    ? `${Math.round((scopedWhatsAppLogs.filter((l) => l.status === 'read').length / scopedWhatsAppLogs.length) * 100)}%`
                     : '100%'}
                 </span>
               </div>
@@ -2306,13 +2445,13 @@ export const BillingManagement: React.FC<BillingManagementProps> = ({
             </div>
 
             <span className="text-xs text-slate-500 font-mono">
-              Showing {whatsAppLogs.filter((l) => waCategoryFilter === 'all' || l.type === waCategoryFilter).length} logs
+              Showing {scopedWhatsAppLogs.filter((l) => waCategoryFilter === 'all' || l.type === waCategoryFilter).length} logs
             </span>
           </div>
 
           {/* Logs List */}
           <div className="divide-y divide-slate-800/80 border border-slate-800 rounded-xl overflow-hidden font-sans text-xs">
-            {whatsAppLogs.filter((l) => waCategoryFilter === 'all' || l.type === waCategoryFilter).length === 0 ? (
+            {scopedWhatsAppLogs.filter((l) => waCategoryFilter === 'all' || l.type === waCategoryFilter).length === 0 ? (
               <div className="p-8 text-center text-slate-500">
                 <Smartphone className="w-8 h-8 mx-auto text-slate-600 mb-2 opacity-50" />
                 <p className="text-sm font-medium">No WhatsApp Business API dispatches recorded yet</p>
@@ -2321,7 +2460,7 @@ export const BillingManagement: React.FC<BillingManagementProps> = ({
                 </p>
               </div>
             ) : (
-              whatsAppLogs
+              scopedWhatsAppLogs
                 .filter((l) => waCategoryFilter === 'all' || l.type === waCategoryFilter)
                 .map((log) => {
                   const auditRecords = whatsappBusinessService.getAuditLogs();
@@ -2478,6 +2617,7 @@ export const BillingManagement: React.FC<BillingManagementProps> = ({
       {/* MODAL 4: GENERATE INVOICE MODAL (Dynamic MikroTik Subscribers) */}
       <GenerateInvoiceModal
         isOpen={isGenerateInvoiceOpen || isCreateInvoiceModalOpen}
+        currentUser={activeUser}
         onClose={() => {
           setIsGenerateInvoiceOpen(false);
           setIsCreateInvoiceModalOpen(false);

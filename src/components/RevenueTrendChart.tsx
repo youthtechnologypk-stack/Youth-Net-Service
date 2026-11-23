@@ -34,10 +34,15 @@ import {
 } from 'lucide-react';
 import { useISP } from '../context/ISPContext';
 import { useCurrency } from '../context/CurrencyContext';
-import { Invoice } from '../types/isp';
+import { Customer, Invoice } from '../types/isp';
+import { getStoredUser } from '../lib/auth';
+import { isResellerUser } from '../lib/resellerEngine';
 
 export interface RevenueTrendChartProps {
   className?: string;
+  invoices?: Invoice[];
+  customers?: Customer[];
+  isIsolatedReseller?: boolean;
 }
 
 export interface DayRevenuePoint {
@@ -56,8 +61,27 @@ export interface DayRevenuePoint {
   invoicesCount: number;
 }
 
-export const RevenueTrendChart: React.FC<RevenueTrendChartProps> = ({ className = '' }) => {
-  const { invoices, customers, packages } = useISP();
+export const RevenueTrendChart: React.FC<RevenueTrendChartProps> = ({
+  className = '',
+  invoices: invoicesProp,
+  customers: customersProp,
+  isIsolatedReseller,
+}) => {
+  const { invoices: globalInvoices, customers: globalCustomers, packages } = useISP();
+  const storedUser = getStoredUser();
+  const effectiveIsReseller =
+    typeof isIsolatedReseller === 'boolean'
+      ? isIsolatedReseller
+      : isResellerUser(storedUser);
+  // Fail-closed: if rendered in a reseller session without explicit scoped arrays, never expose Master ISP totals
+  const invoices = useMemo(
+    () => (invoicesProp !== undefined ? invoicesProp : effectiveIsReseller ? [] : globalInvoices),
+    [invoicesProp, effectiveIsReseller, globalInvoices]
+  );
+  const customers = useMemo(
+    () => (customersProp !== undefined ? customersProp : effectiveIsReseller ? [] : globalCustomers),
+    [customersProp, effectiveIsReseller, globalCustomers]
+  );
   const { formatCurrency, currencySymbol } = useCurrency();
 
   // Controls state
@@ -164,8 +188,8 @@ export const RevenueTrendChart: React.FC<RevenueTrendChartProps> = ({ className 
         dayProjected = Math.max(dayProjected, baseForDay);
       }
 
-      // Ensure minimal realistic benchmark curve if no invoices on that day
-      if (dayProjected === 0) {
+      // Ensure minimal realistic benchmark curve only for Master ISP (never fabricate projected fees for isolated resellers)
+      if (dayProjected === 0 && !effectiveIsReseller && (activeInvoices.length > 0 || customers.length > 0)) {
         // Average distributed baseline for smooth visualization
         dayProjected = 25.0 + ((i % 5) * 8.5);
       }
@@ -202,6 +226,7 @@ export const RevenueTrendChart: React.FC<RevenueTrendChartProps> = ({ className 
     paymentChannelFilter,
     todayDate,
     todayStr,
+    effectiveIsReseller,
   ]);
 
   // Aggregate stats across the 30-day window

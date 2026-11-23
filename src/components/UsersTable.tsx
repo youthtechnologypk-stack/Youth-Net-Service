@@ -246,9 +246,24 @@ export const UsersTable: React.FC<UsersTableProps> = ({
   // Dynamic Badge Counts based on live scoped data
   const totalCount = scopedUsers.length;
   const clientCount = scopedUsers.filter((u) => (u.role || '').toUpperCase() === 'CLIENT').length;
+  const subDealerCount = scopedUsers.filter((u) => getResellerTier(u) === 'SUB_DEALER').length;
   const agentCount = scopedUsers.filter((u) => (u.role || '').toUpperCase() === 'AGENT').length;
   const managerCount = scopedUsers.filter((u) => (u.role || '').toUpperCase() === 'MANAGER').length;
   const adminCount = scopedUsers.filter((u) => (u.role || '').toUpperCase() === 'ADMIN').length;
+
+  // Ensure isolated resellers never sit on a hidden staff/admin tab
+  useEffect(() => {
+    if (!resellerScope.isIsolated) return;
+    if (resellerScope.tier === 'SUB_DEALER' && activeTab !== 'CLIENT') {
+      setActiveTab('CLIENT');
+    } else if (
+      resellerScope.tier === 'DEALER' &&
+      activeTab !== 'CLIENT' &&
+      activeTab !== 'SUB_DEALER'
+    ) {
+      setActiveTab('CLIENT');
+    }
+  }, [resellerScope.isIsolated, resellerScope.tier, activeTab]);
 
   // Status toggle handler directly updating Supabase
   const handleToggleStatus = async (user: PortalUserRow) => {
@@ -370,37 +385,84 @@ export const UsersTable: React.FC<UsersTableProps> = ({
 
       {/* Role Filter Tabs & Search Bar */}
       <div className="flex flex-col sm:flex-row items-stretch sm:items-center justify-between gap-3 bg-slate-900 border border-slate-800 p-3 rounded-xl shadow-md">
-        {/* Strict Role Filtering Tabs */}
-        <div className="flex items-center gap-1.5 overflow-x-auto pb-1 sm:pb-0 scrollbar-none">
-          {[
-            { id: 'ALL' as TabType, label: 'All Users', count: totalCount },
-            { id: 'CLIENT' as TabType, label: 'Clients', count: clientCount },
-            { id: 'AGENT' as TabType, label: 'Field Agents', count: agentCount },
-            { id: 'MANAGER' as TabType, label: 'Managers', count: managerCount },
-            { id: 'ADMIN' as TabType, label: 'Administrators', count: adminCount },
-          ].map((tab) => (
+        {/* Strict Role Filtering Tabs (Hidden for Resellers — show clean subscriber header instead) */}
+        {resellerScope.isIsolated ? (
+          <div className="flex items-center gap-1.5 overflow-x-auto pb-1 sm:pb-0 scrollbar-none">
             <button
-              key={tab.id}
-              onClick={() => setActiveTab(tab.id)}
+              type="button"
+              onClick={() => setActiveTab('CLIENT')}
               className={`px-3 py-1.5 rounded-lg text-xs font-semibold whitespace-nowrap transition cursor-pointer flex items-center gap-1.5 ${
-                activeTab === tab.id
+                activeTab === 'CLIENT'
                   ? 'bg-cyan-600 text-slate-950 font-bold shadow-md shadow-cyan-950/40'
                   : 'bg-slate-950 text-slate-400 hover:text-slate-200 border border-slate-800'
               }`}
             >
-              <span>{tab.label}</span>
+              <span>My PPPoE Subscribers</span>
               <span
                 className={`px-1.5 py-0.2 rounded-full text-[10px] font-mono ${
-                  activeTab === tab.id
+                  activeTab === 'CLIENT'
                     ? 'bg-slate-950 text-cyan-300 font-bold'
                     : 'bg-slate-800 text-slate-400'
                 }`}
               >
-                {tab.count}
+                {clientCount}
               </span>
             </button>
-          ))}
-        </div>
+            {resellerScope.tier === 'DEALER' && subDealerCount > 0 && (
+              <button
+                type="button"
+                onClick={() => setActiveTab('SUB_DEALER')}
+                className={`px-3 py-1.5 rounded-lg text-xs font-semibold whitespace-nowrap transition cursor-pointer flex items-center gap-1.5 ${
+                  activeTab === 'SUB_DEALER'
+                    ? 'bg-cyan-600 text-slate-950 font-bold shadow-md shadow-cyan-950/40'
+                    : 'bg-slate-950 text-slate-400 hover:text-slate-200 border border-slate-800'
+                }`}
+              >
+                <span>My Sub-Dealers</span>
+                <span
+                  className={`px-1.5 py-0.2 rounded-full text-[10px] font-mono ${
+                    activeTab === 'SUB_DEALER'
+                      ? 'bg-slate-950 text-cyan-300 font-bold'
+                      : 'bg-slate-800 text-slate-400'
+                  }`}
+                >
+                  {subDealerCount}
+                </span>
+              </button>
+            )}
+          </div>
+        ) : (
+          <div className="flex items-center gap-1.5 overflow-x-auto pb-1 sm:pb-0 scrollbar-none">
+            {[
+              { id: 'ALL' as TabType, label: 'All Users', count: totalCount },
+              { id: 'CLIENT' as TabType, label: 'Clients', count: clientCount },
+              { id: 'AGENT' as TabType, label: 'Field Agents', count: agentCount },
+              { id: 'MANAGER' as TabType, label: 'Managers', count: managerCount },
+              { id: 'ADMIN' as TabType, label: 'Administrators', count: adminCount },
+            ].map((tab) => (
+              <button
+                key={tab.id}
+                onClick={() => setActiveTab(tab.id)}
+                className={`px-3 py-1.5 rounded-lg text-xs font-semibold whitespace-nowrap transition cursor-pointer flex items-center gap-1.5 ${
+                  activeTab === tab.id
+                    ? 'bg-cyan-600 text-slate-950 font-bold shadow-md shadow-cyan-950/40'
+                    : 'bg-slate-950 text-slate-400 hover:text-slate-200 border border-slate-800'
+                }`}
+              >
+                <span>{tab.label}</span>
+                <span
+                  className={`px-1.5 py-0.2 rounded-full text-[10px] font-mono ${
+                    activeTab === tab.id
+                      ? 'bg-slate-950 text-cyan-300 font-bold'
+                      : 'bg-slate-800 text-slate-400'
+                  }`}
+                >
+                  {tab.count}
+                </span>
+              </button>
+            ))}
+          </div>
+        )}
 
         {/* Search Input, Admin Dealer Filter & Refresh Button */}
         <div className="flex flex-wrap items-center gap-2">

@@ -1,4 +1,4 @@
-import React from 'react';
+import React, { useState, useEffect, useMemo } from 'react';
 import {
   Network,
   Activity,
@@ -36,6 +36,8 @@ import { PWAInstallPrompt } from './PWAInstallPrompt';
 import { ThemeToggle } from './ThemeToggle';
 import { getStoredUser } from '../lib/auth';
 import { StaffPermissions, resolveStaffPermissions } from '../lib/staffPermissions';
+import { supabase, SupabasePortalUser } from '../services/supabaseClient';
+import { getResellerTier, isResellerUser, resolveResellerScope } from '../lib/resellerEngine';
 
 export type ActiveTab =
   | 'noc'
@@ -135,6 +137,67 @@ export const Header: React.FC<HeaderProps> = ({
     activeUser?.role === 'AGENT' ||
     currentRole === 'AGENT' ||
     effectiveRole === 'AGENT';
+  const isResellerSession =
+    isResellerUser(activeUser) ||
+    currentRole === 'DEALER' ||
+    currentRole === 'SUB_DEALER' ||
+    effectiveRole === 'DEALER' ||
+    effectiveRole === 'SUB_DEALER';
+  const resellerTier =
+    getResellerTier(activeUser) ||
+    (currentRole === 'DEALER' || effectiveRole === 'DEALER' ? 'DEALER' : 'SUB_DEALER');
+
+  const [resellerPortalRows, setResellerPortalRows] = useState<SupabasePortalUser[]>([]);
+  const [isHeaderScopeReady, setIsHeaderScopeReady] = useState<boolean>(!isResellerSession);
+
+  useEffect(() => {
+    if (!isResellerSession) {
+      setIsHeaderScopeReady(true);
+      return;
+    }
+
+    let cancelled = false;
+    setIsHeaderScopeReady(false);
+
+    const loadScope = async () => {
+      try {
+        const { data } = await supabase.from('portal_users').select('*');
+        if (!cancelled && Array.isArray(data)) {
+          setResellerPortalRows(data as SupabasePortalUser[]);
+        }
+      } catch {
+        // fail closed with empty list
+      } finally {
+        if (!cancelled) setIsHeaderScopeReady(true);
+      }
+    };
+
+    void loadScope();
+
+    const ch = supabase
+      .channel('header_reseller_online_scope')
+      .on('postgres_changes', { event: '*', schema: 'public', table: 'portal_users' }, () => {
+        void loadScope();
+      })
+      .subscribe();
+
+    return () => {
+      cancelled = true;
+      supabase.removeChannel(ch);
+    };
+  }, [isResellerSession, activeUser?.id]);
+
+  const scopedOnlineUsersCount = useMemo(() => {
+    if (!isResellerSession) return (activeSessions || []).length;
+    if (!isHeaderScopeReady) return 0;
+    const scope = resolveResellerScope(activeUser, resellerPortalRows);
+    const allowedSet = scope.allowedSubscriberUsernames;
+    if (!allowedSet) return 0;
+    return (activeSessions || []).filter((s) => {
+      const uname = String(s?.username || '').trim().toLowerCase();
+      return Boolean(uname && allowedSet.has(uname));
+    }).length;
+  }, [isResellerSession, isHeaderScopeReady, activeUser, resellerPortalRows, activeSessions]);
 
   const getTabClassName = (tab: ActiveTab, themeColor: 'cyan' | 'indigo' = 'cyan') => {
     const isActive = activeTab === tab;
@@ -331,6 +394,7 @@ export const Header: React.FC<HeaderProps> = ({
         {/* Global Search Bar (Name, IP, Invoice # across app) */}
         <div className="order-last md:order-none w-full md:w-auto flex-1 max-w-lg mx-auto md:mx-4 min-w-0">
           <GlobalSearchBar
+            currentUser={activeUser}
             onNavigateTab={setActiveTab}
             onOpenPaymentModal={onOpenPaymentModal}
             onOpenReceiptModal={onOpenReceiptModal}
@@ -338,77 +402,100 @@ export const Header: React.FC<HeaderProps> = ({
           />
         </div>
 
-        {/* Live Router Selector Row (Full-Width on <768px) + Telemetry & Wrapped Actions */}
+        {/* Live Router Selector Row (Master ISP Only) OR Clean Reseller Portal Badge */}
         <div className="w-full md:w-auto flex flex-col md:flex-row md:items-center flex-wrap gap-2 sm:gap-3 text-xs font-mono min-w-0 max-w-full">
-          {/* Dedicated Router Selector Row on Mobile */}
-          <div className="w-full md:w-auto max-w-full flex items-center gap-2 bg-slate-100 dark:bg-slate-900 border border-slate-200 dark:border-slate-800 px-2.5 py-1.5 rounded-lg min-w-0">
-            <Server className="w-3.5 h-3.5 text-cyan-600 dark:text-cyan-400 shrink-0" />
-            <select
-              value={selectedRouterId}
-              onChange={(e) => setSelectedRouterId(e.target.value)}
-              className="w-full md:w-auto min-w-0 flex-1 max-w-full truncate bg-transparent text-slate-800 dark:text-slate-200 text-xs focus:outline-none cursor-pointer"
-            >
-              {(!routers || routers.length === 0) ? (
-                <option value="" disabled className="bg-white dark:bg-slate-900 text-slate-400">
-                  No Routers Connected
-                </option>
-              ) : (
-                routers.map((r) => (
-                  <option key={r.id} value={r.id} className="bg-white dark:bg-slate-900 text-slate-900 dark:text-slate-100">
-                    {r.name} ({r.ipAddress})
-                  </option>
-                ))
-              )}
-            </select>
-            {currentRouter && (
-              <span
-                className={`inline-block w-2 h-2 rounded-full shrink-0 ${
-                  currentRouter.status === 'online' ? 'bg-emerald-500 animate-ping' : 'bg-rose-500'
-                }`}
-                title={currentRouter.status === 'online' ? 'Router Online' : 'Router Offline'}
-              />
-            )}
-            {onOpenAddRouterModal && (
-              <button
-                onClick={onOpenAddRouterModal}
-                className="p-1 rounded bg-slate-200 hover:bg-slate-300 dark:bg-slate-800 dark:hover:bg-slate-700 text-cyan-600 dark:text-cyan-400 hover:text-cyan-700 dark:hover:text-cyan-300 border border-slate-300 dark:border-slate-700 transition shrink-0"
-                title="Add New MikroTik Router"
-              >
-                <PlusCircle className="w-3.5 h-3.5" />
-              </button>
-            )}
-          </div>
-
-          {currentRouter ? (
-            <>
-              <span className={`hidden xl:inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full text-[11px] font-mono shadow-sm ${
-                currentRouter.status === 'online'
-                  ? 'bg-emerald-50 dark:bg-emerald-950/90 text-emerald-700 dark:text-emerald-300 border border-emerald-200 dark:border-emerald-500/30'
-                  : 'bg-rose-50 dark:bg-rose-950/90 text-rose-700 dark:text-rose-300 border border-rose-200 dark:border-rose-500/30'
-              }`}>
-                <span className={`w-1.5 h-1.5 rounded-full ${currentRouter.status === 'online' ? 'bg-emerald-500 animate-pulse' : 'bg-rose-500'}`} />
-                {currentRouter.status === 'online' ? 'Router Online' : 'Router Offline'}
-              </span>
-
-              <div className="hidden lg:flex items-center gap-3 bg-slate-100 dark:bg-slate-900/80 border border-slate-200 dark:border-slate-800 px-3 py-1.5 rounded-md text-slate-700 dark:text-slate-300">
-                <span>
-                  CPU: <strong className="text-cyan-600 dark:text-cyan-300">{currentRouter.cpuLoad ?? 0}%</strong>
+          {isResellerSession ? (
+            <div className="w-full md:w-auto max-w-full flex flex-wrap items-center gap-2">
+              <div className="inline-flex items-center gap-2 bg-slate-100 dark:bg-slate-900 border border-cyan-500/30 px-3 py-1.5 rounded-lg text-slate-800 dark:text-slate-100">
+                <Building2 className="w-3.5 h-3.5 text-cyan-600 dark:text-cyan-400 shrink-0" />
+                <span className="font-bold">
+                  Reseller Portal &bull; @{activeUser?.username || 'reseller'}
                 </span>
-                <span className="text-slate-300 dark:text-slate-600">|</span>
-                <span>
-                  WAN: <strong className="text-emerald-600 dark:text-emerald-400">{(((currentRouter.currentWanRxMbps || 0)) / 1000).toFixed(2)} Gbps</strong>
-                </span>
-                <span className="text-slate-300 dark:text-slate-600">|</span>
-                <span>
-                  Sessions: <strong className="text-indigo-600 dark:text-indigo-300">{(activeSessions || []).length} active</strong>
+                <span className="px-1.5 py-0.5 rounded text-[10px] font-bold bg-cyan-50 dark:bg-cyan-950 text-cyan-700 dark:text-cyan-300 border border-cyan-200 dark:border-cyan-800">
+                  {resellerTier === 'DEALER' ? 'DEALER' : 'SUB-DEALER'}
                 </span>
               </div>
-            </>
+
+              <div className="inline-flex items-center gap-1.5 bg-emerald-50 dark:bg-emerald-950/70 border border-emerald-200 dark:border-emerald-700/50 px-2.5 py-1.5 rounded-lg text-emerald-700 dark:text-emerald-300">
+                <span className="w-2 h-2 rounded-full bg-emerald-500 animate-pulse shrink-0" />
+                <span>
+                  Online Users: <strong className="font-bold">{scopedOnlineUsersCount}</strong>
+                </span>
+              </div>
+            </div>
           ) : (
-            <span className="hidden xl:inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full text-[11px] font-mono bg-slate-100 dark:bg-slate-900 text-slate-500 dark:text-slate-400 border border-slate-200 dark:border-slate-800">
-              <span className="w-1.5 h-1.5 rounded-full bg-slate-400 dark:bg-slate-500" />
-              No Routers Connected
-            </span>
+            <>
+              {/* Dedicated Router Selector Row on Mobile */}
+              <div className="w-full md:w-auto max-w-full flex items-center gap-2 bg-slate-100 dark:bg-slate-900 border border-slate-200 dark:border-slate-800 px-2.5 py-1.5 rounded-lg min-w-0">
+                <Server className="w-3.5 h-3.5 text-cyan-600 dark:text-cyan-400 shrink-0" />
+                <select
+                  value={selectedRouterId}
+                  onChange={(e) => setSelectedRouterId(e.target.value)}
+                  className="w-full md:w-auto min-w-0 flex-1 max-w-full truncate bg-transparent text-slate-800 dark:text-slate-200 text-xs focus:outline-none cursor-pointer"
+                >
+                  {(!routers || routers.length === 0) ? (
+                    <option value="" disabled className="bg-white dark:bg-slate-900 text-slate-400">
+                      No Routers Connected
+                    </option>
+                  ) : (
+                    routers.map((r) => (
+                      <option key={r.id} value={r.id} className="bg-white dark:bg-slate-900 text-slate-900 dark:text-slate-100">
+                        {r.name} ({r.ipAddress})
+                      </option>
+                    ))
+                  )}
+                </select>
+                {currentRouter && (
+                  <span
+                    className={`inline-block w-2 h-2 rounded-full shrink-0 ${
+                      currentRouter.status === 'online' ? 'bg-emerald-500 animate-ping' : 'bg-rose-500'
+                    }`}
+                    title={currentRouter.status === 'online' ? 'Router Online' : 'Router Offline'}
+                  />
+                )}
+                {onOpenAddRouterModal && (
+                  <button
+                    onClick={onOpenAddRouterModal}
+                    className="p-1 rounded bg-slate-200 hover:bg-slate-300 dark:bg-slate-800 dark:hover:bg-slate-700 text-cyan-600 dark:text-cyan-400 hover:text-cyan-700 dark:hover:text-cyan-300 border border-slate-300 dark:border-slate-700 transition shrink-0"
+                    title="Add New MikroTik Router"
+                  >
+                    <PlusCircle className="w-3.5 h-3.5" />
+                  </button>
+                )}
+              </div>
+
+              {currentRouter ? (
+                <>
+                  <span className={`hidden xl:inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full text-[11px] font-mono shadow-sm ${
+                    currentRouter.status === 'online'
+                      ? 'bg-emerald-50 dark:bg-emerald-950/90 text-emerald-700 dark:text-emerald-300 border border-emerald-200 dark:border-emerald-500/30'
+                      : 'bg-rose-50 dark:bg-rose-950/90 text-rose-700 dark:text-rose-300 border border-rose-200 dark:border-rose-500/30'
+                  }`}>
+                    <span className={`w-1.5 h-1.5 rounded-full ${currentRouter.status === 'online' ? 'bg-emerald-500 animate-pulse' : 'bg-rose-500'}`} />
+                    {currentRouter.status === 'online' ? 'Router Online' : 'Router Offline'}
+                  </span>
+
+                  <div className="hidden lg:flex items-center gap-3 bg-slate-100 dark:bg-slate-900/80 border border-slate-200 dark:border-slate-800 px-3 py-1.5 rounded-md text-slate-700 dark:text-slate-300">
+                    <span>
+                      CPU: <strong className="text-cyan-600 dark:text-cyan-300">{currentRouter.cpuLoad ?? 0}%</strong>
+                    </span>
+                    <span className="text-slate-300 dark:text-slate-600">|</span>
+                    <span>
+                      WAN: <strong className="text-emerald-600 dark:text-emerald-400">{(((currentRouter.currentWanRxMbps || 0)) / 1000).toFixed(2)} Gbps</strong>
+                    </span>
+                    <span className="text-slate-300 dark:text-slate-600">|</span>
+                    <span>
+                      Sessions: <strong className="text-indigo-600 dark:text-indigo-300">{(activeSessions || []).length} active</strong>
+                    </span>
+                  </div>
+                </>
+              ) : (
+                <span className="hidden xl:inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full text-[11px] font-mono bg-slate-100 dark:bg-slate-900 text-slate-500 dark:text-slate-400 border border-slate-200 dark:border-slate-800">
+                  <span className="w-1.5 h-1.5 rounded-full bg-slate-400 dark:bg-slate-500" />
+                  No Routers Connected
+                </span>
+              )}
+            </>
           )}
 
           {/* Wrapped Session, + Provision & Logout Actions Row (Fits cleanly inside 360px) */}
