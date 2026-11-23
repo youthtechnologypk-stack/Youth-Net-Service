@@ -62,6 +62,7 @@ export interface SupabasePortalUser {
   wallet_balance?: number | null;
   credit_limit?: number | null;
   bandwidth_pool_cap_mbps?: number | null;
+  assigned_pool_mbps?: number | null;
   max_active_users?: number | null;
   can_create_subdealers?: boolean | null;
   created_at?: string;

@@ -20,6 +20,7 @@ ALTER TABLE public.portal_users
   ADD COLUMN IF NOT EXISTS wallet_balance NUMERIC(12, 2) NOT NULL DEFAULT 0,
   ADD COLUMN IF NOT EXISTS credit_limit NUMERIC(12, 2) NOT NULL DEFAULT 0,
   ADD COLUMN IF NOT EXISTS bandwidth_pool_cap_mbps INTEGER NOT NULL DEFAULT 0,
+  ADD COLUMN IF NOT EXISTS assigned_pool_mbps INTEGER NOT NULL DEFAULT 0,
   ADD COLUMN IF NOT EXISTS max_active_users INTEGER NOT NULL DEFAULT 0,
   ADD COLUMN IF NOT EXISTS can_create_subdealers BOOLEAN NOT NULL DEFAULT false;
 
@@ -76,7 +77,8 @@ CREATE INDEX IF NOT EXISTS idx_portal_users_tier_level ON public.portal_users (t
 CREATE INDEX IF NOT EXISTS idx_portal_users_parent_dealer_id ON public.portal_users (parent_dealer_id);
 CREATE INDEX IF NOT EXISTS idx_portal_users_dealer_id ON public.portal_users (dealer_id);
 CREATE INDEX IF NOT EXISTS idx_reseller_tariffs_reseller_id ON public.reseller_tariffs (reseller_id);
-CREATE INDEX IF NOT EXISTS idx_reseller_wallet_ledger_reseller_id ON public.reseller_wallet_ledger (reseller_id, created_at DESC);`;
+CREATE INDEX IF NOT EXISTS idx_reseller_wallet_ledger_reseller_id ON public.reseller_wallet_ledger (reseller_id, created_at DESC);
+NOTIFY pgrst, 'reload schema';`;
 
 export interface ResellerSubjectLike {
   id?: string | null;
@@ -88,8 +90,16 @@ export interface ResellerSubjectLike {
   wallet_balance?: number | null;
   credit_limit?: number | null;
   bandwidth_pool_cap_mbps?: number | null;
+  assigned_pool_mbps?: number | null;
   max_active_users?: number | null;
   can_create_subdealers?: boolean | null;
+}
+
+export function getResellerPoolMbps(row?: ResellerSubjectLike | null): number {
+  if (!row) return 0;
+  const val = row.bandwidth_pool_cap_mbps ?? row.assigned_pool_mbps ?? 0;
+  const num = Number(val);
+  return Number.isFinite(num) ? Math.max(0, num) : 0;
 }
 
 export interface ResellerScope {
@@ -125,26 +135,198 @@ export interface WalletDeductionResult {
   error?: string;
 }
 
-export function isResellerSchemaMissingError(err: any): boolean {
+export function formatSupabaseError(err: any): string {
+  if (!err) return 'Unknown database error';
+  const code = err.code ? `[${err.code}] ` : '';
+  const message = err.message || String(err);
+  const extras = [err.details, err.hint].filter(Boolean).join(' — ');
+  return `${code}${message}${extras ? ` (${extras})` : ''}`;
+}
+
+export function extractMissingColumnName(err: any): string | null {
+  if (!err) return null;
+  const msg = String(err.message || err.details || '');
+  // PostgREST: Could not find the 'bandwidth_pool_cap_mbps' column of 'portal_users' in the schema cache
+  const pgrstMatch = msg.match(/Could not find the ['"]([a-zA-Z0-9_]+)['"] column/i);
+  if (pgrstMatch?.[1]) return pgrstMatch[1];
+  // Postgres: column "bandwidth_pool_cap_mbps" of relation "portal_users" does not exist
+  const pgMatch = msg.match(/column\s+["']?([a-zA-Z0-9_]+)["']?\s+of\s+relation/i);
+  if (pgMatch?.[1]) return pgMatch[1];
+  // Postgres: column portal_users.bandwidth_pool_cap_mbps does not exist
+  const pgDotMatch = msg.match(/column\s+[a-zA-Z0-9_]+\.["']?([a-zA-Z0-9_]+)["']?\s+does not exist/i);
+  if (pgDotMatch?.[1]) return pgDotMatch[1];
+  return null;
+}
+
+export function isResellerTableMissingError(err: any): boolean {
   if (!err) return false;
   const code = String(err.code || '').toUpperCase();
-  const msg = String(err.message || err.details || err.hint || '').toLowerCase();
+  const msg = String(err.message || err.details || '').toLowerCase();
   return (
     code === '42P01' ||
-    code === '42703' ||
-    code === 'PGRST204' ||
     code === 'PGRST205' ||
-    msg.includes('reseller_tariffs') ||
-    msg.includes('reseller_wallet_ledger') ||
-    msg.includes('tier_level') ||
-    msg.includes('parent_dealer_id') ||
-    msg.includes('wallet_balance') ||
-    msg.includes('credit_limit') ||
-    msg.includes('dealer_id') ||
-    msg.includes('bandwidth_pool_cap_mbps') ||
-    msg.includes('max_active_users') ||
-    msg.includes('can_create_subdealers')
+    (msg.includes('could not find the table') && msg.includes('schema cache')) ||
+    (msg.includes('relation') && msg.includes('does not exist'))
   );
+}
+
+export function isResellerSchemaMissingError(err: any): boolean {
+  if (!err) return false;
+  return isResellerTableMissingError(err);
+}
+
+const OPTIONAL_PORTAL_USER_COLUMNS = new Set([
+  'bandwidth_pool_cap_mbps',
+  'assigned_pool_mbps',
+  'can_access_gis_map',
+  'gis_map_permission',
+  'permissions',
+  'account_status',
+  'can_create_subdealers',
+  'max_active_users',
+  'credit_limit',
+  'wallet_balance',
+  'parent_dealer_id',
+  'dealer_id',
+  'tier_level',
+  'created_at',
+  'phone',
+  'area',
+]);
+
+async function adaptivePortalUsersInsert(
+  initialPayload: Record<string, any>
+): Promise<{ data: any; error: any; strippedColumns: string[] }> {
+  const working: Record<string, any> = { ...initialPayload };
+  const strippedColumns: string[] = [];
+  let roleFallbackTried = false;
+  let swappedPoolColumn = false;
+
+  for (let attempt = 0; attempt < 14; attempt++) {
+    const { data, error } = await supabase
+      .from('portal_users')
+      .insert([working])
+      .select('*')
+      .single();
+
+    if (!error) {
+      return { data, error: null, strippedColumns };
+    }
+
+    console.error(`[ResellerEngine] portal_users insert attempt ${attempt + 1} failed:`, error);
+
+    const code = String(error.code || '').toUpperCase();
+    const msgLower = String(error.message || '').toLowerCase();
+
+    // Handle role CHECK constraint (e.g. legacy constraint allowing only ADMIN/MANAGER/AGENT/CLIENT)
+    if (
+      !roleFallbackTried &&
+      (code === '23514' || msgLower.includes('check constraint')) &&
+      working.role !== 'MANAGER'
+    ) {
+      roleFallbackTried = true;
+      working.role = 'MANAGER';
+      continue;
+    }
+
+    // Handle missing column in PostgREST schema cache (PGRST204) or PostgreSQL (42703)
+    const missingCol = extractMissingColumnName(error);
+    if (missingCol && (code === 'PGRST204' || code === '42703' || msgLower.includes('schema cache') || msgLower.includes('does not exist'))) {
+      if (missingCol === 'bandwidth_pool_cap_mbps' && !swappedPoolColumn && 'bandwidth_pool_cap_mbps' in working) {
+        swappedPoolColumn = true;
+        const val = working.bandwidth_pool_cap_mbps;
+        delete working.bandwidth_pool_cap_mbps;
+        working.assigned_pool_mbps = val;
+        console.warn('[ResellerEngine] Swapped bandwidth_pool_cap_mbps -> assigned_pool_mbps on portal_users.');
+        continue;
+      }
+
+      if (missingCol in working && OPTIONAL_PORTAL_USER_COLUMNS.has(missingCol)) {
+        delete working[missingCol];
+        strippedColumns.push(missingCol);
+        console.warn(`[ResellerEngine] Stripped unavailable optional column "${missingCol}" and retrying portal_users insert.`);
+        continue;
+      }
+    }
+
+    return { data: null, error, strippedColumns };
+  }
+
+  return {
+    data: null,
+    error: { message: 'Exceeded retry attempts while adapting portal_users columns.' },
+    strippedColumns,
+  };
+}
+
+async function adaptivePortalUsersUpdate(
+  resellerId: string,
+  initialPatch: Record<string, any>
+): Promise<{ error: any; strippedColumns: string[] }> {
+  const working: Record<string, any> = { ...initialPatch };
+  const strippedColumns: string[] = [];
+  let swappedPoolColumn = false;
+
+  for (let attempt = 0; attempt < 12; attempt++) {
+    if (Object.keys(working).length === 0) {
+      return { error: null, strippedColumns };
+    }
+
+    const { error } = await supabase.from('portal_users').update(working).eq('id', resellerId);
+    if (!error) {
+      return { error: null, strippedColumns };
+    }
+
+    console.error(`[ResellerEngine] portal_users update attempt ${attempt + 1} failed:`, error);
+
+    const code = String(error.code || '').toUpperCase();
+    const msgLower = String(error.message || '').toLowerCase();
+    const missingCol = extractMissingColumnName(error);
+
+    if (missingCol && (code === 'PGRST204' || code === '42703' || msgLower.includes('schema cache') || msgLower.includes('does not exist'))) {
+      if (missingCol === 'bandwidth_pool_cap_mbps' && !swappedPoolColumn && 'bandwidth_pool_cap_mbps' in working) {
+        swappedPoolColumn = true;
+        const val = working.bandwidth_pool_cap_mbps;
+        delete working.bandwidth_pool_cap_mbps;
+        working.assigned_pool_mbps = val;
+        continue;
+      }
+
+      if (missingCol in working && OPTIONAL_PORTAL_USER_COLUMNS.has(missingCol)) {
+        delete working[missingCol];
+        strippedColumns.push(missingCol);
+        continue;
+      }
+    }
+
+    return { error, strippedColumns };
+  }
+
+  return {
+    error: { message: 'Exceeded retry attempts while updating portal_users.' },
+    strippedColumns,
+  };
+}
+
+async function adaptiveLedgerInsert(rows: Array<Record<string, any>>): Promise<{ error: any }> {
+  let workingRows = rows.map((r) => ({ ...r }));
+  for (let attempt = 0; attempt < 8; attempt++) {
+    const { error } = await supabase.from('reseller_wallet_ledger').insert(workingRows);
+    if (!error) return { error: null };
+
+    console.error(`[ResellerEngine] reseller_wallet_ledger insert attempt ${attempt + 1} failed:`, error);
+    const missingCol = extractMissingColumnName(error);
+    if (missingCol && workingRows.some((r) => missingCol in r)) {
+      workingRows = workingRows.map((r) => {
+        const copy = { ...r };
+        delete copy[missingCol];
+        return copy;
+      });
+      continue;
+    }
+    return { error };
+  }
+  return { error: { message: 'Failed to insert wallet ledger row after retries.' } };
 }
 
 /**
@@ -441,10 +623,11 @@ export async function fetchResellerDataBundle(): Promise<{
   tariffs: SupabaseResellerTariff[];
   ledger: SupabaseResellerWalletLedger[];
   missingSchema: boolean;
+  loadErrors: string[];
 }> {
   const [usersRes, tariffsRes, ledgerRes] = await Promise.all([
     supabase.from('portal_users').select('*').order('created_at', { ascending: false }),
-    supabase.from('reseller_tariffs').select('*').order('profile_name', { ascending: true }),
+    supabase.from('reseller_tariffs').select('*'),
     supabase
       .from('reseller_wallet_ledger')
       .select('*')
@@ -452,9 +635,23 @@ export async function fetchResellerDataBundle(): Promise<{
       .limit(400),
   ]);
 
+  const loadErrors: string[] = [];
+  if (usersRes.error) {
+    console.error('[ResellerEngine] Failed loading portal_users:', usersRes.error);
+    loadErrors.push(`portal_users: ${formatSupabaseError(usersRes.error)}`);
+  }
+  if (tariffsRes.error) {
+    console.error('[ResellerEngine] Failed loading reseller_tariffs:', tariffsRes.error);
+    loadErrors.push(`reseller_tariffs: ${formatSupabaseError(tariffsRes.error)}`);
+  }
+  if (ledgerRes.error) {
+    console.error('[ResellerEngine] Failed loading reseller_wallet_ledger:', ledgerRes.error);
+    loadErrors.push(`reseller_wallet_ledger: ${formatSupabaseError(ledgerRes.error)}`);
+  }
+
   const missingSchema =
-    isResellerSchemaMissingError(tariffsRes.error) ||
-    isResellerSchemaMissingError(ledgerRes.error);
+    isResellerTableMissingError(tariffsRes.error) ||
+    isResellerTableMissingError(ledgerRes.error);
 
   const allUsers = (usersRes.data || []) as SupabasePortalUser[];
   const dealers = allUsers.filter((u) => getResellerTier(u) === 'DEALER');
@@ -462,15 +659,26 @@ export async function fetchResellerDataBundle(): Promise<{
   const resellers = [...dealers, ...subDealers];
   const subscribers = allUsers.filter((u) => String(u.role || '').toUpperCase() === 'CLIENT');
 
+  const rawTariffs = tariffsRes.error ? [] : ((tariffsRes.data || []) as any[]);
+  const normalizedTariffs: SupabaseResellerTariff[] = rawTariffs
+    .map((t) => ({
+      ...t,
+      profile_name: String(t.profile_name || t.package_name || t.mikrotik_profile || '').trim(),
+      wholesale_price: Number(t.wholesale_price ?? 0),
+      retail_price: Number(t.retail_price ?? 0),
+    }))
+    .sort((a, b) => a.profile_name.localeCompare(b.profile_name));
+
   return {
     allUsers,
     resellers,
     dealers,
     subDealers,
     subscribers,
-    tariffs: tariffsRes.error ? [] : ((tariffsRes.data || []) as SupabaseResellerTariff[]),
+    tariffs: normalizedTariffs,
     ledger: ledgerRes.error ? [] : ((ledgerRes.data || []) as SupabaseResellerWalletLedger[]),
     missingSchema,
+    loadErrors,
   };
 }
 
@@ -527,37 +735,25 @@ export async function createResellerAccount(input: {
     created_at: new Date().toISOString(),
   };
 
-  let { data, error } = await supabase
-    .from('portal_users')
-    .insert([payload])
-    .select('*')
-    .single();
-
-  // If old DB CHECK constraint rejects DEALER/SUB_DEALER in `role`, try MANAGER + tier_level
-  if (error && (String(error.code) === '23514' || String(error.message || '').toLowerCase().includes('check constraint'))) {
-    const fallbackPayload = { ...payload, role: 'MANAGER' };
-    const retry = await supabase
-      .from('portal_users')
-      .insert([fallbackPayload])
-      .select('*')
-      .single();
-    data = retry.data;
-    error = retry.error;
-  }
+  const { data, error } = await adaptivePortalUsersInsert(payload);
 
   if (error) {
-    if (isResellerSchemaMissingError(error)) {
+    const code = String(error.code || '').toUpperCase();
+    if (code === '23505') {
       return {
         ok: false,
-        schemaMissing: true,
-        error: 'Reseller columns are missing on portal_users. Run the Reseller SQL migration in Supabase.',
+        error: `Username "@${cleanUsername}" already exists in portal_users. Choose a different username.`,
       };
     }
-    return { ok: false, error: error.message || 'Failed to create reseller account.' };
+    return {
+      ok: false,
+      schemaMissing: isResellerTableMissingError(error),
+      error: `Failed to create reseller in portal_users: ${formatSupabaseError(error)}`,
+    };
   }
 
   if (data && initialWallet > 0) {
-    await supabase.from('reseller_wallet_ledger').insert([
+    await adaptiveLedgerInsert([
       {
         reseller_id: data.id,
         reseller_name: data.full_name,
@@ -606,9 +802,9 @@ export async function updateResellerAccount(
   if (updates.accountStatus !== undefined) patch.account_status = updates.accountStatus;
   if (updates.password && updates.password.trim()) patch.password = updates.password.trim();
 
-  const { error } = await supabase.from('portal_users').update(patch).eq('id', resellerId);
+  const { error } = await adaptivePortalUsersUpdate(resellerId, patch);
   if (error) {
-    return { ok: false, error: error.message || 'Failed to update reseller settings.' };
+    return { ok: false, error: formatSupabaseError(error) };
   }
   return { ok: true };
 }
@@ -629,29 +825,41 @@ export async function upsertResellerTariff(params: {
     return { ok: false, error: 'Wholesale and retail prices must be zero or positive numbers.' };
   }
 
-  const { data, error } = await supabase
+  const rowPayload: Record<string, any> = {
+    reseller_id: params.resellerId,
+    profile_name: params.profileName.trim(),
+    wholesale_price: wholesale,
+    retail_price: retail,
+    updated_by: params.updatedBy || 'Admin',
+    updated_at: new Date().toISOString(),
+  };
+
+  let { data, error } = await supabase
     .from('reseller_tariffs')
-    .upsert(
-      [
-        {
-          reseller_id: params.resellerId,
-          profile_name: params.profileName.trim(),
-          wholesale_price: wholesale,
-          retail_price: retail,
-          updated_by: params.updatedBy || 'Admin',
-          updated_at: new Date().toISOString(),
-        },
-      ],
-      { onConflict: 'reseller_id,profile_name' }
-    )
+    .upsert([rowPayload], { onConflict: 'reseller_id,profile_name' })
     .select('*')
     .single();
 
   if (error) {
+    const missingCol = extractMissingColumnName(error);
+    if (missingCol && (missingCol === 'updated_by' || missingCol === 'updated_at')) {
+      delete rowPayload[missingCol];
+      const retry = await supabase
+        .from('reseller_tariffs')
+        .upsert([rowPayload], { onConflict: 'reseller_id,profile_name' })
+        .select('*')
+        .single();
+      data = retry.data;
+      error = retry.error;
+    }
+  }
+
+  if (error) {
+    console.error('[ResellerEngine] upsertResellerTariff failed:', error);
     return {
       ok: false,
-      schemaMissing: isResellerSchemaMissingError(error),
-      error: error.message || 'Failed to save reseller tariff.',
+      schemaMissing: isResellerTableMissingError(error),
+      error: `Failed to save reseller tariff: ${formatSupabaseError(error)}`,
     };
   }
   return { ok: true, tariff: data as SupabaseResellerTariff };
@@ -670,15 +878,16 @@ export async function rechargeResellerWallet(params: {
 
   const { data: reseller, error: fetchErr } = await supabase
     .from('portal_users')
-    .select('id, username, full_name, wallet_balance')
+    .select('*')
     .eq('id', params.resellerId)
     .single();
 
   if (fetchErr || !reseller) {
+    console.error('[ResellerEngine] rechargeResellerWallet fetch failed:', fetchErr);
     return {
       ok: false,
-      schemaMissing: isResellerSchemaMissingError(fetchErr),
-      error: fetchErr?.message || 'Reseller account not found.',
+      schemaMissing: isResellerTableMissingError(fetchErr),
+      error: fetchErr ? formatSupabaseError(fetchErr) : 'Reseller account not found.',
     };
   }
 
@@ -691,14 +900,15 @@ export async function rechargeResellerWallet(params: {
     .eq('id', reseller.id);
 
   if (updErr) {
+    console.error('[ResellerEngine] rechargeResellerWallet update failed:', updErr);
     return {
       ok: false,
-      schemaMissing: isResellerSchemaMissingError(updErr),
-      error: updErr.message || 'Failed to update wallet balance.',
+      schemaMissing: isResellerTableMissingError(updErr),
+      error: formatSupabaseError(updErr),
     };
   }
 
-  const { error: ledgerErr } = await supabase.from('reseller_wallet_ledger').insert([
+  const { error: ledgerErr } = await adaptiveLedgerInsert([
     {
       reseller_id: reseller.id,
       reseller_name: reseller.full_name,
@@ -714,7 +924,7 @@ export async function rechargeResellerWallet(params: {
 
   broadcastResellerWalletUpdated({ resellerId: reseller.id, walletBalance: after });
 
-  if (ledgerErr && isResellerSchemaMissingError(ledgerErr)) {
+  if (ledgerErr && isResellerTableMissingError(ledgerErr)) {
     return { ok: true, balanceAfter: after, schemaMissing: true };
   }
 
@@ -745,20 +955,18 @@ export async function transferDealerToSubDealer(params: {
   }
 
   const [{ data: dealer, error: dErr }, { data: subDealer, error: sErr }] = await Promise.all([
-    supabase
-      .from('portal_users')
-      .select('id, username, full_name, role, tier_level, wallet_balance')
-      .eq('id', params.fromDealerId)
-      .single(),
-    supabase
-      .from('portal_users')
-      .select('id, username, full_name, role, tier_level, parent_dealer_id, wallet_balance')
-      .eq('id', params.toSubDealerId)
-      .single(),
+    supabase.from('portal_users').select('*').eq('id', params.fromDealerId).single(),
+    supabase.from('portal_users').select('*').eq('id', params.toSubDealerId).single(),
   ]);
 
-  if (dErr || !dealer) return { ok: false, error: 'Source Dealer account not found.' };
-  if (sErr || !subDealer) return { ok: false, error: 'Destination Sub-Dealer account not found.' };
+  if (dErr || !dealer) {
+    console.error('[ResellerEngine] transfer source dealer fetch failed:', dErr);
+    return { ok: false, error: dErr ? formatSupabaseError(dErr) : 'Source Dealer account not found.' };
+  }
+  if (sErr || !subDealer) {
+    console.error('[ResellerEngine] transfer target sub-dealer fetch failed:', sErr);
+    return { ok: false, error: sErr ? formatSupabaseError(sErr) : 'Destination Sub-Dealer account not found.' };
+  }
 
   const validation = validateSubDealerTransfer({
     dealerId: dealer.id,
@@ -803,7 +1011,7 @@ export async function transferDealerToSubDealer(params: {
 
   // 3. Log both ledger entries
   const cleanNotes = params.notes?.trim();
-  await supabase.from('reseller_wallet_ledger').insert([
+  await adaptiveLedgerInsert([
     {
       reseller_id: dealer.id,
       reseller_name: dealer.full_name,
@@ -867,14 +1075,13 @@ export async function checkAndDeductResellerWallet(params: {
 
   const { data: reseller, error: resErr } = await supabase
     .from('portal_users')
-    .select(
-      'id, username, full_name, role, tier_level, wallet_balance, credit_limit, max_active_users, account_status'
-    )
+    .select('*')
     .eq('id', params.resellerId)
     .maybeSingle();
 
   if (resErr) {
-    if (isResellerSchemaMissingError(resErr)) {
+    console.error('[ResellerEngine] checkAndDeductResellerWallet fetch failed:', resErr);
+    if (isResellerTableMissingError(resErr)) {
       return { ok: true, skipped: true, chargedAmount: 0, balanceBefore: 0, balanceAfter: 0 };
     }
     return {
@@ -882,7 +1089,7 @@ export async function checkAndDeductResellerWallet(params: {
       chargedAmount: 0,
       balanceBefore: 0,
       balanceAfter: 0,
-      error: resErr.message || 'Failed to verify reseller wallet.',
+      error: formatSupabaseError(resErr),
     };
   }
 
@@ -971,7 +1178,7 @@ export async function checkAndDeductResellerWallet(params: {
       };
     }
 
-    await supabase.from('reseller_wallet_ledger').insert([
+    await adaptiveLedgerInsert([
       {
         reseller_id: reseller.id,
         reseller_name: reseller.full_name,
@@ -1020,15 +1227,18 @@ export async function fetchLiveResellerWalletSnapshot(
   if (!user?.id || !isResellerUser(user)) return null;
   const { data, error } = await supabase
     .from('portal_users')
-    .select('wallet_balance, credit_limit, bandwidth_pool_cap_mbps, max_active_users, can_create_subdealers')
+    .select('*')
     .eq('id', user.id)
     .maybeSingle();
 
-  if (error || !data) return null;
+  if (error || !data) {
+    if (error) console.error('[ResellerEngine] fetchLiveResellerWalletSnapshot failed:', error);
+    return null;
+  }
   return {
     wallet_balance: Number(data.wallet_balance || 0),
     credit_limit: Number(data.credit_limit || 0),
-    bandwidth_pool_cap_mbps: Number(data.bandwidth_pool_cap_mbps || 0),
+    bandwidth_pool_cap_mbps: getResellerPoolMbps(data),
     max_active_users: Number(data.max_active_users || 0),
     can_create_subdealers: Boolean(data.can_create_subdealers),
   };

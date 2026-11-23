@@ -40,12 +40,14 @@ import {
   computeTariffMargin,
   createResellerAccount,
   fetchResellerDataBundle,
+  getResellerPoolMbps,
   getResellerTier,
   rechargeResellerWallet,
   transferDealerToSubDealer,
   updateResellerAccount,
   upsertResellerTariff,
 } from '../lib/resellerEngine';
+import { saveUnifiedPortalUser } from '../lib/auth';
 
 export interface DealersManagementViewProps {
   currentUser: UserAccount | null;
@@ -114,6 +116,7 @@ export const DealersManagementView: React.FC<DealersManagementViewProps> = ({
   const [isLoading, setIsLoading] = useState<boolean>(true);
   const [isLoadingProfiles, setIsLoadingProfiles] = useState<boolean>(false);
   const [missingSchema, setMissingSchema] = useState<boolean>(false);
+  const [dbErrorDetails, setDbErrorDetails] = useState<string[]>([]);
   const [copiedSql, setCopiedSql] = useState<boolean>(false);
 
   const [expandedDealerIds, setExpandedDealerIds] = useState<Record<string, boolean>>({});
@@ -192,6 +195,7 @@ export const DealersManagementView: React.FC<DealersManagementViewProps> = ({
       setTariffs(bundle.tariffs);
       setLedger(bundle.ledger);
       setMissingSchema(bundle.missingSchema);
+      setDbErrorDetails(bundle.loadErrors || []);
 
       // Expand dealers by default on first load
       setExpandedDealerIds((prev) => {
@@ -203,7 +207,10 @@ export const DealersManagementView: React.FC<DealersManagementViewProps> = ({
         return next;
       });
     } catch (err: any) {
-      showToast('error', err?.message || 'Failed to load reseller hierarchy.');
+      console.error('[DealersManagementView] loadData error:', err);
+      const msg = err?.message || 'Failed to load reseller hierarchy.';
+      setDbErrorDetails([msg]);
+      showToast('error', msg);
     } finally {
       setIsLoading(false);
     }
@@ -465,9 +472,26 @@ export const DealersManagementView: React.FC<DealersManagementViewProps> = ({
       });
 
       if (!res.ok) {
+        console.error('[DealersManagementView] createResellerAccount failed:', res.error);
         if (res.schemaMissing) setMissingSchema(true);
         showToast('error', res.error || 'Could not create reseller.');
         return;
+      }
+
+      // Mirror Staff Management local auth sync so the new reseller can log in immediately
+      if (res.user) {
+        try {
+          saveUnifiedPortalUser({
+            username: res.user.username,
+            password: createForm.password.trim(),
+            role: createModalTier,
+            fullName: res.user.full_name,
+            phone: res.user.phone || createForm.phone,
+            area: res.user.area || createForm.area || 'Main Zone',
+          });
+        } catch (syncErr) {
+          console.warn('[DealersManagementView] local auth sync notice:', syncErr);
+        }
       }
 
       setCreateModalTier(null);
@@ -575,7 +599,7 @@ export const DealersManagementView: React.FC<DealersManagementViewProps> = ({
       phone: reseller.phone || '',
       area: reseller.area || '',
       creditLimit: String(Number(reseller.credit_limit || 0)),
-      bandwidthPoolCapMbps: String(Number(reseller.bandwidth_pool_cap_mbps || 0)),
+      bandwidthPoolCapMbps: String(getResellerPoolMbps(reseller)),
       maxActiveUsers: String(Number(reseller.max_active_users || 0)),
       canCreateSubdealers: Boolean(reseller.can_create_subdealers),
       accountStatus:
@@ -713,6 +737,7 @@ export const DealersManagementView: React.FC<DealersManagementViewProps> = ({
               area: editCapsForm.area,
               credit_limit: Number(editCapsForm.creditLimit) || 0,
               bandwidth_pool_cap_mbps: Number(editCapsForm.bandwidthPoolCapMbps) || 0,
+              assigned_pool_mbps: Number(editCapsForm.bandwidthPoolCapMbps) || 0,
               max_active_users: Number(editCapsForm.maxActiveUsers) || 0,
               can_create_subdealers:
                 getResellerTier(prev) === 'DEALER' ? editCapsForm.canCreateSubdealers : false,
@@ -813,29 +838,40 @@ export const DealersManagementView: React.FC<DealersManagementViewProps> = ({
         </div>
       )}
 
-      {/* Missing Schema SQL Migration Notice */}
-      {missingSchema && (
-        <div className="rounded-lg border border-amber-300 dark:border-amber-700/60 bg-amber-50 dark:bg-amber-950/40 p-4 flex flex-col sm:flex-row sm:items-center justify-between gap-3">
+      {/* Real Supabase / Schema Diagnostics Banner */}
+      {(missingSchema || dbErrorDetails.length > 0) && (
+        <div className="rounded-lg border border-amber-300 dark:border-amber-700/60 bg-amber-50 dark:bg-amber-950/40 p-4 flex flex-col sm:flex-row sm:items-start justify-between gap-3">
           <div className="flex items-start gap-2.5 min-w-0">
             <Database className="w-4 h-4 text-amber-600 dark:text-amber-400 shrink-0 mt-0.5" />
-            <div className="text-xs text-amber-900 dark:text-amber-100">
-              <p className="font-semibold">Reseller Database Tables Required</p>
-              <p className="text-amber-700 dark:text-amber-300 mt-0.5">
-                Run the idempotent SQL migration in Supabase SQL Editor to create{' '}
-                <code className="font-mono">reseller_tariffs</code>,{' '}
-                <code className="font-mono">reseller_wallet_ledger</code>, and reseller columns on{' '}
-                <code className="font-mono">portal_users</code>.
+            <div className="text-xs text-amber-900 dark:text-amber-100 min-w-0">
+              <p className="font-semibold">
+                {missingSchema ? 'Reseller Database Tables Missing' : 'Supabase Query Warning'}
               </p>
+              {dbErrorDetails.length > 0 ? (
+                <ul className="mt-1 space-y-0.5 font-mono text-[11px] text-amber-800 dark:text-amber-200 break-all">
+                  {dbErrorDetails.map((errText, idx) => (
+                    <li key={idx}>{errText}</li>
+                  ))}
+                </ul>
+              ) : (
+                <p className="text-amber-700 dark:text-amber-300 mt-0.5">
+                  Run the SQL migration in Supabase SQL Editor to create{' '}
+                  <code className="font-mono">reseller_tariffs</code> and{' '}
+                  <code className="font-mono">reseller_wallet_ledger</code>.
+                </p>
+              )}
             </div>
           </div>
-          <button
-            type="button"
-            onClick={handleCopySql}
-            className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-amber-600 hover:bg-amber-500 text-white text-xs font-semibold whitespace-nowrap shrink-0 cursor-pointer"
-          >
-            {copiedSql ? <Check className="w-3.5 h-3.5" /> : <Copy className="w-3.5 h-3.5" />}
-            <span>{copiedSql ? 'SQL Copied' : 'Copy Reseller SQL'}</span>
-          </button>
+          {missingSchema && (
+            <button
+              type="button"
+              onClick={handleCopySql}
+              className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-amber-600 hover:bg-amber-500 text-white text-xs font-semibold whitespace-nowrap shrink-0 cursor-pointer"
+            >
+              {copiedSql ? <Check className="w-3.5 h-3.5" /> : <Copy className="w-3.5 h-3.5" />}
+              <span>{copiedSql ? 'SQL Copied' : 'Copy Reseller SQL'}</span>
+            </button>
+          )}
         </div>
       )}
 
@@ -1080,8 +1116,8 @@ export const DealersManagementView: React.FC<DealersManagementViewProps> = ({
 
                             <td className="py-3.5 px-3 text-right font-mono tabular-nums text-slate-700 dark:text-slate-300">
                               <div>
-                                {Number(dealer.bandwidth_pool_cap_mbps || 0) > 0
-                                  ? `${dealer.bandwidth_pool_cap_mbps} Mbps`
+                                {getResellerPoolMbps(dealer) > 0
+                                  ? `${getResellerPoolMbps(dealer)} Mbps`
                                   : 'Unmetered'}
                               </div>
                               <div className="text-[11px] text-slate-500 dark:text-slate-400 mt-0.5">
@@ -1205,8 +1241,8 @@ export const DealersManagementView: React.FC<DealersManagementViewProps> = ({
 
                                   <td className="py-3 px-3 text-right font-mono tabular-nums text-slate-700 dark:text-slate-300">
                                     <div>
-                                      {Number(sub.bandwidth_pool_cap_mbps || 0) > 0
-                                        ? `${sub.bandwidth_pool_cap_mbps} Mbps`
+                                      {getResellerPoolMbps(sub) > 0
+                                        ? `${getResellerPoolMbps(sub)} Mbps`
                                         : 'Unmetered'}
                                     </div>
                                     <div className="text-[11px] text-slate-500 dark:text-slate-400 mt-0.5">

@@ -287,7 +287,9 @@ function ISPAppContent() {
                   ...prev,
                   wallet_balance: Number(row.wallet_balance ?? prev.wallet_balance ?? 0),
                   credit_limit: Number(row.credit_limit ?? prev.credit_limit ?? 0),
-                  bandwidth_pool_cap_mbps: Number(row.bandwidth_pool_cap_mbps ?? prev.bandwidth_pool_cap_mbps ?? 0),
+                  bandwidth_pool_cap_mbps: Number(
+                    row.bandwidth_pool_cap_mbps ?? row.assigned_pool_mbps ?? prev.bandwidth_pool_cap_mbps ?? 0
+                  ),
                   max_active_users: Number(row.max_active_users ?? prev.max_active_users ?? 0),
                   can_create_subdealers: Boolean(row.can_create_subdealers ?? prev.can_create_subdealers),
                 };
