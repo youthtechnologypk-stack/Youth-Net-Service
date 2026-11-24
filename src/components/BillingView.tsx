@@ -208,6 +208,7 @@ export const BillingView: React.FC<BillingViewProps> = ({
   const [editPackageProfile, setEditPackageProfile] = useState<string>('');
   const [editDetectedMkProfile, setEditDetectedMkProfile] = useState<string | null>(null);
   const [deleteLinkedPayments, setDeleteLinkedPayments] = useState<boolean>(true);
+  const [deleteInvoiceError, setDeleteInvoiceError] = useState<string | null>(null);
 
   // New Invoice Form State
   const [newSubUsername, setNewSubUsername] = useState<string>('');
@@ -803,9 +804,11 @@ export const BillingView: React.FC<BillingViewProps> = ({
         amount: Number(updatedData.amount) || 0,
         due_date: updatedData.due_date || editDueDate,
         cycle_day: updatedData.cycle_day,
+        billing_cycle_day: updatedData.cycle_day,
         status: editStatus,
         assigned_agent_id: updatedData.assigned_agent_id || null,
         assigned_agent_name: updatedData.assigned_agent_name || null,
+        assigned_agent: updatedData.assigned_agent_name || null,
         notes: updatedData.notes ?? null,
         package_profile: updatedData.package_profile || null,
         package_name: updatedData.package_name || null,
@@ -820,6 +823,7 @@ export const BillingView: React.FC<BillingViewProps> = ({
 
       setActionNotice(`Invoice ${invoiceToEdit.invoice_no} updated successfully!${syncNote}`);
       setTimeout(() => setActionNotice(null), 6000);
+      setEditInvoiceError(null);
       setIsEditModalOpen(false);
       setInvoiceToEdit(null);
       await fetchInvoices();
@@ -830,11 +834,12 @@ export const BillingView: React.FC<BillingViewProps> = ({
     }
   };
 
-  // 7. Execute Invoice Delete via RBAC-verified Backend API (+ Optional Linked Payment Cleanup)
+  // 7. Execute Invoice Delete via Direct Supabase (+ Optional Linked Payment Cleanup)
   const handleDeleteInvoice = async () => {
     if (!perms.edit_delete_invoice) return;
     if (!invoiceToDelete) return;
 
+    setDeleteInvoiceError(null);
     setIsSubmitting(true);
     try {
       const invoiceId = invoiceToDelete.id;
@@ -856,10 +861,13 @@ export const BillingView: React.FC<BillingViewProps> = ({
           : '';
       setActionNotice(`Invoice ${invoiceNo} deleted successfully.${txNote}`);
       setTimeout(() => setActionNotice(null), 5000);
+      setDeleteInvoiceError(null);
       setInvoiceToDelete(null);
       await fetchInvoices();
     } catch (err: any) {
-      setActionNotice(`Failed to delete invoice: ${err.message}`);
+      const msg = err?.message || 'Failed to delete invoice.';
+      setDeleteInvoiceError(msg);
+      setActionNotice(`Failed to delete invoice: ${msg}`);
     } finally {
       setIsSubmitting(false);
     }
@@ -1990,7 +1998,10 @@ export const BillingView: React.FC<BillingViewProps> = ({
                             </button>
                             <button
                               type="button"
-                              onClick={() => setInvoiceToDelete(inv)}
+                              onClick={() => {
+                                setDeleteInvoiceError(null);
+                                setInvoiceToDelete(inv);
+                              }}
                               className="p-2 bg-rose-950/80 hover:bg-rose-900 text-rose-300 border border-rose-800 rounded-xl transition cursor-pointer shrink-0"
                               title="Delete Invoice"
                             >
@@ -2032,7 +2043,10 @@ export const BillingView: React.FC<BillingViewProps> = ({
                           </button>
                           <button
                             type="button"
-                            onClick={() => setInvoiceToDelete(inv)}
+                            onClick={() => {
+                              setDeleteInvoiceError(null);
+                              setInvoiceToDelete(inv);
+                            }}
                             className="p-2.5 bg-rose-950/80 hover:bg-rose-900 text-rose-300 border border-rose-800 rounded-xl transition cursor-pointer shrink-0"
                             title="Delete Invoice"
                           >
@@ -2270,7 +2284,10 @@ export const BillingView: React.FC<BillingViewProps> = ({
                           {perms.edit_delete_invoice && (
                             <button
                               type="button"
-                              onClick={() => setInvoiceToDelete(inv)}
+                              onClick={() => {
+                                setDeleteInvoiceError(null);
+                                setInvoiceToDelete(inv);
+                              }}
                               className="p-1.5 bg-rose-950/80 hover:bg-rose-900 text-rose-300 hover:text-rose-100 border border-rose-800 rounded-lg text-xs transition cursor-pointer"
                               title="Delete Invoice"
                             >
@@ -2988,6 +3005,13 @@ export const BillingView: React.FC<BillingViewProps> = ({
                 );
               })()}
 
+              {deleteInvoiceError && (
+                <div className="rounded-xl border border-rose-500/70 bg-rose-950/90 px-3 py-2.5 text-xs font-semibold text-rose-200 flex items-start gap-2">
+                  <AlertTriangle className="w-4 h-4 text-rose-400 shrink-0 mt-0.5" />
+                  <span>{deleteInvoiceError}</span>
+                </div>
+              )}
+
               <div className="flex flex-col gap-2 pt-3 border-t border-slate-800 w-full min-w-0">
                 <button
                   type="button"
@@ -3006,7 +3030,10 @@ export const BillingView: React.FC<BillingViewProps> = ({
                 </button>
                 <button
                   type="button"
-                  onClick={() => setInvoiceToDelete(null)}
+                  onClick={() => {
+                    setDeleteInvoiceError(null);
+                    setInvoiceToDelete(null);
+                  }}
                   className="w-full min-w-0 py-2 px-4 bg-slate-800 hover:bg-slate-700 text-slate-300 rounded-xl text-base font-semibold transition cursor-pointer"
                 >
                   Cancel

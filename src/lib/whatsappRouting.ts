@@ -1,11 +1,14 @@
-import type {
-  SupabasePaymentAccount,
-  SupabasePortalUser,
-  WhatsAppEventType,
+import {
+  supabase,
+  type SupabasePaymentAccount,
+  type SupabasePortalUser,
+  type WhatsAppEventType,
 } from '../services/supabaseClient';
 import { getStoredToken, getStoredUser } from './auth';
 
 export const DEFAULT_MASTER_COMPANY_NAME = 'Youth Net Service';
+export const WHATSAPP_GATEWAY_URL_STORAGE_KEY = 'youthnet_baileys_gateway_url';
+export const DEFAULT_STANDALONE_GATEWAY_URL = 'http://localhost:3001';
 
 export const WHATSAPP_GATEWAY_MIGRATION_SQL = `-- Multi-Tenant Baileys WhatsApp Gateway & Reseller Branding Migration
 ALTER TABLE public.portal_users
@@ -38,6 +41,18 @@ CREATE INDEX IF NOT EXISTS idx_whatsapp_logs_created_at ON public.whatsapp_logs 
 CREATE INDEX IF NOT EXISTS idx_whatsapp_logs_dealer_id ON public.whatsapp_logs (dealer_id);
 CREATE INDEX IF NOT EXISTS idx_whatsapp_logs_sub_dealer_id ON public.whatsapp_logs (sub_dealer_id);
 CREATE INDEX IF NOT EXISTS idx_whatsapp_logs_event_user ON public.whatsapp_logs (event_type, subscriber_username, created_at DESC);
+
+CREATE TABLE IF NOT EXISTS public.app_settings (
+  key TEXT PRIMARY KEY,
+  value TEXT,
+  updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+ALTER TABLE public.app_settings ENABLE ROW LEVEL SECURITY;
+DROP POLICY IF EXISTS "allow_all_app_settings" ON public.app_settings;
+CREATE POLICY "allow_all_app_settings"
+  ON public.app_settings FOR ALL TO anon, authenticated
+  USING (true) WITH CHECK (true);
 
 ALTER TABLE public.whatsapp_logs ENABLE ROW LEVEL SECURITY;
 DO $$
@@ -424,10 +439,270 @@ export interface AutoWhatsAppTriggerResponse {
   senderPhone?: string | null;
   error?: string;
   skippedReason?: string;
+  isGatewayUnreachable?: boolean;
+}
+
+/**
+ * Normalizes and validates a Baileys Gateway base URL.
+ * Empty string means same-origin integrated Node server.
+ * Non-empty values must be valid http:// or https:// URLs (blocks javascript:, data:, etc.).
+ */
+export function normalizeWhatsAppGatewayUrl(raw: string): { valid: boolean; normalized: string; error?: string } {
+  const trimmed = String(raw || '').trim();
+  if (!trimmed) {
+    return { valid: true, normalized: '' };
+  }
+  const withScheme = /^https?:\/\//i.test(trimmed) ? trimmed : `http://${trimmed}`;
+  try {
+    const parsed = new URL(withScheme);
+    if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') {
+      return { valid: false, normalized: '', error: 'Gateway URL must start with http:// or https://' };
+    }
+    const cleanOriginPath = `${parsed.origin}${parsed.pathname}`.replace(/\/+$/, '');
+    return { valid: true, normalized: cleanOriginPath };
+  } catch {
+    return {
+      valid: false,
+      normalized: '',
+      error: 'Please enter a valid Gateway URL (e.g. https://wa.youthtechnology.pk or http://localhost:3001).',
+    };
+  }
+}
+
+function getEnvWhatsAppGatewayUrl(): string {
+  try {
+    const envVal = (import.meta as any)?.env?.VITE_WHATSAPP_GATEWAY_URL;
+    if (typeof envVal === 'string' && envVal.trim()) {
+      const check = normalizeWhatsAppGatewayUrl(envVal);
+      if (check.valid) return check.normalized;
+    }
+  } catch {
+    // ignore in Node/test contexts
+  }
+  return '';
+}
+
+function isStaticSpaHost(): boolean {
+  if (typeof window === 'undefined') return false;
+  const host = String(window.location?.hostname || '').toLowerCase();
+  return (
+    host.endsWith('.netlify.app') ||
+    host.endsWith('.netlify.com') ||
+    host.endsWith('.vercel.app') ||
+    host.endsWith('.pages.dev') ||
+    host.endsWith('.github.io')
+  );
+}
+
+/**
+ * Resolves the active Baileys WhatsApp Gateway base URL:
+ * 1. Saved override in localStorage (synced from Supabase app_settings / UI input)
+ * 2. VITE_WHATSAPP_GATEWAY_URL build-time env var
+ * 3. On static hosts (Netlify/Vercel), defaults to http://localhost:3001
+ * 4. Otherwise "" (same-origin integrated Node server)
+ */
+export function getConfiguredWhatsAppGatewayUrl(): string {
+  if (typeof window !== 'undefined') {
+    try {
+      const stored = window.localStorage.getItem(WHATSAPP_GATEWAY_URL_STORAGE_KEY);
+      if (stored !== null) {
+        const trimmed = stored.trim();
+        if (trimmed) {
+          const parsed = normalizeWhatsAppGatewayUrl(trimmed);
+          if (parsed.valid) return parsed.normalized;
+        }
+      }
+    } catch {
+      // ignore storage errors
+    }
+  }
+
+  const fromEnv = getEnvWhatsAppGatewayUrl();
+  if (fromEnv) return fromEnv;
+
+  if (isStaticSpaHost()) {
+    return DEFAULT_STANDALONE_GATEWAY_URL;
+  }
+
+  return '';
+}
+
+export function getDisplayWhatsAppGatewayUrl(overrideBaseUrl?: string): string {
+  const base =
+    overrideBaseUrl !== undefined
+      ? normalizeWhatsAppGatewayUrl(overrideBaseUrl).normalized
+      : getConfiguredWhatsAppGatewayUrl();
+  if (base) return base;
+  if (typeof window !== 'undefined' && window.location?.origin) {
+    return window.location.origin;
+  }
+  return DEFAULT_STANDALONE_GATEWAY_URL;
+}
+
+export async function loadPersistedWhatsAppGatewayUrl(): Promise<string> {
+  const localCurrent = getConfiguredWhatsAppGatewayUrl();
+  try {
+    const { data, error } = await supabase
+      .from('app_settings')
+      .select('value')
+      .eq('key', 'whatsapp_gateway_url')
+      .maybeSingle();
+
+    if (!error && data && typeof data.value === 'string' && data.value.trim()) {
+      const parsed = normalizeWhatsAppGatewayUrl(data.value);
+      if (parsed.valid && parsed.normalized) {
+        if (typeof window !== 'undefined') {
+          try {
+            window.localStorage.setItem(WHATSAPP_GATEWAY_URL_STORAGE_KEY, parsed.normalized);
+          } catch {
+            // ignore
+          }
+        }
+        return parsed.normalized;
+      }
+    }
+  } catch {
+    // app_settings table may not exist yet; gracefully keep local/env value
+  }
+  return localCurrent;
+}
+
+export async function saveWhatsAppGatewayUrl(rawUrl: string): Promise<{
+  ok: boolean;
+  normalizedUrl: string;
+  savedToSupabase: boolean;
+  error?: string;
+}> {
+  const check = normalizeWhatsAppGatewayUrl(rawUrl);
+  if (!check.valid) {
+    return { ok: false, normalizedUrl: '', savedToSupabase: false, error: check.error };
+  }
+
+  if (typeof window !== 'undefined') {
+    try {
+      if (check.normalized) {
+        window.localStorage.setItem(WHATSAPP_GATEWAY_URL_STORAGE_KEY, check.normalized);
+      } else {
+        window.localStorage.removeItem(WHATSAPP_GATEWAY_URL_STORAGE_KEY);
+      }
+    } catch {
+      // ignore storage errors
+    }
+  }
+
+  let savedToSupabase = false;
+  try {
+    const { error } = await supabase.from('app_settings').upsert(
+      [
+        {
+          key: 'whatsapp_gateway_url',
+          value: check.normalized,
+          updated_at: new Date().toISOString(),
+        },
+      ],
+      { onConflict: 'key' }
+    );
+    if (!error) {
+      savedToSupabase = true;
+    }
+  } catch {
+    // Graceful fallback: localStorage already persisted the URL
+  }
+
+  return {
+    ok: true,
+    normalizedUrl: check.normalized,
+    savedToSupabase,
+  };
+}
+
+export interface SafeWhatsAppApiResult<T = any> {
+  ok: boolean;
+  httpStatus: number;
+  data: T | null;
+  error: string | null;
+  isGatewayUnreachable: boolean;
+  gatewayUrl: string;
+}
+
+export function buildGatewayUnreachableMessage(gatewayUrl: string): string {
+  return `Baileys WhatsApp Gateway Server is unreachable at ${gatewayUrl}. Start the Node.js Baileys server or set your Gateway URL below.`;
+}
+
+/**
+ * Safely calls any /api/whatsapp/* endpoint on either the configured external Baileys server
+ * or the same-origin integrated server. Inspects content-type and raw response text BEFORE
+ * parsing JSON so SPA HTML fallbacks (e.g. Netlify index.html `<!doctype html>`) NEVER throw
+ * `Unexpected token '<', "<!doctype "... is not valid JSON`.
+ */
+export async function safeWhatsAppApiFetch<T = any>(
+  endpointPath: string,
+  init?: RequestInit,
+  overrideBaseUrl?: string
+): Promise<SafeWhatsAppApiResult<T>> {
+  const normalizedBase =
+    overrideBaseUrl !== undefined
+      ? normalizeWhatsAppGatewayUrl(overrideBaseUrl).normalized
+      : getConfiguredWhatsAppGatewayUrl();
+
+  const cleanPath = endpointPath.startsWith('/') ? endpointPath : `/${endpointPath}`;
+  const fullUrl = normalizedBase ? `${normalizedBase}${cleanPath}` : cleanPath;
+  const displayGateway = getDisplayWhatsAppGatewayUrl(overrideBaseUrl);
+
+  try {
+    const res = await fetch(fullUrl, init);
+    const contentType = String(res.headers.get('content-type') || '').toLowerCase();
+    const rawText = await res.text();
+    const trimmed = rawText.trim();
+
+    if (!contentType.includes('application/json') || trimmed.startsWith('<')) {
+      return {
+        ok: false,
+        httpStatus: res.status,
+        data: null,
+        error: buildGatewayUnreachableMessage(displayGateway),
+        isGatewayUnreachable: true,
+        gatewayUrl: displayGateway,
+      };
+    }
+
+    let parsed: any = null;
+    try {
+      parsed = trimmed ? JSON.parse(trimmed) : {};
+    } catch {
+      return {
+        ok: false,
+        httpStatus: res.status,
+        data: null,
+        error: buildGatewayUnreachableMessage(displayGateway),
+        isGatewayUnreachable: true,
+        gatewayUrl: displayGateway,
+      };
+    }
+
+    return {
+      ok: res.ok,
+      httpStatus: res.status,
+      data: parsed as T,
+      error: res.ok ? null : parsed?.error || `Gateway returned HTTP ${res.status}`,
+      isGatewayUnreachable: false,
+      gatewayUrl: displayGateway,
+    };
+  } catch {
+    return {
+      ok: false,
+      httpStatus: 0,
+      data: null,
+      error: buildGatewayUnreachableMessage(displayGateway),
+      isGatewayUnreachable: true,
+      gatewayUrl: displayGateway,
+    };
+  }
 }
 
 /**
  * Zero-click background dispatcher calling POST /api/whatsapp/send-auto.
+ * Uses the configured Baileys Gateway URL and safe JSON parsing.
  * Never opens wa.me popups and never throws into calling UI/billing transactions.
  */
 export async function triggerAutoWhatsAppNotification(payload: {
@@ -439,34 +714,37 @@ export async function triggerAutoWhatsAppNotification(payload: {
   if (typeof window === 'undefined') {
     return { ok: false, status: 'SKIPPED', skippedReason: 'Non-browser environment' };
   }
-  try {
-    const res = await fetch('/api/whatsapp/send-auto', {
-      method: 'POST',
-      headers: buildPortalAuthHeaders(),
-      body: JSON.stringify(payload),
-    });
-    const data = await res.json().catch(() => ({}));
-    if (!res.ok) {
-      return {
-        ok: false,
-        status: data?.status || 'FAILED',
-        senderCompanyName: data?.senderCompanyName,
-        error: data?.error || `HTTP ${res.status}`,
-      };
-    }
-    return {
-      ok: Boolean(data?.ok),
-      status: data?.status || (data?.ok ? 'SENT' : 'FAILED'),
-      senderCompanyName: data?.senderCompanyName,
-      senderPhone: data?.senderPhone || null,
-      error: data?.error,
-      skippedReason: data?.skippedReason,
-    };
-  } catch (err: any) {
+  const result = await safeWhatsAppApiFetch<any>('/api/whatsapp/send-auto', {
+    method: 'POST',
+    headers: buildPortalAuthHeaders(),
+    body: JSON.stringify(payload),
+  });
+
+  if (result.isGatewayUnreachable || !result.data) {
     return {
       ok: false,
       status: 'FAILED',
-      error: err?.message || 'Unable to reach WhatsApp gateway API',
+      isGatewayUnreachable: result.isGatewayUnreachable,
+      error: result.error || 'Unable to reach WhatsApp gateway API',
     };
   }
+
+  const data = result.data;
+  if (!result.ok) {
+    return {
+      ok: false,
+      status: data?.status || 'FAILED',
+      senderCompanyName: data?.senderCompanyName,
+      error: data?.error || result.error || `HTTP ${result.httpStatus}`,
+    };
+  }
+
+  return {
+    ok: Boolean(data?.ok),
+    status: data?.status || (data?.ok ? 'SENT' : 'FAILED'),
+    senderCompanyName: data?.senderCompanyName,
+    senderPhone: data?.senderPhone || null,
+    error: data?.error,
+    skippedReason: data?.skippedReason,
+  };
 }

@@ -20,12 +20,20 @@ import {
   XCircle,
   Clock,
   Building2,
+  Server,
+  PlugZap,
 } from 'lucide-react';
 import type { SystemRole, UserAccount } from '../types/auth';
 import type { SupabaseWhatsappLog } from '../services/supabaseClient';
 import {
   buildPortalAuthHeaders,
   DEFAULT_MASTER_COMPANY_NAME,
+  getConfiguredWhatsAppGatewayUrl,
+  getDisplayWhatsAppGatewayUrl,
+  loadPersistedWhatsAppGatewayUrl,
+  normalizeWhatsAppGatewayUrl,
+  safeWhatsAppApiFetch,
+  saveWhatsAppGatewayUrl,
   WHATSAPP_GATEWAY_MIGRATION_SQL,
 } from '../lib/whatsappRouting';
 
@@ -104,6 +112,15 @@ export const WhatsAppGatewayView: React.FC<WhatsAppGatewayViewProps> = ({
   const [actionLoading, setActionLoading] = useState<string | null>(null);
   const [feedback, setFeedback] = useState<{ type: 'success' | 'error' | 'info'; text: string } | null>(null);
 
+  // Gateway Server URL state (for Netlify / external self-hosted Baileys Node.js server)
+  const [gatewayUrlInput, setGatewayUrlInput] = useState<string>(() => getConfiguredWhatsAppGatewayUrl());
+  const [activeGatewayUrl, setActiveGatewayUrl] = useState<string>(() => getConfiguredWhatsAppGatewayUrl());
+  const [gatewayUnreachable, setGatewayUnreachable] = useState<string | null>(null);
+  const [gatewayHealth, setGatewayHealth] = useState<{
+    state: 'idle' | 'testing' | 'online' | 'offline';
+    message: string;
+  }>({ state: 'idle', message: '' });
+
   // Branding form state (never clobbered during QR polling)
   const [companyName, setCompanyName] = useState('');
   const [supportPhone, setSupportPhone] = useState('');
@@ -120,15 +137,38 @@ export const WhatsAppGatewayView: React.FC<WhatsAppGatewayViewProps> = ({
   const [eventFilter, setEventFilter] = useState<string>('ALL');
   const [expandedLogId, setExpandedLogId] = useState<string | null>(null);
 
-  const fetchStatus = useCallback(async (silent = false) => {
-    if (!silent) setLoading(true);
-    try {
-      const res = await fetch('/api/whatsapp/session/status', {
-        headers: buildPortalAuthHeaders(),
-      });
-      const json = await res.json();
-      if (res.ok && json.success) {
+  const isMasterAdmin =
+    String(currentRole || '').toUpperCase() === 'ADMIN' ||
+    String(currentUser?.role || '').toUpperCase() === 'ADMIN';
+
+  const fetchStatus = useCallback(
+    async (silent = false, overrideUrl?: string) => {
+      if (!silent) setLoading(true);
+      const targetBase = overrideUrl !== undefined ? overrideUrl : activeGatewayUrl;
+      const result = await safeWhatsAppApiFetch<any>(
+        '/api/whatsapp/session/status',
+        { headers: buildPortalAuthHeaders() },
+        targetBase
+      );
+
+      if (result.isGatewayUnreachable) {
+        setGatewayUnreachable(result.error);
+        setGatewayHealth({
+          state: 'offline',
+          message: `Unreachable at ${result.gatewayUrl}`,
+        });
+        if (!silent) setLoading(false);
+        return;
+      }
+
+      setGatewayUnreachable(null);
+      if (result.ok && result.data?.success) {
+        const json = result.data;
         setStatusData(json);
+        setGatewayHealth({
+          state: 'online',
+          message: `Connected to ${result.gatewayUrl}`,
+        });
         if (!brandingInitializedRef.current) {
           setCompanyName(json.branding?.companyName || DEFAULT_MASTER_COMPANY_NAME);
           setSupportPhone(json.branding?.supportPhone || '');
@@ -136,72 +176,168 @@ export const WhatsAppGatewayView: React.FC<WhatsAppGatewayViewProps> = ({
           brandingInitializedRef.current = true;
         }
       } else if (!silent) {
-        setFeedback({ type: 'error', text: json?.error || 'Failed to load WhatsApp session status.' });
+        setFeedback({
+          type: 'error',
+          text: result.error || result.data?.error || 'Failed to load WhatsApp session status.',
+        });
       }
-    } catch (err: any) {
-      if (!silent) {
-        setFeedback({ type: 'error', text: err?.message || 'Unable to connect to WhatsApp gateway server.' });
-      }
-    } finally {
       if (!silent) setLoading(false);
-    }
-  }, []);
+    },
+    [activeGatewayUrl]
+  );
 
-  const fetchLogs = useCallback(async () => {
-    try {
-      const res = await fetch('/api/whatsapp/logs?limit=150', {
-        headers: buildPortalAuthHeaders(),
-      });
-      const json = await res.json();
-      if (res.ok && json.success) {
-        setLogs(Array.isArray(json.logs) ? json.logs : []);
-        setTableMissing(Boolean(json.tableMissing));
+  const fetchLogs = useCallback(
+    async (overrideUrl?: string) => {
+      const targetBase = overrideUrl !== undefined ? overrideUrl : activeGatewayUrl;
+      const result = await safeWhatsAppApiFetch<any>(
+        '/api/whatsapp/logs?limit=150',
+        { headers: buildPortalAuthHeaders() },
+        targetBase
+      );
+      if (!result.isGatewayUnreachable && result.ok && result.data?.success) {
+        setLogs(Array.isArray(result.data.logs) ? result.data.logs : []);
+        setTableMissing(Boolean(result.data.tableMissing));
       }
-    } catch {
-      // ignore transient poll error
-    }
-  }, []);
+    },
+    [activeGatewayUrl]
+  );
 
   useEffect(() => {
+    let active = true;
     brandingInitializedRef.current = false;
-    fetchStatus(false);
-    fetchLogs();
-  }, [currentUser?.id, currentRole, fetchStatus, fetchLogs]);
+    loadPersistedWhatsAppGatewayUrl().then((persistedUrl) => {
+      if (!active) return;
+      setGatewayUrlInput(persistedUrl);
+      setActiveGatewayUrl(persistedUrl);
+      fetchStatus(false, persistedUrl);
+      fetchLogs(persistedUrl);
+    });
+    return () => {
+      active = false;
+    };
+  }, [currentUser?.id, currentRole]);
 
   // Poll every 2.5s while CONNECTING or QR_READY so QR refresh & instant pair completion appear live
   useEffect(() => {
     const st = statusData?.session?.status;
     if (st !== 'CONNECTING' && st !== 'QR_READY') return;
+    if (gatewayUnreachable) return;
     const timer = setInterval(() => {
       fetchStatus(true);
     }, 2500);
     return () => clearInterval(timer);
-  }, [statusData?.session?.status, fetchStatus]);
+  }, [statusData?.session?.status, gatewayUnreachable, fetchStatus]);
+
+  const handleTestGatewayConnection = async () => {
+    const check = normalizeWhatsAppGatewayUrl(gatewayUrlInput);
+    if (!check.valid) {
+      setGatewayHealth({ state: 'offline', message: check.error || 'Invalid Gateway URL.' });
+      setFeedback({ type: 'error', text: check.error || 'Invalid Gateway URL.' });
+      return;
+    }
+    setGatewayHealth({ state: 'testing', message: 'Testing Baileys Gateway...' });
+    setFeedback(null);
+
+    const res = await safeWhatsAppApiFetch<any>(
+      '/api/whatsapp/health',
+      { method: 'GET', headers: { Accept: 'application/json' } },
+      check.normalized
+    );
+
+    if (res.isGatewayUnreachable || !res.ok || !res.data?.success) {
+      const msg =
+        res.error ||
+        `Baileys WhatsApp Gateway Server is unreachable at ${getDisplayWhatsAppGatewayUrl(check.normalized)}. Start the Node.js Baileys server or set your Gateway URL below.`;
+      setGatewayUnreachable(msg);
+      setGatewayHealth({ state: 'offline', message: `Offline at ${res.gatewayUrl}` });
+      setFeedback({ type: 'error', text: msg });
+      return;
+    }
+
+    setGatewayUnreachable(null);
+    const activeCount = Number(res.data?.connectedSessionsCount ?? res.data?.activeSessionsCount ?? 0);
+    setGatewayHealth({
+      state: 'online',
+      message: `Online at ${res.gatewayUrl} (${activeCount} connected session${activeCount === 1 ? '' : 's'})`,
+    });
+    setFeedback({
+      type: 'success',
+      text: `Baileys WhatsApp Gateway is ONLINE at ${res.gatewayUrl}!`,
+    });
+  };
+
+  const handleSaveGatewayUrl = async () => {
+    setActionLoading('gateway_url');
+    setFeedback(null);
+    const saved = await saveWhatsAppGatewayUrl(gatewayUrlInput);
+    if (!saved.ok) {
+      setFeedback({ type: 'error', text: saved.error || 'Invalid Gateway URL.' });
+      setActionLoading(null);
+      return;
+    }
+
+    setGatewayUrlInput(saved.normalizedUrl);
+    setActiveGatewayUrl(saved.normalizedUrl);
+    setFeedback({
+      type: 'success',
+      text: saved.normalizedUrl
+        ? `Gateway URL saved (${saved.normalizedUrl})${saved.savedToSupabase ? ' to Supabase & browser' : ' locally'}. Reconnecting...`
+        : 'Gateway URL reset to same-origin integrated server. Reconnecting...',
+    });
+    await fetchStatus(false, saved.normalizedUrl);
+    await fetchLogs(saved.normalizedUrl);
+    setActionLoading(null);
+  };
 
   const handleStartSession = async () => {
     setActionLoading('start');
     setFeedback(null);
     try {
-      const res = await fetch('/api/whatsapp/session/start', {
-        method: 'POST',
-        headers: buildPortalAuthHeaders(),
-        body: JSON.stringify({}),
-      });
-      const json = await res.json();
-      if (!res.ok || !json.success) {
-        setFeedback({ type: 'error', text: json?.error || 'Failed to initialize WhatsApp QR session.' });
+      const result = await safeWhatsAppApiFetch<any>(
+        '/api/whatsapp/session/start',
+        {
+          method: 'POST',
+          headers: buildPortalAuthHeaders(),
+          body: JSON.stringify({}),
+        },
+        activeGatewayUrl
+      );
+
+      if (result.isGatewayUnreachable) {
+        setGatewayUnreachable(result.error);
+        setFeedback({ type: 'error', text: result.error || 'Baileys WhatsApp Gateway Server is unreachable.' });
+        return;
+      }
+
+      setGatewayUnreachable(null);
+      const json = result.data;
+      if (!result.ok || !json?.success) {
+        setFeedback({
+          type: 'error',
+          text: result.error || json?.error || 'Failed to initialize WhatsApp QR session.',
+        });
       } else {
+        const nextStatus = json.status || json.session?.status;
+        const nextQr = json.qrDataUrl || json.session?.qrDataUrl || null;
+        if (nextQr && statusData) {
+          setStatusData({
+            ...statusData,
+            session: {
+              ...statusData.session,
+              status: nextStatus || 'QR_READY',
+              qrDataUrl: nextQr,
+            },
+          });
+        }
         setFeedback({
           type: 'info',
           text:
-            json.session?.status === 'CONNECTED'
-              ? `WhatsApp connected (${json.session.phone || 'Active'}).`
+            nextStatus === 'CONNECTED'
+              ? `WhatsApp connected (${json.session?.phone || 'Active'}).`
               : 'Live QR code generated. Open WhatsApp -> Linked Devices -> Link a Device to scan.',
         });
         await fetchStatus(true);
       }
-    } catch (err: any) {
-      setFeedback({ type: 'error', text: err?.message || 'Error starting WhatsApp session.' });
     } finally {
       setActionLoading(null);
     }
@@ -211,20 +347,32 @@ export const WhatsAppGatewayView: React.FC<WhatsAppGatewayViewProps> = ({
     setActionLoading('logout');
     setFeedback(null);
     try {
-      const res = await fetch('/api/whatsapp/session/logout', {
-        method: 'POST',
-        headers: buildPortalAuthHeaders(),
-        body: JSON.stringify({}),
-      });
-      const json = await res.json();
-      if (!res.ok || !json.success) {
-        setFeedback({ type: 'error', text: json?.error || 'Failed to disconnect WhatsApp session.' });
+      const result = await safeWhatsAppApiFetch<any>(
+        '/api/whatsapp/session/logout',
+        {
+          method: 'POST',
+          headers: buildPortalAuthHeaders(),
+          body: JSON.stringify({}),
+        },
+        activeGatewayUrl
+      );
+      if (result.isGatewayUnreachable) {
+        setGatewayUnreachable(result.error);
+        setFeedback({ type: 'error', text: result.error || 'Baileys WhatsApp Gateway Server is unreachable.' });
+        return;
+      }
+      if (!result.ok || !result.data?.success) {
+        setFeedback({
+          type: 'error',
+          text: result.error || result.data?.error || 'Failed to disconnect WhatsApp session.',
+        });
       } else {
-        setFeedback({ type: 'success', text: 'WhatsApp session disconnected and local auth credentials cleared.' });
+        setFeedback({
+          type: 'success',
+          text: 'WhatsApp session disconnected and local auth credentials cleared.',
+        });
         await fetchStatus(true);
       }
-    } catch (err: any) {
-      setFeedback({ type: 'error', text: err?.message || 'Error disconnecting WhatsApp session.' });
     } finally {
       setActionLoading(null);
     }
@@ -235,29 +383,53 @@ export const WhatsAppGatewayView: React.FC<WhatsAppGatewayViewProps> = ({
     setActionLoading('branding');
     setFeedback(null);
     try {
-      const res = await fetch('/api/whatsapp/branding', {
-        method: 'POST',
-        headers: buildPortalAuthHeaders(),
-        body: JSON.stringify({
-          companyName: companyName.trim(),
-          supportPhone: supportPhone.trim(),
-          autoSend,
-        }),
-      });
-      const json = await res.json();
-      if (!res.ok || !json.success) {
-        setFeedback({ type: 'error', text: json?.error || 'Failed to save branding settings.' });
+      let targetUrl = activeGatewayUrl;
+      if (isMasterAdmin && gatewayUrlInput.trim() !== activeGatewayUrl) {
+        const savedUrl = await saveWhatsAppGatewayUrl(gatewayUrlInput);
+        if (!savedUrl.ok) {
+          setFeedback({ type: 'error', text: savedUrl.error || 'Invalid Gateway URL.' });
+          return;
+        }
+        targetUrl = savedUrl.normalizedUrl;
+        setActiveGatewayUrl(targetUrl);
+      }
+
+      const result = await safeWhatsAppApiFetch<any>(
+        '/api/whatsapp/branding',
+        {
+          method: 'POST',
+          headers: buildPortalAuthHeaders(),
+          body: JSON.stringify({
+            companyName: companyName.trim(),
+            supportPhone: supportPhone.trim(),
+            autoSend,
+          }),
+        },
+        targetUrl
+      );
+
+      if (result.isGatewayUnreachable) {
+        setGatewayUnreachable(result.error);
+        setFeedback({ type: 'error', text: result.error || 'Baileys WhatsApp Gateway Server is unreachable.' });
+        return;
+      }
+
+      const json = result.data;
+      if (!result.ok || !json?.success) {
+        setFeedback({
+          type: 'error',
+          text: result.error || json?.error || 'Failed to save branding settings.',
+        });
       } else {
+        setGatewayUnreachable(null);
         setFeedback({
           type: 'success',
           text: json.schemaWarning
             ? 'Branding saved (some optional columns require running the WhatsApp SQL migration in Supabase).'
             : `Branding saved! All automated messages will sign as "${json.branding?.companyName}".`,
         });
-        await fetchStatus(true);
+        await fetchStatus(true, targetUrl);
       }
-    } catch (err: any) {
-      setFeedback({ type: 'error', text: err?.message || 'Error saving branding.' });
     } finally {
       setActionLoading(null);
     }
@@ -272,19 +444,30 @@ export const WhatsAppGatewayView: React.FC<WhatsAppGatewayViewProps> = ({
     setActionLoading('test');
     setFeedback(null);
     try {
-      const res = await fetch('/api/whatsapp/send-auto', {
-        method: 'POST',
-        headers: buildPortalAuthHeaders(),
-        body: JSON.stringify({
-          eventType: 'MANUAL_TEST',
-          messageVars: {
-            phone: cleanPhone,
-            customNote: `Live zero-click Baileys WhatsApp Gateway verification from ${companyName || DEFAULT_MASTER_COMPANY_NAME}.`,
-          },
-        }),
-      });
-      const json = await res.json();
-      if (json.ok && json.status === 'SENT') {
+      const result = await safeWhatsAppApiFetch<any>(
+        '/api/whatsapp/send-auto',
+        {
+          method: 'POST',
+          headers: buildPortalAuthHeaders(),
+          body: JSON.stringify({
+            eventType: 'MANUAL_TEST',
+            messageVars: {
+              phone: cleanPhone,
+              customNote: `Live zero-click Baileys WhatsApp Gateway verification from ${companyName || DEFAULT_MASTER_COMPANY_NAME}.`,
+            },
+          }),
+        },
+        activeGatewayUrl
+      );
+
+      if (result.isGatewayUnreachable) {
+        setGatewayUnreachable(result.error);
+        setFeedback({ type: 'error', text: result.error || 'Baileys WhatsApp Gateway Server is unreachable.' });
+        return;
+      }
+
+      const json = result.data;
+      if (json?.ok && json?.status === 'SENT') {
         setFeedback({
           type: 'success',
           text: `Test message delivered automatically via "${json.senderCompanyName}" to ${cleanPhone}!`,
@@ -292,12 +475,10 @@ export const WhatsAppGatewayView: React.FC<WhatsAppGatewayViewProps> = ({
       } else {
         setFeedback({
           type: 'error',
-          text: json.error || json.skippedReason || 'Test delivery failed. Ensure WhatsApp is Connected.',
+          text: json?.error || json?.skippedReason || result.error || 'Test delivery failed. Ensure WhatsApp is Connected.',
         });
       }
       await fetchLogs();
-    } catch (err: any) {
-      setFeedback({ type: 'error', text: err?.message || 'Test send request failed.' });
     } finally {
       setActionLoading(null);
     }
@@ -307,14 +488,28 @@ export const WhatsAppGatewayView: React.FC<WhatsAppGatewayViewProps> = ({
     setActionLoading('sweep');
     setFeedback(null);
     try {
-      const res = await fetch('/api/whatsapp/cron/pre-expiry', {
-        method: 'POST',
-        headers: buildPortalAuthHeaders(),
-        body: JSON.stringify({}),
-      });
-      const json = await res.json();
-      if (!res.ok || !json.success) {
-        setFeedback({ type: 'error', text: json?.error || 'Failed to run 3-day pre-expiry sweep.' });
+      const result = await safeWhatsAppApiFetch<any>(
+        '/api/whatsapp/cron/pre-expiry',
+        {
+          method: 'POST',
+          headers: buildPortalAuthHeaders(),
+          body: JSON.stringify({}),
+        },
+        activeGatewayUrl
+      );
+
+      if (result.isGatewayUnreachable) {
+        setGatewayUnreachable(result.error);
+        setFeedback({ type: 'error', text: result.error || 'Baileys WhatsApp Gateway Server is unreachable.' });
+        return;
+      }
+
+      const json = result.data;
+      if (!result.ok || !json?.success) {
+        setFeedback({
+          type: 'error',
+          text: result.error || json?.error || 'Failed to run 3-day pre-expiry sweep.',
+        });
       } else {
         setFeedback({
           type: 'success',
@@ -322,8 +517,6 @@ export const WhatsAppGatewayView: React.FC<WhatsAppGatewayViewProps> = ({
         });
         await fetchLogs();
       }
-    } catch (err: any) {
-      setFeedback({ type: 'error', text: err?.message || 'Error running pre-expiry sweep.' });
     } finally {
       setActionLoading(null);
     }
@@ -368,8 +561,8 @@ export const WhatsAppGatewayView: React.FC<WhatsAppGatewayViewProps> = ({
   }, [logs, statusData]);
 
   const sessionStatus = statusData?.session?.status || 'DISCONNECTED';
-  const canPair = statusData?.canPairOwnWhatsapp ?? false;
-  const effectiveTier = statusData?.effectiveTier || 'ADMIN';
+  const canPair = statusData?.canPairOwnWhatsapp ?? isMasterAdmin;
+  const effectiveTier = statusData?.effectiveTier || (isMasterAdmin ? 'ADMIN' : 'DEALER');
 
   return (
     <div className="space-y-6 pb-10">
@@ -420,6 +613,35 @@ export const WhatsAppGatewayView: React.FC<WhatsAppGatewayViewProps> = ({
         </div>
       </div>
 
+      {/* Baileys Gateway Offline / Static Host Banner */}
+      {gatewayUnreachable && (
+        <div className="bg-rose-500/10 border border-rose-500/35 rounded-2xl p-4 flex flex-col md:flex-row md:items-center md:justify-between gap-3">
+          <div className="flex items-start gap-3">
+            <WifiOff className="w-5 h-5 text-rose-400 shrink-0 mt-0.5" />
+            <div className="space-y-1">
+              <p className="text-xs font-bold text-rose-200">{gatewayUnreachable}</p>
+              <p className="text-[11px] text-rose-200/80">
+                Hosting on Netlify? Run <code className="px-1.5 py-0.5 rounded bg-slate-900 text-cyan-300">node baileys-server.js</code> on your VPS, office PC, or Cloudflare Tunnel, then enter its URL in{' '}
+                <strong className="text-white">Baileys Gateway Server URL</strong> below and click <strong className="text-white">Test Connection</strong>.
+              </p>
+            </div>
+          </div>
+          <button
+            type="button"
+            onClick={handleTestGatewayConnection}
+            disabled={gatewayHealth.state === 'testing'}
+            className="inline-flex items-center gap-1.5 px-3.5 py-2 rounded-xl bg-rose-500/20 hover:bg-rose-500/30 border border-rose-500/40 text-rose-100 text-xs font-bold shrink-0 transition cursor-pointer"
+          >
+            {gatewayHealth.state === 'testing' ? (
+              <Loader2 className="w-3.5 h-3.5 animate-spin" />
+            ) : (
+              <PlugZap className="w-3.5 h-3.5" />
+            )}
+            Retry Connection
+          </button>
+        </div>
+      )}
+
       {/* Feedback Banner */}
       {feedback && (
         <div
@@ -442,6 +664,7 @@ export const WhatsAppGatewayView: React.FC<WhatsAppGatewayViewProps> = ({
             <span>{feedback.text}</span>
           </div>
           <button
+            type="button"
             onClick={() => setFeedback(null)}
             className="text-slate-400 hover:text-slate-200 text-xs px-1.5"
           >
@@ -746,6 +969,78 @@ export const WhatsAppGatewayView: React.FC<WhatsAppGatewayViewProps> = ({
                 placeholder="e.g. +92 323 4193599"
                 className="w-full bg-slate-900 border border-slate-700/80 rounded-xl px-3.5 py-2.5 text-sm text-slate-100 placeholder:text-slate-500 focus:outline-none focus:border-cyan-500/60"
               />
+            </div>
+
+            {/* Baileys Gateway Server URL Config (Admin Editable for Netlify -> Self-Hosted Node Server) */}
+            <div className="bg-slate-900/90 border border-slate-800 rounded-xl p-3.5 space-y-2.5">
+              <div className="flex items-center justify-between gap-2">
+                <label className="text-xs font-bold text-slate-200 flex items-center gap-1.5">
+                  <Server className="w-3.5 h-3.5 text-cyan-400" />
+                  <span>Baileys Gateway Server URL</span>
+                </label>
+                {gatewayHealth.state !== 'idle' && (
+                  <span
+                    className={`text-[10px] font-bold px-2 py-0.5 rounded-md border ${
+                      gatewayHealth.state === 'online'
+                        ? 'bg-emerald-500/15 text-emerald-300 border-emerald-500/30'
+                        : gatewayHealth.state === 'testing'
+                        ? 'bg-cyan-500/15 text-cyan-300 border-cyan-500/30'
+                        : 'bg-rose-500/15 text-rose-300 border-rose-500/30'
+                    }`}
+                  >
+                    {gatewayHealth.message}
+                  </span>
+                )}
+              </div>
+
+              {isMasterAdmin ? (
+                <>
+                  <div className="flex flex-col sm:flex-row gap-2">
+                    <input
+                      type="text"
+                      value={gatewayUrlInput}
+                      onChange={(e) => setGatewayUrlInput(e.target.value)}
+                      placeholder="https://wa.youthtechnology.pk or http://localhost:3001"
+                      className="flex-1 bg-slate-950 border border-slate-700/80 rounded-xl px-3 py-2 text-xs font-mono text-slate-100 placeholder:text-slate-500 focus:outline-none focus:border-cyan-500/60"
+                    />
+                    <div className="flex items-center gap-1.5 shrink-0">
+                      <button
+                        type="button"
+                        onClick={handleTestGatewayConnection}
+                        disabled={gatewayHealth.state === 'testing'}
+                        className="inline-flex items-center gap-1.5 px-3 py-2 rounded-xl bg-slate-800 hover:bg-slate-700 border border-slate-700 text-cyan-300 text-xs font-semibold transition cursor-pointer disabled:opacity-50"
+                      >
+                        {gatewayHealth.state === 'testing' ? (
+                          <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                        ) : (
+                          <PlugZap className="w-3.5 h-3.5" />
+                        )}
+                        Test Connection
+                      </button>
+                      <button
+                        type="button"
+                        onClick={handleSaveGatewayUrl}
+                        disabled={actionLoading === 'gateway_url'}
+                        className="inline-flex items-center gap-1 px-3 py-2 rounded-xl bg-emerald-600/20 hover:bg-emerald-600/30 border border-emerald-500/40 text-emerald-300 text-xs font-bold transition cursor-pointer disabled:opacity-50"
+                      >
+                        {actionLoading === 'gateway_url' ? (
+                          <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                        ) : (
+                          <Check className="w-3.5 h-3.5" />
+                        )}
+                        Save URL
+                      </button>
+                    </div>
+                  </div>
+                  <p className="text-[11px] text-slate-400">
+                    Point Netlify or remote browsers to your self-hosted <code className="text-cyan-300">node baileys-server.js</code> (e.g. Cloudflare Tunnel, VPS HTTPS domain, or LAN IP). Leave blank to use the built-in server.
+                  </p>
+                </>
+              ) : (
+                <p className="text-[11px] font-mono text-slate-300">
+                  Active Gateway Endpoint: <span className="text-cyan-300">{getDisplayWhatsAppGatewayUrl(activeGatewayUrl)}</span>
+                </p>
+              )}
             </div>
 
             {/* Auto-Send Master Switch */}

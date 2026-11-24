@@ -3011,6 +3011,19 @@ async function resolveWhatsAppGatewayActor(req: Request): Promise<{
   };
 }
 
+app.get('/api/whatsapp/health', (_req: Request, res: Response) => {
+  const activeSessions = baileysManager.listActiveSessions();
+  const connectedCount = activeSessions.filter((s) => s.status === 'CONNECTED').length;
+  return res.json({
+    success: true,
+    status: 'online',
+    engine: 'baileys-multi-session',
+    activeSessionsCount: activeSessions.length,
+    connectedSessionsCount: connectedCount,
+    timestamp: new Date().toISOString(),
+  });
+});
+
 app.get('/api/whatsapp/session/status', async (req: Request, res: Response) => {
   try {
     const ctx = await resolveWhatsAppGatewayActor(req);
@@ -3135,7 +3148,12 @@ app.post('/api/whatsapp/session/start', async (req: Request, res: Response) => {
     }
 
     const state = await baileysManager.startSession(targetId, serverSupabase);
-    return res.json({ success: true, session: state });
+    return res.json({
+      success: true,
+      qrDataUrl: state.qrDataUrl || null,
+      status: state.status,
+      session: state,
+    });
   } catch (err: any) {
     return res.status(500).json({ success: false, error: err?.message || 'Failed to start WhatsApp session' });
   }
@@ -3457,7 +3475,7 @@ async function applyMaterialInvoiceSyncOnServer(params: {
   return plan;
 }
 
-app.patch('/api/subscribers/inventory-logs/:id', async (req: Request, res: Response) => {
+const handleUpdateInventoryLog = async (req: Request, res: Response) => {
   try {
     const auth = await authorizeLedgerEditDeleteActor(req);
     if (!auth.ok) {
@@ -3492,7 +3510,12 @@ app.patch('/api/subscribers/inventory-logs/:id', async (req: Request, res: Respo
     const itemName = String(req.body?.item_name ?? existing.item_name ?? '').trim().slice(0, 180);
     const quantity = Number(req.body?.quantity);
     const unitCost = Number(req.body?.unit_cost);
-    const installedBy = String(req.body?.installed_by_agent_name ?? existing.installed_by_agent_name ?? '')
+    const installedBy = String(
+      req.body?.installed_by_agent_name ??
+        req.body?.installed_by ??
+        existing.installed_by_agent_name ??
+        ''
+    )
       .trim()
       .slice(0, 120);
 
@@ -3510,7 +3533,9 @@ app.patch('/api/subscribers/inventory-logs/:id', async (req: Request, res: Respo
       item_name: itemName,
       quantity,
       unit_cost: unitCost,
+      total_charge: Math.round(quantity * unitCost * 100) / 100,
       installed_by_agent_name: installedBy || 'Field Technician',
+      installed_by: installedBy || 'Field Technician',
     };
 
     if (req.body?.created_at) {
@@ -3520,12 +3545,35 @@ app.patch('/api/subscribers/inventory-logs/:id', async (req: Request, res: Respo
       }
     }
 
-    const { data: updated, error: updateErr } = await serverSupabase
-      .from('subscriber_inventory_logs')
-      .update(updatePayload)
-      .eq('id', logId)
-      .select('*')
-      .maybeSingle();
+    const working = { ...updatePayload };
+    const optionalCols = new Set(['total_charge', 'installed_by']);
+    let updated: any = null;
+    let updateErr: any = null;
+
+    for (let attempt = 0; attempt < 5; attempt++) {
+      const { data, error } = await serverSupabase
+        .from('subscriber_inventory_logs')
+        .update(working)
+        .eq('id', logId)
+        .select('*')
+        .maybeSingle();
+
+      if (!error) {
+        updated = data;
+        updateErr = null;
+        break;
+      }
+      updateErr = error;
+      const msg = String(error.message || '');
+      const colMatch =
+        msg.match(/Could not find the ['"]([a-zA-Z0-9_]+)['"] column/i) ||
+        msg.match(/column\s+["']?([a-zA-Z0-9_]+)["']?\s+(?:of relation|does not exist)/i);
+      if (colMatch?.[1] && colMatch[1] in working && optionalCols.has(colMatch[1])) {
+        delete working[colMatch[1]];
+        continue;
+      }
+      break;
+    }
 
     if (updateErr) {
       return res.status(500).json({ success: false, error: updateErr.message });
@@ -3534,20 +3582,20 @@ app.patch('/api/subscribers/inventory-logs/:id', async (req: Request, res: Respo
     const invoiceSync = await applyMaterialInvoiceSyncOnServer({
       subscriberUsername: existing.subscriber_username,
       previousItem: existing as MinimalInventoryLog,
-      updatedItem: (updated || { ...existing, ...updatePayload }) as MinimalInventoryLog,
+      updatedItem: (updated || { ...existing, ...working }) as MinimalInventoryLog,
     });
 
     return res.json({
       success: true,
-      data: updated || { ...existing, ...updatePayload },
+      data: updated || { ...existing, ...working },
       invoiceSync,
     });
   } catch (err: any) {
     return res.status(500).json({ success: false, error: err?.message || 'Failed to update material log.' });
   }
-});
+};
 
-app.delete('/api/subscribers/inventory-logs/:id', async (req: Request, res: Response) => {
+const handleDeleteInventoryLog = async (req: Request, res: Response) => {
   try {
     const auth = await authorizeLedgerEditDeleteActor(req);
     if (!auth.ok) {
@@ -3602,9 +3650,21 @@ app.delete('/api/subscribers/inventory-logs/:id', async (req: Request, res: Resp
   } catch (err: any) {
     return res.status(500).json({ success: false, error: err?.message || 'Failed to delete material log.' });
   }
-});
+};
 
-app.patch('/api/invoices/:id', async (req: Request, res: Response) => {
+app.put('/api/subscribers/inventory-logs/:id', handleUpdateInventoryLog);
+app.patch('/api/subscribers/inventory-logs/:id', handleUpdateInventoryLog);
+app.post('/api/subscribers/inventory-logs/:id/update', handleUpdateInventoryLog);
+app.delete('/api/subscribers/inventory-logs/:id', handleDeleteInventoryLog);
+app.post('/api/subscribers/inventory-logs/:id/delete', handleDeleteInventoryLog);
+
+app.put('/api/subscriber-inventory-logs/:id', handleUpdateInventoryLog);
+app.patch('/api/subscriber-inventory-logs/:id', handleUpdateInventoryLog);
+app.post('/api/subscriber-inventory-logs/:id/update', handleUpdateInventoryLog);
+app.delete('/api/subscriber-inventory-logs/:id', handleDeleteInventoryLog);
+app.post('/api/subscriber-inventory-logs/:id/delete', handleDeleteInventoryLog);
+
+const handleUpdateInvoice = async (req: Request, res: Response) => {
   try {
     const auth = await authorizeLedgerEditDeleteActor(req);
     if (!auth.ok) {
@@ -3662,10 +3722,12 @@ app.patch('/api/invoices/:id', async (req: Request, res: Response) => {
       status: rawStatus,
     };
 
-    if (req.body?.cycle_day !== undefined) {
-      const cDay = Number(req.body.cycle_day);
+    const requestedCycleDay = req.body?.cycle_day ?? req.body?.billing_cycle_day;
+    if (requestedCycleDay !== undefined) {
+      const cDay = Number(requestedCycleDay);
       if (Number.isFinite(cDay) && cDay >= 1 && cDay <= 31) {
         updatePayload.cycle_day = Math.round(cDay);
+        updatePayload.billing_cycle_day = Math.round(cDay);
       }
     }
 
@@ -3674,16 +3736,21 @@ app.patch('/api/invoices/:id', async (req: Request, res: Response) => {
         ? String(req.body.assigned_agent_id).trim()
         : null;
     }
-    if (req.body?.assigned_agent_name !== undefined) {
-      updatePayload.assigned_agent_name = req.body.assigned_agent_name
-        ? String(req.body.assigned_agent_name).trim().slice(0, 120)
-        : null;
+    const requestedAgentName =
+      req.body?.assigned_agent_name !== undefined
+        ? req.body.assigned_agent_name
+        : req.body?.assigned_agent;
+    if (requestedAgentName !== undefined) {
+      const cleanAgent = requestedAgentName ? String(requestedAgentName).trim().slice(0, 120) : null;
+      updatePayload.assigned_agent_name = cleanAgent;
+      updatePayload.assigned_agent = cleanAgent;
     }
     if (req.body?.notes !== undefined) {
       updatePayload.notes = req.body.notes ? String(req.body.notes).trim().slice(0, 500) : null;
     }
-    if (req.body?.package_profile) {
-      const pkg = String(req.body.package_profile).trim().slice(0, 100);
+    const requestedPkg = req.body?.package_profile || req.body?.package_name;
+    if (requestedPkg) {
+      const pkg = String(requestedPkg).trim().slice(0, 100);
       updatePayload.package_profile = pkg;
       updatePayload.package_name = pkg;
     }
@@ -3710,13 +3777,20 @@ app.patch('/api/invoices/:id', async (req: Request, res: Response) => {
       updatePayload.paid_amount = Math.max(0, Math.min(amount, requestedPaid));
     }
 
-    // Adaptive optional-column stripping if PostgreSQL invoices table lacks optional columns like `notes`
+    // Adaptive optional-column stripping if PostgreSQL invoices table lacks optional columns
     const working = { ...updatePayload };
-    const optionalCols = new Set(['notes', 'package_profile', 'package_name', 'shifted_to_next_month']);
+    const optionalCols = new Set([
+      'notes',
+      'package_profile',
+      'package_name',
+      'billing_cycle_day',
+      'assigned_agent',
+      'shifted_to_next_month',
+    ]);
     let updatedRow: any = null;
     let lastError: any = null;
 
-    for (let attempt = 0; attempt < 6; attempt++) {
+    for (let attempt = 0; attempt < 8; attempt++) {
       const { data, error } = await serverSupabase
         .from('invoices')
         .update(working)
@@ -3752,9 +3826,9 @@ app.patch('/api/invoices/:id', async (req: Request, res: Response) => {
   } catch (err: any) {
     return res.status(500).json({ success: false, error: err?.message || 'Failed to update invoice.' });
   }
-});
+};
 
-app.delete('/api/invoices/:id', async (req: Request, res: Response) => {
+const handleDeleteInvoice = async (req: Request, res: Response) => {
   try {
     const auth = await authorizeLedgerEditDeleteActor(req);
     if (!auth.ok) {
@@ -3822,7 +3896,13 @@ app.delete('/api/invoices/:id', async (req: Request, res: Response) => {
   } catch (err: any) {
     return res.status(500).json({ success: false, error: err?.message || 'Failed to delete invoice.' });
   }
-});
+};
+
+app.put('/api/invoices/:id', handleUpdateInvoice);
+app.patch('/api/invoices/:id', handleUpdateInvoice);
+app.post('/api/invoices/:id/update', handleUpdateInvoice);
+app.delete('/api/invoices/:id', handleDeleteInvoice);
+app.post('/api/invoices/:id/delete', handleDeleteInvoice);
 
 // ============================================================================
 // API ROUTE JSON GUARANTEE & ERROR MIDDLEWARE

@@ -313,8 +313,10 @@ export const SubscriberProfileView: React.FC<SubscriberProfileViewProps> = ({
     date: new Date().toISOString().slice(0, 10),
   });
   const [isUpdatingMaterial, setIsUpdatingMaterial] = useState<boolean>(false);
+  const [editMaterialError, setEditMaterialError] = useState<string | null>(null);
   const [materialToDelete, setMaterialToDelete] = useState<SupabaseSubscriberInventoryLog | null>(null);
   const [isDeletingMaterial, setIsDeletingMaterial] = useState<boolean>(false);
+  const [deleteMaterialError, setDeleteMaterialError] = useState<string | null>(null);
 
   // Edit / Delete Invoice Modal State (Tab 2)
   const [invoiceToEdit, setInvoiceToEdit] = useState<SupabaseInvoice | null>(null);
@@ -331,6 +333,7 @@ export const SubscriberProfileView: React.FC<SubscriberProfileViewProps> = ({
   const [invoiceToDelete, setInvoiceToDelete] = useState<SupabaseInvoice | null>(null);
   const [deleteLinkedPayments, setDeleteLinkedPayments] = useState<boolean>(true);
   const [isDeletingInvoice, setIsDeletingInvoice] = useState<boolean>(false);
+  const [deleteInvoiceError, setDeleteInvoiceError] = useState<string | null>(null);
 
   const speedPollingTimerRef = useRef<any>(null);
 
@@ -1368,6 +1371,7 @@ export const SubscriberProfileView: React.FC<SubscriberProfileViewProps> = ({
       showToast('Permission required: Edit & Delete Invoice / Hardware Log is disabled for your account.', 'error');
       return;
     }
+    setEditMaterialError(null);
     setMaterialToEdit(log);
     const dateVal = log.created_at
       ? extractYmdString(log.created_at) || new Date().toISOString().slice(0, 10)
@@ -1385,15 +1389,20 @@ export const SubscriberProfileView: React.FC<SubscriberProfileViewProps> = ({
   const handleUpdateMaterial = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!canEditDeleteLedger || !materialToEdit?.id) return;
+    setEditMaterialError(null);
     const trimmedItem = editMaterialForm.itemName.trim();
     const qty = Number(editMaterialForm.quantity);
     const cost = Number(editMaterialForm.unitCost);
     if (!trimmedItem) {
-      showToast('Please enter an Item Name.', 'error');
+      const msg = 'Please enter an Item Name.';
+      setEditMaterialError(msg);
+      showToast(msg, 'error');
       return;
     }
     if (!Number.isFinite(qty) || qty <= 0 || !Number.isFinite(cost) || cost < 0) {
-      showToast('Quantity must be greater than 0 and Unit Cost cannot be negative.', 'error');
+      const msg = 'Quantity must be greater than 0 and Unit Cost cannot be negative.';
+      setEditMaterialError(msg);
+      showToast(msg, 'error');
       return;
     }
 
@@ -1408,18 +1417,28 @@ export const SubscriberProfileView: React.FC<SubscriberProfileViewProps> = ({
         quantity: qty,
         unit_cost: cost,
         installed_by_agent_name: editMaterialForm.installedByAgent || 'Field Technician',
+        installed_by: editMaterialForm.installedByAgent || 'Field Technician',
         created_at: dateIso,
       });
+
+      if (res.data) {
+        setInventoryLogs((prev) =>
+          prev.map((row) => (row.id === materialToEdit.id ? { ...row, ...res.data } : row))
+        );
+      }
 
       const syncNote =
         res.invoiceSync && res.invoiceSync.action !== 'NOOP'
           ? ` ${res.invoiceSync.reason}`
           : '';
       showToast(`Material "${trimmedItem}" updated!${syncNote}`);
+      setEditMaterialError(null);
       setMaterialToEdit(null);
       await fetchAllProfileData();
     } catch (err: any) {
-      showToast(err?.message || 'Failed to update material log.', 'error');
+      const msg = err?.message || 'Failed to update material log.';
+      setEditMaterialError(msg);
+      showToast(msg, 'error');
     } finally {
       setIsUpdatingMaterial(false);
     }
@@ -1428,19 +1447,25 @@ export const SubscriberProfileView: React.FC<SubscriberProfileViewProps> = ({
   // Action 9: Delete Material Log + Auto-Sync / Cleanup Linked INV-MAT Invoice
   const handleDeleteMaterial = async () => {
     if (!canEditDeleteLedger || !materialToDelete?.id) return;
+    setDeleteMaterialError(null);
     setIsDeletingMaterial(true);
     try {
+      const targetId = materialToDelete.id;
       const itemLabel = materialToDelete.item_name;
-      const res = await deleteInventoryLogApi(materialToDelete.id);
+      const res = await deleteInventoryLogApi(targetId);
+      setInventoryLogs((prev) => prev.filter((row) => row.id !== targetId));
       const syncNote =
         res.invoiceSync && res.invoiceSync.action !== 'NOOP'
           ? ` ${res.invoiceSync.reason}`
           : '';
       showToast(`Material "${itemLabel}" deleted.${syncNote}`);
+      setDeleteMaterialError(null);
       setMaterialToDelete(null);
       await fetchAllProfileData();
     } catch (err: any) {
-      showToast(err?.message || 'Failed to delete material log.', 'error');
+      const msg = err?.message || 'Failed to delete material log.';
+      setDeleteMaterialError(msg);
+      showToast(msg, 'error');
     } finally {
       setIsDeletingMaterial(false);
     }
@@ -1513,12 +1538,13 @@ export const SubscriberProfileView: React.FC<SubscriberProfileViewProps> = ({
           ? 0
           : Math.min(amountNum, Number(invoiceToEdit.paid_amount) || 0);
 
-      await updateInvoiceApi(invoiceToEdit.id, {
+      const res = await updateInvoiceApi(invoiceToEdit.id, {
         amount: amountNum,
         due_date: editInvoiceForm.dueDate,
         status: editInvoiceForm.status,
         assigned_agent_id: editInvoiceForm.assignedAgentId || null,
         assigned_agent_name: selectedAgent ? selectedAgent.full_name : null,
+        assigned_agent: selectedAgent ? selectedAgent.full_name : null,
         notes: editInvoiceForm.notes.trim() || null,
         paid_amount: nextPaidAmount,
         paid_at:
@@ -1527,7 +1553,14 @@ export const SubscriberProfileView: React.FC<SubscriberProfileViewProps> = ({
             : null,
       });
 
+      if (res.data) {
+        setInvoices((prev) =>
+          prev.map((row) => (row.id === invoiceToEdit.id ? { ...row, ...res.data } : row))
+        );
+      }
+
       showToast(`Invoice #${invoiceToEdit.invoice_no} updated!${restoreNote}`);
+      setEditInvoiceError(null);
       setInvoiceToEdit(null);
       await fetchAllProfileData();
     } catch (err: any) {
@@ -1545,6 +1578,7 @@ export const SubscriberProfileView: React.FC<SubscriberProfileViewProps> = ({
       showToast('Permission required: Edit & Delete Invoice is disabled for your account.', 'error');
       return;
     }
+    setDeleteInvoiceError(null);
     const linkedTxCount = transactions.filter((t) => t.invoice_id === inv.id).length;
     setDeleteLinkedPayments(linkedTxCount > 0);
     setInvoiceToDelete(inv);
@@ -1553,21 +1587,27 @@ export const SubscriberProfileView: React.FC<SubscriberProfileViewProps> = ({
   // Action 13: Confirm Delete Invoice (+ Optional Linked Payment Transactions)
   const handleDeleteInvoice = async () => {
     if (!canEditDeleteLedger || !invoiceToDelete) return;
+    setDeleteInvoiceError(null);
     setIsDeletingInvoice(true);
     try {
+      const targetId = invoiceToDelete.id;
       const invNo = invoiceToDelete.invoice_no;
-      const res = await deleteInvoiceApi(invoiceToDelete.id, {
+      const res = await deleteInvoiceApi(targetId, {
         deleteLinkedPayments,
       });
+      setInvoices((prev) => prev.filter((row) => row.id !== targetId));
       const txNote =
         res.deletedPaymentsCount && res.deletedPaymentsCount > 0
           ? ` Also removed ${res.deletedPaymentsCount} linked payment receipt(s).`
           : '';
       showToast(`Invoice #${invNo} deleted.${txNote}`);
+      setDeleteInvoiceError(null);
       setInvoiceToDelete(null);
       await fetchAllProfileData();
     } catch (err: any) {
-      showToast(err?.message || 'Failed to delete invoice.', 'error');
+      const msg = err?.message || 'Failed to delete invoice.';
+      setDeleteInvoiceError(msg);
+      showToast(msg, 'error');
     } finally {
       setIsDeletingInvoice(false);
     }
@@ -2256,7 +2296,10 @@ export const SubscriberProfileView: React.FC<SubscriberProfileViewProps> = ({
                                 </button>
                                 <button
                                   type="button"
-                                  onClick={() => setMaterialToDelete(log)}
+                                  onClick={() => {
+                                    setDeleteMaterialError(null);
+                                    setMaterialToDelete(log);
+                                  }}
                                   title="Delete Material Entry"
                                   className="p-1.5 rounded-lg bg-slate-800 hover:bg-rose-600/30 border border-slate-700 hover:border-rose-500/60 text-rose-300 transition cursor-pointer"
                                 >
@@ -3806,10 +3849,20 @@ export const SubscriberProfileView: React.FC<SubscriberProfileViewProps> = ({
                   )}
                 </div>
 
+                {editMaterialError && (
+                  <div className="rounded-xl border border-rose-500/70 bg-rose-950/90 px-3 py-2.5 text-xs font-semibold text-rose-200 flex items-start gap-2">
+                    <AlertTriangle className="w-4 h-4 text-rose-400 shrink-0 mt-0.5" />
+                    <span>{editMaterialError}</span>
+                  </div>
+                )}
+
                 <div className="flex items-center justify-end gap-2.5 pt-2 border-t border-slate-800">
                   <button
                     type="button"
-                    onClick={() => setMaterialToEdit(null)}
+                    onClick={() => {
+                      setEditMaterialError(null);
+                      setMaterialToEdit(null);
+                    }}
                     className="px-4 py-2 bg-slate-800 hover:bg-slate-700 text-slate-300 rounded-lg transition cursor-pointer"
                   >
                     Cancel
@@ -3876,10 +3929,20 @@ export const SubscriberProfileView: React.FC<SubscriberProfileViewProps> = ({
                 )}
               </p>
 
+              {deleteMaterialError && (
+                <div className="rounded-xl border border-rose-500/70 bg-rose-950/90 px-3 py-2.5 text-xs font-semibold text-rose-200 flex items-start gap-2">
+                  <AlertTriangle className="w-4 h-4 text-rose-400 shrink-0 mt-0.5" />
+                  <span>{deleteMaterialError}</span>
+                </div>
+              )}
+
               <div className="flex items-center justify-end gap-2.5 pt-2 border-t border-slate-800">
                 <button
                   type="button"
-                  onClick={() => setMaterialToDelete(null)}
+                  onClick={() => {
+                    setDeleteMaterialError(null);
+                    setMaterialToDelete(null);
+                  }}
                   className="px-4 py-2 bg-slate-800 hover:bg-slate-700 text-slate-300 rounded-lg text-xs transition cursor-pointer"
                 >
                   Cancel
@@ -4134,10 +4197,20 @@ export const SubscriberProfileView: React.FC<SubscriberProfileViewProps> = ({
                     This action permanently deletes the invoice and immediately updates the subscriber&apos;s KPI totals and outstanding balance.
                   </p>
 
+                  {deleteInvoiceError && (
+                    <div className="rounded-xl border border-rose-500/70 bg-rose-950/90 px-3 py-2.5 text-xs font-semibold text-rose-200 flex items-start gap-2">
+                      <AlertTriangle className="w-4 h-4 text-rose-400 shrink-0 mt-0.5" />
+                      <span>{deleteInvoiceError}</span>
+                    </div>
+                  )}
+
                   <div className="flex items-center justify-end gap-2.5 pt-2 border-t border-slate-800">
                     <button
                       type="button"
-                      onClick={() => setInvoiceToDelete(null)}
+                      onClick={() => {
+                        setDeleteInvoiceError(null);
+                        setInvoiceToDelete(null);
+                      }}
                       className="px-4 py-2 bg-slate-800 hover:bg-slate-700 text-slate-300 rounded-lg text-xs transition cursor-pointer"
                     >
                       Cancel
