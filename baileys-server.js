@@ -143,6 +143,22 @@ function buildAutomatedMessage(eventType, vars = {}) {
         supportLine
       );
 
+    case 'PORTAL_CREDENTIALS': {
+      const roleText = vars.accountRole ? `\n• *Account Role:* ${vars.accountRole}` : '';
+      const portalLink = vars.portalUrl ? `\n• *Portal Link:* ${vars.portalUrl}` : '';
+      return (
+        `*Welcome to ${company}!*\n\n` +
+        `Dear *${clientName}*,\n` +
+        `Your portal login account has been created and is now active.\n\n` +
+        `• *Username:* ${uname || 'N/A'}\n` +
+        `• *Password:* ${vars.password || 'As configured'}` +
+        roleText +
+        portalLink +
+        `\n\nPlease keep your login details secure.\n— *${company}*` +
+        supportLine
+      );
+    }
+
     case 'INVOICE_GENERATED':
       return (
         `*${company} — Monthly Broadband Bill*\n\n` +
@@ -558,7 +574,12 @@ async function sendAutomatedMessage({ subscriber, subscriberUsername, eventType,
     username: messageVars.username || resolvedSub?.username || subscriberUsername,
   });
 
-  if (!sender.autoSendEnabled && eventType !== 'MANUAL_TEST') {
+  const loggedMessageBody =
+    eventType === 'PORTAL_CREDENTIALS' || eventType === 'PROVISION_WELCOME'
+      ? messageBody.replace(/(\*(?:PPPoE\s+)?Password:\*\s*)(.+)/gi, '$1••••••••')
+      : messageBody;
+
+  if (!sender.autoSendEnabled && eventType !== 'MANUAL_TEST' && eventType !== 'PORTAL_CREDENTIALS') {
     await logDelivery({
       sender_portal_user_id: sender.senderPortalUserId,
       sender_company_name: sender.companyName,
@@ -570,7 +591,7 @@ async function sendAutomatedMessage({ subscriber, subscriberUsername, eventType,
       dealer_id: resolvedSub?.dealer_id || null,
       sub_dealer_id: resolvedSub?.sub_dealer_id || null,
       event_type: eventType,
-      message_body: messageBody,
+      message_body: loggedMessageBody,
       status: 'SKIPPED',
       error_message: 'Auto-send master switch is OFF for resolved sender.',
     });
@@ -589,7 +610,7 @@ async function sendAutomatedMessage({ subscriber, subscriberUsername, eventType,
       dealer_id: resolvedSub?.dealer_id || null,
       sub_dealer_id: resolvedSub?.sub_dealer_id || null,
       event_type: eventType,
-      message_body: messageBody,
+      message_body: loggedMessageBody,
       status: 'FAILED',
       error_message: 'Missing or invalid subscriber WhatsApp phone number.',
     });
@@ -609,7 +630,7 @@ async function sendAutomatedMessage({ subscriber, subscriberUsername, eventType,
       dealer_id: resolvedSub?.dealer_id || null,
       sub_dealer_id: resolvedSub?.sub_dealer_id || null,
       event_type: eventType,
-      message_body: messageBody,
+      message_body: loggedMessageBody,
       status: 'FAILED',
       error_message: `No connected Baileys WhatsApp session available for ${sender.companyName}.`,
     });
@@ -634,7 +655,7 @@ async function sendAutomatedMessage({ subscriber, subscriberUsername, eventType,
       dealer_id: resolvedSub?.dealer_id || null,
       sub_dealer_id: resolvedSub?.sub_dealer_id || null,
       event_type: eventType,
-      message_body: messageBody,
+      message_body: loggedMessageBody,
       status: 'SENT',
       error_message: null,
     });
@@ -657,7 +678,7 @@ async function sendAutomatedMessage({ subscriber, subscriberUsername, eventType,
       dealer_id: resolvedSub?.dealer_id || null,
       sub_dealer_id: resolvedSub?.sub_dealer_id || null,
       event_type: eventType,
-      message_body: messageBody,
+      message_body: loggedMessageBody,
       status: 'FAILED',
       error_message: errMsg,
     });
@@ -944,7 +965,7 @@ app.post('/api/whatsapp/branding', async (req, res) => {
 });
 
 // 6. Zero-Click Automated Send (Sub-Dealer -> Dealer -> Master Admin Routing)
-app.post('/api/whatsapp/send-auto', async (req, res) => {
+async function handleWhatsAppSend(req, res) {
   try {
     const ctx = await resolveActor(req);
     if (!ctx.ok || !ctx.actor) {
@@ -954,20 +975,39 @@ app.post('/api/whatsapp/send-auto', async (req, res) => {
     const body = req.body || {};
     const validEvents = new Set([
       'PROVISION_WELCOME',
+      'PORTAL_CREDENTIALS',
       'INVOICE_GENERATED',
       'PRE_EXPIRY_3D',
       'AUTO_SUSPENSION',
       'PAYMENT_RESTORED',
       'MANUAL_TEST',
     ]);
-    const eventType = String(body.eventType || '').trim().toUpperCase();
+    let eventType = String(body.eventType || '').trim().toUpperCase();
+    if (!eventType) {
+      if (body.password || body.portalUrl || body.messageVars?.password || body.messageVars?.portalUrl) {
+        eventType = 'PORTAL_CREDENTIALS';
+      } else if (body.message || body.messageVars?.customNote) {
+        eventType = 'MANUAL_TEST';
+      }
+    }
     if (!validEvents.has(eventType)) {
       return res.status(400).json({ ok: false, status: 'FAILED', error: 'Unsupported WhatsApp eventType.' });
     }
 
     const subscriberUsername = body.subscriberUsername
       ? String(body.subscriberUsername).trim().toLowerCase()
+      : body.username
+      ? String(body.username).trim().toLowerCase()
       : undefined;
+
+    const mergedMessageVars = {
+      ...(body.messageVars || {}),
+      ...(body.phone && !body.messageVars?.phone ? { phone: String(body.phone).trim() } : {}),
+      ...(body.message && !body.messageVars?.customNote ? { customNote: String(body.message).slice(0, 2000) } : {}),
+    };
+
+    const isNewAccountEvent = eventType === 'PROVISION_WELCOME' || eventType === 'PORTAL_CREDENTIALS';
+    let effectiveSubscriber = body.subscriber || null;
 
     // Enforce multi-tenant scope for Dealers & Sub-Dealers
     if (ctx.effectiveTier === 'DEALER' || ctx.effectiveTier === 'SUB_DEALER') {
@@ -978,8 +1018,10 @@ app.post('/api/whatsapp/send-auto', async (req, res) => {
           ) || body.subscriber || null;
         const ownsSub =
           ctx.effectiveTier === 'SUB_DEALER'
-            ? String(subRow?.sub_dealer_id || '') === String(ctx.actor.id)
+            ? String(subRow?.sub_dealer_id || '') === String(ctx.actor.id) ||
+              (isNewAccountEvent && !subRow?.dealer_id && !subRow?.sub_dealer_id)
             : String(subRow?.dealer_id || '') === String(ctx.actor.id) ||
+              (isNewAccountEvent && !subRow?.dealer_id && !subRow?.sub_dealer_id) ||
               ctx.allUsers.some(
                 (sd) =>
                   String(sd.parent_dealer_id || '') === String(ctx.actor.id) &&
@@ -992,14 +1034,26 @@ app.post('/api/whatsapp/send-auto', async (req, res) => {
             error: 'Access Denied: Subscriber is outside your Dealer/Sub-Dealer scope.',
           });
         }
+        if (isNewAccountEvent) {
+          effectiveSubscriber = {
+            ...(body.subscriber || {}),
+            username: subscriberUsername || body.subscriber?.username || null,
+            phone: mergedMessageVars.phone || body.subscriber?.phone || null,
+            sub_dealer_id: ctx.effectiveTier === 'SUB_DEALER' ? String(ctx.actor.id) : body.subscriber?.sub_dealer_id || null,
+            dealer_id:
+              ctx.effectiveTier === 'DEALER'
+                ? String(ctx.actor.id)
+                : ctx.actor.parent_dealer_id || body.subscriber?.dealer_id || null,
+          };
+        }
       }
     }
 
     const result = await sendAutomatedMessage({
-      subscriber: body.subscriber || null,
+      subscriber: effectiveSubscriber,
       subscriberUsername,
       eventType,
-      messageVars: body.messageVars || {},
+      messageVars: mergedMessageVars,
       forceSenderPortalUserId: eventType === 'MANUAL_TEST' ? String(ctx.actor.id) : undefined,
     });
 
@@ -1007,7 +1061,10 @@ app.post('/api/whatsapp/send-auto', async (req, res) => {
   } catch (err) {
     return res.status(500).json({ ok: false, status: 'FAILED', error: err?.message || 'Send failed.' });
   }
-});
+}
+
+app.post('/api/whatsapp/send', handleWhatsAppSend);
+app.post('/api/whatsapp/send-auto', handleWhatsAppSend);
 
 // 7. Scoped Delivery Logs
 app.get('/api/whatsapp/logs', async (req, res) => {

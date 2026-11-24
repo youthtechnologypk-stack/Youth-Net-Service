@@ -9,7 +9,6 @@ import {
   Eye,
   EyeOff,
   Users,
-  CheckCircle2,
   AlertCircle,
   Link as LinkIcon,
   Briefcase,
@@ -17,16 +16,14 @@ import {
   Radio,
   Search,
   UserCheck,
-  Check,
-  Copy,
-  ExternalLink,
   Wifi,
   MapPin,
 } from 'lucide-react';
 import { UserAccount, SystemRole } from '../types/auth';
 import { useISP } from '../context/ISPContext';
-import { generateRandomPassword, buildStandardWhatsAppCredentialText, getPortalUrlForRole } from '../services/authUtils';
+import { generateRandomPassword } from '../services/authUtils';
 import { saveUnifiedPortalUser } from '../lib/userRepository';
+import { getStoredUser } from '../lib/auth';
 import {
   RealMikrotikSubscriber,
   fetchLiveMikrotikSubscribers,
@@ -34,7 +31,6 @@ import {
 } from '../services/mikrotikSubscriberSync';
 import { supabase } from '../services/supabaseClient';
 import { AreaNodeSelector } from './AreaNodeSelector';
-import { buildWhatsAppUrl } from '../lib/whatsappBilling';
 import {
   fetchNetworkAreas,
   resolveAreaFromUsername,
@@ -64,7 +60,7 @@ export const CreateAccountModal: React.FC<CreateAccountModalProps> = ({
   onSuccess,
   subscribers: propSubscribers,
 }) => {
-  const { routers, selectedRouterId, agents, logWhatsAppNotice } = useISP();
+  const { routers, selectedRouterId, agents } = useISP();
 
   const [role, setRole] = useState<SystemRole>('CLIENT');
   const [fullName, setFullName] = useState('');
@@ -127,16 +123,9 @@ export const CreateAccountModal: React.FC<CreateAccountModalProps> = ({
   // WhatsApp checkbox
   const [sendWhatsApp, setSendWhatsApp] = useState(true);
 
-  // Submission & Toast state
+  // Submission state
   const [isSubmitting, setIsSubmitting] = useState(false);
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
-  const [createdSuccessToast, setCreatedSuccessToast] = useState<{
-    user: UserAccount;
-    plainPassword: string;
-    waUrl: string;
-    waText: string;
-  } | null>(null);
-  const [copiedSuccess, setCopiedSuccess] = useState(false);
 
   const currentRouter = useMemo(
     () => routers.find((r) => r.id === selectedRouterId) || routers[0],
@@ -146,7 +135,6 @@ export const CreateAccountModal: React.FC<CreateAccountModalProps> = ({
   // Update live subscribers from props or fetch directly from MikroTik REST API
   useEffect(() => {
     if (!isOpen) {
-      setCreatedSuccessToast(null);
       setErrorMessage(null);
       setSubscriberSearchQuery('');
       setIsSubscriberSearchOpen(false);
@@ -155,7 +143,6 @@ export const CreateAccountModal: React.FC<CreateAccountModalProps> = ({
 
     setPassword(generateRandomPassword());
     setErrorMessage(null);
-    setCreatedSuccessToast(null);
 
     if (propSubscribers && propSubscribers.length > 0) {
       setLiveSubscribers(propSubscribers);
@@ -312,6 +299,17 @@ export const CreateAccountModal: React.FC<CreateAccountModalProps> = ({
           : role === 'CLIENT'
           ? { ...CLIENT_NO_PERMISSIONS }
           : { ...staffPermissions };
+      const creator = getStoredUser();
+      const creatorTier = String(creator?.tier_level || creator?.role || '').toUpperCase();
+      const creatorDealerId =
+        creatorTier === 'DEALER'
+          ? String(creator?.id || '')
+          : creatorTier === 'SUB_DEALER'
+          ? String(creator?.parent_dealer_id || '') || null
+          : null;
+      const creatorSubDealerId =
+        creatorTier === 'SUB_DEALER' ? String(creator?.id || '') : null;
+
       const newUserPayload: Record<string, any> = {
         username: cleanUsername,
         password: plainPass,
@@ -324,6 +322,9 @@ export const CreateAccountModal: React.FC<CreateAccountModalProps> = ({
         can_access_gis_map: effectivePerms.gis_map !== 'none',
         gis_map_permission: effectivePerms.gis_map,
         permissions: effectivePerms,
+        ...(creatorDealerId ? { dealer_id: creatorDealerId } : {}),
+        ...(creatorSubDealerId ? { sub_dealer_id: creatorSubDealerId } : {}),
+        ...(creator?.id ? { created_by_id: String(creator.id) } : {}),
         created_at: new Date().toISOString(),
       };
       const { error: insertErr } = await supabase.from('portal_users').insert([newUserPayload]);
@@ -361,47 +362,11 @@ export const CreateAccountModal: React.FC<CreateAccountModalProps> = ({
       }).catch(() => {});
     } catch {}
 
-    // 3. Build WhatsApp credentials text & link
-    const waText = buildStandardWhatsAppCredentialText(
-      fullName.trim(),
-      cleanUsername,
-      plainPass,
-      getPortalUrlForRole(role)
-    );
-    const waUrl = buildWhatsAppUrl(cleanPhone, waText);
-
-    // Log to system WhatsApp notification history
-    logWhatsAppNotice(
-      cleanPhone,
-      fullName.trim(),
-      waText,
-      'isp_user_credentials_provisioned'
-    );
-
     setIsSubmitting(false);
 
-    // Requirement 4: Show a success toast with the option to send credentials via WhatsApp
-    setCreatedSuccessToast({
-      user: newUser,
-      plainPassword: plainPass,
-      waUrl,
-      waText,
-    });
-  };
-
-  const handleFinishAndClose = () => {
-    if (createdSuccessToast) {
-      onSuccess(createdSuccessToast.user, createdSuccessToast.plainPassword, sendWhatsApp);
-    }
+    // Close modal immediately and hand off to parent for zero-click background Baileys WhatsApp dispatch & non-blocking toast
+    onSuccess(newUser, plainPass, sendWhatsApp);
     onClose();
-  };
-
-  const handleCopyToastCredentials = () => {
-    if (!createdSuccessToast) return;
-    const text = `=== YOUTH NET PORTAL CREDENTIALS ===\nSubscriber: ${createdSuccessToast.user.fullName}\nUsername: ${createdSuccessToast.user.username}\nPassword: ${createdSuccessToast.plainPassword}\nRole: ${createdSuccessToast.user.role}\nPortal URL: ${window.location.origin}/login`;
-    navigator.clipboard.writeText(text);
-    setCopiedSuccess(true);
-    setTimeout(() => setCopiedSuccess(false), 2500);
   };
 
   return (
@@ -432,81 +397,6 @@ export const CreateAccountModal: React.FC<CreateAccountModalProps> = ({
 
         {/* Modal Form Scrollable Body */}
         <div className="p-6 space-y-5 overflow-y-auto text-xs flex-1">
-          {/* Requirement 4: Success Toast with WhatsApp and Login Details */}
-          {createdSuccessToast && (
-            <div className="p-4 bg-emerald-950/90 border-2 border-emerald-500 rounded-2xl space-y-3 shadow-xl animate-fade-in">
-              <div className="flex items-start justify-between">
-                <div className="flex items-center gap-2.5">
-                  <div className="p-2 rounded-xl bg-emerald-500 text-slate-950 font-bold">
-                    <CheckCircle2 className="w-5 h-5" />
-                  </div>
-                  <div>
-                    <h4 className="text-sm font-bold text-white">
-                      Account created! You can now log in with these credentials.
-                    </h4>
-                    <p className="text-[11px] text-emerald-300 font-mono mt-0.5">
-                      Account @{createdSuccessToast.user.username} saved to <code className="bg-emerald-900/60 px-1 py-0.5 rounded text-emerald-200">youthnet_portal_users</code> &bull; Ready for instant login
-                    </p>
-                  </div>
-                </div>
-              </div>
-
-              {/* Account Credentials Card */}
-              <div className="bg-slate-950/90 p-3 rounded-xl border border-emerald-800/80 space-y-1.5 font-mono text-[11px]">
-                <div className="flex justify-between items-center text-slate-300">
-                  <span className="text-slate-400">Portal Login:</span>
-                  <span className="text-cyan-300 font-bold">@{createdSuccessToast.user.username}</span>
-                </div>
-                <div className="flex justify-between items-center text-slate-300">
-                  <span className="text-slate-400">Password:</span>
-                  <span className="text-amber-300 font-bold">{createdSuccessToast.plainPassword}</span>
-                </div>
-                <div className="flex justify-between items-center text-slate-300">
-                  <span className="text-slate-400">Assigned Role:</span>
-                  <span className="text-emerald-400">{createdSuccessToast.user.role}</span>
-                </div>
-                {selectedSubscriber && (
-                  <div className="flex justify-between items-center text-slate-300 pt-1 border-t border-slate-800">
-                    <span className="text-slate-400">MikroTik IP / MAC:</span>
-                    <span className="text-slate-300 text-[10px]">
-                      {selectedSubscriber.address || 'Dynamic'} &bull; {selectedSubscriber.callerId || 'Unbound'}
-                    </span>
-                  </div>
-                )}
-              </div>
-
-              {/* Action Buttons: WhatsApp & Finish */}
-              <div className="flex flex-col sm:flex-row items-center gap-2 pt-1">
-                <a
-                  href={createdSuccessToast.waUrl}
-                  target="_blank"
-                  rel="noopener noreferrer external"
-                  className="w-full sm:flex-1 py-2.5 px-3 rounded-xl bg-emerald-600 hover:bg-emerald-500 text-slate-950 font-bold text-xs flex items-center justify-center gap-2 shadow-lg shadow-emerald-950/40 transition"
-                >
-                  <Send className="w-4 h-4" />
-                  <span>Send Credentials via WhatsApp</span>
-                </a>
-
-                <button
-                  type="button"
-                  onClick={handleCopyToastCredentials}
-                  className="w-full sm:w-auto py-2.5 px-3 rounded-xl bg-slate-800 hover:bg-slate-700 text-slate-200 text-xs font-semibold flex items-center justify-center gap-1.5 transition"
-                >
-                  {copiedSuccess ? <Check className="w-3.5 h-3.5 text-emerald-400" /> : <Copy className="w-3.5 h-3.5" />}
-                  <span>{copiedSuccess ? 'Copied!' : 'Copy'}</span>
-                </button>
-
-                <button
-                  type="button"
-                  onClick={handleFinishAndClose}
-                  className="w-full sm:w-auto py-2.5 px-4 rounded-xl bg-cyan-600 hover:bg-cyan-500 text-slate-950 font-bold text-xs transition"
-                >
-                  Done
-                </button>
-              </div>
-            </div>
-          )}
-
           {errorMessage && (
             <div className="p-3 bg-rose-950/80 border border-rose-800 rounded-xl text-rose-300 flex items-center gap-2 font-mono">
               <AlertCircle className="w-4 h-4 shrink-0 text-rose-400" />
@@ -972,7 +862,7 @@ export const CreateAccountModal: React.FC<CreateAccountModalProps> = ({
                   <span>Send Login Credentials to User via WhatsApp</span>
                 </span>
                 <p className="text-[11px] text-slate-300 leading-normal">
-                  Generates instant 1-click WhatsApp message button with the portal link, username, and password immediately upon account creation.
+                  Automatically dispatches portal link, username, and password directly via your linked WhatsApp session (zero-click).
                 </p>
               </div>
             </label>

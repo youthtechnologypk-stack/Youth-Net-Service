@@ -11,6 +11,13 @@ import {
   ArrowLeft,
   Wifi,
   UserX,
+  X,
+  Copy,
+  Check,
+  ExternalLink,
+  AlertTriangle,
+  Loader2,
+  MessageCircle,
 } from 'lucide-react';
 import { useISP } from '../context/ISPContext';
 import { UserAccount, SystemRole } from '../types/auth';
@@ -27,6 +34,11 @@ import { AgentProfileView } from './AgentProfileView';
 import { EditStaffModal } from './EditStaffModal';
 import { AddScopedFieldAgentModal } from './AddScopedFieldAgentModal';
 import { buildStandardWhatsAppCredentialText, getPortalUrlForRole } from '../services/authUtils';
+import { buildWhatsAppUrl } from '../lib/whatsappBilling';
+import {
+  formatWhatsAppDisplayPhone,
+  sendWhatsAppCredentialsViaGateway,
+} from '../lib/whatsappRouting';
 import { RealMikrotikSubscriber, fetchLiveMikrotikSubscribers } from '../services/mikrotikSubscriberSync';
 import { supabase, SupabasePortalUser } from '../services/supabaseClient';
 import { getStoredUser } from '../lib/auth';
@@ -45,6 +57,21 @@ import {
   resolveStaffPermissions,
   updatePortalUserPermissions,
 } from '../lib/staffPermissions';
+
+interface AccountCredentialToast {
+  id: number;
+  status: 'sending' | 'sent' | 'created_no_wa' | 'failed';
+  username: string;
+  fullName: string;
+  role: SystemRole;
+  formattedPhone: string;
+  plainPassword: string;
+  portalUrl: string;
+  senderCompanyName?: string;
+  errorMessage?: string;
+  waUrl: string;
+  copied: boolean;
+}
 
 export interface UserAccountsViewProps {
   currentSimulatedRole?: SystemRole;
@@ -74,6 +101,7 @@ export const UserAccountsView: React.FC<UserAccountsViewProps> = ({
   // Sub-navigation: User Accounts vs Permission Matrix
   const [activeManagementTab, setActiveManagementTab] = useState<'users' | 'permissions'>('users');
   const [actionNotice, setActionNotice] = useState<string | null>(null);
+  const [credentialToast, setCredentialToast] = useState<AccountCredentialToast | null>(null);
   const [refreshTrigger, setRefreshTrigger] = useState<number>(0);
 
   useEffect(() => {
@@ -252,8 +280,33 @@ export const UserAccountsView: React.FC<UserAccountsViewProps> = ({
   };
 
   // Handlers
+  const handleCopyToastCredentials = (toast: AccountCredentialToast) => {
+    const text = [
+      `Portal Link: ${toast.portalUrl}`,
+      `Name: ${toast.fullName}`,
+      `Username: ${toast.username}`,
+      `Password: ${toast.plainPassword}`,
+      `Role: ${toast.role}`,
+    ].join('\n');
+    navigator.clipboard?.writeText(text).catch(() => {});
+    setCredentialToast((prev) => (prev && prev.id === toast.id ? { ...prev, copied: true } : prev));
+    setTimeout(() => {
+      setCredentialToast((prev) => (prev && prev.id === toast.id ? { ...prev, copied: false } : prev));
+    }, 2500);
+  };
+
   const handleAccountCreated = async (newUser: UserAccount, plainPassword: string, sendWhatsApp: boolean) => {
     const resolvedPerms = resolveStaffPermissions(newUser, newUser.role);
+    const creatorTier = String(activeUser?.tier_level || activeUser?.role || '').toUpperCase();
+    const derivedDealerId =
+      creatorTier === 'DEALER'
+        ? String(activeUser?.id || '')
+        : creatorTier === 'SUB_DEALER'
+        ? String(activeUser?.parent_dealer_id || '') || null
+        : null;
+    const derivedSubDealerId =
+      creatorTier === 'SUB_DEALER' ? String(activeUser?.id || '') : null;
+
     const insertPayload: Record<string, any> = {
       id: newUser.id,
       username: (newUser.username || '').trim().toLowerCase(),
@@ -266,6 +319,9 @@ export const UserAccountsView: React.FC<UserAccountsViewProps> = ({
       can_access_gis_map: resolvedPerms.gis_map !== 'none',
       gis_map_permission: resolvedPerms.gis_map,
       permissions: resolvedPerms,
+      ...(derivedDealerId ? { dealer_id: derivedDealerId } : {}),
+      ...(derivedSubDealerId ? { sub_dealer_id: derivedSubDealerId } : {}),
+      ...(activeUser?.id ? { created_by_id: String(activeUser.id) } : {}),
       created_at: new Date().toISOString(),
     };
     // Insert directly into Supabase portal_users
@@ -294,12 +350,15 @@ export const UserAccountsView: React.FC<UserAccountsViewProps> = ({
     setRefreshTrigger((prev) => prev + 1);
     refreshMetrics();
 
+    const portalUrl = getPortalUrlForRole(newUser.role);
     const shareText = buildStandardWhatsAppCredentialText(
       newUser.displayName || newUser.fullName,
       newUser.username,
       plainPassword,
-      getPortalUrlForRole(newUser.role)
+      portalUrl
     );
+    const waUrl = buildWhatsAppUrl(newUser.phone, shareText);
+    const formattedPhone = formatWhatsAppDisplayPhone(newUser.phone);
 
     logWhatsAppNotice(
       newUser.phone,
@@ -308,11 +367,93 @@ export const UserAccountsView: React.FC<UserAccountsViewProps> = ({
       'isp_user_credentials_provisioned'
     );
 
-    if (sendWhatsApp) {
-      setIsWhatsAppModalOpen(true);
+    const toastId = Date.now();
+
+    if (!sendWhatsApp) {
+      setCredentialToast({
+        id: toastId,
+        status: 'created_no_wa',
+        username: newUser.username,
+        fullName: newUser.displayName || newUser.fullName,
+        role: newUser.role,
+        formattedPhone,
+        plainPassword,
+        portalUrl,
+        waUrl,
+        copied: false,
+      });
+      setTimeout(() => {
+        setCredentialToast((prev) => (prev && prev.id === toastId ? null : prev));
+      }, 6000);
+      return;
+    }
+
+    // Zero-click background Baileys Gateway send (NEVER opens manual WhatsApp modal or wa.me tab)
+    setCredentialToast({
+      id: toastId,
+      status: 'sending',
+      username: newUser.username,
+      fullName: newUser.displayName || newUser.fullName,
+      role: newUser.role,
+      formattedPhone,
+      plainPassword,
+      portalUrl,
+      waUrl,
+      copied: false,
+    });
+
+    const dispatchRes = await sendWhatsAppCredentialsViaGateway({
+      phone: newUser.phone,
+      username: newUser.username,
+      fullName: newUser.displayName || newUser.fullName,
+      password: plainPassword,
+      role: newUser.role,
+      portalUrl,
+      subscriber: {
+        id: newUser.id,
+        username: newUser.username,
+        full_name: newUser.displayName || newUser.fullName,
+        phone: newUser.phone,
+        dealer_id: derivedDealerId,
+        sub_dealer_id: derivedSubDealerId,
+      },
+    });
+
+    if (dispatchRes.ok && dispatchRes.status === 'SENT') {
+      setCredentialToast({
+        id: toastId,
+        status: 'sent',
+        username: newUser.username,
+        fullName: newUser.displayName || newUser.fullName,
+        role: newUser.role,
+        formattedPhone: dispatchRes.formattedPhone || formattedPhone,
+        plainPassword,
+        portalUrl,
+        senderCompanyName: dispatchRes.senderCompanyName,
+        waUrl,
+        copied: false,
+      });
+      setTimeout(() => {
+        setCredentialToast((prev) => (prev && prev.id === toastId ? null : prev));
+      }, 8000);
     } else {
-      setActionNotice(`Account created! @${newUser.username} (${newUser.role}) is now active.`);
-      setTimeout(() => setActionNotice(null), 5000);
+      setCredentialToast({
+        id: toastId,
+        status: 'failed',
+        username: newUser.username,
+        fullName: newUser.displayName || newUser.fullName,
+        role: newUser.role,
+        formattedPhone: dispatchRes.formattedPhone || formattedPhone,
+        plainPassword,
+        portalUrl,
+        senderCompanyName: dispatchRes.senderCompanyName,
+        errorMessage:
+          dispatchRes.error ||
+          dispatchRes.skippedReason ||
+          'WhatsApp session is disconnected. Pair your session or use the fallback options below.',
+        waUrl,
+        copied: false,
+      });
     }
   };
 
@@ -830,6 +971,101 @@ export const UserAccountsView: React.FC<UserAccountsViewProps> = ({
         confirmText="Confirm Permanent Delete"
         isLoading={isDeleting}
       />
+
+      {/* Non-blocking Floating Toast for Account Creation & Zero-Click WhatsApp Dispatch */}
+      {credentialToast && (
+        <div
+          role="status"
+          aria-live="polite"
+          className={`fixed bottom-5 right-5 z-[9990] w-[calc(100vw-2.5rem)] max-w-md rounded-2xl border p-4 shadow-2xl backdrop-blur-md transition-all animate-fadeIn ${
+            credentialToast.status === 'failed'
+              ? 'bg-slate-950/95 border-amber-500/70 text-amber-100 shadow-amber-950/40'
+              : credentialToast.status === 'sending'
+              ? 'bg-slate-950/95 border-cyan-500/60 text-cyan-100 shadow-cyan-950/40'
+              : 'bg-emerald-950/95 border-emerald-500/70 text-emerald-100 shadow-emerald-950/40'
+          }`}
+        >
+          <div className="flex items-start gap-3">
+            <div
+              className={`mt-0.5 p-1.5 rounded-xl shrink-0 ${
+                credentialToast.status === 'failed'
+                  ? 'bg-amber-500/20 text-amber-400'
+                  : credentialToast.status === 'sending'
+                  ? 'bg-cyan-500/20 text-cyan-400'
+                  : 'bg-emerald-500/20 text-emerald-400'
+              }`}
+            >
+              {credentialToast.status === 'sending' ? (
+                <Loader2 className="w-4 h-4 animate-spin" />
+              ) : credentialToast.status === 'failed' ? (
+                <AlertTriangle className="w-4 h-4" />
+              ) : (
+                <CheckCircle2 className="w-4 h-4" />
+              )}
+            </div>
+
+            <div className="flex-1 min-w-0 space-y-1.5">
+              <p className="text-xs font-bold leading-snug text-white">
+                {credentialToast.status === 'sending' &&
+                  `Account @${credentialToast.username} created — sending WhatsApp credentials to ${credentialToast.formattedPhone}...`}
+                {credentialToast.status === 'sent' &&
+                  `Account created & WhatsApp credentials auto-sent to ${credentialToast.formattedPhone}`}
+                {credentialToast.status === 'created_no_wa' &&
+                  `Account @${credentialToast.username} (${credentialToast.role}) created successfully.`}
+                {credentialToast.status === 'failed' &&
+                  `Account @${credentialToast.username} created — WhatsApp auto-send failed`}
+              </p>
+
+              {credentialToast.status === 'sent' && credentialToast.senderCompanyName && (
+                <p className="text-[11px] text-emerald-300/90 font-mono flex items-center gap-1.5">
+                  <MessageCircle className="w-3 h-3 shrink-0" />
+                  <span>Dispatched via {credentialToast.senderCompanyName}</span>
+                </p>
+              )}
+
+              {credentialToast.status === 'failed' && (
+                <>
+                  <p className="text-[11px] text-amber-200/90 leading-relaxed">
+                    {credentialToast.errorMessage}
+                  </p>
+                  <div className="flex flex-wrap items-center gap-2 pt-1.5">
+                    <button
+                      type="button"
+                      onClick={() => handleCopyToastCredentials(credentialToast)}
+                      className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-slate-800 hover:bg-slate-700 border border-slate-700 text-slate-100 font-semibold text-[11px] transition cursor-pointer"
+                    >
+                      {credentialToast.copied ? (
+                        <Check className="w-3.5 h-3.5 text-emerald-400" />
+                      ) : (
+                        <Copy className="w-3.5 h-3.5 text-cyan-400" />
+                      )}
+                      <span>{credentialToast.copied ? 'Copied!' : 'Copy Credentials'}</span>
+                    </button>
+                    <a
+                      href={credentialToast.waUrl}
+                      target="_blank"
+                      rel="noopener noreferrer external"
+                      className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-emerald-600 hover:bg-emerald-500 text-slate-950 font-bold text-[11px] transition"
+                    >
+                      <ExternalLink className="w-3.5 h-3.5" />
+                      <span>Open Manual WhatsApp</span>
+                    </a>
+                  </div>
+                </>
+              )}
+            </div>
+
+            <button
+              type="button"
+              onClick={() => setCredentialToast(null)}
+              className="p-1 rounded-lg text-slate-400 hover:text-white hover:bg-white/10 transition cursor-pointer shrink-0"
+              aria-label="Dismiss notification"
+            >
+              <X className="w-4 h-4" />
+            </button>
+          </div>
+        </div>
+      )}
     </div>
   );
 };

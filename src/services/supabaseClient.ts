@@ -78,6 +78,7 @@ export interface SupabasePortalUser {
 
 export type WhatsAppEventType =
   | 'PROVISION_WELCOME'
+  | 'PORTAL_CREDENTIALS'
   | 'INVOICE_GENERATED'
   | 'PRE_EXPIRY_3D'
   | 'AUTO_SUSPENSION'

@@ -3257,7 +3257,7 @@ app.post('/api/whatsapp/branding', async (req: Request, res: Response) => {
   }
 });
 
-app.post('/api/whatsapp/send-auto', async (req: Request, res: Response) => {
+const handleWhatsAppAutoSend = async (req: Request, res: Response) => {
   try {
     const { scope, caller } = await resolveServerResellerScope(req);
     if (!caller || !caller.id) {
@@ -3271,32 +3271,51 @@ app.post('/api/whatsapp/send-auto', async (req: Request, res: Response) => {
     const body = req.body || {};
     const validEvents = new Set([
       'PROVISION_WELCOME',
+      'PORTAL_CREDENTIALS',
       'INVOICE_GENERATED',
       'PRE_EXPIRY_3D',
       'AUTO_SUSPENSION',
       'PAYMENT_RESTORED',
       'MANUAL_TEST',
     ]);
-    const eventType = String(body.eventType || '').trim().toUpperCase();
+    let eventType = String(body.eventType || '').trim().toUpperCase();
+    if (!eventType) {
+      if (body.password || body.portalUrl || body.messageVars?.password || body.messageVars?.portalUrl) {
+        eventType = 'PORTAL_CREDENTIALS';
+      } else if (body.message || body.messageVars?.customNote) {
+        eventType = 'MANUAL_TEST';
+      }
+    }
     if (!validEvents.has(eventType)) {
-      return res.status(400).json({ success: false, error: 'Unsupported WhatsApp eventType.' });
+      return res.status(400).json({ ok: false, status: 'FAILED', error: 'Unsupported WhatsApp eventType.' });
     }
 
     const subscriberUsername = body.subscriberUsername
       ? String(body.subscriberUsername).trim().toLowerCase()
+      : body.username
+      ? String(body.username).trim().toLowerCase()
       : undefined;
+
+    const mergedMessageVars = {
+      ...(body.messageVars || {}),
+      ...(body.phone && !body.messageVars?.phone ? { phone: String(body.phone).trim() } : {}),
+      ...(body.message && !body.messageVars?.customNote ? { customNote: String(body.message).slice(0, 2000) } : {}),
+    };
+
+    const isNewAccountEvent = eventType === 'PROVISION_WELCOME' || eventType === 'PORTAL_CREDENTIALS';
+    let effectiveSubscriber = body.subscriber || null;
 
     // Enforce strict multi-tenant scope so a Dealer/Sub-Dealer cannot trigger messages for another tenant's subscriber
     if (scope.isIsolated && eventType !== 'MANUAL_TEST') {
       const allowedSet = scope.allowedSubscriberUsernames || new Set<string>();
       const inExistingScope = Boolean(subscriberUsername && allowedSet.has(subscriberUsername));
       if (!inExistingScope) {
-        // Allow brand-new provisioning only if subscriber does not already belong to another tenant
         const subObj = body.subscriber || {};
         const callerOwnsNewSub =
-          eventType === 'PROVISION_WELCOME' &&
+          isNewAccountEvent &&
           ((subObj.sub_dealer_id && String(subObj.sub_dealer_id) === String(caller.id)) ||
-            (subObj.dealer_id && String(subObj.dealer_id) === String(caller.id)));
+            (subObj.dealer_id && String(subObj.dealer_id) === String(caller.id)) ||
+            (!subObj.dealer_id && !subObj.sub_dealer_id));
         if (!callerOwnsNewSub) {
           return res.status(403).json({
             ok: false,
@@ -3305,14 +3324,29 @@ app.post('/api/whatsapp/send-auto', async (req: Request, res: Response) => {
           });
         }
       }
+
+      if (isNewAccountEvent) {
+        effectiveSubscriber = {
+          ...(body.subscriber || {}),
+          username: subscriberUsername || body.subscriber?.username || null,
+          phone: mergedMessageVars.phone || body.subscriber?.phone || null,
+          sub_dealer_id: scope.tier === 'SUB_DEALER' ? String(caller.id) : body.subscriber?.sub_dealer_id || null,
+          dealer_id:
+            scope.tier === 'DEALER'
+              ? String(caller.id)
+              : (caller as any)?.parent_dealer_id || body.subscriber?.dealer_id || null,
+        };
+      } else {
+        effectiveSubscriber = null;
+      }
     }
 
     const result = await baileysManager.sendAutomatedMessage({
       supabase: serverSupabase,
-      subscriber: scope.isIsolated && eventType !== 'PROVISION_WELCOME' ? null : (body.subscriber || null),
+      subscriber: effectiveSubscriber,
       subscriberUsername,
       eventType: eventType as any,
-      messageVars: body.messageVars || {},
+      messageVars: mergedMessageVars,
       forceSenderPortalUserId:
         eventType === 'MANUAL_TEST' ? String(caller.id) : undefined,
     });
@@ -3325,7 +3359,10 @@ app.post('/api/whatsapp/send-auto', async (req: Request, res: Response) => {
       error: err?.message || 'Failed to dispatch automated WhatsApp message',
     });
   }
-});
+};
+
+app.post('/api/whatsapp/send', handleWhatsAppAutoSend);
+app.post('/api/whatsapp/send-auto', handleWhatsAppAutoSend);
 
 app.get('/api/whatsapp/logs', async (req: Request, res: Response) => {
   try {

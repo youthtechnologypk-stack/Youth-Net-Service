@@ -675,6 +675,8 @@ class MultiTenantBaileysManager {
         'Subscriber',
       username: cleanSubUsername || params.messageVars?.username || '',
       password: params.messageVars?.password,
+      portalUrl: params.messageVars?.portalUrl,
+      accountRole: params.messageVars?.accountRole,
       packageName: params.messageVars?.packageName,
       monthlyFee: params.messageVars?.monthlyFee,
       amountDue: params.messageVars?.amountDue,
@@ -693,6 +695,11 @@ class MultiTenantBaileysManager {
       customNote: params.messageVars?.customNote,
     });
 
+    const loggedMessageBody =
+      eventType === 'PORTAL_CREDENTIALS' || eventType === 'PROVISION_WELCOME'
+        ? messageBody.replace(/(\*Password:\*\s*)(.+)/gi, '$1••••••••')
+        : messageBody;
+
     const baseLog = {
       sender_portal_user_id: senderResolution.senderPortalUserId,
       sender_company_name: senderResolution.companyName,
@@ -706,11 +713,11 @@ class MultiTenantBaileysManager {
         ? String(resolvedSubscriber.sub_dealer_id)
         : null,
       event_type: eventType,
-      message_body: messageBody,
+      message_body: loggedMessageBody,
     };
 
-    // Respect sender's Auto-Send master toggle (except explicit manual test)
-    if (eventType !== 'MANUAL_TEST' && !senderResolution.autoSendEnabled) {
+    // Respect sender's Auto-Send master toggle (except explicit manual test or explicit credential dispatch)
+    if (eventType !== 'MANUAL_TEST' && eventType !== 'PORTAL_CREDENTIALS' && !senderResolution.autoSendEnabled) {
       const log = await this.persistWhatsappLog(supabase, {
         ...baseLog,
         status: 'SKIPPED',

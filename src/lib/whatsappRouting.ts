@@ -137,6 +137,15 @@ export function formatWhatsAppJid(phone?: string | null): string | null {
 }
 
 /**
+ * Formats a phone number for user-facing toast display (e.g. "+923001234567").
+ */
+export function formatWhatsAppDisplayPhone(phone?: string | null): string {
+  const digits = formatWhatsAppDigits(phone);
+  if (digits) return `+${digits}`;
+  return String(phone || '').trim() || 'subscriber';
+}
+
+/**
  * Determines whether a Sub-Dealer is permitted to pair and send from their own WhatsApp number.
  * Allowed if explicitly granted on the Sub-Dealer row OR enabled at the Parent Dealer level.
  */
@@ -272,6 +281,8 @@ export interface AutomatedMessageTemplateVars {
   subscriberName?: string | null;
   username?: string | null;
   password?: string | null;
+  portalUrl?: string | null;
+  accountRole?: string | null;
   packageName?: string | null;
   monthlyFee?: number | null;
   amountDue?: number | null;
@@ -320,6 +331,22 @@ export function buildAutomatedWhatsAppMessage(vars: AutomatedMessageTemplateVars
         feeText +
         expText +
         `\n\nThank you for choosing *${company}*.` +
+        supportLine
+      );
+    }
+
+    case 'PORTAL_CREDENTIALS': {
+      const roleText = vars.accountRole ? `\n• *Account Role:* ${vars.accountRole}` : '';
+      const portalLink = vars.portalUrl ? `\n• *Portal Link:* ${vars.portalUrl}` : '';
+      return (
+        `*Welcome to ${company}!*\n\n` +
+        `Dear *${clientName}*,\n` +
+        `Your portal login account has been created and is now active.\n\n` +
+        `• *Username:* ${uname || 'N/A'}\n` +
+        `• *Password:* ${vars.password || 'As configured'}` +
+        roleText +
+        portalLink +
+        `\n\nPlease keep your login details secure.\n— *${company}*` +
         supportLine
       );
     }
@@ -750,6 +777,90 @@ export async function triggerAutoWhatsAppNotification(payload: {
   return {
     ok: Boolean(data?.ok),
     status: data?.status || (data?.ok ? 'SENT' : 'FAILED'),
+    senderCompanyName: data?.senderCompanyName,
+    senderPhone: data?.senderPhone || null,
+    error: data?.error,
+    skippedReason: data?.skippedReason,
+  };
+}
+
+export interface SendPortalCredentialsWhatsAppResult extends AutoWhatsAppTriggerResponse {
+  formattedPhone: string;
+}
+
+/**
+ * Zero-click background dispatcher calling POST ${gatewayUrl}/api/whatsapp/send
+ * for newly created portal account credentials.
+ * Routes hierarchically (Sub-Dealer -> Dealer -> Master Admin) and signs with the
+ * resolved sender's configured Company Display Name & Support Helpline footer.
+ */
+export async function sendWhatsAppCredentialsViaGateway(payload: {
+  phone: string;
+  username: string;
+  fullName: string;
+  password: string;
+  role: string;
+  portalUrl: string;
+  subscriber?: Partial<SupabasePortalUser> | null;
+}): Promise<SendPortalCredentialsWhatsAppResult> {
+  const formattedPhone = formatWhatsAppDisplayPhone(payload.phone);
+  if (typeof window === 'undefined') {
+    return {
+      ok: false,
+      status: 'SKIPPED',
+      formattedPhone,
+      skippedReason: 'Non-browser environment',
+    };
+  }
+
+  const result = await safeWhatsAppApiFetch<any>('/api/whatsapp/send', {
+    method: 'POST',
+    headers: buildPortalAuthHeaders(),
+    body: JSON.stringify({
+      eventType: 'PORTAL_CREDENTIALS',
+      phone: payload.phone,
+      subscriberUsername: payload.username,
+      subscriber: payload.subscriber || {
+        username: payload.username,
+        full_name: payload.fullName,
+        phone: payload.phone,
+      },
+      messageVars: {
+        subscriberName: payload.fullName,
+        username: payload.username,
+        password: payload.password,
+        accountRole: payload.role,
+        portalUrl: payload.portalUrl,
+        phone: payload.phone,
+      },
+    }),
+  });
+
+  if (result.isGatewayUnreachable || !result.data) {
+    return {
+      ok: false,
+      status: 'FAILED',
+      formattedPhone,
+      isGatewayUnreachable: result.isGatewayUnreachable,
+      error: result.error || 'Unable to reach WhatsApp gateway API',
+    };
+  }
+
+  const data = result.data;
+  if (!result.ok) {
+    return {
+      ok: false,
+      status: data?.status || 'FAILED',
+      formattedPhone,
+      senderCompanyName: data?.senderCompanyName,
+      error: data?.error || result.error || `HTTP ${result.httpStatus}`,
+    };
+  }
+
+  return {
+    ok: Boolean(data?.ok),
+    status: data?.status || (data?.ok ? 'SENT' : 'FAILED'),
+    formattedPhone,
     senderCompanyName: data?.senderCompanyName,
     senderPhone: data?.senderPhone || null,
     error: data?.error,
