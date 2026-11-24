@@ -45,6 +45,12 @@ export interface UserAccount {
   bandwidth_pool_cap_mbps?: number;
   max_active_users?: number;
   can_create_subdealers?: boolean;
+  company_name?: string | null;
+  whatsapp_status?: string | null;
+  whatsapp_phone?: string | null;
+  whatsapp_auto_send?: boolean | null;
+  whatsapp_support_phone?: string | null;
+  allow_subdealer_whatsapp?: boolean | null;
   createdAt: string;
   lastLoginAt?: string;
 }

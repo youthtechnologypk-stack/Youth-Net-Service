@@ -49,7 +49,7 @@ import {
   removeSubscriberGracePeriod,
   shiftBillToNextMonth,
 } from '../lib/billingAndNetwork';
-import { openWhatsAppLink } from '../lib/whatsappBilling';
+import { triggerAutoWhatsAppNotification } from '../lib/whatsappRouting';
 import { EXPIRY_MIGRATION_SQL } from '../lib/expiryMigrationSql';
 import {
   DEFAULT_ISP_BILLING_SETTINGS,
@@ -952,7 +952,23 @@ export const ExpiryAutomationView: React.FC<ExpiryAutomationViewProps> = ({
         },
       });
 
-      openWhatsAppLink(sub.phone, slip);
+      const autoRes = await triggerAutoWhatsAppNotification({
+        eventType: 'PRE_EXPIRY_3D',
+        subscriberUsername: uname,
+        subscriber: sub,
+        messageVars: {
+          subscriberName: sub.full_name || sub.username,
+          username: uname,
+          phone: sub.phone,
+          packageName:
+            sub.package_speed || sub.package_profile_name || sub.original_package_profile || 'Fiber Broadband',
+          amountDue: sub.amountDue,
+          expiryDate: expiryDateLabel,
+          daysRemaining: Math.max(0, Math.ceil((sub.effectiveExpiryMs - Date.now()) / 86_400_000)),
+        },
+      });
+
+      const loggedStatus = autoRes.ok && autoRes.status === 'SENT' ? 'SENT' : 'FAILED';
 
       await supabase.from('whatsapp_reminder_logs').insert([
         {
@@ -962,7 +978,7 @@ export const ExpiryAutomationView: React.FC<ExpiryAutomationViewProps> = ({
           message_body: slip,
           amount_due: sub.amountDue,
           expiry_date: new Date(sub.effectiveExpiryMs).toISOString(),
-          status: 'SENT',
+          status: loggedStatus,
           created_at: nowIso,
         },
       ]);
@@ -974,6 +990,9 @@ export const ExpiryAutomationView: React.FC<ExpiryAutomationViewProps> = ({
           .eq('id', realSubscriberId);
       }
 
+      const deliverySucceeded = autoRes.ok && autoRes.status === 'SENT';
+      const senderLabel = autoRes.senderCompanyName || 'WhatsApp Gateway';
+
       await supabase.from('expiry_audit_logs').insert([
         {
           subscriber_id: realSubscriberId,
@@ -982,12 +1001,21 @@ export const ExpiryAutomationView: React.FC<ExpiryAutomationViewProps> = ({
           previous_profile: sub.original_package_profile || sub.package_profile_name || null,
           applied_profile: sub.package_profile_name || null,
           triggered_by: 'ADMIN',
-          notes: `Manual WhatsApp payment slip opened & logged for cycle ${cycleKey}`,
+          notes: deliverySucceeded
+            ? `Automated WhatsApp reminder sent via ${senderLabel} for cycle ${cycleKey}`
+            : `Automated WhatsApp reminder ${autoRes.status || 'FAILED'} for cycle ${cycleKey}: ${autoRes.error || 'gateway unavailable'}`,
           created_at: nowIso,
         },
       ]);
 
-      showNotice(`WhatsApp payment slip logged & opened for @${uname}.`, 'success');
+      if (deliverySucceeded) {
+        showNotice(`Automated WhatsApp reminder sent to @${uname} via ${senderLabel}.`, 'success');
+      } else {
+        showNotice(
+          `WhatsApp reminder not delivered for @${uname}: ${autoRes.error || autoRes.status || 'Session not connected'}.`,
+          'error'
+        );
+      }
       await fetchAllDatabaseState();
     } catch (err: any) {
       showNotice(`Failed to log reminder for @${uname}: ${err?.message}`, 'error');

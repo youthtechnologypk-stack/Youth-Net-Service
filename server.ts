@@ -75,6 +75,18 @@ import {
   TARIFF_NOT_CONFIGURED_ERROR,
 } from './src/lib/resellerEngine.ts';
 import { isExpiryOrBlockedProfile } from './src/lib/mikrotikProfileSync.ts';
+import { baileysManager, sanitizePortalUserIdForSession } from './src/server/baileysManager.ts';
+import {
+  canSubDealerUseOwnWhatsApp,
+  DEFAULT_MASTER_COMPANY_NAME,
+} from './src/lib/whatsappRouting.ts';
+import { resolveStaffPermissions } from './src/lib/staffPermissions.ts';
+import {
+  computeMaterialInvoiceSyncPlan,
+  type MaterialInvoiceSyncPlan,
+  type MinimalInventoryLog,
+  type MinimalInvoice,
+} from './src/lib/inventoryInvoiceSync.ts';
 
 dotenv.config();
 
@@ -2936,6 +2948,883 @@ app.get('/.netlify/functions/whatsapp-webhook', handleWhatsappWebhookGet);
 app.post('/.netlify/functions/whatsapp-webhook', handleWhatsappWebhookPost);
 
 // ============================================================================
+// MULTI-TENANT BAILEYS WHATSAPP GATEWAY & ZERO-CLICK AUTO-SEND API
+// ============================================================================
+
+async function resolveWhatsAppGatewayActor(req: Request): Promise<{
+  ok: boolean;
+  statusCode?: number;
+  error?: string;
+  actor: Record<string, any> | null;
+  allUsers: Array<Record<string, any>>;
+  scope: ResellerScope;
+  canPairOwnWhatsapp: boolean;
+  effectiveTier: 'ADMIN' | 'DEALER' | 'SUB_DEALER' | 'OTHER';
+}> {
+  const { scope, caller } = await resolveServerResellerScope(req);
+  const { data: rows } = await serverSupabase.from('portal_users').select('*');
+  const allUsers = (rows || []) as Array<Record<string, any>>;
+
+  const actor = caller;
+
+  if (!actor || !actor.id) {
+    return {
+      ok: false,
+      statusCode: 401,
+      error: 'Authentication required to access WhatsApp Gateway.',
+      actor: null,
+      allUsers,
+      scope,
+      canPairOwnWhatsapp: false,
+      effectiveTier: 'OTHER',
+    };
+  }
+
+  const roleUpper = String(actor.role || '').trim().toUpperCase();
+  const tierUpper = String(actor.tier_level || '').trim().toUpperCase();
+  const effectiveTier: 'ADMIN' | 'DEALER' | 'SUB_DEALER' | 'OTHER' =
+    tierUpper === 'SUB_DEALER' || roleUpper === 'SUB_DEALER'
+      ? 'SUB_DEALER'
+      : tierUpper === 'DEALER' || roleUpper === 'DEALER'
+      ? 'DEALER'
+      : roleUpper === 'ADMIN' || tierUpper === 'MASTER'
+      ? 'ADMIN'
+      : 'OTHER';
+
+  let canPairOwnWhatsapp = false;
+  if (effectiveTier === 'ADMIN' || effectiveTier === 'DEALER') {
+    canPairOwnWhatsapp = true;
+  } else if (effectiveTier === 'SUB_DEALER') {
+    const parentDealer = actor.parent_dealer_id
+      ? allUsers.find((u) => String(u.id) === String(actor.parent_dealer_id)) || null
+      : null;
+    canPairOwnWhatsapp = canSubDealerUseOwnWhatsApp(actor as any, parentDealer as any);
+  }
+
+  return {
+    ok: true,
+    actor,
+    allUsers,
+    scope,
+    canPairOwnWhatsapp,
+    effectiveTier,
+  };
+}
+
+app.get('/api/whatsapp/session/status', async (req: Request, res: Response) => {
+  try {
+    const ctx = await resolveWhatsAppGatewayActor(req);
+    if (!ctx.ok || !ctx.actor) {
+      return res.status(ctx.statusCode || 401).json({ success: false, error: ctx.error });
+    }
+
+    const requestedId = String(req.query.portalUserId || '').trim();
+    let targetUser = ctx.actor;
+
+    if (requestedId && requestedId !== String(ctx.actor.id)) {
+      if (ctx.effectiveTier === 'ADMIN') {
+        const found = ctx.allUsers.find((u) => String(u.id) === requestedId);
+        if (found) targetUser = found;
+      } else {
+        return res.status(403).json({
+          success: false,
+          error: 'Access Denied: You can only inspect your own WhatsApp session.',
+        });
+      }
+    }
+
+    const runtime = baileysManager.getSessionState(String(targetUser.id));
+    const activeSessions = baileysManager.listActiveSessions();
+
+    // Build scoped tenant session list (Admin sees all Dealers/Sub-Dealers/Admin; Dealer sees self + own Sub-Dealers)
+    const visibleTenants = ctx.allUsers
+      .filter((u) => {
+        const r = String(u.role || '').toUpperCase();
+        const t = String(u.tier_level || '').toUpperCase();
+        const isTenant = r === 'ADMIN' || r === 'DEALER' || r === 'SUB_DEALER' || t === 'DEALER' || t === 'SUB_DEALER';
+        if (!isTenant) return false;
+        if (ctx.effectiveTier === 'ADMIN') return true;
+        if (ctx.effectiveTier === 'DEALER') {
+          return String(u.id) === String(ctx.actor!.id) || String(u.parent_dealer_id || '') === String(ctx.actor!.id);
+        }
+        return String(u.id) === String(ctx.actor!.id);
+      })
+      .map((u) => {
+        const meta = activeSessions.find((s) => s.portalUserId === String(u.id));
+        const tier =
+          String(u.tier_level || u.role || '').toUpperCase() === 'SUB_DEALER'
+            ? 'SUB_DEALER'
+            : String(u.tier_level || u.role || '').toUpperCase() === 'DEALER'
+            ? 'DEALER'
+            : 'ADMIN';
+        return {
+          portalUserId: String(u.id),
+          username: u.username,
+          fullName: u.full_name,
+          tier,
+          companyName:
+            String(u.company_name || '').trim() ||
+            (tier === 'ADMIN' ? DEFAULT_MASTER_COMPANY_NAME : u.full_name),
+          status: meta?.status || (String(u.whatsapp_status || '').toUpperCase() === 'CONNECTED' ? 'DISCONNECTED' : String(u.whatsapp_status || 'DISCONNECTED')),
+          phone: meta?.phone || u.whatsapp_phone || null,
+          autoSend: u.whatsapp_auto_send !== false,
+          allowSubdealerWhatsapp: Boolean(u.allow_subdealer_whatsapp),
+        };
+      });
+
+    const missingColumns =
+      targetUser.company_name === undefined &&
+      targetUser.whatsapp_status === undefined &&
+      targetUser.allow_subdealer_whatsapp === undefined;
+
+    return res.json({
+      success: true,
+      portalUserId: String(targetUser.id),
+      effectiveTier: ctx.effectiveTier,
+      canPairOwnWhatsapp: ctx.canPairOwnWhatsapp,
+      session: {
+        ...runtime,
+        phone: runtime.phone || targetUser.whatsapp_phone || null,
+      },
+      branding: {
+        companyName:
+          String(targetUser.company_name || '').trim() ||
+          (ctx.effectiveTier === 'ADMIN'
+            ? DEFAULT_MASTER_COMPANY_NAME
+            : String(targetUser.full_name || '')),
+        supportPhone: String(targetUser.whatsapp_support_phone || targetUser.phone || ''),
+        autoSend: targetUser.whatsapp_auto_send !== false,
+      },
+      tenantSessions: visibleTenants,
+      schemaWarning: missingColumns,
+    });
+  } catch (err: any) {
+    return res.status(500).json({ success: false, error: err?.message || 'Failed to read WhatsApp session status' });
+  }
+});
+
+app.post('/api/whatsapp/session/start', async (req: Request, res: Response) => {
+  try {
+    const ctx = await resolveWhatsAppGatewayActor(req);
+    if (!ctx.ok || !ctx.actor) {
+      return res.status(ctx.statusCode || 401).json({ success: false, error: ctx.error });
+    }
+    if (!ctx.canPairOwnWhatsapp) {
+      return res.status(403).json({
+        success: false,
+        error:
+          'Own WhatsApp pairing is disabled for this Sub-Dealer. Ask your Parent Dealer or Master ISP Admin to enable "Allow Sub-Dealer Own WhatsApp".',
+      });
+    }
+
+    const requestedId = String(req.body?.portalUserId || '').trim();
+    let targetId = String(ctx.actor.id);
+    if (requestedId && requestedId !== targetId) {
+      if (ctx.effectiveTier === 'ADMIN') {
+        const safe = sanitizePortalUserIdForSession(requestedId);
+        if (!safe) {
+          return res.status(400).json({ success: false, error: 'Invalid portalUserId format.' });
+        }
+        targetId = safe;
+      } else {
+        return res.status(403).json({
+          success: false,
+          error: 'Access Denied: You can only start your own WhatsApp session.',
+        });
+      }
+    }
+
+    const state = await baileysManager.startSession(targetId, serverSupabase);
+    return res.json({ success: true, session: state });
+  } catch (err: any) {
+    return res.status(500).json({ success: false, error: err?.message || 'Failed to start WhatsApp session' });
+  }
+});
+
+app.post('/api/whatsapp/session/logout', async (req: Request, res: Response) => {
+  try {
+    const ctx = await resolveWhatsAppGatewayActor(req);
+    if (!ctx.ok || !ctx.actor) {
+      return res.status(ctx.statusCode || 401).json({ success: false, error: ctx.error });
+    }
+
+    const requestedId = String(req.body?.portalUserId || '').trim();
+    let targetId = String(ctx.actor.id);
+    if (requestedId && requestedId !== targetId) {
+      if (ctx.effectiveTier === 'ADMIN') {
+        const safe = sanitizePortalUserIdForSession(requestedId);
+        if (!safe) {
+          return res.status(400).json({ success: false, error: 'Invalid portalUserId format.' });
+        }
+        targetId = safe;
+      } else {
+        return res.status(403).json({
+          success: false,
+          error: 'Access Denied: You can only disconnect your own WhatsApp session.',
+        });
+      }
+    }
+
+    const state = await baileysManager.logoutSession(targetId, serverSupabase);
+    return res.json({ success: true, session: state });
+  } catch (err: any) {
+    return res.status(500).json({ success: false, error: err?.message || 'Failed to disconnect WhatsApp session' });
+  }
+});
+
+app.post('/api/whatsapp/branding', async (req: Request, res: Response) => {
+  try {
+    const ctx = await resolveWhatsAppGatewayActor(req);
+    if (!ctx.ok || !ctx.actor) {
+      return res.status(ctx.statusCode || 401).json({ success: false, error: ctx.error });
+    }
+    if (ctx.effectiveTier === 'OTHER') {
+      return res.status(403).json({
+        success: false,
+        error: 'Only Master Admin, Dealers, and authorized Sub-Dealers can update WhatsApp branding.',
+      });
+    }
+
+    const companyName = String(req.body?.companyName ?? '').trim().slice(0, 100);
+    const supportPhone = String(req.body?.supportPhone ?? '').trim().slice(0, 40);
+    const autoSend = req.body?.autoSend !== undefined ? Boolean(req.body.autoSend) : true;
+
+    const patch: Record<string, any> = {
+      company_name: companyName || (ctx.effectiveTier === 'ADMIN' ? DEFAULT_MASTER_COMPANY_NAME : ctx.actor.full_name),
+      whatsapp_auto_send: autoSend,
+      whatsapp_support_phone: supportPhone || null,
+    };
+
+    const stripped: string[] = [];
+    let lastError: any = null;
+    for (let attempt = 0; attempt < 5; attempt++) {
+      if (Object.keys(patch).length === 0) break;
+      const { error } = await serverSupabase
+        .from('portal_users')
+        .update(patch)
+        .eq('id', ctx.actor.id);
+      if (!error) {
+        lastError = null;
+        break;
+      }
+      lastError = error;
+      const msg = String(error.message || '');
+      const colMatch =
+        msg.match(/Could not find the ['"]([a-zA-Z0-9_]+)['"] column/i) ||
+        msg.match(/column\s+["']?([a-zA-Z0-9_]+)["']?\s+/i);
+      if (colMatch?.[1] && colMatch[1] in patch) {
+        stripped.push(colMatch[1]);
+        delete patch[colMatch[1]];
+        continue;
+      }
+      break;
+    }
+
+    if (lastError) {
+      return res.status(500).json({ success: false, error: lastError.message });
+    }
+
+    return res.json({
+      success: true,
+      schemaWarning: stripped.length > 0,
+      strippedColumns: stripped,
+      branding: {
+        companyName: companyName || DEFAULT_MASTER_COMPANY_NAME,
+        supportPhone,
+        autoSend,
+      },
+    });
+  } catch (err: any) {
+    return res.status(500).json({ success: false, error: err?.message || 'Failed to save WhatsApp branding' });
+  }
+});
+
+app.post('/api/whatsapp/send-auto', async (req: Request, res: Response) => {
+  try {
+    const { scope, caller } = await resolveServerResellerScope(req);
+    if (!caller || !caller.id) {
+      return res.status(401).json({
+        ok: false,
+        status: 'FAILED',
+        error: 'Authentication required to dispatch automated WhatsApp messages.',
+      });
+    }
+
+    const body = req.body || {};
+    const validEvents = new Set([
+      'PROVISION_WELCOME',
+      'INVOICE_GENERATED',
+      'PRE_EXPIRY_3D',
+      'AUTO_SUSPENSION',
+      'PAYMENT_RESTORED',
+      'MANUAL_TEST',
+    ]);
+    const eventType = String(body.eventType || '').trim().toUpperCase();
+    if (!validEvents.has(eventType)) {
+      return res.status(400).json({ success: false, error: 'Unsupported WhatsApp eventType.' });
+    }
+
+    const subscriberUsername = body.subscriberUsername
+      ? String(body.subscriberUsername).trim().toLowerCase()
+      : undefined;
+
+    // Enforce strict multi-tenant scope so a Dealer/Sub-Dealer cannot trigger messages for another tenant's subscriber
+    if (scope.isIsolated && eventType !== 'MANUAL_TEST') {
+      const allowedSet = scope.allowedSubscriberUsernames || new Set<string>();
+      const inExistingScope = Boolean(subscriberUsername && allowedSet.has(subscriberUsername));
+      if (!inExistingScope) {
+        // Allow brand-new provisioning only if subscriber does not already belong to another tenant
+        const subObj = body.subscriber || {};
+        const callerOwnsNewSub =
+          eventType === 'PROVISION_WELCOME' &&
+          ((subObj.sub_dealer_id && String(subObj.sub_dealer_id) === String(caller.id)) ||
+            (subObj.dealer_id && String(subObj.dealer_id) === String(caller.id)));
+        if (!callerOwnsNewSub) {
+          return res.status(403).json({
+            ok: false,
+            status: 'FAILED',
+            error: 'Access Denied: Subscriber is outside your Dealer/Sub-Dealer scope.',
+          });
+        }
+      }
+    }
+
+    const result = await baileysManager.sendAutomatedMessage({
+      supabase: serverSupabase,
+      subscriber: scope.isIsolated && eventType !== 'PROVISION_WELCOME' ? null : (body.subscriber || null),
+      subscriberUsername,
+      eventType: eventType as any,
+      messageVars: body.messageVars || {},
+      forceSenderPortalUserId:
+        eventType === 'MANUAL_TEST' ? String(caller.id) : undefined,
+    });
+
+    return res.json(result);
+  } catch (err: any) {
+    return res.status(500).json({
+      ok: false,
+      status: 'FAILED',
+      error: err?.message || 'Failed to dispatch automated WhatsApp message',
+    });
+  }
+});
+
+app.get('/api/whatsapp/logs', async (req: Request, res: Response) => {
+  try {
+    const ctx = await resolveWhatsAppGatewayActor(req);
+    if (!ctx.ok || !ctx.actor) {
+      return res.status(ctx.statusCode || 401).json({ success: false, error: ctx.error });
+    }
+
+    const limit = Math.min(250, Math.max(10, Number(req.query.limit) || 120));
+    const { logs, tableMissing } = await baileysManager.fetchScopedLogs(
+      serverSupabase,
+      {
+        isIsolated: ctx.scope.isIsolated,
+        tier: ctx.scope.tier,
+        portalUserId: String(ctx.actor.id),
+        allowedResellerIds: ctx.scope.allowedResellerIds,
+        allowedSubscriberUsernames: ctx.scope.allowedSubscriberUsernames,
+      },
+      limit
+    );
+
+    return res.json({ success: true, logs, tableMissing });
+  } catch (err: any) {
+    return res.status(500).json({ success: false, error: err?.message || 'Failed to load WhatsApp logs' });
+  }
+});
+
+app.post('/api/whatsapp/cron/pre-expiry', async (req: Request, res: Response) => {
+  try {
+    const ctx = await resolveWhatsAppGatewayActor(req);
+    if (!ctx.ok || !ctx.actor) {
+      return res.status(ctx.statusCode || 401).json({ success: false, error: ctx.error });
+    }
+    if (ctx.effectiveTier !== 'ADMIN' && ctx.effectiveTier !== 'DEALER') {
+      return res.status(403).json({
+        success: false,
+        error: 'Only Master Admin or Dealers can trigger the 3-day pre-expiry reminder sweep.',
+      });
+    }
+
+    const scopedSet = ctx.scope.isIsolated
+      ? ctx.scope.allowedSubscriberUsernames || new Set<string>()
+      : null;
+    const summary = await baileysManager.runDailyPreExpiryAutoReminders(serverSupabase, scopedSet);
+    return res.json({ success: true, ...summary });
+  } catch (err: any) {
+    return res.status(500).json({ success: false, error: err?.message || 'Pre-expiry sweep failed' });
+  }
+});
+
+// ============================================================================
+// SUBSCRIBER INVENTORY LOGS & INVOICES EDIT / DELETE API (RBAC + TENANT SCOPED)
+// ============================================================================
+
+async function authorizeLedgerEditDeleteActor(req: Request): Promise<{
+  ok: boolean;
+  statusCode?: number;
+  error?: string;
+  caller: Record<string, any> | null;
+  scope: ResellerScope;
+}> {
+  const { scope, caller } = await resolveServerResellerScope(req);
+  if (!caller || !caller.id) {
+    return {
+      ok: false,
+      statusCode: 401,
+      error: 'Authentication required to edit or delete invoices and inventory logs.',
+      caller: null,
+      scope,
+    };
+  }
+
+  const perms = resolveStaffPermissions(caller as any);
+  if (!perms.edit_delete_invoice) {
+    return {
+      ok: false,
+      statusCode: 403,
+      error: 'Permission Denied: Edit & Delete Invoice / Hardware Log permission is required.',
+      caller,
+      scope,
+    };
+  }
+
+  return { ok: true, caller, scope };
+}
+
+function isSubscriberAllowedInScope(
+  scope: ResellerScope,
+  subscriberUsername: string | null | undefined,
+  recordOwnerIds?: { dealer_id?: string | null; sub_dealer_id?: string | null }
+): boolean {
+  if (!scope.isIsolated) return true;
+  const uname = String(subscriberUsername || '').trim().toLowerCase();
+  if (uname && scope.allowedSubscriberUsernames?.has(uname)) {
+    return true;
+  }
+  if (recordOwnerIds && scope.allowedResellerIds) {
+    if (recordOwnerIds.sub_dealer_id && scope.allowedResellerIds.has(String(recordOwnerIds.sub_dealer_id))) {
+      return true;
+    }
+    if (
+      scope.tier === 'DEALER' &&
+      recordOwnerIds.dealer_id &&
+      scope.allowedResellerIds.has(String(recordOwnerIds.dealer_id))
+    ) {
+      return true;
+    }
+  }
+  return false;
+}
+
+async function applyMaterialInvoiceSyncOnServer(params: {
+  subscriberUsername: string;
+  previousItem: MinimalInventoryLog;
+  updatedItem: MinimalInventoryLog | null;
+}): Promise<MaterialInvoiceSyncPlan> {
+  const { subscriberUsername, previousItem, updatedItem } = params;
+  const [{ data: remainingLogs }, { data: subscriberInvoices }] = await Promise.all([
+    serverSupabase
+      .from('subscriber_inventory_logs')
+      .select('*')
+      .ilike('subscriber_username', subscriberUsername)
+      .order('created_at', { ascending: false }),
+    serverSupabase
+      .from('invoices')
+      .select('*')
+      .ilike('subscriber_username', subscriberUsername)
+      .order('created_at', { ascending: false }),
+  ]);
+
+  const plan = computeMaterialInvoiceSyncPlan({
+    previousItem,
+    updatedItem,
+    remainingLogsAfterMutation: (remainingLogs || []) as MinimalInventoryLog[],
+    subscriberInvoices: (subscriberInvoices || []) as MinimalInvoice[],
+  });
+
+  if (plan.action === 'DELETE_INVOICE' && plan.targetInvoiceId) {
+    await serverSupabase.from('invoices').delete().eq('id', plan.targetInvoiceId);
+  } else if (plan.action === 'UPDATE_INVOICE' && plan.targetInvoiceId && plan.newAmount !== undefined) {
+    const patch: Record<string, any> = { amount: plan.newAmount };
+    if (plan.newStatus) patch.status = plan.newStatus;
+    if (plan.newStatus === 'PAID') patch.paid_at = new Date().toISOString();
+    await serverSupabase.from('invoices').update(patch).eq('id', plan.targetInvoiceId);
+  }
+
+  return plan;
+}
+
+app.patch('/api/subscribers/inventory-logs/:id', async (req: Request, res: Response) => {
+  try {
+    const auth = await authorizeLedgerEditDeleteActor(req);
+    if (!auth.ok) {
+      return res.status(auth.statusCode || 403).json({ success: false, error: auth.error });
+    }
+
+    const logId = String(req.params.id || '').trim();
+    if (!logId || logId.length > 80) {
+      return res.status(400).json({ success: false, error: 'Invalid inventory log ID.' });
+    }
+
+    const { data: existing, error: fetchErr } = await serverSupabase
+      .from('subscriber_inventory_logs')
+      .select('*')
+      .eq('id', logId)
+      .maybeSingle();
+
+    if (fetchErr) {
+      return res.status(500).json({ success: false, error: fetchErr.message });
+    }
+    if (!existing) {
+      return res.status(404).json({ success: false, error: 'Inventory log entry not found.' });
+    }
+
+    if (!isSubscriberAllowedInScope(auth.scope, existing.subscriber_username)) {
+      return res.status(403).json({
+        success: false,
+        error: 'Access Denied: Subscriber inventory log is outside your Dealer/Sub-Dealer scope.',
+      });
+    }
+
+    const itemName = String(req.body?.item_name ?? existing.item_name ?? '').trim().slice(0, 180);
+    const quantity = Number(req.body?.quantity);
+    const unitCost = Number(req.body?.unit_cost);
+    const installedBy = String(req.body?.installed_by_agent_name ?? existing.installed_by_agent_name ?? '')
+      .trim()
+      .slice(0, 120);
+
+    if (!itemName) {
+      return res.status(400).json({ success: false, error: 'Item Name is required.' });
+    }
+    if (!Number.isFinite(quantity) || quantity <= 0) {
+      return res.status(400).json({ success: false, error: 'Quantity must be a positive number.' });
+    }
+    if (!Number.isFinite(unitCost) || unitCost < 0) {
+      return res.status(400).json({ success: false, error: 'Unit Cost must be 0 or greater.' });
+    }
+
+    const updatePayload: Record<string, any> = {
+      item_name: itemName,
+      quantity,
+      unit_cost: unitCost,
+      installed_by_agent_name: installedBy || 'Field Technician',
+    };
+
+    if (req.body?.created_at) {
+      const parsedDate = new Date(String(req.body.created_at));
+      if (!Number.isNaN(parsedDate.getTime())) {
+        updatePayload.created_at = parsedDate.toISOString();
+      }
+    }
+
+    const { data: updated, error: updateErr } = await serverSupabase
+      .from('subscriber_inventory_logs')
+      .update(updatePayload)
+      .eq('id', logId)
+      .select('*')
+      .maybeSingle();
+
+    if (updateErr) {
+      return res.status(500).json({ success: false, error: updateErr.message });
+    }
+
+    const invoiceSync = await applyMaterialInvoiceSyncOnServer({
+      subscriberUsername: existing.subscriber_username,
+      previousItem: existing as MinimalInventoryLog,
+      updatedItem: (updated || { ...existing, ...updatePayload }) as MinimalInventoryLog,
+    });
+
+    return res.json({
+      success: true,
+      data: updated || { ...existing, ...updatePayload },
+      invoiceSync,
+    });
+  } catch (err: any) {
+    return res.status(500).json({ success: false, error: err?.message || 'Failed to update material log.' });
+  }
+});
+
+app.delete('/api/subscribers/inventory-logs/:id', async (req: Request, res: Response) => {
+  try {
+    const auth = await authorizeLedgerEditDeleteActor(req);
+    if (!auth.ok) {
+      return res.status(auth.statusCode || 403).json({ success: false, error: auth.error });
+    }
+
+    const logId = String(req.params.id || '').trim();
+    if (!logId || logId.length > 80) {
+      return res.status(400).json({ success: false, error: 'Invalid inventory log ID.' });
+    }
+
+    const { data: existing, error: fetchErr } = await serverSupabase
+      .from('subscriber_inventory_logs')
+      .select('*')
+      .eq('id', logId)
+      .maybeSingle();
+
+    if (fetchErr) {
+      return res.status(500).json({ success: false, error: fetchErr.message });
+    }
+    if (!existing) {
+      return res.status(404).json({ success: false, error: 'Inventory log entry not found.' });
+    }
+
+    if (!isSubscriberAllowedInScope(auth.scope, existing.subscriber_username)) {
+      return res.status(403).json({
+        success: false,
+        error: 'Access Denied: Subscriber inventory log is outside your Dealer/Sub-Dealer scope.',
+      });
+    }
+
+    const { error: delErr } = await serverSupabase
+      .from('subscriber_inventory_logs')
+      .delete()
+      .eq('id', logId);
+
+    if (delErr) {
+      return res.status(500).json({ success: false, error: delErr.message });
+    }
+
+    const invoiceSync = await applyMaterialInvoiceSyncOnServer({
+      subscriberUsername: existing.subscriber_username,
+      previousItem: existing as MinimalInventoryLog,
+      updatedItem: null,
+    });
+
+    return res.json({
+      success: true,
+      data: { id: logId },
+      invoiceSync,
+    });
+  } catch (err: any) {
+    return res.status(500).json({ success: false, error: err?.message || 'Failed to delete material log.' });
+  }
+});
+
+app.patch('/api/invoices/:id', async (req: Request, res: Response) => {
+  try {
+    const auth = await authorizeLedgerEditDeleteActor(req);
+    if (!auth.ok) {
+      return res.status(auth.statusCode || 403).json({ success: false, error: auth.error });
+    }
+
+    const invoiceId = String(req.params.id || '').trim();
+    if (!invoiceId || invoiceId.length > 80) {
+      return res.status(400).json({ success: false, error: 'Invalid invoice ID.' });
+    }
+
+    const { data: existing, error: fetchErr } = await serverSupabase
+      .from('invoices')
+      .select('*')
+      .eq('id', invoiceId)
+      .maybeSingle();
+
+    if (fetchErr) {
+      return res.status(500).json({ success: false, error: fetchErr.message });
+    }
+    if (!existing) {
+      return res.status(404).json({ success: false, error: 'Invoice not found.' });
+    }
+
+    if (
+      !isSubscriberAllowedInScope(auth.scope, existing.subscriber_username, {
+        dealer_id: existing.dealer_id,
+        sub_dealer_id: existing.sub_dealer_id,
+      })
+    ) {
+      return res.status(403).json({
+        success: false,
+        error: 'Access Denied: Invoice is outside your Dealer/Sub-Dealer scope.',
+      });
+    }
+
+    const amount = Number(req.body?.amount);
+    const dueDate = String(req.body?.due_date ?? existing.due_date ?? '').trim();
+    const rawStatus = String(req.body?.status ?? existing.status ?? 'DUE').trim().toUpperCase();
+    const validStatuses = new Set(['DUE', 'PARTIAL', 'PAID', 'OVERDUE']);
+
+    if (!Number.isFinite(amount) || amount < 0) {
+      return res.status(400).json({ success: false, error: 'Invoice amount must be 0 or greater.' });
+    }
+    if (!dueDate || !/^\d{4}-\d{2}-\d{2}$/.test(dueDate.slice(0, 10))) {
+      return res.status(400).json({ success: false, error: 'Valid Due Date (YYYY-MM-DD) is required.' });
+    }
+    if (!validStatuses.has(rawStatus)) {
+      return res.status(400).json({ success: false, error: 'Invalid invoice status.' });
+    }
+
+    const updatePayload: Record<string, any> = {
+      amount,
+      due_date: dueDate.slice(0, 10),
+      status: rawStatus,
+    };
+
+    if (req.body?.cycle_day !== undefined) {
+      const cDay = Number(req.body.cycle_day);
+      if (Number.isFinite(cDay) && cDay >= 1 && cDay <= 31) {
+        updatePayload.cycle_day = Math.round(cDay);
+      }
+    }
+
+    if (req.body?.assigned_agent_id !== undefined) {
+      updatePayload.assigned_agent_id = req.body.assigned_agent_id
+        ? String(req.body.assigned_agent_id).trim()
+        : null;
+    }
+    if (req.body?.assigned_agent_name !== undefined) {
+      updatePayload.assigned_agent_name = req.body.assigned_agent_name
+        ? String(req.body.assigned_agent_name).trim().slice(0, 120)
+        : null;
+    }
+    if (req.body?.notes !== undefined) {
+      updatePayload.notes = req.body.notes ? String(req.body.notes).trim().slice(0, 500) : null;
+    }
+    if (req.body?.package_profile) {
+      const pkg = String(req.body.package_profile).trim().slice(0, 100);
+      updatePayload.package_profile = pkg;
+      updatePayload.package_name = pkg;
+    }
+
+    if (rawStatus === 'PAID') {
+      updatePayload.paid_amount =
+        req.body?.paid_amount !== undefined && Number.isFinite(Number(req.body.paid_amount))
+          ? Math.max(amount, Number(req.body.paid_amount))
+          : amount;
+      updatePayload.paid_at = existing.paid_at || req.body?.paid_at || new Date().toISOString();
+    } else if (rawStatus === 'DUE' || rawStatus === 'OVERDUE') {
+      if (req.body?.paid_amount !== undefined && Number.isFinite(Number(req.body.paid_amount))) {
+        updatePayload.paid_amount = Math.max(0, Math.min(amount, Number(req.body.paid_amount)));
+      } else if (String(existing.status || '').toUpperCase() === 'PAID') {
+        updatePayload.paid_amount = 0;
+        updatePayload.paid_at = null;
+      }
+    } else if (rawStatus === 'PARTIAL') {
+      const existingPaid = Number(existing.paid_amount) || 0;
+      const requestedPaid =
+        req.body?.paid_amount !== undefined && Number.isFinite(Number(req.body.paid_amount))
+          ? Number(req.body.paid_amount)
+          : existingPaid;
+      updatePayload.paid_amount = Math.max(0, Math.min(amount, requestedPaid));
+    }
+
+    // Adaptive optional-column stripping if PostgreSQL invoices table lacks optional columns like `notes`
+    const working = { ...updatePayload };
+    const optionalCols = new Set(['notes', 'package_profile', 'package_name', 'shifted_to_next_month']);
+    let updatedRow: any = null;
+    let lastError: any = null;
+
+    for (let attempt = 0; attempt < 6; attempt++) {
+      const { data, error } = await serverSupabase
+        .from('invoices')
+        .update(working)
+        .eq('id', invoiceId)
+        .select('*')
+        .maybeSingle();
+
+      if (!error) {
+        updatedRow = data;
+        lastError = null;
+        break;
+      }
+      lastError = error;
+      const msg = String(error.message || '');
+      const colMatch =
+        msg.match(/Could not find the ['"]([a-zA-Z0-9_]+)['"] column/i) ||
+        msg.match(/column\s+["']?([a-zA-Z0-9_]+)["']?\s+(?:of relation|does not exist)/i);
+      if (colMatch?.[1] && colMatch[1] in working && optionalCols.has(colMatch[1])) {
+        delete working[colMatch[1]];
+        continue;
+      }
+      break;
+    }
+
+    if (lastError) {
+      return res.status(500).json({ success: false, error: lastError.message });
+    }
+
+    return res.json({
+      success: true,
+      data: updatedRow || { ...existing, ...working },
+    });
+  } catch (err: any) {
+    return res.status(500).json({ success: false, error: err?.message || 'Failed to update invoice.' });
+  }
+});
+
+app.delete('/api/invoices/:id', async (req: Request, res: Response) => {
+  try {
+    const auth = await authorizeLedgerEditDeleteActor(req);
+    if (!auth.ok) {
+      return res.status(auth.statusCode || 403).json({ success: false, error: auth.error });
+    }
+
+    const invoiceId = String(req.params.id || '').trim();
+    if (!invoiceId || invoiceId.length > 80) {
+      return res.status(400).json({ success: false, error: 'Invalid invoice ID.' });
+    }
+
+    const { data: existing, error: fetchErr } = await serverSupabase
+      .from('invoices')
+      .select('*')
+      .eq('id', invoiceId)
+      .maybeSingle();
+
+    if (fetchErr) {
+      return res.status(500).json({ success: false, error: fetchErr.message });
+    }
+    if (!existing) {
+      return res.status(404).json({ success: false, error: 'Invoice not found.' });
+    }
+
+    if (
+      !isSubscriberAllowedInScope(auth.scope, existing.subscriber_username, {
+        dealer_id: existing.dealer_id,
+        sub_dealer_id: existing.sub_dealer_id,
+      })
+    ) {
+      return res.status(403).json({
+        success: false,
+        error: 'Access Denied: Invoice is outside your Dealer/Sub-Dealer scope.',
+      });
+    }
+
+    const deleteLinkedPayments =
+      req.body?.deleteLinkedPayments === true ||
+      String(req.query.deleteLinkedPayments || '').toLowerCase() === 'true';
+
+    let deletedPaymentsCount = 0;
+    if (deleteLinkedPayments) {
+      const { data: deletedTxs } = await serverSupabase
+        .from('payment_transactions')
+        .delete()
+        .eq('invoice_id', invoiceId)
+        .select('id');
+      deletedPaymentsCount = Array.isArray(deletedTxs) ? deletedTxs.length : 0;
+    }
+
+    const { error: delErr } = await serverSupabase
+      .from('invoices')
+      .delete()
+      .eq('id', invoiceId);
+
+    if (delErr) {
+      return res.status(500).json({ success: false, error: delErr.message });
+    }
+
+    return res.json({
+      success: true,
+      data: { id: invoiceId, invoice_no: existing.invoice_no },
+      deletedPaymentsCount,
+    });
+  } catch (err: any) {
+    return res.status(500).json({ success: false, error: err?.message || 'Failed to delete invoice.' });
+  }
+});
+
+// ============================================================================
 // API ROUTE JSON GUARANTEE & ERROR MIDDLEWARE
 // Guarantees all /api/* requests ALWAYS return valid JSON payloads, never HTML
 // ============================================================================
@@ -2983,6 +3872,11 @@ async function startServer() {
 
   app.listen(PORT, '0.0.0.0', () => {
     console.log(`[NetPulse NOC Server] Ready on http://0.0.0.0:${PORT}`);
+    // Auto-restore persisted multi-tenant Baileys WhatsApp sessions & start daily 3-day pre-expiry scheduler
+    baileysManager.restorePersistedSessions(serverSupabase).catch((err) => {
+      console.warn('[Baileys] Startup session restore warning:', err?.message);
+    });
+    baileysManager.startPreExpiryScheduler(serverSupabase);
   });
 }
 

@@ -32,6 +32,7 @@ import {
   resolvePkrTariffForProfile,
 } from '../lib/mikrotikProfileSync';
 import { getStoredUser } from '../lib/auth';
+import { triggerAutoWhatsAppNotification } from '../lib/whatsappRouting';
 import {
   buildOwnershipStamp,
   filterFieldAgentsForUser,
@@ -549,6 +550,20 @@ export const CreateInvoiceModal: React.FC<CreateInvoiceModalProps> = ({
         });
         localStorage.setItem('youthnet_invoices', JSON.stringify(list));
       } catch {}
+
+      // Zero-click background WhatsApp Monthly Bill notification via hierarchical Baileys sender
+      void triggerAutoWhatsAppNotification({
+        eventType: 'INVOICE_GENERATED',
+        subscriberUsername: subUsername,
+        messageVars: {
+          username: subUsername,
+          invoiceNo: generatedInvoiceNo,
+          amountDue: numAmount,
+          totalAmount: numAmount,
+          dueDate,
+          packageName: cleanProfile || 'Fiber Broadband',
+        },
+      });
 
       // 5. Success Toast & Trigger Refresh
       setToastMessage('Invoice created successfully');

@@ -262,6 +262,12 @@ const OPTIONAL_PORTAL_USER_COLUMNS = new Set([
   'base_salary',
   'cash_in_hand',
   'advance_balance',
+  'company_name',
+  'whatsapp_status',
+  'whatsapp_phone',
+  'whatsapp_auto_send',
+  'whatsapp_support_phone',
+  'allow_subdealer_whatsapp',
 ]);
 
 async function adaptivePortalUsersInsert(
@@ -1306,6 +1312,8 @@ export async function createResellerAccount(input: {
   bandwidthPoolCapMbps: number;
   maxActiveUsers: number;
   canCreateSubdealers: boolean;
+  allowSubdealerWhatsapp?: boolean;
+  companyName?: string;
   initialWalletBalance?: number;
   performedBy?: string;
 }): Promise<{ ok: boolean; user?: SupabasePortalUser; schemaMissing?: boolean; error?: string }> {
@@ -1341,6 +1349,10 @@ export async function createResellerAccount(input: {
     bandwidth_pool_cap_mbps: bandwidthCap,
     max_active_users: maxActiveUsers,
     can_create_subdealers: input.tierLevel === 'DEALER' ? Boolean(input.canCreateSubdealers) : false,
+    allow_subdealer_whatsapp: Boolean(input.allowSubdealerWhatsapp),
+    company_name: input.companyName?.trim() || cleanName,
+    whatsapp_status: 'DISCONNECTED',
+    whatsapp_auto_send: true,
     can_access_gis_map: perms.gis_map !== 'none',
     gis_map_permission: perms.gis_map,
     permissions: perms,
@@ -1393,6 +1405,8 @@ export async function updateResellerAccount(
     bandwidthPoolCapMbps?: number;
     maxActiveUsers?: number;
     canCreateSubdealers?: boolean;
+    allowSubdealerWhatsapp?: boolean;
+    companyName?: string;
     accountStatus?: 'ACTIVE' | 'SUSPENDED';
     password?: string;
   }
@@ -1410,6 +1424,12 @@ export async function updateResellerAccount(
   }
   if (updates.canCreateSubdealers !== undefined) {
     patch.can_create_subdealers = Boolean(updates.canCreateSubdealers);
+  }
+  if (updates.allowSubdealerWhatsapp !== undefined) {
+    patch.allow_subdealer_whatsapp = Boolean(updates.allowSubdealerWhatsapp);
+  }
+  if (updates.companyName !== undefined) {
+    patch.company_name = updates.companyName.trim();
   }
   if (updates.accountStatus !== undefined) patch.account_status = updates.accountStatus;
   if (updates.password && updates.password.trim()) patch.password = updates.password.trim();

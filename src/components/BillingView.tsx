@@ -71,15 +71,15 @@ import { BulkReceiveAmountModal } from './BulkReceiveAmountModal';
 import {
   DEFAULT_SUPPORT_WHATSAPP,
   WHATSAPP_CONFIG_UPDATED_EVENT,
-  buildInstantPaymentReceiptMessage,
   buildPreExpiryReminderMessage,
   buildPreExpiryReminderQueue,
   computeDaysUntilDate,
   fetchPaymentAccounts,
   fetchWhatsappBillingConfig,
   getDefaultWhatsappConfig,
-  openWhatsAppLink,
 } from '../lib/whatsappBilling';
+import { triggerAutoWhatsAppNotification } from '../lib/whatsappRouting';
+import { deleteInvoiceApi, updateInvoiceApi } from '../lib/inventoryInvoiceSync';
 import {
   FIELD_STAFF_ROLES,
   LiveFieldAgentLedger,
@@ -204,8 +204,10 @@ export const BillingView: React.FC<BillingViewProps> = ({
   const [editCycleDay, setEditCycleDay] = useState<number>(() => new Date().getDate());
   const [editStatus, setEditStatus] = useState<'DUE' | 'PARTIAL' | 'PAID' | 'OVERDUE'>('DUE');
   const [editAssignedAgentId, setEditAssignedAgentId] = useState<string>('');
+  const [editNotes, setEditNotes] = useState<string>('');
   const [editPackageProfile, setEditPackageProfile] = useState<string>('');
   const [editDetectedMkProfile, setEditDetectedMkProfile] = useState<string | null>(null);
+  const [deleteLinkedPayments, setDeleteLinkedPayments] = useState<boolean>(true);
 
   // New Invoice Form State
   const [newSubUsername, setNewSubUsername] = useState<string>('');
@@ -507,6 +509,9 @@ export const BillingView: React.FC<BillingViewProps> = ({
           performedBy: currentUser?.fullName || currentUser?.username || 'Billing Desk',
           notes: `Payment recorded on Invoice #${selectedInvoice.invoice_no} (${paidPaymentMethod})`,
           activeRouter: activeRouterRef.current,
+          amountPaid: enteredVal,
+          invoiceNo: selectedInvoice.invoice_no,
+          paymentMethod: paidPaymentMethod,
         });
         if (restoreRes.insufficientWalletFunds || !restoreRes.success) {
           const msg = restoreRes.error || 'Insufficient Dealer Wallet Balance: Renewal blocked.';
@@ -592,6 +597,26 @@ export const BillingView: React.FC<BillingViewProps> = ({
         selectedInvoice.due_date ||
         addCalendarMonthDateString(new Date(), renewalAnchorDay);
 
+      // For partial payments (where restoreSubscriberOnInvoicePaid was not called), still auto-send instant WhatsApp receipt in background
+      if (newStatus !== 'PAID') {
+        void triggerAutoWhatsAppNotification({
+          eventType: 'PAYMENT_RESTORED',
+          subscriberUsername: selectedInvoice.subscriber_username,
+          subscriber: clientMatch || { username: selectedInvoice.subscriber_username },
+          messageVars: {
+            subscriberName: clientMatch?.full_name || selectedInvoice.subscriber_username,
+            username: selectedInvoice.subscriber_username,
+            phone: clientMatch?.phone || undefined,
+            invoiceNo: selectedInvoice.invoice_no,
+            amountPaid: enteredVal,
+            totalAmount: Number(selectedInvoice.amount) || 0,
+            remainingBalance: Math.max(0, (Number(selectedInvoice.amount) || 0) - finalPaidAmount),
+            paymentMethod: paidPaymentMethod,
+            expiryDate: nextExpiryStr,
+          },
+        });
+      }
+
       setLastPaidReceiptPayload({
         username: selectedInvoice.subscriber_username,
         fullName: clientMatch?.full_name || selectedInvoice.subscriber_username,
@@ -633,6 +658,7 @@ export const BillingView: React.FC<BillingViewProps> = ({
     setEditCycleDay(inv.cycle_day || new Date().getDate());
     setEditStatus((inv.status as any) || 'DUE');
     setEditAssignedAgentId(inv.assigned_agent_id || '');
+    setEditNotes(inv.notes || '');
 
     const subClean = (inv.subscriber_username || '').trim().toLowerCase();
     const clientMatch = portalClients.find(
@@ -723,6 +749,7 @@ export const BillingView: React.FC<BillingViewProps> = ({
         status: editStatus as any,
         assigned_agent_id: editAssignedAgentId || null,
         assigned_agent_name: selectedAgent ? selectedAgent.full_name : null,
+        notes: editNotes.trim() || null,
       };
       if (selectedProfileClean) {
         updatedData.package_profile = selectedProfileClean;
@@ -734,6 +761,11 @@ export const BillingView: React.FC<BillingViewProps> = ({
           updatedData.paid_at = new Date().toISOString();
         }
         updatedData.paid_amount = Number(editAmount) || Number(invoiceToEdit.amount) || 0;
+      } else if (editStatus === 'DUE' || editStatus === 'OVERDUE') {
+        if (String(invoiceToEdit.status || '').toUpperCase() === 'PAID') {
+          updatedData.paid_amount = 0;
+          updatedData.paid_at = null;
+        }
       }
 
       let syncNote = '';
@@ -767,14 +799,19 @@ export const BillingView: React.FC<BillingViewProps> = ({
         syncNote = ` Restored to "${restoreRes.restoredProfile}" & kicked ${restoreRes.kickedSessions} session(s).`;
       }
 
-      const { error } = await safeUpdateInvoiceInSupabase(
-        { id: invoiceToEdit.id, invoiceNo: invoiceToEdit.invoice_no },
-        updatedData as Record<string, any>
-      );
-
-      if (error) {
-        throw new Error(error.message);
-      }
+      await updateInvoiceApi(invoiceToEdit.id, {
+        amount: Number(updatedData.amount) || 0,
+        due_date: updatedData.due_date || editDueDate,
+        cycle_day: updatedData.cycle_day,
+        status: editStatus,
+        assigned_agent_id: updatedData.assigned_agent_id || null,
+        assigned_agent_name: updatedData.assigned_agent_name || null,
+        notes: updatedData.notes ?? null,
+        package_profile: updatedData.package_profile || null,
+        package_name: updatedData.package_name || null,
+        paid_amount: updatedData.paid_amount,
+        paid_at: updatedData.paid_at,
+      });
 
       // Update local state immediately
       setInvoices((prev) =>
@@ -793,7 +830,7 @@ export const BillingView: React.FC<BillingViewProps> = ({
     }
   };
 
-  // 7. Execute Invoice Delete in Supabase
+  // 7. Execute Invoice Delete via RBAC-verified Backend API (+ Optional Linked Payment Cleanup)
   const handleDeleteInvoice = async () => {
     if (!perms.edit_delete_invoice) return;
     if (!invoiceToDelete) return;
@@ -803,21 +840,24 @@ export const BillingView: React.FC<BillingViewProps> = ({
       const invoiceId = invoiceToDelete.id;
       const invoiceNo = invoiceToDelete.invoice_no;
 
-      const { error } = await supabase
-        .from('invoices')
-        .delete()
-        .eq('id', invoiceId);
-
-      if (error) {
-        throw new Error(error.message);
-      }
+      const res = await deleteInvoiceApi(invoiceId, {
+        deleteLinkedPayments,
+      });
 
       // Remove from local state instantly
       setInvoices((prev) => prev.filter((i) => i.id !== invoiceId));
+      if (deleteLinkedPayments) {
+        setPaymentTransactions((prev) => prev.filter((tx) => tx.invoice_id !== invoiceId));
+      }
 
-      setActionNotice(`Invoice ${invoiceNo} deleted successfully.`);
+      const txNote =
+        res.deletedPaymentsCount && res.deletedPaymentsCount > 0
+          ? ` Also removed ${res.deletedPaymentsCount} linked payment receipt(s).`
+          : '';
+      setActionNotice(`Invoice ${invoiceNo} deleted successfully.${txNote}`);
       setTimeout(() => setActionNotice(null), 5000);
       setInvoiceToDelete(null);
+      await fetchInvoices();
     } catch (err: any) {
       setActionNotice(`Failed to delete invoice: ${err.message}`);
     } finally {
@@ -1246,19 +1286,28 @@ export const BillingView: React.FC<BillingViewProps> = ({
 
   const supportWhatsapp = whatsappConfig.support_whatsapp || DEFAULT_SUPPORT_WHATSAPP;
 
-  const handleSendPreExpiryReminder = (item: (typeof preExpiryReminderQueue)[number]) => {
-    const msg = buildPreExpiryReminderMessage({
-      fullName: item.fullName,
-      username: item.username,
-      packageSpeed: item.packageSpeed,
-      daysRemaining: item.daysRemaining,
-      expiryDate: item.expiryDate,
-      invoiceNo: item.invoiceNo,
-      amountDue: item.amountDue,
-      activePaymentAccounts,
-      supportWhatsapp,
+  const handleSendPreExpiryReminder = async (item: (typeof preExpiryReminderQueue)[number]) => {
+    const res = await triggerAutoWhatsAppNotification({
+      eventType: 'PRE_EXPIRY_3D',
+      subscriberUsername: item.username,
+      messageVars: {
+        subscriberName: item.fullName,
+        username: item.username,
+        phone: item.phone,
+        packageName: item.packageSpeed,
+        daysRemaining: item.daysRemaining,
+        expiryDate: item.expiryDate,
+        invoiceNo: item.invoiceNo,
+        amountDue: item.amountDue,
+      },
     });
-    openWhatsAppLink(item.phone, msg);
+    if (res.ok && res.status === 'SENT') {
+      setActionNotice(`WhatsApp reminder sent automatically to @${item.username} via ${res.senderCompanyName || 'Gateway'}.`);
+    } else if (res.status === 'SKIPPED') {
+      setActionNotice(res.skippedReason || `Reminder skipped for @${item.username}.`);
+    } else {
+      setActionNotice(`WhatsApp delivery failed for @${item.username}: ${res.error || 'Connect WhatsApp in WhatsApp & Branding.'}`);
+    }
   };
 
   const handleCopyPreExpiryReminder = (item: (typeof preExpiryReminderQueue)[number]) => {
@@ -1278,42 +1327,44 @@ export const BillingView: React.FC<BillingViewProps> = ({
     setTimeout(() => setCopiedReminderKey((prev) => (prev === item.key ? null : prev)), 2000);
   };
 
-  const handleSendInvoiceWhatsApp = (inv: SupabaseInvoice) => {
+  const handleSendInvoiceWhatsApp = async (inv: SupabaseInvoice) => {
     const client = clientByUsername[(inv.subscriber_username || '').trim().toLowerCase()];
     const totalAmount = Number(inv.amount) || 0;
     const paidAmount = Number(inv.paid_amount) || 0;
     const balanceDue = Math.max(0, totalAmount - paidAmount);
     const isPaid = balanceDue <= 0 || (inv.status || '').toUpperCase() === 'PAID';
+    const daysLeft = computeDaysUntilDate(inv.due_date);
 
-    if (isPaid) {
-      const receiptMsg = buildInstantPaymentReceiptMessage({
-        fullName: client?.full_name || inv.subscriber_username,
+    const res = await triggerAutoWhatsAppNotification({
+      eventType: isPaid ? 'PAYMENT_RESTORED' : 'PRE_EXPIRY_3D',
+      subscriberUsername: inv.subscriber_username,
+      subscriber: client || { username: inv.subscriber_username },
+      messageVars: {
+        subscriberName: client?.full_name || inv.subscriber_username,
         username: inv.subscriber_username,
+        phone: client?.phone || undefined,
         invoiceNo: inv.invoice_no,
-        amountPaid: paidAmount > 0 ? paidAmount : totalAmount,
+        packageName: client?.package_speed || 'Fiber Broadband',
+        amountPaid: isPaid ? (paidAmount > 0 ? paidAmount : totalAmount) : 0,
+        amountDue: isPaid ? 0 : balanceDue,
         totalAmount,
-        remainingBalance: 0,
-        paymentMethod: 'Verified Payment',
-        collectorName: inv.assigned_agent_name || 'Youth Net NOC',
-        nextExpiryDate: inv.due_date,
-        activePaymentAccounts,
-        supportWhatsapp,
-      });
-      openWhatsAppLink(client?.phone, receiptMsg);
-    } else {
-      const daysLeft = computeDaysUntilDate(inv.due_date);
-      const reminderMsg = buildPreExpiryReminderMessage({
-        fullName: client?.full_name || inv.subscriber_username,
-        username: inv.subscriber_username,
-        packageSpeed: client?.package_speed || 'Fiber Broadband',
+        remainingBalance: balanceDue,
         daysRemaining: daysLeft !== null ? Math.max(0, daysLeft) : 0,
         expiryDate: inv.due_date,
-        invoiceNo: inv.invoice_no,
-        amountDue: balanceDue,
-        activePaymentAccounts,
-        supportWhatsapp,
-      });
-      openWhatsAppLink(client?.phone, reminderMsg);
+        paymentMethod: 'Verified Payment',
+      },
+    });
+
+    if (res.ok && res.status === 'SENT') {
+      setActionNotice(
+        `WhatsApp ${isPaid ? 'receipt' : 'reminder'} sent automatically to @${inv.subscriber_username} via ${res.senderCompanyName || 'Gateway'}.`
+      );
+    } else if (res.status === 'SKIPPED') {
+      setActionNotice(res.skippedReason || `WhatsApp message skipped for @${inv.subscriber_username}.`);
+    } else {
+      setActionNotice(
+        `WhatsApp send failed for @${inv.subscriber_username}: ${res.error || 'Pair WhatsApp in WhatsApp & Branding.'}`
+      );
     }
   };
 
@@ -1391,20 +1442,32 @@ export const BillingView: React.FC<BillingViewProps> = ({
             {lastPaidReceiptPayload && (
               <button
                 type="button"
-                onClick={() =>
-                  openWhatsAppLink(
-                    lastPaidReceiptPayload.phone,
-                    buildInstantPaymentReceiptMessage({
-                      ...lastPaidReceiptPayload,
-                      activePaymentAccounts,
-                      supportWhatsapp,
-                    })
-                  )
-                }
+                onClick={async () => {
+                  const res = await triggerAutoWhatsAppNotification({
+                    eventType: 'PAYMENT_RESTORED',
+                    subscriberUsername: lastPaidReceiptPayload.username,
+                    messageVars: {
+                      subscriberName: lastPaidReceiptPayload.fullName,
+                      username: lastPaidReceiptPayload.username,
+                      phone: lastPaidReceiptPayload.phone,
+                      invoiceNo: lastPaidReceiptPayload.invoiceNo,
+                      amountPaid: lastPaidReceiptPayload.amountPaid,
+                      totalAmount: lastPaidReceiptPayload.totalAmount,
+                      remainingBalance: lastPaidReceiptPayload.remainingBalance,
+                      paymentMethod: lastPaidReceiptPayload.paymentMethod,
+                      expiryDate: lastPaidReceiptPayload.nextExpiryDate,
+                    },
+                  });
+                  if (res.ok && res.status === 'SENT') {
+                    setActionNotice(`Receipt re-sent automatically via ${res.senderCompanyName || 'Gateway'}!`);
+                  } else {
+                    setActionNotice(`WhatsApp receipt failed: ${res.error || 'Ensure WhatsApp is connected.'}`);
+                  }
+                }}
                 className="px-3 py-1.5 rounded-lg bg-emerald-600 hover:bg-emerald-500 text-white font-bold text-xs flex items-center gap-1.5 transition cursor-pointer whitespace-nowrap shrink-0"
               >
                 <Send className="w-3.5 h-3.5" />
-                <span>Send Instant WhatsApp Receipt</span>
+                <span>Resend Auto WhatsApp Receipt</span>
               </button>
             )}
             <button
@@ -2789,6 +2852,19 @@ export const BillingView: React.FC<BillingViewProps> = ({
                   </select>
                 </div>
 
+                <div className="w-full min-w-0">
+                  <label className="block text-xs font-medium text-slate-300 mb-1">
+                    Notes
+                  </label>
+                  <textarea
+                    rows={2}
+                    value={editNotes}
+                    onChange={(e) => setEditNotes(e.target.value)}
+                    placeholder="Optional billing adjustment remark..."
+                    className="w-full min-w-0 px-3 py-2 bg-slate-900 border border-slate-700 rounded-xl text-sm text-white focus:outline-none focus:border-cyan-500"
+                  />
+                </div>
+
                 {editStatus === 'PAID' && (
                   <ResellerWalletGatePreview
                     subscriberUsername={invoiceToEdit.subscriber_username}
@@ -2890,6 +2966,27 @@ export const BillingView: React.FC<BillingViewProps> = ({
                 <strong className="text-cyan-300">@{invoiceToDelete.subscriber_username}</strong> (
                 {formatCurrency(Number(invoiceToDelete.amount) || 0)})?
               </p>
+
+              {(() => {
+                const linkedCount = paymentTransactions.filter(
+                  (tx) => tx.invoice_id === invoiceToDelete.id
+                ).length;
+                if (linkedCount === 0) return null;
+                return (
+                  <label className="flex items-start gap-2.5 p-3 rounded-xl bg-rose-950/35 border border-rose-800/60 cursor-pointer text-xs">
+                    <input
+                      type="checkbox"
+                      checked={deleteLinkedPayments}
+                      onChange={(e) => setDeleteLinkedPayments(e.target.checked)}
+                      className="mt-0.5 w-4 h-4 rounded bg-slate-900 border-slate-700 text-rose-600 cursor-pointer"
+                    />
+                    <span className="text-rose-200 leading-relaxed">
+                      Also delete <strong>{linkedCount}</strong> linked receipt(s) from{' '}
+                      <code className="text-cyan-300">payment_transactions</code> to keep balances accurate.
+                    </span>
+                  </label>
+                );
+              })()}
 
               <div className="flex flex-col gap-2 pt-3 border-t border-slate-800 w-full min-w-0">
                 <button

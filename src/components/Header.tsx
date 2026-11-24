@@ -27,6 +27,7 @@ import {
   MapPin,
   Package,
   Building2,
+  MessageSquare,
 } from 'lucide-react';
 import { useISP } from '../context/ISPContext';
 import { SystemRole, UserAccount } from '../types/auth';
@@ -57,6 +58,7 @@ export type ActiveTab =
   | 'architecture'
   | 'settings'
   | 'logs'
+  | 'whatsapp_gateway'
   | 'agent_portal'
   | 'client_portal';
 
@@ -651,6 +653,14 @@ export const Header: React.FC<HeaderProps> = ({
               </button>
 
               <button
+                onClick={() => setActiveTab('whatsapp_gateway')}
+                className={`shrink-0 whitespace-nowrap snap-start flex items-center gap-2 px-3 py-2 text-xs sm:text-sm font-medium rounded-xl transition cursor-pointer ${getTabClassName('whatsapp_gateway')}`}
+              >
+                <MessageSquare className={`w-4 h-4 shrink-0 ${activeTab === 'whatsapp_gateway' ? 'text-white dark:text-emerald-300' : 'text-emerald-500 dark:text-emerald-400'}`} />
+                <span>WhatsApp &amp; Branding</span>
+              </button>
+
+              <button
                 onClick={() => setActiveTab('billing')}
                 className={`shrink-0 whitespace-nowrap snap-start flex items-center gap-2 px-3 py-2 text-xs sm:text-sm font-medium rounded-xl transition cursor-pointer ${getTabClassName('billing')}`}
               >
@@ -870,6 +880,14 @@ export const Header: React.FC<HeaderProps> = ({
               >
                 <AlertTriangle className="w-4 h-4 shrink-0" />
                 <span>Complaints &amp; SLA</span>
+              </button>
+
+              <button
+                onClick={() => setActiveTab('whatsapp_gateway')}
+                className={`shrink-0 whitespace-nowrap snap-start flex items-center gap-2 px-3 py-2 text-xs sm:text-sm font-medium rounded-xl transition cursor-pointer ${getTabClassName('whatsapp_gateway')}`}
+              >
+                <MessageSquare className={`w-4 h-4 shrink-0 ${activeTab === 'whatsapp_gateway' ? 'text-white dark:text-emerald-300' : 'text-emerald-500 dark:text-emerald-400'}`} />
+                <span>WhatsApp &amp; Branding</span>
               </button>
 
               {effectiveCanAccessGisMap && (

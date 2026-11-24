@@ -174,10 +174,13 @@ export const DealersManagementView: React.FC<DealersManagementViewProps> = ({
     bandwidthPoolCapMbps: '0',
     maxActiveUsers: '0',
     canCreateSubdealers: false,
+    allowSubdealerWhatsapp: false,
+    companyName: '',
     accountStatus: 'ACTIVE' as 'ACTIVE' | 'SUSPENDED',
     newPassword: '',
   });
   const [isSavingCaps, setIsSavingCaps] = useState<boolean>(false);
+  const [togglingWhatsappId, setTogglingWhatsappId] = useState<string | null>(null);
 
   const showToast = useCallback((type: 'success' | 'error', text: string) => {
     setNotice({ type, text });
@@ -606,6 +609,8 @@ export const DealersManagementView: React.FC<DealersManagementViewProps> = ({
       bandwidthPoolCapMbps: String(getResellerPoolMbps(reseller)),
       maxActiveUsers: String(Number(reseller.max_active_users || 0)),
       canCreateSubdealers: Boolean(reseller.can_create_subdealers),
+      allowSubdealerWhatsapp: Boolean(reseller.allow_subdealer_whatsapp),
+      companyName: String(reseller.company_name || reseller.full_name || ''),
       accountStatus:
         String(reseller.account_status || 'ACTIVE').toUpperCase() === 'SUSPENDED'
           ? 'SUSPENDED'
@@ -723,6 +728,8 @@ export const DealersManagementView: React.FC<DealersManagementViewProps> = ({
         maxActiveUsers: Number(editCapsForm.maxActiveUsers) || 0,
         canCreateSubdealers:
           getResellerTier(drawerReseller) === 'DEALER' ? editCapsForm.canCreateSubdealers : false,
+        allowSubdealerWhatsapp: editCapsForm.allowSubdealerWhatsapp,
+        companyName: editCapsForm.companyName,
         accountStatus: editCapsForm.accountStatus,
         password: editCapsForm.newPassword || undefined,
       });
@@ -745,6 +752,8 @@ export const DealersManagementView: React.FC<DealersManagementViewProps> = ({
               max_active_users: Number(editCapsForm.maxActiveUsers) || 0,
               can_create_subdealers:
                 getResellerTier(prev) === 'DEALER' ? editCapsForm.canCreateSubdealers : false,
+              allow_subdealer_whatsapp: editCapsForm.allowSubdealerWhatsapp,
+              company_name: editCapsForm.companyName,
               account_status: editCapsForm.accountStatus,
             }
           : null
@@ -752,6 +761,36 @@ export const DealersManagementView: React.FC<DealersManagementViewProps> = ({
       setEditCapsForm((prev) => ({ ...prev, newPassword: '' }));
     } finally {
       setIsSavingCaps(false);
+    }
+  };
+
+  const handleToggleSubdealerWhatsapp = async (
+    target: SupabasePortalUser,
+    nextVal: boolean
+  ) => {
+    setTogglingWhatsappId(target.id);
+    try {
+      const res = await updateResellerAccount(target.id, {
+        allowSubdealerWhatsapp: nextVal,
+      });
+      if (!res.ok) {
+        showToast('error', res.error || 'Failed to update WhatsApp permission.');
+        return;
+      }
+      // If a Dealer is turned OFF, also turn off child sub-dealers so revocation is immediate
+      if (!nextVal && getResellerTier(target) === 'DEALER') {
+        const ownedSubs = subDealers.filter((s) => s.parent_dealer_id === target.id);
+        for (const s of ownedSubs) {
+          await updateResellerAccount(s.id, { allowSubdealerWhatsapp: false });
+        }
+      }
+      showToast(
+        'success',
+        `${nextVal ? 'Enabled' : 'Disabled'} Sub-Dealer Own WhatsApp for ${target.full_name}.`
+      );
+      await loadData();
+    } finally {
+      setTogglingWhatsappId(null);
     }
   };
 
@@ -1171,6 +1210,29 @@ export const DealersManagementView: React.FC<DealersManagementViewProps> = ({
                                   </button>
                                 )}
 
+                                {isAdmin && (
+                                  <button
+                                    type="button"
+                                    disabled={togglingWhatsappId === dealer.id}
+                                    onClick={() =>
+                                      void handleToggleSubdealerWhatsapp(
+                                        dealer,
+                                        !Boolean(dealer.allow_subdealer_whatsapp)
+                                      )
+                                    }
+                                    title="Allow this Dealer's Sub-Dealers to pair their own WhatsApp numbers"
+                                    className={`inline-flex items-center gap-1 px-2.5 py-1.5 rounded-lg border text-[11px] font-medium transition whitespace-nowrap cursor-pointer ${
+                                      dealer.allow_subdealer_whatsapp
+                                        ? 'border-emerald-500/40 bg-emerald-500/15 text-emerald-700 dark:text-emerald-300'
+                                        : 'border-slate-300 dark:border-slate-700 bg-white dark:bg-slate-800 text-slate-600 dark:text-slate-400'
+                                    }`}
+                                  >
+                                    <span>
+                                      Sub-Dealer WA: {dealer.allow_subdealer_whatsapp ? 'ON' : 'OFF'}
+                                    </span>
+                                  </button>
+                                )}
+
                                 <button
                                   type="button"
                                   onClick={() => openResellerDrawer(dealer, 'tariffs')}
@@ -1282,6 +1344,32 @@ export const DealersManagementView: React.FC<DealersManagementViewProps> = ({
                                         >
                                           <ArrowRightLeft className="w-3 h-3" />
                                           <span>Send Float</span>
+                                        </button>
+                                      )}
+
+                                      {(isAdmin || dealer.id === currentUser?.id) && (
+                                        <button
+                                          type="button"
+                                          disabled={togglingWhatsappId === sub.id}
+                                          onClick={() =>
+                                            void handleToggleSubdealerWhatsapp(
+                                              sub,
+                                              !Boolean(sub.allow_subdealer_whatsapp)
+                                            )
+                                          }
+                                          title="Allow this Sub-Dealer to link & send from their own WhatsApp number"
+                                          className={`inline-flex items-center gap-1 px-2.5 py-1.5 rounded-lg border text-[11px] font-medium transition whitespace-nowrap cursor-pointer ${
+                                            sub.allow_subdealer_whatsapp || dealer.allow_subdealer_whatsapp
+                                              ? 'border-emerald-500/40 bg-emerald-500/15 text-emerald-700 dark:text-emerald-300'
+                                              : 'border-slate-300 dark:border-slate-700 bg-white dark:bg-slate-800 text-slate-600 dark:text-slate-400'
+                                          }`}
+                                        >
+                                          <span>
+                                            Own WA:{' '}
+                                            {sub.allow_subdealer_whatsapp || dealer.allow_subdealer_whatsapp
+                                              ? 'ON'
+                                              : 'OFF'}
+                                          </span>
                                         </button>
                                       )}
 
@@ -2254,6 +2342,47 @@ export const DealersManagementView: React.FC<DealersManagementViewProps> = ({
                       />
                     </label>
                   )}
+
+                  <div>
+                    <label className="block text-[11px] font-medium text-slate-600 dark:text-slate-300 mb-1">
+                      WhatsApp Company Display Name
+                    </label>
+                    <input
+                      type="text"
+                      disabled={!canEditDrawerReseller}
+                      value={editCapsForm.companyName}
+                      onChange={(e) =>
+                        setEditCapsForm((p) => ({ ...p, companyName: e.target.value }))
+                      }
+                      placeholder="e.g. Ali Fiber Net"
+                      className="w-full px-3 py-2 rounded-lg border border-slate-300 dark:border-slate-700 bg-white dark:bg-slate-950 text-slate-900 dark:text-slate-100 disabled:opacity-60"
+                    />
+                  </div>
+
+                  <label className="flex items-center justify-between gap-3 rounded-lg border border-emerald-500/25 bg-emerald-500/5 px-3.5 py-2.5 cursor-pointer">
+                    <div>
+                      <div className="font-medium text-slate-800 dark:text-slate-200">
+                        Allow Sub-Dealer Own WhatsApp
+                      </div>
+                      <div className="text-[11px] text-slate-500">
+                        {getResellerTier(drawerReseller) === 'DEALER'
+                          ? 'Permits linked Sub-Dealers under this Dealer to pair their own Baileys WhatsApp number'
+                          : 'Permits this Sub-Dealer to pair and send automated notifications from their own WhatsApp number'}
+                      </div>
+                    </div>
+                    <input
+                      type="checkbox"
+                      disabled={!canEditDrawerReseller}
+                      checked={editCapsForm.allowSubdealerWhatsapp}
+                      onChange={(e) =>
+                        setEditCapsForm((p) => ({
+                          ...p,
+                          allowSubdealerWhatsapp: e.target.checked,
+                        }))
+                      }
+                      className="w-4 h-4 accent-emerald-500"
+                    />
+                  </label>
 
                   {canEditDrawerReseller && (
                     <div>

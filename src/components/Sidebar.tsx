@@ -24,6 +24,7 @@ import {
   MapPin,
   Package,
   Building2,
+  MessageSquare,
 } from 'lucide-react';
 import { ActiveTab } from './Header';
 import { SystemRole, UserAccount } from '../types/auth';
@@ -117,6 +118,15 @@ export const Sidebar: React.FC<SidebarProps> = ({
       badge: 'Resellers',
       badgeColor: 'bg-cyan-950 text-cyan-300 border-cyan-800',
       roles: ['ADMIN', 'DEALER'],
+    },
+    {
+      id: 'whatsapp_gateway' as ActiveTab,
+      label: 'WhatsApp & Branding',
+      subtitle: 'Multi-Session QR & Auto-Send',
+      icon: MessageSquare,
+      badge: 'Auto WA',
+      badgeColor: 'bg-emerald-950 text-emerald-300 border-emerald-800',
+      roles: ['ADMIN', 'DEALER', 'SUB_DEALER'],
     },
     {
       id: 'billing' as ActiveTab,

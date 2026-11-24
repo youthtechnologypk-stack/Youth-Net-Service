@@ -67,7 +67,39 @@ export interface SupabasePortalUser {
   assigned_pool_mbps?: number | null;
   max_active_users?: number | null;
   can_create_subdealers?: boolean | null;
+  company_name?: string | null;
+  whatsapp_status?: 'DISCONNECTED' | 'CONNECTING' | 'QR_READY' | 'CONNECTED' | string | null;
+  whatsapp_phone?: string | null;
+  whatsapp_auto_send?: boolean | null;
+  whatsapp_support_phone?: string | null;
+  allow_subdealer_whatsapp?: boolean | null;
   created_at?: string;
+}
+
+export type WhatsAppEventType =
+  | 'PROVISION_WELCOME'
+  | 'INVOICE_GENERATED'
+  | 'PRE_EXPIRY_3D'
+  | 'AUTO_SUSPENSION'
+  | 'PAYMENT_RESTORED'
+  | 'MANUAL_TEST';
+
+export interface SupabaseWhatsappLog {
+  id: string;
+  sender_portal_user_id?: string | null;
+  sender_company_name: string;
+  sender_phone?: string | null;
+  sender_tier?: string | null;
+  subscriber_id?: string | null;
+  subscriber_username?: string | null;
+  recipient_phone: string;
+  dealer_id?: string | null;
+  sub_dealer_id?: string | null;
+  event_type: WhatsAppEventType | string;
+  message_body: string;
+  status: 'SENT' | 'FAILED' | 'SKIPPED' | string;
+  error_message?: string | null;
+  created_at: string;
 }
 
 export interface SupabaseResellerTariff {
@@ -124,6 +156,7 @@ export interface SupabaseInvoice {
   due_date: string;
   cycle_day: number;
   shifted_to_next_month?: boolean | null;
+  notes?: string | null;
   paid_at?: string | null;
   created_at?: string;
 }

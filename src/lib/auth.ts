@@ -70,6 +70,7 @@ export function getTabFromPath(path: string): string | null {
   if (clean === 'architecture') return 'architecture';
   if (clean === 'logs' || clean === 'activity' || clean === 'audit') return 'logs';
   if (clean === 'fiber-gis' || clean === 'fiber_gis' || clean === 'gis' || clean === 'map') return 'fiber_gis';
+  if (clean === 'whatsapp-gateway' || clean === 'whatsapp_gateway' || clean === 'whatsapp') return 'whatsapp_gateway';
   if (clean === 'mobile') return 'mobile';
   if (clean === 'login') return 'login';
   return null;
@@ -93,6 +94,8 @@ export function getPathFromTab(tab: string): string {
       return '/logs';
     case 'fiber_gis':
       return '/fiber-gis';
+    case 'whatsapp_gateway':
+      return '/whatsapp-gateway';
     default:
       return `/${tab}`;
   }
@@ -136,12 +139,12 @@ export function isRouteAllowedForRole(
   }
 
   if (role === 'DEALER' || String(user?.tier_level || '').toUpperCase() === 'DEALER') {
-    const dealerAllowed = ['dealers', 'billing', 'users', 'complaints', 'subscribers'];
+    const dealerAllowed = ['dealers', 'billing', 'users', 'complaints', 'subscribers', 'whatsapp_gateway', 'whatsapp'];
     return dealerAllowed.some((a) => clean === a || clean.includes(a));
   }
 
   if (role === 'SUB_DEALER' || String(user?.tier_level || '').toUpperCase() === 'SUB_DEALER') {
-    const subDealerAllowed = ['billing', 'users', 'complaints', 'subscribers'];
+    const subDealerAllowed = ['billing', 'users', 'complaints', 'subscribers', 'whatsapp_gateway', 'whatsapp'];
     return subDealerAllowed.some((a) => clean === a || clean.includes(a));
   }
 
@@ -233,6 +236,12 @@ export function getStoredUser(): UserAccount | null {
         bandwidth_pool_cap_mbps: Number(u.bandwidth_pool_cap_mbps ?? u.assigned_pool_mbps ?? 0),
         max_active_users: Number(u.max_active_users ?? 0),
         can_create_subdealers: Boolean(u.can_create_subdealers),
+        company_name: u.company_name ?? null,
+        whatsapp_status: u.whatsapp_status ?? null,
+        whatsapp_phone: u.whatsapp_phone ?? null,
+        whatsapp_auto_send: typeof u.whatsapp_auto_send === 'boolean' ? u.whatsapp_auto_send : true,
+        whatsapp_support_phone: u.whatsapp_support_phone ?? null,
+        allow_subdealer_whatsapp: Boolean(u.allow_subdealer_whatsapp),
         createdAt: u.createdAt || new Date().toISOString(),
       };
     }

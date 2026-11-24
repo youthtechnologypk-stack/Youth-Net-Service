@@ -39,6 +39,7 @@ import {
   Printer,
   ChevronRight,
   Info,
+  Trash2,
 } from 'lucide-react';
 import {
   supabase,
@@ -105,6 +106,12 @@ import {
   WalletGatePreviewResult,
 } from '../lib/resellerEngine';
 import { ResellerWalletGatePreview } from './ResellerWalletGatePreview';
+import {
+  deleteInventoryLogApi,
+  deleteInvoiceApi,
+  updateInventoryLogApi,
+  updateInvoiceApi,
+} from '../lib/inventoryInvoiceSync';
 
 export interface SubscriberProfileViewProps {
   username: string;
@@ -292,6 +299,38 @@ export const SubscriberProfileView: React.FC<SubscriberProfileViewProps> = ({
   const [isSavingTicket, setIsSavingTicket] = useState<boolean>(false);
   const [isAccessDenied, setIsAccessDenied] = useState<boolean>(false);
   const [owningDealerLabel, setOwningDealerLabel] = useState<string | null>(null);
+
+  // RBAC: Edit / Delete Inventory Logs & Invoices
+  const canEditDeleteLedger = Boolean(perms.edit_delete_invoice || isAdminSession);
+
+  // Edit / Delete Material Log Modal State (Tab 1)
+  const [materialToEdit, setMaterialToEdit] = useState<SupabaseSubscriberInventoryLog | null>(null);
+  const [editMaterialForm, setEditMaterialForm] = useState({
+    itemName: '',
+    quantity: 1,
+    unitCost: 0,
+    installedByAgent: '',
+    date: new Date().toISOString().slice(0, 10),
+  });
+  const [isUpdatingMaterial, setIsUpdatingMaterial] = useState<boolean>(false);
+  const [materialToDelete, setMaterialToDelete] = useState<SupabaseSubscriberInventoryLog | null>(null);
+  const [isDeletingMaterial, setIsDeletingMaterial] = useState<boolean>(false);
+
+  // Edit / Delete Invoice Modal State (Tab 2)
+  const [invoiceToEdit, setInvoiceToEdit] = useState<SupabaseInvoice | null>(null);
+  const [editInvoiceForm, setEditInvoiceForm] = useState({
+    amount: 0,
+    dueDate: new Date().toISOString().slice(0, 10),
+    status: 'DUE' as 'DUE' | 'PARTIAL' | 'PAID' | 'OVERDUE',
+    assignedAgentId: '',
+    notes: '',
+  });
+  const [isUpdatingInvoice, setIsUpdatingInvoice] = useState<boolean>(false);
+  const [editInvoiceWalletStatus, setEditInvoiceWalletStatus] = useState<WalletGatePreviewResult | null>(null);
+  const [editInvoiceError, setEditInvoiceError] = useState<string | null>(null);
+  const [invoiceToDelete, setInvoiceToDelete] = useState<SupabaseInvoice | null>(null);
+  const [deleteLinkedPayments, setDeleteLinkedPayments] = useState<boolean>(true);
+  const [isDeletingInvoice, setIsDeletingInvoice] = useState<boolean>(false);
 
   const speedPollingTimerRef = useRef<any>(null);
 
@@ -1120,9 +1159,14 @@ export const SubscriberProfileView: React.FC<SubscriberProfileViewProps> = ({
 
       if (invErr) throw new Error(invErr.message);
 
-      // 2. If append to invoice is checked, append to latest unpaid invoice or create invoice
+      // 2. If append to invoice is checked, prefer existing unpaid INV-MAT-* invoice, otherwise append to latest unpaid invoice or create INV-MAT-*
       if (materialForm.appendToInvoice && totalCharge > 0) {
-        const unpaidInv = invoices.find((i) => (i.status || '').toUpperCase() !== 'PAID');
+        const unpaidMatInv = invoices.find(
+          (i) =>
+            String(i.invoice_no || '').toUpperCase().startsWith('INV-MAT-') &&
+            (i.status || '').toUpperCase() !== 'PAID'
+        );
+        const unpaidInv = unpaidMatInv || invoices.find((i) => (i.status || '').toUpperCase() !== 'PAID');
         if (unpaidInv) {
           const newAmount = Number(unpaidInv.amount) + totalCharge;
           await supabase.from('invoices').update({ amount: newAmount }).eq('id', unpaidInv.id);
@@ -1315,6 +1359,217 @@ export const SubscriberProfileView: React.FC<SubscriberProfileViewProps> = ({
       await fetchAllProfileData();
     } catch (err: any) {
       showToast(`Payment error: ${err.message}`, 'error');
+    }
+  };
+
+  // Action 7: Open Edit Material Modal (Tab 1)
+  const handleOpenEditMaterial = (log: SupabaseSubscriberInventoryLog) => {
+    if (!canEditDeleteLedger) {
+      showToast('Permission required: Edit & Delete Invoice / Hardware Log is disabled for your account.', 'error');
+      return;
+    }
+    setMaterialToEdit(log);
+    const dateVal = log.created_at
+      ? extractYmdString(log.created_at) || new Date().toISOString().slice(0, 10)
+      : new Date().toISOString().slice(0, 10);
+    setEditMaterialForm({
+      itemName: log.item_name || '',
+      quantity: Number(log.quantity) || 1,
+      unitCost: Number(log.unit_cost) || 0,
+      installedByAgent: log.installed_by_agent_name || '',
+      date: dateVal,
+    });
+  };
+
+  // Action 8: Save Edited Material Log + Auto-Sync Linked INV-MAT Invoice
+  const handleUpdateMaterial = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!canEditDeleteLedger || !materialToEdit?.id) return;
+    const trimmedItem = editMaterialForm.itemName.trim();
+    const qty = Number(editMaterialForm.quantity);
+    const cost = Number(editMaterialForm.unitCost);
+    if (!trimmedItem) {
+      showToast('Please enter an Item Name.', 'error');
+      return;
+    }
+    if (!Number.isFinite(qty) || qty <= 0 || !Number.isFinite(cost) || cost < 0) {
+      showToast('Quantity must be greater than 0 and Unit Cost cannot be negative.', 'error');
+      return;
+    }
+
+    setIsUpdatingMaterial(true);
+    try {
+      const dateIso = editMaterialForm.date
+        ? new Date(`${editMaterialForm.date}T12:00:00.000Z`).toISOString()
+        : materialToEdit.created_at || new Date().toISOString();
+
+      const res = await updateInventoryLogApi(materialToEdit.id, {
+        item_name: trimmedItem,
+        quantity: qty,
+        unit_cost: cost,
+        installed_by_agent_name: editMaterialForm.installedByAgent || 'Field Technician',
+        created_at: dateIso,
+      });
+
+      const syncNote =
+        res.invoiceSync && res.invoiceSync.action !== 'NOOP'
+          ? ` ${res.invoiceSync.reason}`
+          : '';
+      showToast(`Material "${trimmedItem}" updated!${syncNote}`);
+      setMaterialToEdit(null);
+      await fetchAllProfileData();
+    } catch (err: any) {
+      showToast(err?.message || 'Failed to update material log.', 'error');
+    } finally {
+      setIsUpdatingMaterial(false);
+    }
+  };
+
+  // Action 9: Delete Material Log + Auto-Sync / Cleanup Linked INV-MAT Invoice
+  const handleDeleteMaterial = async () => {
+    if (!canEditDeleteLedger || !materialToDelete?.id) return;
+    setIsDeletingMaterial(true);
+    try {
+      const itemLabel = materialToDelete.item_name;
+      const res = await deleteInventoryLogApi(materialToDelete.id);
+      const syncNote =
+        res.invoiceSync && res.invoiceSync.action !== 'NOOP'
+          ? ` ${res.invoiceSync.reason}`
+          : '';
+      showToast(`Material "${itemLabel}" deleted.${syncNote}`);
+      setMaterialToDelete(null);
+      await fetchAllProfileData();
+    } catch (err: any) {
+      showToast(err?.message || 'Failed to delete material log.', 'error');
+    } finally {
+      setIsDeletingMaterial(false);
+    }
+  };
+
+  // Action 10: Open Edit Invoice Modal (Tab 2)
+  const handleOpenEditInvoice = (inv: SupabaseInvoice) => {
+    if (!canEditDeleteLedger) {
+      showToast('Permission required: Edit & Delete Invoice is disabled for your account.', 'error');
+      return;
+    }
+    setEditInvoiceError(null);
+    setEditInvoiceWalletStatus(null);
+    setInvoiceToEdit(inv);
+    setEditInvoiceForm({
+      amount: Number(inv.amount) || 0,
+      dueDate: inv.due_date ? String(inv.due_date).slice(0, 10) : new Date().toISOString().slice(0, 10),
+      status: ((inv.status || 'DUE').toUpperCase() as 'DUE' | 'PARTIAL' | 'PAID' | 'OVERDUE'),
+      assignedAgentId: inv.assigned_agent_id || '',
+      notes: inv.notes || '',
+    });
+  };
+
+  // Action 11: Save Edited Invoice + Refresh KPI Cards
+  const handleUpdateInvoice = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!canEditDeleteLedger || !invoiceToEdit) return;
+    setEditInvoiceError(null);
+
+    const amountNum = Number(editInvoiceForm.amount);
+    if (!Number.isFinite(amountNum) || amountNum < 0) {
+      setEditInvoiceError('Amount must be 0 or greater.');
+      return;
+    }
+
+    const wasPaid = String(invoiceToEdit.status || '').toUpperCase() === 'PAID';
+    const becomingPaid = editInvoiceForm.status === 'PAID' && !wasPaid;
+
+    if (becomingPaid && editInvoiceWalletStatus?.blocked) {
+      const msg =
+        editInvoiceWalletStatus.error || 'Insufficient Dealer Wallet Balance. Renewal blocked.';
+      setEditInvoiceError(msg);
+      showToast(msg, 'error');
+      return;
+    }
+
+    setIsUpdatingInvoice(true);
+    try {
+      let restoreNote = '';
+      if (becomingPaid) {
+        const restoreRes = await restoreSubscriberOnInvoicePaid(cleanUsername, {
+          triggeredBy: 'ADMIN',
+          performedBy: getStoredUser()?.fullName || getStoredUser()?.username || 'Subscriber 360 Desk',
+          notes: `Invoice #${invoiceToEdit.invoice_no} marked PAID via Subscriber 360 Edit`,
+          activeRouter,
+        });
+        if (restoreRes.insufficientWalletFunds || (!restoreRes.success && restoreRes.error)) {
+          throw new Error(restoreRes.error || 'Insufficient Dealer Wallet Balance. Renewal blocked.');
+        }
+        if (restoreRes.restoredProfile) {
+          restoreNote = ` Restored MikroTik profile "${restoreRes.restoredProfile}".`;
+        }
+      }
+
+      const selectedAgent = portalAgents.find((a) => a.id === editInvoiceForm.assignedAgentId);
+      const nextPaidAmount =
+        editInvoiceForm.status === 'PAID'
+          ? amountNum
+          : editInvoiceForm.status === 'DUE' || editInvoiceForm.status === 'OVERDUE'
+          ? 0
+          : Math.min(amountNum, Number(invoiceToEdit.paid_amount) || 0);
+
+      await updateInvoiceApi(invoiceToEdit.id, {
+        amount: amountNum,
+        due_date: editInvoiceForm.dueDate,
+        status: editInvoiceForm.status,
+        assigned_agent_id: editInvoiceForm.assignedAgentId || null,
+        assigned_agent_name: selectedAgent ? selectedAgent.full_name : null,
+        notes: editInvoiceForm.notes.trim() || null,
+        paid_amount: nextPaidAmount,
+        paid_at:
+          editInvoiceForm.status === 'PAID'
+            ? invoiceToEdit.paid_at || new Date().toISOString()
+            : null,
+      });
+
+      showToast(`Invoice #${invoiceToEdit.invoice_no} updated!${restoreNote}`);
+      setInvoiceToEdit(null);
+      await fetchAllProfileData();
+    } catch (err: any) {
+      const msg = err?.message || 'Failed to update invoice.';
+      setEditInvoiceError(msg);
+      showToast(msg, 'error');
+    } finally {
+      setIsUpdatingInvoice(false);
+    }
+  };
+
+  // Action 12: Open Delete Invoice Confirmation Modal (Tab 2)
+  const handleOpenDeleteInvoice = (inv: SupabaseInvoice) => {
+    if (!canEditDeleteLedger) {
+      showToast('Permission required: Edit & Delete Invoice is disabled for your account.', 'error');
+      return;
+    }
+    const linkedTxCount = transactions.filter((t) => t.invoice_id === inv.id).length;
+    setDeleteLinkedPayments(linkedTxCount > 0);
+    setInvoiceToDelete(inv);
+  };
+
+  // Action 13: Confirm Delete Invoice (+ Optional Linked Payment Transactions)
+  const handleDeleteInvoice = async () => {
+    if (!canEditDeleteLedger || !invoiceToDelete) return;
+    setIsDeletingInvoice(true);
+    try {
+      const invNo = invoiceToDelete.invoice_no;
+      const res = await deleteInvoiceApi(invoiceToDelete.id, {
+        deleteLinkedPayments,
+      });
+      const txNote =
+        res.deletedPaymentsCount && res.deletedPaymentsCount > 0
+          ? ` Also removed ${res.deletedPaymentsCount} linked payment receipt(s).`
+          : '';
+      showToast(`Invoice #${invNo} deleted.${txNote}`);
+      setInvoiceToDelete(null);
+      await fetchAllProfileData();
+    } catch (err: any) {
+      showToast(err?.message || 'Failed to delete invoice.', 'error');
+    } finally {
+      setIsDeletingInvoice(false);
     }
   };
 
@@ -1938,7 +2193,7 @@ export const SubscriberProfileView: React.FC<SubscriberProfileViewProps> = ({
             </div>
 
             {/* Inventory Table */}
-            <div className="rounded-xl border border-slate-800 overflow-hidden bg-slate-900/60">
+            <div className="rounded-xl border border-slate-800 overflow-x-auto bg-slate-900/60">
               <table className="w-full text-left text-xs text-slate-300">
                 <thead className="bg-slate-900 text-slate-400 border-b border-slate-800 uppercase font-mono text-[11px]">
                   <tr>
@@ -1949,12 +2204,15 @@ export const SubscriberProfileView: React.FC<SubscriberProfileViewProps> = ({
                     <th className="py-3 px-4 text-center">Added to Invoice</th>
                     <th className="py-3 px-4">Installed By</th>
                     <th className="py-3 px-4 text-right">Date</th>
+                    {canEditDeleteLedger && (
+                      <th className="py-3 px-4 text-right">Actions</th>
+                    )}
                   </tr>
                 </thead>
                 <tbody className="divide-y divide-slate-800/60 font-sans">
                   {inventoryLogs.length === 0 ? (
                     <tr>
-                      <td colSpan={7} className="py-8 text-center text-slate-500 font-mono">
+                      <td colSpan={canEditDeleteLedger ? 8 : 7} className="py-8 text-center text-slate-500 font-mono">
                         No maintenance materials logged yet for @{cleanUsername}. Click "+ Add Material / Wire Charge" above.
                       </td>
                     </tr>
@@ -1982,9 +2240,31 @@ export const SubscriberProfileView: React.FC<SubscriberProfileViewProps> = ({
                             )}
                           </td>
                           <td className="py-3 px-4 font-mono text-cyan-400">{log.installed_by_agent_name || 'NOC'}</td>
-                          <td className="py-3 px-4 text-right font-mono text-slate-400">
+                          <td className="py-3 px-4 text-right font-mono text-slate-400 whitespace-nowrap">
                             {log.created_at ? new Date(log.created_at).toLocaleDateString() : 'N/A'}
                           </td>
+                          {canEditDeleteLedger && (
+                            <td className="py-3 px-4 text-right whitespace-nowrap">
+                              <div className="inline-flex items-center justify-end gap-1.5">
+                                <button
+                                  type="button"
+                                  onClick={() => handleOpenEditMaterial(log)}
+                                  title="Edit Material Entry"
+                                  className="p-1.5 rounded-lg bg-slate-800 hover:bg-indigo-600/30 border border-slate-700 hover:border-indigo-500/60 text-indigo-300 transition cursor-pointer"
+                                >
+                                  <Edit className="w-3.5 h-3.5" />
+                                </button>
+                                <button
+                                  type="button"
+                                  onClick={() => setMaterialToDelete(log)}
+                                  title="Delete Material Entry"
+                                  className="p-1.5 rounded-lg bg-slate-800 hover:bg-rose-600/30 border border-slate-700 hover:border-rose-500/60 text-rose-300 transition cursor-pointer"
+                                >
+                                  <Trash2 className="w-3.5 h-3.5" />
+                                </button>
+                              </div>
+                            </td>
+                          )}
                         </tr>
                       );
                     })
@@ -2106,38 +2386,60 @@ export const SubscriberProfileView: React.FC<SubscriberProfileViewProps> = ({
                             <td className="py-3 px-4 font-mono text-slate-400">
                               {inv.assigned_agent_name || 'Unassigned'}
                             </td>
-                            <td className="py-3 px-4 text-right">
-                              {balance > 0 && displayStatus !== 'PAID' ? (
-                                perms.collect_fee ? (
-                                  <button
-                                    type="button"
-                                    onClick={() => {
-                                      setSelectedInvoiceForPayment(inv);
-                                      setPaymentAmountInput(balance);
-                                      setIsRecordPaymentModalOpen(true);
-                                    }}
-                                    className="px-2.5 py-1 rounded bg-emerald-600 hover:bg-emerald-500 text-slate-950 font-bold text-[11px] transition cursor-pointer"
-                                  >
-                                    Record Payment
-                                  </button>
+                            <td className="py-3 px-4 text-right whitespace-nowrap">
+                              <div className="flex items-center justify-end gap-1.5">
+                                {balance > 0 && displayStatus !== 'PAID' ? (
+                                  perms.collect_fee ? (
+                                    <button
+                                      type="button"
+                                      onClick={() => {
+                                        setSelectedInvoiceForPayment(inv);
+                                        setPaymentAmountInput(balance);
+                                        setIsRecordPaymentModalOpen(true);
+                                      }}
+                                      className="px-2.5 py-1 rounded bg-emerald-600 hover:bg-emerald-500 text-slate-950 font-bold text-[11px] transition cursor-pointer"
+                                    >
+                                      Record Payment
+                                    </button>
+                                  ) : (
+                                    <span className="text-slate-500 font-mono text-[11px]">Unpaid</span>
+                                  )
                                 ) : (
-                                  <span className="text-slate-500 font-mono text-[11px]">Unpaid</span>
-                                )
-                              ) : (
-                                <div className="flex items-center justify-end gap-1.5">
-                                  <span className="text-emerald-400 font-mono text-[11px] font-semibold">
-                                    ✓ Settled / Paid in Full
-                                  </span>
-                                  <button
-                                    type="button"
-                                    onClick={() => onOpenReceiptModal?.(inv)}
-                                    className="px-2.5 py-1 rounded bg-slate-800 hover:bg-slate-700 text-cyan-400 text-[11px] transition cursor-pointer flex items-center gap-1"
-                                  >
-                                    <Printer className="w-3 h-3" />
-                                    <span>Receipt</span>
-                                  </button>
-                                </div>
-                              )}
+                                  <>
+                                    <span className="text-emerald-400 font-mono text-[11px] font-semibold">
+                                      ✓ Paid
+                                    </span>
+                                    <button
+                                      type="button"
+                                      onClick={() => onOpenReceiptModal?.(inv)}
+                                      className="px-2.5 py-1 rounded bg-slate-800 hover:bg-slate-700 text-cyan-400 text-[11px] transition cursor-pointer flex items-center gap-1"
+                                    >
+                                      <Printer className="w-3 h-3" />
+                                      <span>Receipt</span>
+                                    </button>
+                                  </>
+                                )}
+                                {canEditDeleteLedger && (
+                                  <>
+                                    <button
+                                      type="button"
+                                      onClick={() => handleOpenEditInvoice(inv)}
+                                      title={`Edit Invoice ${inv.invoice_no}`}
+                                      className="p-1.5 rounded-lg bg-slate-800 hover:bg-indigo-600/30 border border-slate-700 hover:border-indigo-500/60 text-indigo-300 transition cursor-pointer"
+                                    >
+                                      <Edit className="w-3.5 h-3.5" />
+                                    </button>
+                                    <button
+                                      type="button"
+                                      onClick={() => handleOpenDeleteInvoice(inv)}
+                                      title={`Delete Invoice ${inv.invoice_no}`}
+                                      className="p-1.5 rounded-lg bg-slate-800 hover:bg-rose-600/30 border border-slate-700 hover:border-rose-500/60 text-rose-300 transition cursor-pointer"
+                                    >
+                                      <Trash2 className="w-3.5 h-3.5" />
+                                    </button>
+                                  </>
+                                )}
+                              </div>
                             </td>
                           </tr>
                         );
@@ -3382,6 +3684,484 @@ export const SubscriberProfileView: React.FC<SubscriberProfileViewProps> = ({
               </div>
             </div>
           </div>,
+          document.body
+        )}
+
+      {/* MODAL 7: EDIT MATERIAL / HARDWARE LOG ENTRY (TAB 1) */}
+      {materialToEdit &&
+        typeof document !== 'undefined' &&
+        ReactDOM.createPortal(
+          <div className="fixed inset-0 z-[999999] flex items-center justify-center bg-black/80 backdrop-blur-sm p-3 overflow-y-auto font-sans">
+            <div className="w-[95vw] sm:w-full max-w-lg max-h-[90vh] overflow-y-auto mx-auto rounded-2xl box-border bg-[#111A2E] border border-indigo-700/70 p-4 sm:p-5 shadow-2xl relative">
+              <div className="flex items-center justify-between pb-3 border-b border-slate-800">
+                <h3 className="text-sm font-bold text-white flex items-center gap-2">
+                  <Edit className="w-4 h-4 text-indigo-400" />
+                  <span>Edit Material &amp; Hardware Log</span>
+                </h3>
+                <button
+                  type="button"
+                  onClick={() => setMaterialToEdit(null)}
+                  className="text-slate-400 hover:text-white cursor-pointer"
+                >
+                  <X className="w-4 h-4" />
+                </button>
+              </div>
+
+              <form onSubmit={handleUpdateMaterial} className="space-y-3.5 mt-4 text-xs">
+                <div>
+                  <label className="block font-medium text-slate-300 mb-1">Item Name</label>
+                  <input
+                    type="text"
+                    required
+                    value={editMaterialForm.itemName}
+                    onChange={(e) => setEditMaterialForm({ ...editMaterialForm, itemName: e.target.value })}
+                    placeholder="e.g. 2-Core FTTH Drop Wire Cable"
+                    className="w-full px-3 py-2 bg-slate-900 border border-slate-700 rounded-lg text-white focus:outline-none focus:border-cyan-500"
+                  />
+                </div>
+
+                <div className="grid grid-cols-2 gap-3">
+                  <div>
+                    <label className="block font-medium text-slate-300 mb-1">Quantity (Meters / Units)</label>
+                    <input
+                      type="number"
+                      min="1"
+                      step="any"
+                      required
+                      value={editMaterialForm.quantity}
+                      onChange={(e) =>
+                        setEditMaterialForm({ ...editMaterialForm, quantity: Number(e.target.value) })
+                      }
+                      className="w-full px-3 py-2 bg-slate-900 border border-slate-700 rounded-lg text-white font-mono focus:outline-none focus:border-cyan-500"
+                    />
+                  </div>
+                  <div>
+                    <label className="block font-medium text-slate-300 mb-1">Unit Cost ({currencySymbol})</label>
+                    <input
+                      type="number"
+                      min="0"
+                      step="any"
+                      required
+                      value={editMaterialForm.unitCost}
+                      onChange={(e) =>
+                        setEditMaterialForm({ ...editMaterialForm, unitCost: Number(e.target.value) })
+                      }
+                      className="w-full px-3 py-2 bg-slate-900 border border-slate-700 rounded-lg text-white font-mono focus:outline-none focus:border-cyan-500"
+                    />
+                  </div>
+                </div>
+
+                <div className="grid grid-cols-2 gap-3">
+                  <div>
+                    <label className="block font-medium text-slate-300 mb-1">Installed By (Agent)</label>
+                    <select
+                      value={editMaterialForm.installedByAgent}
+                      onChange={(e) =>
+                        setEditMaterialForm({ ...editMaterialForm, installedByAgent: e.target.value })
+                      }
+                      className="w-full px-3 py-2 bg-slate-900 border border-slate-700 rounded-lg text-white focus:outline-none focus:border-cyan-500"
+                    >
+                      <option value="">-- Field Technician / NOC --</option>
+                      {editMaterialForm.installedByAgent &&
+                        !portalAgents.some((ag) => ag.full_name === editMaterialForm.installedByAgent) && (
+                          <option value={editMaterialForm.installedByAgent}>
+                            {editMaterialForm.installedByAgent}
+                          </option>
+                        )}
+                      {portalAgents.map((ag) => (
+                        <option key={ag.id} value={ag.full_name}>
+                          {ag.full_name} {ag.area ? `(${ag.area})` : ''}
+                        </option>
+                      ))}
+                    </select>
+                  </div>
+                  <div>
+                    <label className="block font-medium text-slate-300 mb-1">Date</label>
+                    <input
+                      type="date"
+                      required
+                      value={editMaterialForm.date}
+                      onChange={(e) => setEditMaterialForm({ ...editMaterialForm, date: e.target.value })}
+                      className="w-full px-3 py-2 bg-slate-900 border border-slate-700 rounded-lg text-white font-mono focus:outline-none focus:border-cyan-500"
+                    />
+                  </div>
+                </div>
+
+                <div className="p-3 bg-slate-900 rounded-xl border border-slate-800 space-y-1.5">
+                  <div className="flex justify-between items-center font-mono">
+                    <span className="text-slate-400">Recalculated Total Charge:</span>
+                    <span className="text-cyan-300 font-bold text-sm">
+                      {formatCurrency(
+                        (Number(editMaterialForm.quantity) || 0) * (Number(editMaterialForm.unitCost) || 0)
+                      )}
+                    </span>
+                  </div>
+                  {materialToEdit.added_to_invoice && (
+                    <p className="text-[11px] text-emerald-300/90 flex items-center gap-1.5 pt-1 border-t border-slate-800">
+                      <CheckCircle2 className="w-3.5 h-3.5 text-emerald-400 shrink-0" />
+                      <span>
+                        Billed item: any linked unpaid <strong className="font-mono">INV-MAT-*</strong> invoice will auto-recalculate to match.
+                      </span>
+                    </p>
+                  )}
+                </div>
+
+                <div className="flex items-center justify-end gap-2.5 pt-2 border-t border-slate-800">
+                  <button
+                    type="button"
+                    onClick={() => setMaterialToEdit(null)}
+                    className="px-4 py-2 bg-slate-800 hover:bg-slate-700 text-slate-300 rounded-lg transition cursor-pointer"
+                  >
+                    Cancel
+                  </button>
+                  <button
+                    type="submit"
+                    disabled={isUpdatingMaterial}
+                    className="px-5 py-2 bg-indigo-600 hover:bg-indigo-500 disabled:opacity-50 text-white font-bold rounded-lg transition shadow flex items-center gap-1.5 cursor-pointer"
+                  >
+                    {isUpdatingMaterial ? (
+                      <>
+                        <RefreshCw className="w-3.5 h-3.5 animate-spin" />
+                        <span>Saving...</span>
+                      </>
+                    ) : (
+                      <span>Save Material Changes</span>
+                    )}
+                  </button>
+                </div>
+              </form>
+            </div>
+          </div>,
+          document.body
+        )}
+
+      {/* MODAL 8: DELETE MATERIAL CONFIRMATION (TAB 1) */}
+      {materialToDelete &&
+        typeof document !== 'undefined' &&
+        ReactDOM.createPortal(
+          <div className="fixed inset-0 z-[999999] flex items-center justify-center bg-black/80 backdrop-blur-sm p-3 overflow-y-auto font-sans">
+            <div className="w-[95vw] sm:w-full max-w-md mx-auto rounded-2xl box-border bg-[#111A2E] border border-rose-800/80 p-5 shadow-2xl space-y-4">
+              <div className="flex items-center gap-3 pb-3 border-b border-slate-800">
+                <div className="p-2.5 bg-rose-950 border border-rose-700 text-rose-400 rounded-xl shrink-0">
+                  <Trash2 className="w-5 h-5" />
+                </div>
+                <div className="min-w-0">
+                  <h3 className="text-base font-bold text-white">Delete Material Entry?</h3>
+                  <p className="text-xs text-rose-300 font-mono truncate">{materialToDelete.item_name}</p>
+                </div>
+              </div>
+
+              <div className="p-3 rounded-xl bg-slate-900 border border-slate-800 text-xs font-mono space-y-1">
+                <div className="flex justify-between">
+                  <span className="text-slate-400">Quantity × Unit Cost:</span>
+                  <span className="text-white">
+                    {materialToDelete.quantity} × {formatCurrency(materialToDelete.unit_cost)}
+                  </span>
+                </div>
+                <div className="flex justify-between font-bold">
+                  <span className="text-slate-400">Total Charge:</span>
+                  <span className="text-rose-300">
+                    {formatCurrency(Number(materialToDelete.quantity) * Number(materialToDelete.unit_cost))}
+                  </span>
+                </div>
+              </div>
+
+              <p className="text-xs text-slate-300 leading-relaxed">
+                This permanently removes the material row from <code className="text-cyan-300">subscriber_inventory_logs</code>.
+                {materialToDelete.added_to_invoice && (
+                  <>
+                    {' '}
+                    Because this item was billed, any linked unpaid <strong className="text-white font-mono">INV-MAT-*</strong> invoice will automatically recalculate (or be removed if no billed items remain and Rs. 0 is paid).
+                  </>
+                )}
+              </p>
+
+              <div className="flex items-center justify-end gap-2.5 pt-2 border-t border-slate-800">
+                <button
+                  type="button"
+                  onClick={() => setMaterialToDelete(null)}
+                  className="px-4 py-2 bg-slate-800 hover:bg-slate-700 text-slate-300 rounded-lg text-xs transition cursor-pointer"
+                >
+                  Cancel
+                </button>
+                <button
+                  type="button"
+                  onClick={handleDeleteMaterial}
+                  disabled={isDeletingMaterial}
+                  className="px-4 py-2 bg-rose-600 hover:bg-rose-500 disabled:opacity-50 text-white font-bold rounded-lg text-xs transition flex items-center gap-1.5 cursor-pointer"
+                >
+                  {isDeletingMaterial ? (
+                    <>
+                      <RefreshCw className="w-3.5 h-3.5 animate-spin" />
+                      <span>Deleting...</span>
+                    </>
+                  ) : (
+                    <span>Delete Material</span>
+                  )}
+                </button>
+              </div>
+            </div>
+          </div>,
+          document.body
+        )}
+
+      {/* MODAL 9: EDIT INVOICE MODAL (TAB 2) */}
+      {invoiceToEdit &&
+        typeof document !== 'undefined' &&
+        ReactDOM.createPortal(
+          <div className="fixed inset-0 z-[999999] flex items-center justify-center bg-black/80 backdrop-blur-sm p-3 overflow-y-auto font-sans">
+            <div className="w-[95vw] sm:w-full max-w-lg max-h-[90vh] overflow-y-auto mx-auto rounded-2xl box-border bg-[#111A2E] border border-indigo-700/70 p-4 sm:p-5 shadow-2xl relative">
+              <div className="flex items-center justify-between pb-3 border-b border-slate-800">
+                <div>
+                  <h3 className="text-sm font-bold text-white flex items-center gap-2">
+                    <Edit className="w-4 h-4 text-indigo-400" />
+                    <span>Edit Invoice Details</span>
+                  </h3>
+                  <p className="text-[11px] font-mono text-cyan-400 mt-0.5">
+                    #{invoiceToEdit.invoice_no} • @{cleanUsername}
+                  </p>
+                </div>
+                <button
+                  type="button"
+                  onClick={() => {
+                    setEditInvoiceError(null);
+                    setInvoiceToEdit(null);
+                  }}
+                  className="text-slate-400 hover:text-white cursor-pointer"
+                >
+                  <X className="w-4 h-4" />
+                </button>
+              </div>
+
+              <form onSubmit={handleUpdateInvoice} className="space-y-3.5 mt-4 text-xs">
+                <div className="grid grid-cols-2 gap-3">
+                  <div>
+                    <label className="block font-medium text-slate-300 mb-1">Amount ({currencySymbol})</label>
+                    <input
+                      type="number"
+                      min="0"
+                      step="any"
+                      required
+                      value={editInvoiceForm.amount}
+                      onChange={(e) =>
+                        setEditInvoiceForm({ ...editInvoiceForm, amount: Number(e.target.value) })
+                      }
+                      className="w-full px-3 py-2 bg-slate-900 border border-slate-700 rounded-lg text-white font-mono focus:outline-none focus:border-cyan-500"
+                    />
+                  </div>
+                  <div>
+                    <label className="block font-medium text-slate-300 mb-1">Due Date</label>
+                    <input
+                      type="date"
+                      required
+                      value={editInvoiceForm.dueDate}
+                      onChange={(e) =>
+                        setEditInvoiceForm({ ...editInvoiceForm, dueDate: e.target.value })
+                      }
+                      className="w-full px-3 py-2 bg-slate-900 border border-slate-700 rounded-lg text-white font-mono focus:outline-none focus:border-cyan-500"
+                    />
+                  </div>
+                </div>
+
+                <div className="grid grid-cols-2 gap-3">
+                  <div>
+                    <label className="block font-medium text-slate-300 mb-1">Status</label>
+                    <select
+                      value={editInvoiceForm.status}
+                      onChange={(e) =>
+                        setEditInvoiceForm({
+                          ...editInvoiceForm,
+                          status: e.target.value as 'DUE' | 'PARTIAL' | 'PAID' | 'OVERDUE',
+                        })
+                      }
+                      className="w-full px-3 py-2 bg-slate-900 border border-slate-700 rounded-lg text-white focus:outline-none focus:border-cyan-500"
+                    >
+                      <option value="DUE">DUE</option>
+                      <option value="PARTIAL">PARTIAL</option>
+                      <option value="PAID">PAID</option>
+                      <option value="OVERDUE">OVERDUE</option>
+                    </select>
+                  </div>
+                  <div>
+                    <label className="block font-medium text-slate-300 mb-1">Assigned Agent</label>
+                    <select
+                      value={editInvoiceForm.assignedAgentId}
+                      onChange={(e) =>
+                        setEditInvoiceForm({ ...editInvoiceForm, assignedAgentId: e.target.value })
+                      }
+                      className="w-full px-3 py-2 bg-slate-900 border border-slate-700 rounded-lg text-white focus:outline-none focus:border-cyan-500"
+                    >
+                      <option value="">-- Unassigned --</option>
+                      {portalAgents.map((ag) => (
+                        <option key={ag.id} value={ag.id}>
+                          {ag.full_name} {ag.area ? `(${ag.area})` : ''}
+                        </option>
+                      ))}
+                    </select>
+                  </div>
+                </div>
+
+                <div>
+                  <label className="block font-medium text-slate-300 mb-1">Notes</label>
+                  <textarea
+                    rows={2}
+                    value={editInvoiceForm.notes}
+                    onChange={(e) => setEditInvoiceForm({ ...editInvoiceForm, notes: e.target.value })}
+                    placeholder="Optional billing adjustment note or remark..."
+                    className="w-full px-3 py-2 bg-slate-900 border border-slate-700 rounded-lg text-white focus:outline-none focus:border-cyan-500"
+                  />
+                </div>
+
+                {editInvoiceForm.status === 'PAID' &&
+                  String(invoiceToEdit.status || '').toUpperCase() !== 'PAID' && (
+                    <ResellerWalletGatePreview
+                      resellerId={activeOwnerResellerId}
+                      subscriberUsername={cleanUsername}
+                      profileName={
+                        invoiceToEdit.package_profile ||
+                        invoiceToEdit.package_name ||
+                        user?.original_package_profile ||
+                        user?.package_profile_name ||
+                        user?.package_speed ||
+                        effectivePackage
+                      }
+                      actionLabel="renewal"
+                      compact
+                      onStatusChange={setEditInvoiceWalletStatus}
+                    />
+                  )}
+
+                {editInvoiceError && (
+                  <div className="rounded-xl border border-rose-500/70 bg-rose-950/90 px-3 py-2.5 text-xs font-semibold text-rose-200 flex items-start gap-2">
+                    <AlertTriangle className="w-4 h-4 text-rose-400 shrink-0 mt-0.5" />
+                    <span>{editInvoiceError}</span>
+                  </div>
+                )}
+
+                <div className="flex items-center justify-end gap-2.5 pt-2 border-t border-slate-800">
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setEditInvoiceError(null);
+                      setInvoiceToEdit(null);
+                    }}
+                    className="px-4 py-2 bg-slate-800 hover:bg-slate-700 text-slate-300 rounded-lg transition cursor-pointer"
+                  >
+                    Cancel
+                  </button>
+                  <button
+                    type="submit"
+                    disabled={
+                      isUpdatingInvoice ||
+                      Boolean(
+                        editInvoiceForm.status === 'PAID' &&
+                          String(invoiceToEdit.status || '').toUpperCase() !== 'PAID' &&
+                          editInvoiceWalletStatus?.blocked
+                      )
+                    }
+                    className="px-5 py-2 bg-indigo-600 hover:bg-indigo-500 disabled:opacity-50 text-white font-bold rounded-lg transition shadow flex items-center gap-1.5 cursor-pointer"
+                  >
+                    {isUpdatingInvoice ? (
+                      <>
+                        <RefreshCw className="w-3.5 h-3.5 animate-spin" />
+                        <span>Saving...</span>
+                      </>
+                    ) : (
+                      <span>Save Invoice</span>
+                    )}
+                  </button>
+                </div>
+              </form>
+            </div>
+          </div>,
+          document.body
+        )}
+
+      {/* MODAL 10: DELETE INVOICE CONFIRMATION (TAB 2) */}
+      {invoiceToDelete &&
+        typeof document !== 'undefined' &&
+        ReactDOM.createPortal(
+          (() => {
+            const linkedTxs = transactions.filter((t) => t.invoice_id === invoiceToDelete.id);
+            return (
+              <div className="fixed inset-0 z-[999999] flex items-center justify-center bg-black/80 backdrop-blur-sm p-3 overflow-y-auto font-sans">
+                <div className="w-[95vw] sm:w-full max-w-md mx-auto rounded-2xl box-border bg-[#111A2E] border border-rose-800/80 p-5 shadow-2xl space-y-4">
+                  <div className="flex items-center gap-3 pb-3 border-b border-slate-800">
+                    <div className="p-2.5 bg-rose-950 border border-rose-700 text-rose-400 rounded-xl shrink-0">
+                      <Trash2 className="w-5 h-5" />
+                    </div>
+                    <div className="min-w-0">
+                      <h3 className="text-base font-bold text-white">
+                        Delete Invoice {invoiceToDelete.invoice_no}?
+                      </h3>
+                      <p className="text-xs text-rose-300 font-mono truncate">@{cleanUsername}</p>
+                    </div>
+                  </div>
+
+                  <div className="p-3 rounded-xl bg-slate-900 border border-slate-800 text-xs font-mono space-y-1">
+                    <div className="flex justify-between">
+                      <span className="text-slate-400">Invoice Amount:</span>
+                      <span className="text-white font-bold">{formatCurrency(invoiceToDelete.amount)}</span>
+                    </div>
+                    <div className="flex justify-between">
+                      <span className="text-slate-400">Paid Recorded:</span>
+                      <span className="text-emerald-400">
+                        {formatCurrency(invoiceToDelete.paid_amount || 0)}
+                      </span>
+                    </div>
+                    <div className="flex justify-between">
+                      <span className="text-slate-400">Linked Receipts:</span>
+                      <span className="text-amber-300">{linkedTxs.length} payment transaction(s)</span>
+                    </div>
+                  </div>
+
+                  {linkedTxs.length > 0 && (
+                    <label className="flex items-start gap-2.5 p-3 rounded-xl bg-rose-950/30 border border-rose-800/60 cursor-pointer text-xs">
+                      <input
+                        type="checkbox"
+                        checked={deleteLinkedPayments}
+                        onChange={(e) => setDeleteLinkedPayments(e.target.checked)}
+                        className="mt-0.5 w-4 h-4 rounded bg-slate-900 border-slate-700 text-rose-600 cursor-pointer"
+                      />
+                      <span className="text-rose-200 leading-relaxed">
+                        Also delete <strong>{linkedTxs.length}</strong> linked receipt(s) from{' '}
+                        <code className="text-cyan-300">payment_transactions</code> so the subscriber&apos;s balance and receipt ledger stay in sync.
+                      </span>
+                    </label>
+                  )}
+
+                  <p className="text-xs text-slate-400">
+                    This action permanently deletes the invoice and immediately updates the subscriber&apos;s KPI totals and outstanding balance.
+                  </p>
+
+                  <div className="flex items-center justify-end gap-2.5 pt-2 border-t border-slate-800">
+                    <button
+                      type="button"
+                      onClick={() => setInvoiceToDelete(null)}
+                      className="px-4 py-2 bg-slate-800 hover:bg-slate-700 text-slate-300 rounded-lg text-xs transition cursor-pointer"
+                    >
+                      Cancel
+                    </button>
+                    <button
+                      type="button"
+                      onClick={handleDeleteInvoice}
+                      disabled={isDeletingInvoice}
+                      className="px-4 py-2 bg-rose-600 hover:bg-rose-500 disabled:opacity-50 text-white font-bold rounded-lg text-xs transition flex items-center gap-1.5 cursor-pointer"
+                    >
+                      {isDeletingInvoice ? (
+                        <>
+                          <RefreshCw className="w-3.5 h-3.5 animate-spin" />
+                          <span>Deleting...</span>
+                        </>
+                      ) : (
+                        <span>Delete Invoice</span>
+                      )}
+                    </button>
+                  </div>
+                </div>
+              </div>
+            );
+          })(),
           document.body
         )}
 

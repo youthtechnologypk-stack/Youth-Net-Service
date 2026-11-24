@@ -13,6 +13,7 @@ import { VsolOltStudio } from './components/VsolOltStudio';
 import { FiberGisMapView } from './components/FiberGisMapView';
 import { BillingStudio } from './components/BillingStudio';
 import { DealersManagementView } from './components/DealersManagementView';
+import { WhatsAppGatewayView } from './components/WhatsAppGatewayView';
 import { ProfitLossLedgerView } from './components/ProfitLossLedgerView';
 import { InventoryHardwareView } from './components/InventoryHardwareView';
 import { ComplaintsStudio } from './components/ComplaintsStudio';
@@ -1061,6 +1062,14 @@ function ISPAppContent() {
                 {/* Multi-Tier Dealers & Sub-Dealers Reseller Console */}
                 {activeTab === 'dealers' && (
                   <DealersManagementView
+                    currentUser={currentUser}
+                    currentRole={currentRole}
+                  />
+                )}
+
+                {/* Multi-Tenant Baileys WhatsApp Gateway & Branding */}
+                {activeTab === 'whatsapp_gateway' && (
+                  <WhatsAppGatewayView
                     currentUser={currentUser}
                     currentRole={currentRole}
                   />

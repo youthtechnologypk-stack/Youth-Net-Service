@@ -14,6 +14,7 @@ import {
   resolveExactSubscriberProfile,
   upsertOrigPkgComment,
 } from '../lib/mikrotikProfileSync';
+import { baileysManager } from './baileysManager';
 
 export {
   DEFAULT_ISP_BILLING_SETTINGS,
@@ -661,19 +662,47 @@ export async function runExpirySweep(
         });
 
         let sendStatus: 'QUEUED' | 'SENT' | 'FAILED' = 'QUEUED';
-        if (!options.skipExternalWhatsapp && sub.phone && waConfig) {
+        if (!options.skipExternalWhatsapp && sub.phone) {
+          // 1. Try Multi-Tenant Baileys Gateway first (hierarchical Sub-Dealer -> Dealer -> Master Admin routing)
           try {
-            const normalizedPhone = normalizeToPlus92(sub.phone);
-            const provider = waConfig.phone_number_id ? 'meta' : 'ultramsg';
-            const sent = await dispatchOutboundWhatsAppReply(
-              provider,
-              normalizedPhone,
-              slipText,
-              waConfig
-            );
-            if (sent) sendStatus = 'SENT';
+            const daysRemaining = Math.max(0, Math.ceil((expiryMs - nowMs) / 86_400_000));
+            const baileysRes = await baileysManager.sendAutomatedMessage({
+              supabase,
+              subscriber: sub as any,
+              subscriberUsername: uname,
+              eventType: 'PRE_EXPIRY_3D',
+              messageVars: {
+                subscriberName: String(sub.full_name || sub.username),
+                username: uname,
+                phone: sub.phone,
+                packageName: packageLabel,
+                amountDue,
+                expiryDate: expiryDateLabel,
+                daysRemaining,
+              },
+            });
+            if (baileysRes.status === 'SENT') {
+              sendStatus = 'SENT';
+            }
           } catch {
-            sendStatus = 'FAILED';
+            // Fall through to legacy webhook if configured
+          }
+
+          // 2. Legacy webhook fallback if Baileys session is not connected yet
+          if (sendStatus !== 'SENT' && waConfig) {
+            try {
+              const normalizedPhone = normalizeToPlus92(sub.phone);
+              const provider = waConfig.phone_number_id ? 'meta' : 'ultramsg';
+              const sent = await dispatchOutboundWhatsAppReply(
+                provider,
+                normalizedPhone,
+                slipText,
+                waConfig
+              );
+              if (sent) sendStatus = 'SENT';
+            } catch {
+              sendStatus = 'FAILED';
+            }
           }
         }
 
@@ -924,6 +953,25 @@ export async function runExpirySweep(
           },
           schemaWarningsSet
         );
+
+        // Fire zero-click automated suspension WhatsApp alert via hierarchical Baileys sender
+        if (!options.skipExternalWhatsapp && sub.phone) {
+          baileysManager
+            .sendAutomatedMessage({
+              supabase,
+              subscriber: sub as any,
+              subscriberUsername: uname,
+              eventType: 'AUTO_SUSPENSION',
+              messageVars: {
+                subscriberName: String(sub.full_name || sub.username),
+                username: uname,
+                phone: sub.phone,
+                packageName: backupProfile,
+                amountDue,
+              },
+            })
+            .catch(() => {});
+        }
 
         if (isDisableMode) disabledSecrets++;
         else suspendedTo16Pool++;

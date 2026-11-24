@@ -16,6 +16,7 @@ import {
 } from './resellerEngine';
 import { getStoredUser } from './auth';
 import { hasExplicitAdminGracePermission } from './staffPermissions';
+import { triggerAutoWhatsAppNotification } from './whatsappRouting';
 
 export const PARENT_FLEET_ROUTER = 'SADDAR FLEET ROUTER';
 
@@ -593,6 +594,10 @@ export async function restoreSubscriberOnInvoicePaid(
     preloadedActive?: Array<Record<string, any>>;
     performedBy?: string;
     skipWalletDeduction?: boolean;
+    amountPaid?: number;
+    invoiceNo?: string;
+    paymentMethod?: string;
+    skipAutoWhatsapp?: boolean;
   }
 ): Promise<{
   success: boolean;
@@ -819,6 +824,27 @@ export async function restoreSubscriberOnInvoicePaid(
       ]);
     } catch {}
 
+    // 6. Zero-click background WhatsApp Payment Receipt & Service Restored notification
+    if (!options?.skipAutoWhatsapp && typeof window !== 'undefined') {
+      const subData = userRes?.data as any;
+      void triggerAutoWhatsAppNotification({
+        eventType: 'PAYMENT_RESTORED',
+        subscriberUsername: cleanUser,
+        subscriber: subData || { username: cleanUser },
+        messageVars: {
+          subscriberName: subData?.full_name || cleanUser,
+          username: cleanUser,
+          phone: subData?.phone || undefined,
+          packageName: restoredProfile,
+          amountPaid: options?.amountPaid ?? Number(subData?.monthly_fee || 0),
+          remainingBalance: 0,
+          invoiceNo: options?.invoiceNo,
+          paymentMethod: options?.paymentMethod || 'Verified Payment',
+          expiryDate: nextAnniversaryYmd,
+        },
+      });
+    }
+
     return {
       success: true,
       restoredProfile,
@@ -887,7 +913,7 @@ export async function fetchLiveMikrotikProfilesAndSecrets(
 export async function safeUpdateInvoiceInSupabase(
   matcher: { id?: string; invoiceNo?: string },
   payload: Record<string, any>
-): Promise<{ error: any }> {
+): Promise<{ error: any; strippedColumns?: string[] }> {
   const applyMatcher = (q: any) => {
     if (matcher.id && /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(matcher.id)) {
       return q.eq('id', matcher.id);
@@ -901,19 +927,51 @@ export async function safeUpdateInvoiceInSupabase(
     return q;
   };
 
-  const { error } = await applyMatcher(supabase.from('invoices').update(payload as any));
-  if (!error) return { error: null };
+  const working: Record<string, any> = { ...payload };
+  const optionalCols = new Set([
+    'notes',
+    'package_profile',
+    'package_name',
+    'shifted_to_next_month',
+    'sub_dealer_id',
+    'dealer_id',
+    'created_by_id',
+  ]);
+  const strippedColumns: string[] = [];
 
-  if (isMissingTableOrColumnError(error)) {
-    const stripped = { ...payload };
-    delete stripped.package_profile;
-    delete stripped.package_name;
-    delete stripped.shifted_to_next_month;
-    const retry = await applyMatcher(supabase.from('invoices').update(stripped as any));
-    return { error: retry.error };
+  for (let attempt = 0; attempt < 8; attempt++) {
+    const { error } = await applyMatcher(supabase.from('invoices').update(working as any));
+    if (!error) return { error: null, strippedColumns };
+
+    if (!isMissingTableOrColumnError(error)) {
+      return { error, strippedColumns };
+    }
+
+    const msg = String(error.message || '');
+    const colMatch =
+      msg.match(/Could not find the ['"]([a-zA-Z0-9_]+)['"] column/i) ||
+      msg.match(/column\s+["']?([a-zA-Z0-9_]+)["']?\s+(?:of relation|does not exist)/i);
+
+    if (colMatch?.[1] && colMatch[1] in working && optionalCols.has(colMatch[1])) {
+      strippedColumns.push(colMatch[1]);
+      delete working[colMatch[1]];
+      continue;
+    }
+
+    let removedAny = false;
+    for (const col of optionalCols) {
+      if (col in working) {
+        strippedColumns.push(col);
+        delete working[col];
+        removedAny = true;
+      }
+    }
+    if (!removedAny) {
+      return { error, strippedColumns };
+    }
   }
 
-  return { error };
+  return { error: null, strippedColumns };
 }
 
 /**

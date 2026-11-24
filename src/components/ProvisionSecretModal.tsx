@@ -27,6 +27,7 @@ import {
   WalletGatePreviewResult,
 } from '../lib/resellerEngine';
 import { ResellerWalletGatePreview } from './ResellerWalletGatePreview';
+import { triggerAutoWhatsAppNotification } from '../lib/whatsappRouting';
 
 interface ProvisionSecretModalProps {
   isOpen: boolean;
@@ -358,6 +359,28 @@ export const ProvisionSecretModal: React.FC<ProvisionSecretModalProps> = ({ isOp
         console.warn('Could not save agent commission to Supabase:', commErr);
       }
     }
+
+    // Fire zero-click automated WhatsApp Welcome Credentials via hierarchical Baileys sender
+    void triggerAutoWhatsAppNotification({
+      eventType: 'PROVISION_WELCOME',
+      subscriberUsername: cleanSubUsername,
+      subscriber: {
+        username: cleanSubUsername,
+        full_name: name.trim() || cleanSubUsername,
+        phone,
+        dealer_id: ownershipStamp.dealer_id,
+        sub_dealer_id: ownershipStamp.sub_dealer_id,
+      },
+      messageVars: {
+        subscriberName: name.trim() || cleanSubUsername,
+        username: cleanSubUsername,
+        password: pppoePassword,
+        phone,
+        packageName: packageId,
+        monthlyFee: resolvedResellerTariff?.retailPrice || selectedProfilePrice,
+        expiryDate: targetExpiryDate.toISOString().slice(0, 10),
+      },
+    });
 
     setIsSubmitting(false);
     onClose();

@@ -3,6 +3,7 @@ import type { FieldAgent } from '../types/isp';
 import type { SupabaseInvoice, SupabasePortalUser } from '../services/supabaseClient';
 import { isMissingTableOrColumnError, parseExpiryDateWithCutoffMs } from './expiryUtils';
 import { resolvePackageRate } from '../components/CreateInvoiceModal';
+import { triggerAutoWhatsAppNotification } from './whatsappRouting';
 
 export type NormalizedTicketPriority = 'LOW' | 'MEDIUM' | 'HIGH' | 'CRITICAL';
 
@@ -678,6 +679,24 @@ export async function runAnniversaryInvoicingCron(
   }
 
   const totalBilled = insertedRows.reduce((sum, i) => sum + (Number(i.amount) || 0), 0);
+
+  // Fire zero-click automated WhatsApp monthly invoice alerts in the background (browser context)
+  if (typeof window !== 'undefined' && insertedRows.length > 0) {
+    for (const invRow of insertedRows) {
+      void triggerAutoWhatsAppNotification({
+        eventType: 'INVOICE_GENERATED',
+        subscriberUsername: invRow.subscriber_username,
+        messageVars: {
+          username: invRow.subscriber_username,
+          invoiceNo: invRow.invoice_no,
+          amountDue: Number(invRow.amount) || 0,
+          totalAmount: Number(invRow.amount) || 0,
+          dueDate: invRow.due_date,
+          packageName: invRow.package_profile || invRow.package_name || 'Fiber Broadband',
+        },
+      });
+    }
+  }
 
   return {
     cycleMonth,
