@@ -36,7 +36,9 @@ const BAILEYS_AUTH_ROOT = path.resolve(process.cwd(), 'baileys_auth');
 const SESSION_ID_PATTERN = /^[a-zA-Z0-9_-]{1,80}$/;
 
 const SUPABASE_URL =
-  process.env.SUPABASE_URL || process.env.VITE_SUPABASE_URL || '';
+  process.env.SUPABASE_URL ||
+  process.env.VITE_SUPABASE_URL ||
+  'https://qstqegwpibztpirncpga.supabase.co';
 const SUPABASE_KEY =
   process.env.SUPABASE_SERVICE_ROLE_KEY ||
   process.env.SUPABASE_KEY ||
@@ -52,7 +54,7 @@ const supabase =
 
 if (!supabase) {
   console.warn(
-    '[Baileys-Gateway] WARNING: SUPABASE_URL / SUPABASE_SERVICE_ROLE_KEY not set in .env. Database persistence & multi-tenant lookups require Supabase credentials.'
+    `[Baileys-Gateway] SUPABASE_URL is set to ${SUPABASE_URL}, but SUPABASE_SERVICE_ROLE_KEY (or SUPABASE_KEY) is not set in .env. Set SUPABASE_SERVICE_ROLE_KEY in .env to enable multi-tenant database lookups & WhatsApp logs.`
   );
 }
 

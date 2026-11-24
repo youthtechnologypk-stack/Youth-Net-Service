@@ -458,6 +458,14 @@ export function normalizeWhatsAppGatewayUrl(raw: string): { valid: boolean; norm
     if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') {
       return { valid: false, normalized: '', error: 'Gateway URL must start with http:// or https://' };
     }
+    if (parsed.hostname.toLowerCase().endsWith('.supabase.co')) {
+      return {
+        valid: false,
+        normalized: '',
+        error:
+          'That is your Supabase Database URL (*.supabase.co), not a Baileys WhatsApp Gateway server. Enter your Node.js baileys-server.js URL (e.g. http://localhost:3001 or your Railway/Render/VPS HTTPS URL), or leave blank on the integrated preview server.',
+      };
+    }
     const cleanOriginPath = `${parsed.origin}${parsed.pathname}`.replace(/\/+$/, '');
     return { valid: true, normalized: cleanOriginPath };
   } catch {
