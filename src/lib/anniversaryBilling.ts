@@ -438,6 +438,58 @@ export function computeNextBillingDateFromInstall(
   return addCalendarMonthsYmd(baseYmd, 1, anchor);
 }
 
+export const MAX_AUTO_DUE_DATE_FUTURE_DAYS = 35;
+
+/**
+ * Adds whole calendar days to a YYYY-MM-DD date string (UTC-safe, no DST drift).
+ */
+export function addDaysToYmd(baseYmd: string, days: number): string {
+  const clean = extractYmdString(baseYmd) || new Date().toISOString().slice(0, 10);
+  const [y, m, d] = clean.split('-').map((n) => parseInt(n, 10));
+  const utcMs = Date.UTC(y, m - 1, d) + Math.round(days) * 86_400_000;
+  return new Date(utcMs).toISOString().slice(0, 10);
+}
+
+/**
+ * Signed whole-day difference: targetYmd - refTodayYmd.
+ */
+export function diffDaysBetweenYmd(targetYmd: string, refTodayYmd: string): number {
+  const t = extractYmdString(targetYmd);
+  const r = extractYmdString(refTodayYmd);
+  if (!t || !r) return 0;
+  const [ty, tm, td] = t.split('-').map((n) => parseInt(n, 10));
+  const [ry, rm, rd] = r.split('-').map((n) => parseInt(n, 10));
+  return Math.round((Date.UTC(ty, tm - 1, td) - Date.UTC(ry, rm - 1, rd)) / 86_400_000);
+}
+
+/**
+ * Returns the maximum allowed YYYY-MM-DD date for automatic shifts/CRON (today + 35 days).
+ */
+export function getMaxAllowedAutoDueDateYmd(
+  refDate: Date | string = new Date(),
+  maxFutureDays: number = MAX_AUTO_DUE_DATE_FUTURE_DAYS
+): string {
+  const todayYmd =
+    typeof refDate === 'string'
+      ? extractYmdString(refDate) || new Date().toISOString().slice(0, 10)
+      : extractYmdString(refDate.toISOString()) || refDate.toISOString().slice(0, 10);
+  return addDaysToYmd(todayYmd, maxFutureDays);
+}
+
+/**
+ * Returns true when targetYmd is strictly more than maxFutureDays (default 35) past today.
+ */
+export function exceedsMaxAutoFutureDays(
+  targetYmd: string,
+  refDate: Date | string = new Date(),
+  maxFutureDays: number = MAX_AUTO_DUE_DATE_FUTURE_DAYS
+): boolean {
+  const cleanTarget = extractYmdString(targetYmd);
+  if (!cleanTarget) return false;
+  const maxYmd = getMaxAllowedAutoDueDateYmd(refDate, maxFutureDays);
+  return cleanTarget > maxYmd;
+}
+
 export function getCycleYearMonth(date: Date = new Date()): string {
   const yyyy = date.getFullYear();
   const mm = String(date.getMonth() + 1).padStart(2, '0');
@@ -567,12 +619,23 @@ export async function runAnniversaryInvoicingCron(
     arr.push(inv);
     invoicesByUser.set(uname, arr);
 
+    const invNoUpper = String(inv.invoice_no || '').trim().toUpperCase();
+    if (invNoUpper.startsWith('INV-MAT-')) continue;
+
     if (doesInvoiceCoverMonth(inv, cycleMonth)) {
       invoicedMonthKeys.add(`${uname}::${cycleMonth}`);
     }
     const dueYm = String(inv.due_date || '').slice(0, 7);
-    if (dueYm && !String(inv.invoice_no || '').toUpperCase().startsWith('INV-MAT-')) {
+    if (/^\d{4}-\d{2}$/.test(dueYm)) {
       invoicedMonthKeys.add(`${uname}::${dueYm}`);
+    }
+    const createdYm = String(inv.created_at || '').slice(0, 7);
+    if (/^\d{4}-\d{2}$/.test(createdYm)) {
+      invoicedMonthKeys.add(`${uname}::${createdYm}`);
+    }
+    const invNoYmMatch = invNoUpper.match(/^INV-(\d{4})(\d{2})-/);
+    if (invNoYmMatch) {
+      invoicedMonthKeys.add(`${uname}::${invNoYmMatch[1]}-${invNoYmMatch[2]}`);
     }
   }
 
@@ -597,19 +660,35 @@ export async function runAnniversaryInvoicingCron(
 
     if (alreadyInvoicedForPeriod) {
       skippedExisting++;
-      // If an invoice already exists for nextBillingDate's YYYY-MM but sub.next_billing_date wasn't advanced yet, sync it forward
-      if ((sub as any).next_billing_date && String((sub as any).next_billing_date).slice(0, 10) <= todayYmd && sub.id) {
-        subscriberAdvances.push({
-          id: sub.id,
-          anchorDay,
-          nextBillingDate: addCalendarMonthsYmd(nextBillingDate, 1, anchorDay),
-        });
+      // Only sync sub.next_billing_date forward when it is still <= today AND
+      // advancing +1 month stays strictly within 35 days of today AND doesn't double-jump an already-invoiced future month.
+      const storedNextYmd = extractYmdString((sub as any).next_billing_date);
+      if (storedNextYmd && storedNextYmd <= todayYmd && sub.id) {
+        const candidateAdvance = addCalendarMonthsYmd(nextBillingDate, 1, anchorDay);
+        const candidateYm = candidateAdvance.slice(0, 7);
+        const candidateAlreadyInvoiced =
+          invoicedMonthKeys.has(`${uname}::${candidateYm}`) ||
+          subInvoices.some((inv) => doesInvoiceCoverMonth(inv, candidateYm));
+
+        if (
+          !exceedsMaxAutoFutureDays(candidateAdvance, now, MAX_AUTO_DUE_DATE_FUTURE_DAYS) &&
+          !candidateAlreadyInvoiced
+        ) {
+          subscriberAdvances.push({
+            id: sub.id,
+            anchorDay,
+            nextBillingDate: candidateAdvance,
+          });
+        }
       }
       continue;
     }
 
-    // Generate invoice only when today >= next_billing_date
-    if (todayYmd < nextBillingDate) {
+    // Generate invoice only when today >= next_billing_date and never more than 35 days past today
+    if (
+      todayYmd < nextBillingDate ||
+      exceedsMaxAutoFutureDays(nextBillingDate, now, MAX_AUTO_DUE_DATE_FUTURE_DAYS)
+    ) {
       skippedUpcomingAnchor++;
       continue;
     }
@@ -640,11 +719,22 @@ export async function runAnniversaryInvoicingCron(
     });
 
     if (sub.id) {
-      subscriberAdvances.push({
-        id: sub.id,
-        anchorDay,
-        nextBillingDate: addCalendarMonthsYmd(nextBillingDate, 1, anchorDay),
-      });
+      const candidateAdvance = addCalendarMonthsYmd(nextBillingDate, 1, anchorDay);
+      const candidateYm = candidateAdvance.slice(0, 7);
+      const candidateAlreadyInvoiced =
+        invoicedMonthKeys.has(`${uname}::${candidateYm}`) ||
+        subInvoices.some((inv) => doesInvoiceCoverMonth(inv, candidateYm));
+
+      if (
+        !exceedsMaxAutoFutureDays(candidateAdvance, now, MAX_AUTO_DUE_DATE_FUTURE_DAYS) &&
+        !candidateAlreadyInvoiced
+      ) {
+        subscriberAdvances.push({
+          id: sub.id,
+          anchorDay,
+          nextBillingDate: candidateAdvance,
+        });
+      }
     }
   }
 

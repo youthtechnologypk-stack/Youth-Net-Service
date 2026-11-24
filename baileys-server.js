@@ -1197,11 +1197,27 @@ async function restorePersistedSessions() {
   }
 }
 
-app.listen(PORT, '0.0.0.0', () => {
-  console.log(`[Baileys-Gateway] Multi-Session WhatsApp Gateway listening on http://0.0.0.0:${PORT}`);
-  console.log(`[Baileys-Gateway] Health check: http://localhost:${PORT}/api/whatsapp/health`);
-  restorePersistedSessions().catch(() => {});
-  setInterval(() => {
-    runPreExpirySweep().catch(() => {});
-  }, 60 * 60 * 1000);
-});
+function startGatewayServer(targetPort, allowFallbackTo3001 = true) {
+  const server = app.listen(targetPort, '0.0.0.0', () => {
+    console.log(`[Baileys-Gateway] Multi-Session WhatsApp Gateway listening on http://0.0.0.0:${targetPort}`);
+    console.log(`[Baileys-Gateway] Health check: http://localhost:${targetPort}/api/whatsapp/health`);
+    restorePersistedSessions().catch(() => {});
+    setInterval(() => {
+      runPreExpirySweep().catch(() => {});
+    }, 60 * 60 * 1000);
+  });
+
+  server.on('error', (err) => {
+    if (err && err.code === 'EADDRINUSE' && allowFallbackTo3001 && targetPort !== 3001) {
+      console.warn(
+        `[Baileys-Gateway] Port ${targetPort} is already in use; falling back to default gateway port 3001...`
+      );
+      startGatewayServer(3001, false);
+      return;
+    }
+    console.error('[Baileys-Gateway] Fatal listen error:', err?.message || err);
+    process.exit(1);
+  });
+}
+
+startGatewayServer(PORT, !process.env.WA_GATEWAY_PORT);

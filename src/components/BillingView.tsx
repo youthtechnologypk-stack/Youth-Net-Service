@@ -62,6 +62,7 @@ import {
   safeUpdateInvoiceInSupabase,
   syncSubscriberPackageAndRestoreIfPaid,
   shiftBillToNextMonth,
+  computeGuardedShiftNextMonthDate,
 } from '../lib/billingAndNetwork';
 import {
   buildLiveMikrotikPlanOptions,
@@ -2067,11 +2068,11 @@ export const BillingView: React.FC<BillingViewProps> = ({
       {/* Desktop Invoices Table (>= 768px) */}
       <div className="hidden md:block rounded-xl border border-slate-800 bg-[#111A2E] overflow-hidden shadow-lg">
         <div className="overflow-x-auto">
-          <table className="hidden md:table w-full text-left text-sm text-slate-300">
-            <thead className="bg-slate-900/80 text-xs uppercase tracking-wider text-slate-400 border-b border-slate-800">
+          <table className="hidden md:table w-full text-left text-xs text-slate-300 border-collapse">
+            <thead className="bg-slate-900/90 text-[11px] uppercase tracking-wider text-slate-400 border-b border-slate-800">
               <tr>
                 {canBulkReceive && (
-                  <th className="py-3 px-3 w-10 text-center">
+                  <th className="py-2 px-2 w-8 text-center">
                     <input
                       type="checkbox"
                       checked={allUnpaidSelected}
@@ -2079,25 +2080,27 @@ export const BillingView: React.FC<BillingViewProps> = ({
                       onChange={toggleSelectAllInvoices}
                       title="Select All Unpaid Invoices"
                       aria-label="Select All Unpaid Invoices"
-                      className="w-4 h-4 rounded border-slate-600 bg-slate-900 text-emerald-500 focus:ring-emerald-500 cursor-pointer disabled:opacity-30"
+                      className="w-3.5 h-3.5 rounded border-slate-600 bg-slate-900 text-emerald-500 focus:ring-emerald-500 cursor-pointer disabled:opacity-30"
                     />
                   </th>
                 )}
-                <th className="py-3 px-4">Invoice #</th>
-                <th className="py-3 px-4">Subscriber</th>
-                <th className="py-3 px-4">Assigned Agent</th>
-                <th className="py-3 px-4">Due Date</th>
-                <th className="py-3 px-4 text-right">Amount</th>
-                <th className="py-3 px-4 text-center">Status</th>
-                <th className="py-3 px-4 text-right">Actions</th>
+                <th className="py-2 px-2.5 whitespace-nowrap">Invoice #</th>
+                <th className="py-2 px-2.5">Subscriber</th>
+                <th className="py-2 px-2.5 whitespace-nowrap">Agent</th>
+                <th className="py-2 px-2.5 whitespace-nowrap">Due Date</th>
+                <th className="py-2 px-2.5 text-right whitespace-nowrap">Amount</th>
+                <th className="py-2 px-2 text-center whitespace-nowrap">Status</th>
+                <th className="py-2 px-2.5 text-right whitespace-nowrap sticky right-0 z-10 bg-slate-900 border-l border-slate-800/80 shadow-[-6px_0_12px_-6px_rgba(0,0,0,0.65)]">
+                  Actions
+                </th>
               </tr>
             </thead>
             <tbody className="divide-y divide-slate-800/60 font-sans">
               {filteredInvoices.length === 0 ? (
                 <tr>
-                  <td colSpan={canBulkReceive ? 8 : 7} className="py-12 text-center text-slate-500">
-                    <FileText className="w-10 h-10 text-slate-600 mx-auto mb-2 opacity-50" />
-                    <p className="text-base font-semibold text-slate-400">No invoices found</p>
+                  <td colSpan={canBulkReceive ? 8 : 7} className="py-10 text-center text-slate-500">
+                    <FileText className="w-9 h-9 text-slate-600 mx-auto mb-2 opacity-50" />
+                    <p className="text-sm font-semibold text-slate-400">No invoices found</p>
                     <p className="text-xs text-slate-500 mt-1">
                       Click &quot;+ Generate Invoice&quot; to create an invoice in Supabase PostgreSQL.
                     </p>
@@ -2117,105 +2120,132 @@ export const BillingView: React.FC<BillingViewProps> = ({
                   const hasGrace = !isPaidRow && hasSubscriberActiveGrace(clientMatch);
                   const graceIso = hasGrace ? getSubscriberGraceUntilIso(clientMatch) : null;
                   const isShifted = !isPaidRow && isSubscriberShiftedNextMonth(clientMatch, inv);
+                  const rowAnchorDay = clientMatch
+                    ? computeBillingAnchorDay(clientMatch)
+                    : inv.cycle_day || new Date().getDate();
+                  const shiftGuard = computeGuardedShiftNextMonthDate(inv.due_date, rowAnchorDay);
 
                   return (
                     <tr
                       key={inv.id}
-                      className={`transition ${
-                        isChecked ? 'bg-emerald-950/20 hover:bg-emerald-950/30' : 'hover:bg-slate-800/30'
+                      className={`group transition ${
+                        isChecked ? 'bg-emerald-950/25 hover:bg-emerald-950/35' : 'hover:bg-slate-800/35'
                       }`}
                     >
                       {canBulkReceive && (
-                        <td className="py-3 px-3 text-center">
+                        <td className="py-2 px-2 text-center">
                           {isSelectable ? (
                             <input
                               type="checkbox"
                               checked={isChecked}
                               onChange={() => toggleSelectOneInvoice(inv.id)}
                               aria-label={`Select invoice ${inv.invoice_no}`}
-                              className="w-4 h-4 rounded border-slate-600 bg-slate-900 text-emerald-500 focus:ring-emerald-500 cursor-pointer"
+                              className="w-3.5 h-3.5 rounded border-slate-600 bg-slate-900 text-emerald-500 focus:ring-emerald-500 cursor-pointer"
                             />
                           ) : (
                             <Check className="w-3.5 h-3.5 text-emerald-600/60 mx-auto" />
                           )}
                         </td>
                       )}
-                      <td className="py-3 px-4 font-mono font-semibold text-cyan-400">{inv.invoice_no}</td>
-                      <td className="py-3 px-4">
-                        <div className="font-semibold text-white">@{inv.subscriber_username}</div>
-                        <div className="text-xs text-slate-500">
-                          Monthly (Day {inv.cycle_day || 'Auto'})
+                      <td className="py-2 px-2.5 font-mono font-semibold text-cyan-400 text-[11px] whitespace-nowrap">
+                        {inv.invoice_no}
+                      </td>
+                      <td className="py-2 px-2.5 max-w-[195px]">
+                        <div className="font-semibold text-white truncate" title={`@${inv.subscriber_username}`}>
+                          @{inv.subscriber_username}
+                        </div>
+                        <div className="text-[10px] text-slate-400 truncate">
+                          Day {inv.cycle_day || 'Auto'}
                           {(inv.package_profile || inv.package_name) && (
-                            <span className="ml-1.5 font-mono text-cyan-400">
+                            <span className="ml-1 font-mono text-cyan-400">
                               • {inv.package_profile || inv.package_name}
                             </span>
                           )}
                         </div>
                         {(hasGrace || isShifted) && (
-                          <div className="flex flex-wrap items-center gap-1.5 mt-1">
+                          <div className="flex flex-wrap items-center gap-1 mt-0.5">
                             {hasGrace && (
-                              <span className="px-1.5 py-0.5 rounded bg-cyan-950 border border-cyan-700 text-cyan-300 font-mono text-[10px] font-bold">
-                                ⏳ Grace until {graceIso ? formatShortGraceDate(graceIso) : 'Active'}
+                              <span className="px-1 py-0.5 rounded bg-cyan-950 border border-cyan-700/80 text-cyan-300 font-mono text-[9px] font-bold">
+                                Grace {graceIso ? formatShortGraceDate(graceIso) : 'Active'}
                               </span>
                             )}
                             {isShifted && (
-                              <span className="px-1.5 py-0.5 rounded bg-indigo-950 border border-indigo-700 text-indigo-300 font-mono text-[10px] font-bold">
-                                ⏭ Shifted Next Month
+                              <span className="px-1 py-0.5 rounded bg-indigo-950 border border-indigo-700/80 text-indigo-300 font-mono text-[9px] font-bold">
+                                Shifted +1M
                               </span>
                             )}
                           </div>
                         )}
                       </td>
-                      <td className="py-3 px-4">
+                      <td className="py-2 px-2.5 max-w-[125px]">
                         {inv.assigned_agent_name ? (
-                          <span className="inline-flex items-center gap-1.5 px-2 py-0.5 rounded text-xs bg-purple-950 text-purple-300 border border-purple-800">
-                            <User className="w-3 h-3" />
-                            <span>{inv.assigned_agent_name}</span>
+                          <span
+                            className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded text-[11px] bg-purple-950 text-purple-300 border border-purple-800 max-w-[115px]"
+                            title={inv.assigned_agent_name}
+                          >
+                            <User className="w-3 h-3 shrink-0" />
+                            <span className="truncate">{inv.assigned_agent_name}</span>
                           </span>
                         ) : (
-                          <span className="text-slate-500 text-xs italic">Unassigned</span>
+                          <span className="text-slate-500 text-[11px] italic">Unassigned</span>
                         )}
                       </td>
-                      <td className="py-3 px-4 text-slate-300 font-mono text-xs">{inv.due_date}</td>
-                      <td className="py-3 px-4 text-right">
-                        <div className="font-mono font-bold text-white text-base">
+                      <td className="py-2 px-2.5 text-slate-300 font-mono text-[11px] whitespace-nowrap">
+                        {inv.due_date}
+                      </td>
+                      <td className="py-2 px-2.5 text-right whitespace-nowrap">
+                        <div className="font-mono font-bold text-white text-xs">
                           {formatCurrency(totalAmount)}
                         </div>
-                        <div className="text-[11px] text-slate-400 font-mono mt-0.5 whitespace-nowrap">
-                          (Paid: {formatCurrency(alreadyPaid)} | Balance: {formatCurrency(balanceDue)})
+                        <div className="text-[10px] text-slate-400 font-mono mt-0.5">
+                          {isPaidRow ? (
+                            <span className="text-emerald-400/90">Settled</span>
+                          ) : alreadyPaid > 0 ? (
+                            <>
+                              Paid {formatCurrency(alreadyPaid, 0)} · Bal {formatCurrency(balanceDue, 0)}
+                            </>
+                          ) : (
+                            <>Bal: {formatCurrency(balanceDue, 0)}</>
+                          )}
                         </div>
                       </td>
-                      <td className="py-3 px-4 text-center">
+                      <td className="py-2 px-2 text-center whitespace-nowrap">
                         {displayStatus === 'PAID' ? (
-                          <span className="inline-flex items-center gap-1 px-2.5 py-1 rounded-md text-xs font-bold bg-emerald-500/20 text-emerald-400 border border-emerald-500/30">
-                            <CheckCircle2 className="w-3.5 h-3.5 text-emerald-400" />
+                          <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded text-[10px] font-bold bg-emerald-500/20 text-emerald-400 border border-emerald-500/30">
+                            <CheckCircle2 className="w-3 h-3 text-emerald-400" />
                             <span>PAID</span>
                           </span>
                         ) : displayStatus === 'PARTIAL' ? (
-                          <span className="inline-flex items-center gap-1 px-2.5 py-1 rounded-md text-xs font-bold bg-amber-500/20 text-amber-400 border border-amber-500/30">
-                            <Clock className="w-3.5 h-3.5 text-amber-400" />
+                          <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded text-[10px] font-bold bg-amber-500/20 text-amber-400 border border-amber-500/30">
+                            <Clock className="w-3 h-3 text-amber-400" />
                             <span>PARTIAL</span>
                           </span>
                         ) : (
-                          <span className="inline-flex items-center gap-1 px-2.5 py-1 rounded-md text-xs font-bold bg-rose-500/20 text-rose-400 border border-rose-500/30">
-                            <Clock className="w-3.5 h-3.5 text-rose-400" />
+                          <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded text-[10px] font-bold bg-rose-500/20 text-rose-400 border border-rose-500/30">
+                            <Clock className="w-3 h-3 text-rose-400" />
                             <span>DUE</span>
                           </span>
                         )}
                       </td>
-                      <td className="py-3 px-4 text-right whitespace-nowrap">
-                        <div className="flex items-center justify-end gap-1.5">
+                      <td
+                        className={`py-2 px-2.5 text-right whitespace-nowrap sticky right-0 z-10 border-l border-slate-800/80 shadow-[-6px_0_12px_-6px_rgba(0,0,0,0.65)] ${
+                          isChecked
+                            ? 'bg-[#0D2322] group-hover:bg-[#112C2A]'
+                            : 'bg-[#111A2E] group-hover:bg-[#18243E]'
+                        }`}
+                      >
+                        <div className="flex items-center justify-end gap-1">
                           {balanceDue > 0 && displayStatus !== 'PAID' ? (
-                            <div className="flex items-center gap-1.5">
+                            <>
                               {perms.collect_fee && (
                                 <button
                                   type="button"
                                   onClick={() => handleOpenMarkPaid(inv)}
-                                  className="px-2.5 py-1.5 bg-emerald-600 hover:bg-emerald-500 text-white font-bold rounded-lg text-xs flex items-center gap-1 transition active:scale-95 shadow cursor-pointer"
+                                  className="px-2 py-1 bg-emerald-600 hover:bg-emerald-500 text-white font-bold rounded-md text-[11px] flex items-center gap-1 transition active:scale-95 shadow cursor-pointer"
                                   title="Record Payment & Credit Field Agent"
                                 >
-                                  <DollarSign className="w-3.5 h-3.5" />
-                                  <span>{isPartial ? 'Add Payment' : 'Mark Paid'}</span>
+                                  <DollarSign className="w-3 h-3 shrink-0" />
+                                  <span>{isPartial ? 'Add Pay' : 'Mark Paid'}</span>
                                 </button>
                               )}
                               {canUseGraceAndShift && (
@@ -2223,48 +2253,52 @@ export const BillingView: React.FC<BillingViewProps> = ({
                                   type="button"
                                   disabled={shiftingInvoiceId === inv.id}
                                   onClick={() => handleShiftInvoiceNextMonth(inv)}
-                                  className="px-2 py-1.5 bg-indigo-950/70 hover:bg-indigo-900/80 text-indigo-300 border border-indigo-700/70 rounded-lg text-xs font-semibold flex items-center gap-1 transition cursor-pointer disabled:opacity-50"
-                                  title="Shift bill to next calendar month & exempt from expiry pool"
+                                  className={`px-2 py-1 rounded-md text-[11px] font-semibold flex items-center gap-1 transition cursor-pointer disabled:opacity-50 border ${
+                                    shiftGuard.allowed
+                                      ? 'bg-indigo-950/80 hover:bg-indigo-900/90 text-indigo-300 border-indigo-700/70'
+                                      : 'bg-slate-900/80 hover:bg-slate-800 text-slate-400 border-slate-700/80'
+                                  }`}
+                                  title={
+                                    shiftGuard.allowed
+                                      ? `Shift due date to ${shiftGuard.candidateDate} & exempt from expiry pool`
+                                      : `Already shifted (${shiftGuard.currentDate}) — shifting to ${shiftGuard.candidateDate} exceeds 35-day cap (max ${shiftGuard.maxAllowedDate}). Use Edit Invoice to override.`
+                                  }
                                 >
-                                  <FastForward className="w-3 h-3" />
-                                  <span>{shiftingInvoiceId === inv.id ? 'Shifting...' : 'Shift Next Mo'}</span>
+                                  <FastForward className="w-3 h-3 shrink-0" />
+                                  <span>{shiftingInvoiceId === inv.id ? '...' : 'Shift +1M'}</span>
                                 </button>
                               )}
                               <button
                                 type="button"
                                 onClick={() => handleSendInvoiceWhatsApp(inv)}
-                                className="px-2 py-1.5 bg-emerald-950/60 hover:bg-emerald-900/70 text-emerald-300 border border-emerald-700/60 rounded-lg text-xs flex items-center gap-1 transition cursor-pointer"
-                                title="Send WhatsApp Payment Reminder with Active Bank/Wallet Accounts"
+                                className="px-1.5 py-1 bg-emerald-950/60 hover:bg-emerald-900/70 text-emerald-300 border border-emerald-700/60 rounded-md text-[11px] font-semibold flex items-center gap-1 transition cursor-pointer"
+                                title="Send WhatsApp Payment Reminder"
                               >
-                                <Send className="w-3 h-3" />
-                                <span>Remind</span>
+                                <Send className="w-3 h-3 shrink-0" />
+                                <span>WA</span>
                               </button>
-                            </div>
+                            </>
                           ) : (
-                            <div className="flex items-center gap-1.5">
-                              <span className="text-emerald-400 font-mono text-[11px] font-semibold flex items-center gap-1 px-2 py-1 rounded-md bg-emerald-950/40 border border-emerald-800/60">
-                                <CheckCircle2 className="w-3.5 h-3.5 text-emerald-400" />
-                                <span>✓ Settled / Paid in Full</span>
-                              </span>
+                            <>
                               <button
                                 type="button"
                                 onClick={() => handleSendInvoiceWhatsApp(inv)}
-                                className="px-2.5 py-1.5 bg-emerald-950/60 hover:bg-emerald-900/70 text-emerald-300 border border-emerald-700/60 rounded-lg text-xs flex items-center gap-1 transition cursor-pointer"
+                                className="px-1.5 py-1 bg-emerald-950/60 hover:bg-emerald-900/70 text-emerald-300 border border-emerald-700/60 rounded-md text-[11px] font-semibold flex items-center gap-1 transition cursor-pointer"
                                 title="Send Instant WhatsApp Payment Receipt"
                               >
-                                <Send className="w-3.5 h-3.5" />
-                                <span>WA Receipt</span>
+                                <Send className="w-3 h-3 shrink-0" />
+                                <span>WA</span>
                               </button>
                               <button
                                 type="button"
                                 onClick={() => onOpenReceiptModal?.(inv)}
-                                className="px-2.5 py-1.5 bg-slate-800 hover:bg-slate-700 text-cyan-400 hover:text-white border border-slate-700 rounded-lg text-xs flex items-center gap-1 transition cursor-pointer"
+                                className="px-2 py-1 bg-slate-800 hover:bg-slate-700 text-cyan-400 hover:text-white border border-slate-700 rounded-md text-[11px] font-semibold flex items-center gap-1 transition cursor-pointer"
                                 title="View & Print Official Receipt"
                               >
-                                <Printer className="w-3.5 h-3.5" />
+                                <Printer className="w-3 h-3 shrink-0" />
                                 <span>Receipt</span>
                               </button>
-                            </div>
+                            </>
                           )}
 
                           {/* Edit Invoice Button (RBAC edit_delete_invoice) */}
@@ -2272,7 +2306,7 @@ export const BillingView: React.FC<BillingViewProps> = ({
                             <button
                               type="button"
                               onClick={() => handleOpenEditModal(inv)}
-                              className="p-1.5 bg-slate-800 hover:bg-slate-700 text-cyan-400 hover:text-white border border-slate-700 rounded-lg text-xs transition cursor-pointer"
+                              className="p-1.5 bg-slate-800 hover:bg-slate-700 text-cyan-400 hover:text-white border border-slate-700 rounded-md text-xs transition cursor-pointer"
                               title="Edit Invoice Details"
                             >
                               <Edit2 className="w-3.5 h-3.5" />
@@ -2288,7 +2322,7 @@ export const BillingView: React.FC<BillingViewProps> = ({
                                 setDeleteInvoiceError(null);
                                 setInvoiceToDelete(inv);
                               }}
-                              className="p-1.5 bg-rose-950/80 hover:bg-rose-900 text-rose-300 hover:text-rose-100 border border-rose-800 rounded-lg text-xs transition cursor-pointer"
+                              className="p-1.5 bg-rose-950/80 hover:bg-rose-900 text-rose-300 hover:text-rose-100 border border-rose-800 rounded-md text-xs transition cursor-pointer"
                               title="Delete Invoice"
                             >
                               <Trash2 className="w-3.5 h-3.5" />

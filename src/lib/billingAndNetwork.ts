@@ -1,7 +1,14 @@
 import { supabase, SupabaseInvoice } from '../services/supabaseClient';
 import { safeMikrotikFetch } from '../services/mikrotikRestClient';
 import { RouterAuthInfo, getActiveRouterAuth, resolveRestHostAndPort } from '../services/apiClient';
-import { addCalendarMonthsYmd, computeBillingAnchorDay, extractYmdString } from './anniversaryBilling';
+import {
+  MAX_AUTO_DUE_DATE_FUTURE_DAYS,
+  addCalendarMonthsYmd,
+  computeBillingAnchorDay,
+  exceedsMaxAutoFutureDays,
+  extractYmdString,
+  getMaxAllowedAutoDueDateYmd,
+} from './anniversaryBilling';
 import { isMissingTableOrColumnError } from './expiryUtils';
 import {
   extractOrigPkgFromComment,
@@ -2349,6 +2356,34 @@ export async function removeSubscriberGracePeriod(params: {
  * - If currently in `EXPIRED-16-POOL` / `Expire` / disabled, restores their adopted MikroTik PPPoE profile
  *   and kicks any `16.16.16.0/24` session.
  */
+export function computeGuardedShiftNextMonthDate(
+  baseRaw: string | null | undefined,
+  anchorDay: number,
+  todayYmd: string = new Date().toISOString().slice(0, 10),
+  maxFutureDays: number = MAX_AUTO_DUE_DATE_FUTURE_DAYS
+): {
+  allowed: boolean;
+  candidateDate: string;
+  maxAllowedDate: string;
+  currentDate: string;
+} {
+  const currentDate = extractYmdString(baseRaw) || todayYmd;
+  const maxAllowedDate = getMaxAllowedAutoDueDateYmd(todayYmd, maxFutureDays);
+  let candidate = addCalendarMonthsYmd(currentDate, 1, anchorDay);
+  let safety = 0;
+  while (candidate <= todayYmd && safety < 24) {
+    candidate = addCalendarMonthsYmd(candidate, 1, anchorDay);
+    safety++;
+  }
+  const allowed = !exceedsMaxAutoFutureDays(candidate, todayYmd, maxFutureDays);
+  return {
+    allowed,
+    candidateDate: candidate,
+    maxAllowedDate,
+    currentDate,
+  };
+}
+
 export async function shiftBillToNextMonth(params: {
   username: string;
   subscriberId?: string | null;
@@ -2359,6 +2394,7 @@ export async function shiftBillToNextMonth(params: {
   preloadedSecrets?: Array<Record<string, any>>;
   preloadedProfiles?: string[];
   preloadedActive?: Array<Record<string, any>>;
+  allowExplicitOverride?: boolean;
 }): Promise<{
   success: boolean;
   nextDueDate: string;
@@ -2378,6 +2414,7 @@ export async function shiftBillToNextMonth(params: {
   const nowIso = new Date().toISOString();
   const todayYmd = nowIso.slice(0, 10);
   const expiryProf = params.expiryProfileName || 'EXPIRED-16-POOL';
+  const maxAllowedYmd = getMaxAllowedAutoDueDateYmd(todayYmd, MAX_AUTO_DUE_DATE_FUTURE_DAYS);
 
   const [{ data: userRow }, invRes] = await Promise.all([
     supabase
@@ -2404,16 +2441,6 @@ export async function shiftBillToNextMonth(params: {
     ? computeBillingAnchorDay(userRow)
     : params.targetInvoice?.cycle_day || new Date().getDate();
 
-  const advanceNextMonthFutureYmd = (baseRaw?: string | null): string => {
-    let candidate = addCalendarMonthsYmd(extractYmdString(baseRaw) || todayYmd, 1, anchorDay);
-    let safety = 0;
-    while (candidate <= todayYmd && safety < 24) {
-      candidate = addCalendarMonthsYmd(candidate, 1, anchorDay);
-      safety++;
-    }
-    return candidate;
-  };
-
   const invoicesToShift = params.targetInvoice
     ? [params.targetInvoice]
     : ((invRes?.data || []) as SupabaseInvoice[]).filter((inv) => {
@@ -2425,13 +2452,40 @@ export async function shiftBillToNextMonth(params: {
         return st !== 'PAID' && st !== 'CANCELLED' && bal > 0;
       });
 
-  let updatedInvoicesCount = 0;
-  let shiftedInvDueDate = advanceNextMonthFutureYmd(
-    params.targetInvoice?.due_date || (userRow as any)?.next_billing_date || userRow?.expiry_date || todayYmd
-  );
-
+  // Pre-validate every target invoice against the 35-day future guard BEFORE mutating any record
+  const plannedShifts: Array<{ inv: SupabaseInvoice; nextInvDate: string }> = [];
   for (const inv of invoicesToShift) {
-    const nextInvDate = advanceNextMonthFutureYmd(inv.due_date || todayYmd);
+    const check = computeGuardedShiftNextMonthDate(
+      inv.due_date || todayYmd,
+      anchorDay,
+      todayYmd,
+      MAX_AUTO_DUE_DATE_FUTURE_DAYS
+    );
+    if (!check.allowed && !params.allowExplicitOverride) {
+      throw new Error(
+        `Shift blocked: Invoice #${inv.invoice_no} due date (${check.currentDate}) cannot be shifted to ${check.candidateDate} (more than ${MAX_AUTO_DUE_DATE_FUTURE_DAYS} days past today; max ${check.maxAllowedDate}). Use Edit Invoice to override explicitly.`
+      );
+    }
+    plannedShifts.push({ inv, nextInvDate: check.candidateDate });
+  }
+
+  // Fallback validation if invoked without invoices (subscriber-only shift)
+  const fallbackCheck = computeGuardedShiftNextMonthDate(
+    params.targetInvoice?.due_date || (userRow as any)?.next_billing_date || userRow?.expiry_date || todayYmd,
+    anchorDay,
+    todayYmd,
+    MAX_AUTO_DUE_DATE_FUTURE_DAYS
+  );
+  if (plannedShifts.length === 0 && !fallbackCheck.allowed && !params.allowExplicitOverride) {
+    throw new Error(
+      `Shift blocked: Subscriber @${uname} next due date (${fallbackCheck.currentDate}) cannot be shifted to ${fallbackCheck.candidateDate} (more than ${MAX_AUTO_DUE_DATE_FUTURE_DAYS} days past today; max ${fallbackCheck.maxAllowedDate}). Use Edit Invoice to override explicitly.`
+    );
+  }
+
+  let updatedInvoicesCount = 0;
+  let shiftedInvDueDate = fallbackCheck.candidateDate;
+
+  for (const { inv, nextInvDate } of plannedShifts) {
     shiftedInvDueDate = nextInvDate;
     const upperSt = String(inv.status || '').toUpperCase();
     const nextStatus = upperSt === 'PARTIAL' ? 'PARTIAL' : 'DUE';
@@ -2447,11 +2501,19 @@ export async function shiftBillToNextMonth(params: {
     if (!error) updatedInvoicesCount++;
   }
 
-  const nextSubscriberBillingDate = advanceNextMonthFutureYmd(
-    (userRow as any)?.next_billing_date || userRow?.expiry_date || params.targetInvoice?.due_date || todayYmd
+  const subCheck = computeGuardedShiftNextMonthDate(
+    (userRow as any)?.next_billing_date || userRow?.expiry_date || params.targetInvoice?.due_date || todayYmd,
+    anchorDay,
+    todayYmd,
+    MAX_AUTO_DUE_DATE_FUTURE_DAYS
   );
-  const finalNextDate =
-    shiftedInvDueDate > nextSubscriberBillingDate ? shiftedInvDueDate : nextSubscriberBillingDate;
+  const candidateSubDate =
+    subCheck.allowed || params.allowExplicitOverride ? subCheck.candidateDate : shiftedInvDueDate;
+  let finalNextDate =
+    shiftedInvDueDate > candidateSubDate ? shiftedInvDueDate : candidateSubDate;
+  if (!params.allowExplicitOverride && finalNextDate > maxAllowedYmd) {
+    finalNextDate = shiftedInvDueDate <= maxAllowedYmd ? shiftedInvDueDate : maxAllowedYmd;
+  }
   const finalExpiryIso = `${finalNextDate}T14:00:00+05:00`;
 
   const liveSecret =
