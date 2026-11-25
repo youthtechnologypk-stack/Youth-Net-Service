@@ -3347,6 +3347,7 @@ const handleWhatsAppAutoSend = async (req: Request, res: Response) => {
       subscriberUsername,
       eventType: eventType as any,
       messageVars: mergedMessageVars,
+      manualTrigger: Boolean(body.manualTrigger),
       forceSenderPortalUserId:
         eventType === 'MANUAL_TEST' ? String(caller.id) : undefined,
     });

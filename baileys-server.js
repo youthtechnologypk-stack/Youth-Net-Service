@@ -126,6 +126,15 @@ function buildAutomatedMessage(eventType, vars = {}) {
   const clientName = String(vars.subscriberName || vars.username || 'Valued Subscriber').trim();
   const uname = String(vars.username || '').trim();
   const supportLine = vars.supportPhone ? `\nSupport Helpline: ${vars.supportPhone}` : '';
+  const activeAccounts = Array.isArray(vars.paymentAccounts)
+    ? vars.paymentAccounts.filter((a) => a && a.is_active !== false)
+    : [];
+  const paymentBlock =
+    activeAccounts.length > 0
+      ? `\n\n*Payment Methods:*\n${activeAccounts
+          .map((acc) => `• *${acc.provider_name}:* ${acc.account_number_or_iban} (${acc.account_title})`)
+          .join('\n')}`
+      : '';
 
   switch (eventType) {
     case 'PROVISION_WELCOME':
@@ -167,8 +176,9 @@ function buildAutomatedMessage(eventType, vars = {}) {
         (vars.invoiceNo ? `• *Invoice #:* ${vars.invoiceNo}\n` : '') +
         `• *Package:* ${vars.packageName || 'Fiber Broadband'}\n` +
         `• *Amount Due:* Rs. ${Math.round(Number(vars.amountDue ?? vars.totalAmount ?? 0)).toLocaleString()}\n` +
-        `• *Due Date:* ${vars.dueDate || vars.expiryDate || 'Current Cycle'}\n\n` +
-        `Please settle your bill before the due date to enjoy uninterrupted internet.\n— *${company}*` +
+        `• *Due Date:* ${vars.dueDate || vars.expiryDate || 'Current Cycle'}` +
+        paymentBlock +
+        `\n\nPlease settle your bill before the due date to enjoy uninterrupted internet.\n— *${company}*` +
         supportLine
       );
 
@@ -179,8 +189,9 @@ function buildAutomatedMessage(eventType, vars = {}) {
         `Your internet package is scheduled to expire soon.\n\n` +
         `• *Package:* ${vars.packageName || 'Fiber Broadband'}\n` +
         `• *Amount Due:* Rs. ${Math.round(Number(vars.amountDue ?? vars.totalAmount ?? 0)).toLocaleString()}\n` +
-        `• *Expiry Date:* ${vars.expiryDate || vars.dueDate || 'Upcoming'}\n\n` +
-        `Please pay before expiry to prevent automatic service suspension.\n— *${company}*` +
+        `• *Expiry Date:* ${vars.expiryDate || vars.dueDate || 'Upcoming'}` +
+        paymentBlock +
+        `\n\nPlease pay before expiry to prevent automatic service suspension.\n— *${company}*` +
         supportLine
       );
 
@@ -190,8 +201,9 @@ function buildAutomatedMessage(eventType, vars = {}) {
         `Dear *${clientName}* (${uname}),\n` +
         `Your broadband connection has been automatically isolated due to unpaid dues.\n\n` +
         `• *Outstanding Due:* Rs. ${Math.round(Number(vars.amountDue ?? vars.totalAmount ?? 0)).toLocaleString()}\n` +
-        `• *Package:* ${vars.packageName || 'Fiber Broadband'}\n\n` +
-        `Your connection will be *instantly restored* as soon as payment is received.\n— *${company}*` +
+        `• *Package:* ${vars.packageName || 'Fiber Broadband'}` +
+        paymentBlock +
+        `\n\nYour connection will be *instantly restored* as soon as payment is received.\n— *${company}*` +
         supportLine
       );
 
@@ -531,17 +543,34 @@ async function logDelivery(entry) {
   }
 }
 
-async function sendAutomatedMessage({ subscriber, subscriberUsername, eventType, messageVars = {}, forceSenderPortalUserId }) {
+async function sendAutomatedMessage({ subscriber, subscriberUsername, eventType, messageVars = {}, forceSenderPortalUserId, manualTrigger = false }) {
   let allUsers = [];
+  let paymentAccounts = [];
   if (supabase) {
-    const { data } = await supabase.from('portal_users').select('*');
-    if (Array.isArray(data)) allUsers = data;
+    const [usersRes, accountsRes] = await Promise.all([
+      supabase.from('portal_users').select('*'),
+      supabase.from('payment_accounts').select('*').eq('is_active', true),
+    ]);
+    if (Array.isArray(usersRes.data)) allUsers = usersRes.data;
+    if (Array.isArray(accountsRes.data)) paymentAccounts = accountsRes.data;
   }
 
-  let resolvedSub = subscriber || null;
-  if (!resolvedSub && subscriberUsername && allUsers.length > 0) {
+  let resolvedSub = subscriber ? { ...subscriber } : null;
+  if (subscriberUsername && allUsers.length > 0) {
     const lower = String(subscriberUsername).trim().toLowerCase();
-    resolvedSub = allUsers.find((u) => String(u.username || '').trim().toLowerCase() === lower) || null;
+    const matched = allUsers.find((u) => String(u.username || '').trim().toLowerCase() === lower) || null;
+    if (matched) {
+      resolvedSub = {
+        ...matched,
+        ...(resolvedSub || {}),
+        id: matched.id,
+        username: matched.username,
+        full_name: resolvedSub?.full_name || matched.full_name,
+        phone: resolvedSub?.phone || matched.phone,
+        dealer_id: resolvedSub?.dealer_id ?? matched.dealer_id ?? null,
+        sub_dealer_id: resolvedSub?.sub_dealer_id ?? matched.sub_dealer_id ?? null,
+      };
+    }
   }
 
   let sender;
@@ -572,6 +601,10 @@ async function sendAutomatedMessage({ subscriber, subscriberUsername, eventType,
     supportPhone: messageVars.supportPhone || sender.supportPhone,
     subscriberName: messageVars.subscriberName || resolvedSub?.full_name || subscriberUsername,
     username: messageVars.username || resolvedSub?.username || subscriberUsername,
+    paymentAccounts:
+      Array.isArray(messageVars.paymentAccounts) && messageVars.paymentAccounts.length > 0
+        ? messageVars.paymentAccounts
+        : paymentAccounts,
   });
 
   const loggedMessageBody =
@@ -579,7 +612,7 @@ async function sendAutomatedMessage({ subscriber, subscriberUsername, eventType,
       ? messageBody.replace(/(\*(?:PPPoE\s+)?Password:\*\s*)(.+)/gi, '$1••••••••')
       : messageBody;
 
-  if (!sender.autoSendEnabled && eventType !== 'MANUAL_TEST' && eventType !== 'PORTAL_CREDENTIALS') {
+  if (!manualTrigger && !sender.autoSendEnabled && eventType !== 'MANUAL_TEST' && eventType !== 'PORTAL_CREDENTIALS') {
     await logDelivery({
       sender_portal_user_id: sender.senderPortalUserId,
       sender_company_name: sender.companyName,
@@ -1054,6 +1087,7 @@ async function handleWhatsAppSend(req, res) {
       subscriberUsername,
       eventType,
       messageVars: mergedMessageVars,
+      manualTrigger: Boolean(body.manualTrigger),
       forceSenderPortalUserId: eventType === 'MANUAL_TEST' ? String(ctx.actor.id) : undefined,
     });
 

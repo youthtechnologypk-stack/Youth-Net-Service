@@ -26,9 +26,11 @@ import {
   Trash2,
   Landmark,
   MessageSquare,
+  MessageCircle,
   Send,
   Copy,
   Check,
+  Loader2,
 } from 'lucide-react';
 import {
   supabase,
@@ -79,7 +81,12 @@ import {
   fetchWhatsappBillingConfig,
   getDefaultWhatsappConfig,
 } from '../lib/whatsappBilling';
-import { triggerAutoWhatsAppNotification } from '../lib/whatsappRouting';
+import {
+  formatWhatsAppDisplayPhone,
+  isValidWhatsAppPhone,
+  loadPersistedWhatsAppGatewayUrl,
+  triggerAutoWhatsAppNotification,
+} from '../lib/whatsappRouting';
 import { deleteInvoiceApi, updateInvoiceApi } from '../lib/inventoryInvoiceSync';
 import {
   FIELD_STAFF_ROLES,
@@ -224,9 +231,45 @@ export const BillingView: React.FC<BillingViewProps> = ({
   const [isBulkReceiving, setIsBulkReceiving] = useState<boolean>(false);
   const [bulkReceiveProgress, setBulkReceiveProgress] = useState<string | null>(null);
 
+  // WhatsApp Row Dispatch & Non-Blocking Floating Toast State
+  const [sendingWaInvoiceId, setSendingWaInvoiceId] = useState<string | null>(null);
+  const [waToast, setWaToast] = useState<{
+    id: number;
+    status: 'sending' | 'sent' | 'error';
+    title: string;
+    subtitle?: string;
+  } | null>(null);
+  const waToastTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+  const showWaToast = (
+    toast: { status: 'sending' | 'sent' | 'error'; title: string; subtitle?: string },
+    autoDismissMs?: number
+  ) => {
+    if (waToastTimerRef.current) {
+      clearTimeout(waToastTimerRef.current);
+      waToastTimerRef.current = null;
+    }
+    const id = Date.now() + Math.floor(Math.random() * 1000);
+    setWaToast({ id, ...toast });
+    if (autoDismissMs && autoDismissMs > 0) {
+      waToastTimerRef.current = setTimeout(() => {
+        setWaToast((prev) => (prev && prev.id === id ? null : prev));
+        waToastTimerRef.current = null;
+      }, autoDismissMs);
+    }
+  };
+
+  useEffect(() => {
+    void loadPersistedWhatsAppGatewayUrl();
+    return () => {
+      if (waToastTimerRef.current) clearTimeout(waToastTimerRef.current);
+    };
+  }, []);
+
   // 1. Fetch Invoices and Agents from Supabase
   const fetchInvoices = async () => {
     setIsLoading(true);
+    void loadPersistedWhatsAppGatewayUrl();
     try {
       const { data, error } = await supabase
         .from('invoices')
@@ -514,6 +557,7 @@ export const BillingView: React.FC<BillingViewProps> = ({
           amountPaid: enteredVal,
           invoiceNo: selectedInvoice.invoice_no,
           paymentMethod: paidPaymentMethod,
+          skipAutoWhatsapp: true,
         });
         if (restoreRes.insufficientWalletFunds || !restoreRes.success) {
           const msg = restoreRes.error || 'Insufficient Dealer Wallet Balance: Renewal blocked.';
@@ -598,42 +642,24 @@ export const BillingView: React.FC<BillingViewProps> = ({
         invoiceUpdateData.due_date ||
         selectedInvoice.due_date ||
         addCalendarMonthDateString(new Date(), renewalAnchorDay);
-
-      // For partial payments (where restoreSubscriberOnInvoicePaid was not called), still auto-send instant WhatsApp receipt in background
-      if (newStatus !== 'PAID') {
-        void triggerAutoWhatsAppNotification({
-          eventType: 'PAYMENT_RESTORED',
-          subscriberUsername: selectedInvoice.subscriber_username,
-          subscriber: clientMatch || { username: selectedInvoice.subscriber_username },
-          messageVars: {
-            subscriberName: clientMatch?.full_name || selectedInvoice.subscriber_username,
-            username: selectedInvoice.subscriber_username,
-            phone: clientMatch?.phone || undefined,
-            invoiceNo: selectedInvoice.invoice_no,
-            amountPaid: enteredVal,
-            totalAmount: Number(selectedInvoice.amount) || 0,
-            remainingBalance: Math.max(0, (Number(selectedInvoice.amount) || 0) - finalPaidAmount),
-            paymentMethod: paidPaymentMethod,
-            expiryDate: nextExpiryStr,
-          },
-        });
-      }
+      const remainingAfterPay = Math.max(0, totalAmount - finalPaidAmount);
+      const invoiceSnapshot = { ...selectedInvoice };
 
       setLastPaidReceiptPayload({
-        username: selectedInvoice.subscriber_username,
-        fullName: clientMatch?.full_name || selectedInvoice.subscriber_username,
+        username: invoiceSnapshot.subscriber_username,
+        fullName: clientMatch?.full_name || invoiceSnapshot.subscriber_username,
         phone: clientMatch?.phone || '',
-        invoiceNo: selectedInvoice.invoice_no,
+        invoiceNo: invoiceSnapshot.invoice_no,
         amountPaid: enteredVal,
         totalAmount,
-        remainingBalance: Math.max(0, totalAmount - finalPaidAmount),
+        remainingBalance: remainingAfterPay,
         paymentMethod: paidPaymentMethod,
         collectorName,
         nextExpiryDate: nextExpiryStr,
       });
 
       setActionNotice(
-        `Recorded ${formatCurrency(enteredVal)} for Invoice #${selectedInvoice.invoice_no}! Status: ${newStatus}.${
+        `Recorded ${formatCurrency(enteredVal)} for Invoice #${invoiceSnapshot.invoice_no}! Status: ${newStatus}.${
           targetAgentId ? ` Credited to ${targetAgentName}'s Cash-in-Hand.` : ''
         }`
       );
@@ -642,6 +668,100 @@ export const BillingView: React.FC<BillingViewProps> = ({
       setIsMarkPaidModalOpen(false);
       setSelectedInvoice(null);
       await fetchInvoices();
+
+      // Auto-dispatch Paid Receipt via Baileys Gateway in the background (zero manual popup, zero wa.me tab)
+      void (async () => {
+        let resolvedSub: Partial<SupabasePortalUser> | null = clientMatch ? { ...clientMatch } : null;
+        if (!isValidWhatsAppPhone(resolvedSub?.phone)) {
+          try {
+            const { data: freshSub } = await supabase
+              .from('portal_users')
+              .select('id, username, full_name, phone, package_speed, dealer_id, sub_dealer_id')
+              .ilike('username', invoiceSnapshot.subscriber_username)
+              .maybeSingle();
+            if (freshSub) {
+              resolvedSub = { ...(resolvedSub || {}), ...(freshSub as Partial<SupabasePortalUser>) };
+            }
+          } catch {
+            // keep existing match
+          }
+        }
+
+        const displayName = resolvedSub?.full_name || invoiceSnapshot.subscriber_username;
+        const resolvedPhone = resolvedSub?.phone || '';
+
+        if (!isValidWhatsAppPhone(resolvedPhone)) {
+          showWaToast(
+            {
+              status: 'error',
+              title: 'Subscriber phone number missing. Please update contact number first.',
+              subtitle: `Payment recorded for Invoice #${invoiceSnapshot.invoice_no}, but WhatsApp receipt could not be sent.`,
+            },
+            9000
+          );
+          return;
+        }
+
+        const formattedPhone = formatWhatsAppDisplayPhone(resolvedPhone);
+        showWaToast({
+          status: 'sending',
+          title: `Sending WhatsApp receipt to ${displayName}...`,
+          subtitle: `Invoice #${invoiceSnapshot.invoice_no} (${formattedPhone})`,
+        });
+
+        const waRes = await triggerAutoWhatsAppNotification({
+          eventType: 'PAYMENT_RESTORED',
+          manualTrigger: true,
+          subscriberUsername: invoiceSnapshot.subscriber_username,
+          subscriber: {
+            ...(resolvedSub || {}),
+            username: invoiceSnapshot.subscriber_username,
+            full_name: displayName,
+            phone: resolvedPhone,
+            dealer_id: resolvedSub?.dealer_id ?? invoiceSnapshot.dealer_id ?? null,
+            sub_dealer_id: resolvedSub?.sub_dealer_id ?? invoiceSnapshot.sub_dealer_id ?? null,
+          },
+          messageVars: {
+            subscriberName: displayName,
+            username: invoiceSnapshot.subscriber_username,
+            phone: resolvedPhone,
+            packageName:
+              invoiceSnapshot.package_name ||
+              invoiceSnapshot.package_profile ||
+              resolvedSub?.package_speed ||
+              'Fiber Broadband',
+            invoiceNo: invoiceSnapshot.invoice_no,
+            amountPaid: enteredVal,
+            totalAmount,
+            remainingBalance: remainingAfterPay,
+            paymentMethod: paidPaymentMethod,
+            expiryDate: nextExpiryStr,
+          },
+        });
+
+        if (waRes.ok && waRes.status === 'SENT') {
+          showWaToast(
+            {
+              status: 'sent',
+              title: `WhatsApp sent to ${waRes.formattedPhone || formattedPhone}`,
+              subtitle: `Paid receipt for Invoice #${invoiceSnapshot.invoice_no} via ${waRes.senderCompanyName || 'WhatsApp Gateway'}`,
+            },
+            7000
+          );
+        } else {
+          showWaToast(
+            {
+              status: 'error',
+              title: `WhatsApp receipt failed for ${displayName}`,
+              subtitle:
+                waRes.error ||
+                waRes.skippedReason ||
+                'WhatsApp session is disconnected. Connect your session in WhatsApp & Branding.',
+            },
+            10000
+          );
+        }
+      })();
     } catch (err: any) {
       setMarkPaidError(`Failed to record payment: ${err.message}`);
     } finally {
@@ -1296,8 +1416,28 @@ export const BillingView: React.FC<BillingViewProps> = ({
   const supportWhatsapp = whatsappConfig.support_whatsapp || DEFAULT_SUPPORT_WHATSAPP;
 
   const handleSendPreExpiryReminder = async (item: (typeof preExpiryReminderQueue)[number]) => {
+    if (!isValidWhatsAppPhone(item.phone)) {
+      showWaToast(
+        {
+          status: 'error',
+          title: 'Subscriber phone number missing. Please update contact number first.',
+          subtitle: `Unable to send reminder to ${item.fullName || item.username}.`,
+        },
+        8000
+      );
+      return;
+    }
+
+    const formattedPhone = formatWhatsAppDisplayPhone(item.phone);
+    showWaToast({
+      status: 'sending',
+      title: `Sending WhatsApp invoice reminder to ${item.fullName || item.username}...`,
+      subtitle: formattedPhone,
+    });
+
     const res = await triggerAutoWhatsAppNotification({
       eventType: 'PRE_EXPIRY_3D',
+      manualTrigger: true,
       subscriberUsername: item.username,
       messageVars: {
         subscriberName: item.fullName,
@@ -1308,14 +1448,27 @@ export const BillingView: React.FC<BillingViewProps> = ({
         expiryDate: item.expiryDate,
         invoiceNo: item.invoiceNo,
         amountDue: item.amountDue,
+        paymentAccounts: activePaymentAccounts,
       },
     });
     if (res.ok && res.status === 'SENT') {
-      setActionNotice(`WhatsApp reminder sent automatically to @${item.username} via ${res.senderCompanyName || 'Gateway'}.`);
-    } else if (res.status === 'SKIPPED') {
-      setActionNotice(res.skippedReason || `Reminder skipped for @${item.username}.`);
+      showWaToast(
+        {
+          status: 'sent',
+          title: `WhatsApp sent to ${res.formattedPhone || formattedPhone}`,
+          subtitle: `Renewal reminder sent via ${res.senderCompanyName || 'WhatsApp Gateway'}`,
+        },
+        7000
+      );
     } else {
-      setActionNotice(`WhatsApp delivery failed for @${item.username}: ${res.error || 'Connect WhatsApp in WhatsApp & Branding.'}`);
+      showWaToast(
+        {
+          status: 'error',
+          title: `WhatsApp reminder failed for ${item.fullName || item.username}`,
+          subtitle: res.error || res.skippedReason || 'WhatsApp session is disconnected. Connect WhatsApp in WhatsApp & Branding.',
+        },
+        10000
+      );
     }
   };
 
@@ -1337,43 +1490,115 @@ export const BillingView: React.FC<BillingViewProps> = ({
   };
 
   const handleSendInvoiceWhatsApp = async (inv: SupabaseInvoice) => {
-    const client = clientByUsername[(inv.subscriber_username || '').trim().toLowerCase()];
-    const totalAmount = Number(inv.amount) || 0;
-    const paidAmount = Number(inv.paid_amount) || 0;
-    const balanceDue = Math.max(0, totalAmount - paidAmount);
-    const isPaid = balanceDue <= 0 || (inv.status || '').toUpperCase() === 'PAID';
-    const daysLeft = computeDaysUntilDate(inv.due_date);
+    if (sendingWaInvoiceId === inv.id) return;
+    setSendingWaInvoiceId(inv.id);
 
-    const res = await triggerAutoWhatsAppNotification({
-      eventType: isPaid ? 'PAYMENT_RESTORED' : 'PRE_EXPIRY_3D',
-      subscriberUsername: inv.subscriber_username,
-      subscriber: client || { username: inv.subscriber_username },
-      messageVars: {
-        subscriberName: client?.full_name || inv.subscriber_username,
-        username: inv.subscriber_username,
-        phone: client?.phone || undefined,
-        invoiceNo: inv.invoice_no,
-        packageName: client?.package_speed || 'Fiber Broadband',
-        amountPaid: isPaid ? (paidAmount > 0 ? paidAmount : totalAmount) : 0,
-        amountDue: isPaid ? 0 : balanceDue,
-        totalAmount,
-        remainingBalance: balanceDue,
-        daysRemaining: daysLeft !== null ? Math.max(0, daysLeft) : 0,
-        expiryDate: inv.due_date,
-        paymentMethod: 'Verified Payment',
-      },
-    });
+    try {
+      const unameLower = (inv.subscriber_username || '').trim().toLowerCase();
+      let resolvedClient: Partial<SupabasePortalUser> | null = clientByUsername[unameLower]
+        ? { ...clientByUsername[unameLower] }
+        : null;
 
-    if (res.ok && res.status === 'SENT') {
-      setActionNotice(
-        `WhatsApp ${isPaid ? 'receipt' : 'reminder'} sent automatically to @${inv.subscriber_username} via ${res.senderCompanyName || 'Gateway'}.`
-      );
-    } else if (res.status === 'SKIPPED') {
-      setActionNotice(res.skippedReason || `WhatsApp message skipped for @${inv.subscriber_username}.`);
-    } else {
-      setActionNotice(
-        `WhatsApp send failed for @${inv.subscriber_username}: ${res.error || 'Pair WhatsApp in WhatsApp & Branding.'}`
-      );
+      // Always fetch latest phone from Supabase if missing/invalid in cached directory
+      if (!isValidWhatsAppPhone(resolvedClient?.phone) && inv.subscriber_username) {
+        try {
+          const { data: freshSub } = await supabase
+            .from('portal_users')
+            .select('id, username, full_name, phone, package_speed, dealer_id, sub_dealer_id')
+            .ilike('username', inv.subscriber_username)
+            .maybeSingle();
+          if (freshSub) {
+            resolvedClient = { ...(resolvedClient || {}), ...(freshSub as Partial<SupabasePortalUser>) };
+          }
+        } catch {
+          // fall back to cached client record
+        }
+      }
+
+      const resolvedPhone = resolvedClient?.phone || '';
+      if (!isValidWhatsAppPhone(resolvedPhone)) {
+        showWaToast(
+          {
+            status: 'error',
+            title: 'Subscriber phone number missing. Please update contact number first.',
+            subtitle: `Subscriber: ${resolvedClient?.full_name || inv.subscriber_username} (#${inv.invoice_no})`,
+          },
+          8000
+        );
+        return;
+      }
+
+      const totalAmount = Number(inv.amount) || 0;
+      const paidAmount = Number(inv.paid_amount) || 0;
+      const balanceDue = Math.max(0, totalAmount - paidAmount);
+      const isPaid = balanceDue <= 0 || (inv.status || '').toUpperCase() === 'PAID';
+      const displayName = resolvedClient?.full_name || inv.subscriber_username;
+      const formattedPhone = formatWhatsAppDisplayPhone(resolvedPhone);
+      const docTypeLabel = isPaid ? 'receipt' : 'invoice';
+
+      showWaToast({
+        status: 'sending',
+        title: `Sending WhatsApp ${docTypeLabel} to ${displayName}...`,
+        subtitle: `Invoice #${inv.invoice_no} (${formattedPhone})`,
+      });
+
+      const res = await triggerAutoWhatsAppNotification({
+        eventType: isPaid ? 'PAYMENT_RESTORED' : 'INVOICE_GENERATED',
+        manualTrigger: true,
+        subscriberUsername: inv.subscriber_username,
+        subscriber: {
+          ...(resolvedClient || {}),
+          username: inv.subscriber_username,
+          full_name: displayName,
+          phone: resolvedPhone,
+          dealer_id: resolvedClient?.dealer_id ?? inv.dealer_id ?? null,
+          sub_dealer_id: resolvedClient?.sub_dealer_id ?? inv.sub_dealer_id ?? null,
+        },
+        messageVars: {
+          subscriberName: displayName,
+          username: inv.subscriber_username,
+          phone: resolvedPhone,
+          invoiceNo: inv.invoice_no,
+          packageName:
+            inv.package_name ||
+            inv.package_profile ||
+            resolvedClient?.package_speed ||
+            'Fiber Broadband',
+          amountPaid: isPaid ? (paidAmount > 0 ? paidAmount : totalAmount) : paidAmount,
+          amountDue: isPaid ? 0 : balanceDue,
+          totalAmount,
+          remainingBalance: balanceDue,
+          dueDate: inv.due_date,
+          expiryDate: inv.due_date,
+          paymentMethod: 'Verified Payment',
+          paymentAccounts: activePaymentAccounts,
+        },
+      });
+
+      if (res.ok && res.status === 'SENT') {
+        showWaToast(
+          {
+            status: 'sent',
+            title: `WhatsApp sent to ${res.formattedPhone || formattedPhone}`,
+            subtitle: `${isPaid ? 'Payment receipt' : 'Invoice'} #${inv.invoice_no} via ${res.senderCompanyName || 'WhatsApp Gateway'}`,
+          },
+          7000
+        );
+      } else {
+        showWaToast(
+          {
+            status: 'error',
+            title: `WhatsApp send failed for ${displayName}`,
+            subtitle:
+              res.error ||
+              res.skippedReason ||
+              'WhatsApp session is disconnected. Connect your session in WhatsApp & Branding.',
+          },
+          10000
+        );
+      }
+    } finally {
+      setSendingWaInvoiceId(null);
     }
   };
 
@@ -1452,8 +1677,26 @@ export const BillingView: React.FC<BillingViewProps> = ({
               <button
                 type="button"
                 onClick={async () => {
+                  if (!isValidWhatsAppPhone(lastPaidReceiptPayload.phone)) {
+                    showWaToast(
+                      {
+                        status: 'error',
+                        title: 'Subscriber phone number missing. Please update contact number first.',
+                        subtitle: `Invoice #${lastPaidReceiptPayload.invoiceNo}`,
+                      },
+                      8000
+                    );
+                    return;
+                  }
+                  const formattedPhone = formatWhatsAppDisplayPhone(lastPaidReceiptPayload.phone);
+                  showWaToast({
+                    status: 'sending',
+                    title: `Sending WhatsApp receipt to ${lastPaidReceiptPayload.fullName}...`,
+                    subtitle: `Invoice #${lastPaidReceiptPayload.invoiceNo} (${formattedPhone})`,
+                  });
                   const res = await triggerAutoWhatsAppNotification({
                     eventType: 'PAYMENT_RESTORED',
+                    manualTrigger: true,
                     subscriberUsername: lastPaidReceiptPayload.username,
                     messageVars: {
                       subscriberName: lastPaidReceiptPayload.fullName,
@@ -1468,9 +1711,23 @@ export const BillingView: React.FC<BillingViewProps> = ({
                     },
                   });
                   if (res.ok && res.status === 'SENT') {
-                    setActionNotice(`Receipt re-sent automatically via ${res.senderCompanyName || 'Gateway'}!`);
+                    showWaToast(
+                      {
+                        status: 'sent',
+                        title: `WhatsApp sent to ${res.formattedPhone || formattedPhone}`,
+                        subtitle: `Receipt #${lastPaidReceiptPayload.invoiceNo} via ${res.senderCompanyName || 'WhatsApp Gateway'}`,
+                      },
+                      7000
+                    );
                   } else {
-                    setActionNotice(`WhatsApp receipt failed: ${res.error || 'Ensure WhatsApp is connected.'}`);
+                    showWaToast(
+                      {
+                        status: 'error',
+                        title: `WhatsApp receipt failed for ${lastPaidReceiptPayload.fullName}`,
+                        subtitle: res.error || res.skippedReason || 'Ensure WhatsApp session is connected.',
+                      },
+                      10000
+                    );
                   }
                 }}
                 className="px-3 py-1.5 rounded-lg bg-emerald-600 hover:bg-emerald-500 text-white font-bold text-xs flex items-center gap-1.5 transition cursor-pointer whitespace-nowrap shrink-0"
@@ -1980,11 +2237,18 @@ export const BillingView: React.FC<BillingViewProps> = ({
                         )}
                         <button
                           type="button"
+                          disabled={sendingWaInvoiceId === inv.id}
                           onClick={() => handleSendInvoiceWhatsApp(inv)}
-                          className="flex-1 min-w-0 py-2 px-3 bg-emerald-950/60 hover:bg-emerald-900/70 text-emerald-300 border border-emerald-700/60 rounded-xl text-xs font-semibold flex items-center justify-center gap-1.5 transition cursor-pointer"
+                          className="flex-1 min-w-0 py-2 px-3 bg-emerald-950/60 hover:bg-emerald-900/70 text-emerald-300 border border-emerald-700/60 rounded-xl text-xs font-semibold flex items-center justify-center gap-1.5 transition cursor-pointer disabled:opacity-60"
                         >
-                          <Send className="w-3.5 h-3.5 shrink-0" />
-                          <span className="truncate">WA Receipt</span>
+                          {sendingWaInvoiceId === inv.id ? (
+                            <Loader2 className="w-3.5 h-3.5 animate-spin shrink-0" />
+                          ) : (
+                            <Send className="w-3.5 h-3.5 shrink-0" />
+                          )}
+                          <span className="truncate">
+                            {sendingWaInvoiceId === inv.id ? 'Sending...' : 'WA Invoice'}
+                          </span>
                         </button>
                         {perms.edit_delete_invoice && (
                           <>
@@ -2017,11 +2281,18 @@ export const BillingView: React.FC<BillingViewProps> = ({
                     <div className="flex flex-wrap items-center gap-2 w-full min-w-0">
                       <button
                         type="button"
+                        disabled={sendingWaInvoiceId === inv.id}
                         onClick={() => handleSendInvoiceWhatsApp(inv)}
-                        className="flex-1 min-w-0 py-2.5 px-3 bg-emerald-600 hover:bg-emerald-500 text-white font-bold rounded-xl text-xs flex items-center justify-center gap-1.5 transition cursor-pointer shadow"
+                        className="flex-1 min-w-0 py-2.5 px-3 bg-emerald-600 hover:bg-emerald-500 text-white font-bold rounded-xl text-xs flex items-center justify-center gap-1.5 transition cursor-pointer shadow disabled:opacity-60"
                       >
-                        <Send className="w-3.5 h-3.5 shrink-0" />
-                        <span className="truncate">WA Receipt</span>
+                        {sendingWaInvoiceId === inv.id ? (
+                          <Loader2 className="w-3.5 h-3.5 animate-spin shrink-0" />
+                        ) : (
+                          <Send className="w-3.5 h-3.5 shrink-0" />
+                        )}
+                        <span className="truncate">
+                          {sendingWaInvoiceId === inv.id ? 'Sending...' : 'WA Receipt'}
+                        </span>
                       </button>
                       <button
                         type="button"
@@ -2270,24 +2541,34 @@ export const BillingView: React.FC<BillingViewProps> = ({
                               )}
                               <button
                                 type="button"
+                                disabled={sendingWaInvoiceId === inv.id}
                                 onClick={() => handleSendInvoiceWhatsApp(inv)}
-                                className="px-1.5 py-1 bg-emerald-950/60 hover:bg-emerald-900/70 text-emerald-300 border border-emerald-700/60 rounded-md text-[11px] font-semibold flex items-center gap-1 transition cursor-pointer"
-                                title="Send WhatsApp Payment Reminder"
+                                className="px-1.5 py-1 bg-emerald-950/60 hover:bg-emerald-900/70 text-emerald-300 border border-emerald-700/60 rounded-md text-[11px] font-semibold flex items-center gap-1 transition cursor-pointer disabled:opacity-60"
+                                title="Send WhatsApp Invoice via Baileys Gateway"
                               >
-                                <Send className="w-3 h-3 shrink-0" />
-                                <span>WA</span>
+                                {sendingWaInvoiceId === inv.id ? (
+                                  <Loader2 className="w-3 h-3 animate-spin shrink-0" />
+                                ) : (
+                                  <Send className="w-3 h-3 shrink-0" />
+                                )}
+                                <span>{sendingWaInvoiceId === inv.id ? '...' : 'WA'}</span>
                               </button>
                             </>
                           ) : (
                             <>
                               <button
                                 type="button"
+                                disabled={sendingWaInvoiceId === inv.id}
                                 onClick={() => handleSendInvoiceWhatsApp(inv)}
-                                className="px-1.5 py-1 bg-emerald-950/60 hover:bg-emerald-900/70 text-emerald-300 border border-emerald-700/60 rounded-md text-[11px] font-semibold flex items-center gap-1 transition cursor-pointer"
-                                title="Send Instant WhatsApp Payment Receipt"
+                                className="px-1.5 py-1 bg-emerald-950/60 hover:bg-emerald-900/70 text-emerald-300 border border-emerald-700/60 rounded-md text-[11px] font-semibold flex items-center gap-1 transition cursor-pointer disabled:opacity-60"
+                                title="Send Instant WhatsApp Payment Receipt via Baileys Gateway"
                               >
-                                <Send className="w-3 h-3 shrink-0" />
-                                <span>WA</span>
+                                {sendingWaInvoiceId === inv.id ? (
+                                  <Loader2 className="w-3 h-3 animate-spin shrink-0" />
+                                ) : (
+                                  <Send className="w-3 h-3 shrink-0" />
+                                )}
+                                <span>{sendingWaInvoiceId === inv.id ? '...' : 'WA'}</span>
                               </button>
                               <button
                                 type="button"
@@ -3108,6 +3389,77 @@ export const BillingView: React.FC<BillingViewProps> = ({
           setWhatsappConfig(updatedConfig);
         }}
       />
+
+      {/* Non-Blocking Floating WhatsApp Dispatch Toast (Portal to document.body so always visible regardless of scroll) */}
+      {waToast &&
+        typeof document !== 'undefined' &&
+        ReactDOM.createPortal(
+          <div
+            role="status"
+            aria-live="polite"
+            className={`fixed bottom-5 right-5 z-[9995] w-[calc(100vw-2.5rem)] max-w-md rounded-2xl border p-4 shadow-2xl backdrop-blur-md transition-all ${
+              waToast.status === 'error'
+                ? 'bg-slate-950/95 border-rose-500/70 text-rose-100 shadow-rose-950/40'
+                : waToast.status === 'sending'
+                ? 'bg-slate-950/95 border-cyan-500/70 text-cyan-100 shadow-cyan-950/40'
+                : 'bg-emerald-950/95 border-emerald-500/70 text-emerald-100 shadow-emerald-950/40'
+            }`}
+          >
+            <div className="flex items-start gap-3">
+              <div
+                className={`mt-0.5 p-1.5 rounded-xl shrink-0 ${
+                  waToast.status === 'error'
+                    ? 'bg-rose-500/20 text-rose-400'
+                    : waToast.status === 'sending'
+                    ? 'bg-cyan-500/20 text-cyan-400'
+                    : 'bg-emerald-500/20 text-emerald-400'
+                }`}
+              >
+                {waToast.status === 'sending' ? (
+                  <Loader2 className="w-4 h-4 animate-spin" />
+                ) : waToast.status === 'error' ? (
+                  <AlertTriangle className="w-4 h-4" />
+                ) : (
+                  <CheckCircle2 className="w-4 h-4" />
+                )}
+              </div>
+
+              <div className="flex-1 min-w-0 space-y-1">
+                <p className="text-xs font-bold leading-snug text-white">{waToast.title}</p>
+                {waToast.subtitle && (
+                  <p
+                    className={`text-[11px] leading-relaxed flex items-center gap-1.5 ${
+                      waToast.status === 'error'
+                        ? 'text-rose-200/90'
+                        : waToast.status === 'sending'
+                        ? 'text-cyan-200/90 font-mono'
+                        : 'text-emerald-200/90 font-mono'
+                    }`}
+                  >
+                    {waToast.status === 'sent' && <MessageCircle className="w-3 h-3 shrink-0" />}
+                    <span className="break-words">{waToast.subtitle}</span>
+                  </p>
+                )}
+              </div>
+
+              <button
+                type="button"
+                onClick={() => {
+                  if (waToastTimerRef.current) {
+                    clearTimeout(waToastTimerRef.current);
+                    waToastTimerRef.current = null;
+                  }
+                  setWaToast(null);
+                }}
+                className="p-1 rounded-lg text-slate-400 hover:text-white hover:bg-white/10 transition cursor-pointer shrink-0"
+                aria-label="Dismiss WhatsApp notification"
+              >
+                <X className="w-4 h-4" />
+              </button>
+            </div>
+          </div>,
+          document.body
+        )}
     </div>
   );
 };

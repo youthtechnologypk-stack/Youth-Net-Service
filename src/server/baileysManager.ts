@@ -540,6 +540,7 @@ class MultiTenantBaileysManager {
     eventType: WhatsAppEventType;
     messageVars?: Partial<AutomatedMessageTemplateVars> & { phone?: string | null };
     forceSenderPortalUserId?: string | null;
+    manualTrigger?: boolean;
   }): Promise<{
     ok: boolean;
     status: 'SENT' | 'FAILED' | 'SKIPPED';
@@ -601,8 +602,8 @@ class MultiTenantBaileysManager {
       }
     }
 
-    // 3. Duplicate same-day protection for 3-day pre-expiry reminders
-    if (eventType === 'PRE_EXPIRY_3D' && cleanSubUsername) {
+    // 3. Duplicate same-day protection for automated 3-day pre-expiry reminders (bypassed on explicit manual clicks)
+    if (eventType === 'PRE_EXPIRY_3D' && cleanSubUsername && !params.manualTrigger) {
       const alreadySent = await this.hasAlreadySentPreExpiryToday(supabase, cleanSubUsername);
       if (alreadySent) {
         return {
@@ -716,8 +717,13 @@ class MultiTenantBaileysManager {
       message_body: loggedMessageBody,
     };
 
-    // Respect sender's Auto-Send master toggle (except explicit manual test or explicit credential dispatch)
-    if (eventType !== 'MANUAL_TEST' && eventType !== 'PORTAL_CREDENTIALS' && !senderResolution.autoSendEnabled) {
+    // Respect sender's Auto-Send master toggle (except explicit manual clicks, manual test, or credential dispatch)
+    if (
+      !params.manualTrigger &&
+      eventType !== 'MANUAL_TEST' &&
+      eventType !== 'PORTAL_CREDENTIALS' &&
+      !senderResolution.autoSendEnabled
+    ) {
       const log = await this.persistWhatsappLog(supabase, {
         ...baseLog,
         status: 'SKIPPED',

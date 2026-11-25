@@ -146,6 +146,17 @@ export function formatWhatsAppDisplayPhone(phone?: string | null): string {
 }
 
 /**
+ * Returns true if the supplied phone string normalizes to a valid WhatsApp phone number.
+ */
+export function isValidWhatsAppPhone(phone?: string | null): boolean {
+  const digits = formatWhatsAppDigits(phone);
+  if (!digits || digits.length < 10) return false;
+  // Reject placeholder all-zero local numbers like 923000000000 or 0000000000
+  if (/^0+$/.test(digits) || /^923000000000$/.test(digits)) return false;
+  return true;
+}
+
+/**
  * Determines whether a Sub-Dealer is permitted to pair and send from their own WhatsApp number.
  * Allowed if explicitly granted on the Sub-Dealer row OR enabled at the Parent Dealer level.
  */
@@ -462,6 +473,7 @@ export function buildPortalAuthHeaders(): Record<string, string> {
 export interface AutoWhatsAppTriggerResponse {
   ok: boolean;
   status?: 'SENT' | 'FAILED' | 'SKIPPED';
+  formattedPhone?: string;
   senderCompanyName?: string;
   senderPhone?: string | null;
   error?: string;
@@ -736,7 +748,7 @@ export async function safeWhatsAppApiFetch<T = any>(
 }
 
 /**
- * Zero-click background dispatcher calling POST /api/whatsapp/send-auto.
+ * Zero-click background dispatcher calling POST ${gatewayUrl}/api/whatsapp/send.
  * Uses the configured Baileys Gateway URL and safe JSON parsing.
  * Never opens wa.me popups and never throws into calling UI/billing transactions.
  */
@@ -745,20 +757,27 @@ export async function triggerAutoWhatsAppNotification(payload: {
   subscriberUsername?: string | null;
   subscriber?: Partial<SupabasePortalUser> | null;
   messageVars?: Partial<AutomatedMessageTemplateVars> & { phone?: string | null };
+  manualTrigger?: boolean;
 }): Promise<AutoWhatsAppTriggerResponse> {
+  const rawPhone = payload.messageVars?.phone || payload.subscriber?.phone || '';
+  const formattedPhone = formatWhatsAppDisplayPhone(rawPhone);
   if (typeof window === 'undefined') {
-    return { ok: false, status: 'SKIPPED', skippedReason: 'Non-browser environment' };
+    return { ok: false, status: 'SKIPPED', formattedPhone, skippedReason: 'Non-browser environment' };
   }
-  const result = await safeWhatsAppApiFetch<any>('/api/whatsapp/send-auto', {
+  const result = await safeWhatsAppApiFetch<any>('/api/whatsapp/send', {
     method: 'POST',
     headers: buildPortalAuthHeaders(),
-    body: JSON.stringify(payload),
+    body: JSON.stringify({
+      ...payload,
+      phone: rawPhone || undefined,
+    }),
   });
 
   if (result.isGatewayUnreachable || !result.data) {
     return {
       ok: false,
       status: 'FAILED',
+      formattedPhone,
       isGatewayUnreachable: result.isGatewayUnreachable,
       error: result.error || 'Unable to reach WhatsApp gateway API',
     };
@@ -769,6 +788,7 @@ export async function triggerAutoWhatsAppNotification(payload: {
     return {
       ok: false,
       status: data?.status || 'FAILED',
+      formattedPhone,
       senderCompanyName: data?.senderCompanyName,
       error: data?.error || result.error || `HTTP ${result.httpStatus}`,
     };
@@ -777,6 +797,7 @@ export async function triggerAutoWhatsAppNotification(payload: {
   return {
     ok: Boolean(data?.ok),
     status: data?.status || (data?.ok ? 'SENT' : 'FAILED'),
+    formattedPhone,
     senderCompanyName: data?.senderCompanyName,
     senderPhone: data?.senderPhone || null,
     error: data?.error,
