@@ -68,7 +68,8 @@ import {
   isResellerUser,
 } from './lib/resellerEngine';
 import { supabase } from './services/supabaseClient';
-import { Radio, ShieldCheck, Database, ShieldAlert, ArrowLeft, WifiOff, RefreshCw, CheckCircle2, X } from 'lucide-react';
+import { GLOBAL_TOAST_EVENT } from './lib/whatsappRouting';
+import { Radio, ShieldCheck, Database, ShieldAlert, ArrowLeft, WifiOff, RefreshCw, CheckCircle2, AlertTriangle, X } from 'lucide-react';
 import {
   QueuedApiRequest,
   SyncQueueProgress,
@@ -146,6 +147,36 @@ function ISPAppContent() {
     }
     return getLandingTabForRole(user.role);
   });
+
+  const [globalToast, setGlobalToast] = useState<{
+    message: string;
+    type: 'success' | 'warning' | 'error';
+  } | null>(null);
+  const globalToastTimerRef = useRef<number | null>(null);
+
+  useEffect(() => {
+    const onGlobalToast = (evt: Event) => {
+      const detail = (evt as CustomEvent<{ message?: string; type?: 'success' | 'warning' | 'error' }>).detail;
+      if (!detail?.message) return;
+      setGlobalToast({
+        message: detail.message,
+        type: detail.type || 'success',
+      });
+      if (globalToastTimerRef.current) {
+        window.clearTimeout(globalToastTimerRef.current);
+      }
+      globalToastTimerRef.current = window.setTimeout(() => {
+        setGlobalToast(null);
+      }, 7500);
+    };
+    window.addEventListener(GLOBAL_TOAST_EVENT, onGlobalToast as EventListener);
+    return () => {
+      window.removeEventListener(GLOBAL_TOAST_EVENT, onGlobalToast as EventListener);
+      if (globalToastTimerRef.current) {
+        window.clearTimeout(globalToastTimerRef.current);
+      }
+    };
+  }, []);
 
   // Live-sync logged-in user's full RBAC permissions JSONB & GIS access from Supabase portal_users + realtime
   useEffect(() => {
@@ -1229,6 +1260,39 @@ function ISPAppContent() {
         isOpen={isAddRouterOpen}
         onClose={() => setIsAddRouterOpen(false)}
       />
+
+      {globalToast && (
+        <div
+          role="status"
+          aria-live="polite"
+          className={`fixed bottom-5 right-5 z-[120] max-w-md flex items-start gap-3 px-4 py-3 rounded-xl border shadow-2xl backdrop-blur-md transition-all ${
+            globalToast.type === 'success'
+              ? 'bg-emerald-950/95 border-emerald-500/40 text-emerald-100'
+              : globalToast.type === 'warning'
+              ? 'bg-amber-950/95 border-amber-500/40 text-amber-100'
+              : 'bg-rose-950/95 border-rose-500/40 text-rose-100'
+          }`}
+        >
+          {globalToast.type === 'success' ? (
+            <CheckCircle2 className="w-4 h-4 text-emerald-400 shrink-0 mt-0.5" />
+          ) : (
+            <AlertTriangle
+              className={`w-4 h-4 shrink-0 mt-0.5 ${
+                globalToast.type === 'warning' ? 'text-amber-400' : 'text-rose-400'
+              }`}
+            />
+          )}
+          <span className="text-xs font-medium leading-relaxed">{globalToast.message}</span>
+          <button
+            type="button"
+            onClick={() => setGlobalToast(null)}
+            aria-label="Dismiss notification"
+            className="p-0.5 rounded-md opacity-70 hover:opacity-100 transition-opacity shrink-0"
+          >
+            <X className="w-3.5 h-3.5" />
+          </button>
+        </div>
+      )}
     </div>
   );
 }

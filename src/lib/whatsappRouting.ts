@@ -153,10 +153,20 @@ export function formatWhatsAppDigits(phone?: string | null): string {
 }
 
 /**
- * Converts a raw phone number into a valid Baileys JID (`923001234567@s.whatsapp.net`).
+ * Converts a raw phone number or JID into a valid Baileys JID.
+ * Preserves `@g.us` group JIDs and `@s.whatsapp.net` user JIDs exact as-is.
+ * Formats plain phone numbers (`+923...`, `03...`) into `923...@s.whatsapp.net`.
  */
 export function formatWhatsAppJid(phone?: string | null): string | null {
-  const digits = formatWhatsAppDigits(phone);
+  const clean = String(phone || '').trim();
+  if (!clean) return null;
+  if (/^[0-9-]{6,40}@g\.us$/i.test(clean)) {
+    return clean.toLowerCase();
+  }
+  if (/^[0-9]{10,15}@s\.whatsapp\.net$/i.test(clean)) {
+    return clean.toLowerCase();
+  }
+  const digits = formatWhatsAppDigits(clean);
   if (!digits) return null;
   return `${digits}@s.whatsapp.net`;
 }
@@ -167,7 +177,7 @@ export function formatWhatsAppJid(phone?: string | null): string | null {
 export function formatWhatsAppGroupJid(raw?: string | null): string | null {
   const clean = String(raw || '').trim();
   if (!clean) return null;
-  if (/^[0-9-]{6,36}@g\.us$/i.test(clean)) {
+  if (/^[0-9-]{6,40}@g\.us$/i.test(clean)) {
     return clean.toLowerCase();
   }
   return null;
@@ -446,6 +456,22 @@ export function buildAutomatedWhatsAppMessage(vars: AutomatedMessageTemplateVars
       Boolean(paymentBlock) &&
       !rendered.includes('*Payment Methods:*');
     return shouldAppendPaymentBlock ? `${rendered}${paymentBlock}` : rendered;
+  }
+
+  if (vars.eventType === 'COMPLAINT_ASSIGNED_AGENT') {
+    return (
+      `🛠️ *ASSIGNED TICKET ALERT — ${renderValues.ticket_id}*\n\n` +
+      `Dear *${renderValues.agent_name}*,\n` +
+      `A new subscriber complaint has been assigned to you:\n\n` +
+      `• *Ticket ID:* ${renderValues.ticket_id}\n` +
+      `• *Client Name:* ${renderValues.client_name} (${renderValues.username})\n` +
+      `• *Client Phone:* ${renderValues.phone}\n` +
+      `• *Area / Node:* ${renderValues.area}\n` +
+      `• *Address:* ${renderValues.address}\n` +
+      `• *Issue Details:* ${renderValues.issue}\n\n` +
+      `Please contact the subscriber and resolve promptly.\n` +
+      `— *${company}* NOC`
+    );
   }
 
   return (
@@ -824,13 +850,17 @@ export async function triggerAutoWhatsAppNotification(payload: {
   subscriberUsername?: string | null;
   subscriber?: Partial<SupabasePortalUser> | null;
   messageVars?: Partial<AutomatedMessageTemplateVars> & { phone?: string | null };
+  to?: string | null;
   groupJid?: string | null;
   customMessage?: string | null;
   manualTrigger?: boolean;
 }): Promise<AutoWhatsAppTriggerResponse> {
   const rawPhone = payload.messageVars?.phone || payload.subscriber?.phone || '';
+  const explicitTo = String(payload.to || '').trim();
   const formattedPhone = payload.groupJid
     ? payload.groupJid
+    : explicitTo
+    ? formatWhatsAppGroupJid(explicitTo) || formatWhatsAppDisplayPhone(explicitTo)
     : formatWhatsAppDisplayPhone(rawPhone);
   if (typeof window === 'undefined') {
     return { ok: false, status: 'SKIPPED', formattedPhone, skippedReason: 'Non-browser environment' };
@@ -840,6 +870,7 @@ export async function triggerAutoWhatsAppNotification(payload: {
     headers: buildPortalAuthHeaders(),
     body: JSON.stringify({
       ...payload,
+      to: explicitTo || payload.groupJid || undefined,
       phone: rawPhone || undefined,
       groupJid: payload.groupJid || undefined,
       customMessage: payload.customMessage || undefined,
@@ -963,11 +994,224 @@ export async function sendWhatsAppCredentialsViaGateway(payload: {
   };
 }
 
+export const GLOBAL_TOAST_EVENT = 'youthnet:global-toast';
+
+export function emitGlobalToast(
+  message: string,
+  type: 'success' | 'warning' | 'error' = 'success'
+): void {
+  if (typeof window === 'undefined') return;
+  try {
+    window.dispatchEvent(new CustomEvent(GLOBAL_TOAST_EVENT, { detail: { message, type } }));
+  } catch {
+    // ignore
+  }
+}
+
+async function resolveTeamWorkGroupJidForDispatch(explicitGroupJid?: string | null): Promise<string | null> {
+  const direct = formatWhatsAppGroupJid(explicitGroupJid);
+  if (direct) return direct;
+
+  // 1. Primary source: Supabase `system_settings` (`id = 'global'`)
+  try {
+    const { data, error } = await supabase
+      .from('system_settings')
+      .select('config')
+      .eq('id', 'global')
+      .maybeSingle();
+    if (!error && data?.config && typeof data.config === 'object') {
+      const cfg = data.config as Record<string, any>;
+      const fromSystem = formatWhatsAppGroupJid(
+        cfg.team_work_group_jid || cfg.teamWhatsAppGroupJid || cfg.team_whatsapp_group_jid || cfg.groupJid
+      );
+      if (fromSystem) return fromSystem;
+    }
+  } catch {
+    // fallback below
+  }
+
+  // 2. Secondary source: Supabase `app_settings` (`whatsapp_team_group_config`)
+  try {
+    const user = getStoredUser();
+    const keys = user?.id
+      ? [`whatsapp_team_group_config:${user.id}`, 'whatsapp_team_group_config']
+      : ['whatsapp_team_group_config'];
+    const { data, error } = await supabase
+      .from('app_settings')
+      .select('key, value')
+      .in('key', keys);
+    if (!error && Array.isArray(data)) {
+      const scoped = user?.id
+        ? data.find((r: any) => r.key === `whatsapp_team_group_config:${user.id}`)
+        : null;
+      const globalRow = data.find((r: any) => r.key === 'whatsapp_team_group_config');
+      for (const row of [scoped, globalRow]) {
+        if (!row?.value) continue;
+        try {
+          const parsed = typeof row.value === 'string' ? JSON.parse(row.value) : row.value;
+          const jid = formatWhatsAppGroupJid(parsed?.groupJid);
+          if (jid) return jid;
+        } catch {
+          // ignore malformed row
+        }
+      }
+    }
+  } catch {
+    // fallback below
+  }
+
+  // 3. Fallback: Local cached settings in localStorage
+  if (typeof window !== 'undefined') {
+    try {
+      const rawSys = window.localStorage.getItem('youthnet_global_system_settings');
+      if (rawSys) {
+        const parsed = JSON.parse(rawSys);
+        const jid = formatWhatsAppGroupJid(
+          parsed?.team_work_group_jid || parsed?.teamWhatsAppGroupJid || parsed?.team_whatsapp_group_jid
+        );
+        if (jid) return jid;
+      }
+      const rawGroup = window.localStorage.getItem('youthnet_whatsapp_team_group');
+      if (rawGroup) {
+        const parsed = JSON.parse(rawGroup);
+        const jid = formatWhatsAppGroupJid(parsed?.groupJid);
+        if (jid) return jid;
+      }
+    } catch {
+      // ignore localStorage read errors
+    }
+  }
+
+  return null;
+}
+
+async function resolveAssignedAgentPhoneForDispatch(params: {
+  assignedAgentId?: string | null;
+  assignedAgentName?: string | null;
+  assignedAgentPhone?: string | null;
+}): Promise<{ phone: string; fullName?: string }> {
+  const directPhone = String(params.assignedAgentPhone || '').trim();
+  if (isValidWhatsAppPhone(directPhone)) {
+    return { phone: directPhone, fullName: params.assignedAgentName || undefined };
+  }
+
+  const cleanAgentId = String(params.assignedAgentId || '').trim();
+  const cleanAgentName = String(params.assignedAgentName || '').trim();
+  if (!cleanAgentId && !cleanAgentName) {
+    return { phone: '' };
+  }
+
+  try {
+    if (cleanAgentId && cleanAgentId !== 'AUTO') {
+      const { data } = await supabase
+        .from('portal_users')
+        .select('id, full_name, phone, whatsapp_phone, whatsapp_support_phone')
+        .eq('id', cleanAgentId)
+        .maybeSingle();
+      if (data) {
+        const row = data as any;
+        const foundPhone = String(
+          row.whatsapp_phone || row.phone || row.whatsapp_support_phone || ''
+        ).trim();
+        return { phone: foundPhone, fullName: row.full_name || cleanAgentName || undefined };
+      }
+    }
+
+    if (cleanAgentName && !/^(field support team|noc support|unassigned)$/i.test(cleanAgentName)) {
+      const { data } = await supabase
+        .from('portal_users')
+        .select('id, full_name, phone, whatsapp_phone, whatsapp_support_phone')
+        .ilike('full_name', cleanAgentName)
+        .limit(1)
+        .maybeSingle();
+      if (data) {
+        const row = data as any;
+        const foundPhone = String(
+          row.whatsapp_phone || row.phone || row.whatsapp_support_phone || ''
+        ).trim();
+        return { phone: foundPhone, fullName: row.full_name || cleanAgentName };
+      }
+    }
+  } catch {
+    // ignore lookup failure
+  }
+
+  return { phone: '' };
+}
+
+export interface ComplaintWhatsAppDispatchResult {
+  clientResult: AutoWhatsAppTriggerResponse;
+  groupResult: AutoWhatsAppTriggerResponse;
+  agentResult: AutoWhatsAppTriggerResponse;
+  resolvedGroupJid: string | null;
+  resolvedAgentPhone: string | null;
+}
+
 /**
- * Automated Complaint Creation WhatsApp Dispatch:
- * Sends BOTH:
- *  a) Confirmation message to the client's phone number (`COMPLAINT_CREATED_CLIENT`)
- *  b) Dispatch alert to the configured Team WhatsApp Work Group (`COMPLAINT_CREATED_GROUP`)
+ * Formats a concise, exact toast message summarizing which of the 3 complaint recipients
+ * (Client, Team Group, Assigned Agent) received WhatsApp alerts and any missing fields/errors.
+ */
+export function formatComplaintDispatchToastSummary(
+  ticketId: string,
+  result: ComplaintWhatsAppDispatchResult
+): { message: string; type: 'success' | 'warning' } {
+  const sentTo: string[] = [];
+  const notes: string[] = [];
+
+  if (result.clientResult.ok && result.clientResult.status === 'SENT') {
+    sentTo.push('Client');
+  } else {
+    notes.push(
+      `Client: ${result.clientResult.skippedReason || result.clientResult.error || 'not sent'}`
+    );
+  }
+
+  if (result.groupResult.ok && result.groupResult.status === 'SENT') {
+    sentTo.push('Team Group');
+  } else {
+    notes.push(
+      `Team Group: ${result.groupResult.skippedReason || result.groupResult.error || 'not sent'}`
+    );
+  }
+
+  if (result.agentResult.ok && result.agentResult.status === 'SENT') {
+    sentTo.push('Assigned Agent');
+  } else {
+    notes.push(
+      `Agent: ${result.agentResult.skippedReason || result.agentResult.error || 'not sent'}`
+    );
+  }
+
+  const formatList = (items: string[]) =>
+    items.length <= 1
+      ? items[0] || ''
+      : `${items.slice(0, -1).join(', ')} & ${items[items.length - 1]}`;
+
+  if (sentTo.length === 3) {
+    return {
+      message: `Ticket #${ticketId} created: WhatsApp sent to Client, Team Group & Assigned Agent`,
+      type: 'success',
+    };
+  }
+
+  if (sentTo.length > 0) {
+    return {
+      message: `Ticket #${ticketId} created: WhatsApp sent to ${formatList(sentTo)} (${notes.join(' | ')})`,
+      type: 'warning',
+    };
+  }
+
+  return {
+    message: `Ticket #${ticketId} created — WhatsApp alerts skipped/failed (${notes.join(' | ')})`,
+    type: 'warning',
+  };
+}
+
+/**
+ * Automated Complaint Creation WhatsApp Dispatch (3 Parallel Dispatches):
+ *  a) Confirmation message to the Client's phone number (`COMPLAINT_CREATED_CLIENT`)
+ *  b) Dispatch alert to the configured Team WhatsApp Work Group (`COMPLAINT_CREATED_GROUP`, `@g.us`)
+ *  c) Assigned Ticket Alert directly to the Assigned Field Agent's WhatsApp (`COMPLAINT_ASSIGNED_AGENT`)
  */
 export async function dispatchComplaintCreatedWhatsApp(payload: {
   ticketId: string;
@@ -977,36 +1221,43 @@ export async function dispatchComplaintCreatedWhatsApp(payload: {
   area?: string | null;
   address?: string | null;
   issue: string;
+  assignedAgentId?: string | null;
   assignedAgentName?: string | null;
+  assignedAgentPhone?: string | null;
   subscriber?: Partial<SupabasePortalUser> | null;
   groupJid?: string | null;
-}): Promise<{
-  clientResult: AutoWhatsAppTriggerResponse;
-  groupResult: AutoWhatsAppTriggerResponse;
-}> {
+}): Promise<ComplaintWhatsAppDispatchResult> {
   const cleanUser = String(payload.subscriberUsername || '').trim();
   let subData: Partial<SupabasePortalUser> | null = payload.subscriber ? { ...payload.subscriber } : null;
 
-  if (cleanUser && (!subData?.phone || !subData?.address || !subData?.area)) {
-    try {
-      const { data: freshSub } = await supabase
-        .from('portal_users')
-        .select('id, username, full_name, phone, area, address, dealer_id, sub_dealer_id')
-        .ilike('username', cleanUser)
-        .maybeSingle();
-      if (freshSub) {
-        subData = { ...(freshSub as Partial<SupabasePortalUser>), ...(subData || {}) };
-      }
-    } catch {
-      // keep provided fields
-    }
+  const [freshSubRes, resolvedGroupJid, resolvedAgent] = await Promise.all([
+    cleanUser && (!subData?.phone || !subData?.address || !subData?.area)
+      ? Promise.resolve(
+          supabase
+            .from('portal_users')
+            .select('id, username, full_name, phone, area, address, dealer_id, sub_dealer_id')
+            .ilike('username', cleanUser)
+            .maybeSingle()
+        ).catch(() => ({ data: null }))
+      : Promise.resolve({ data: null }),
+    resolveTeamWorkGroupJidForDispatch(payload.groupJid),
+    resolveAssignedAgentPhoneForDispatch({
+      assignedAgentId: payload.assignedAgentId,
+      assignedAgentName: payload.assignedAgentName,
+      assignedAgentPhone: payload.assignedAgentPhone,
+    }),
+  ]);
+
+  if (freshSubRes?.data) {
+    subData = { ...(freshSubRes.data as Partial<SupabasePortalUser>), ...(subData || {}) };
   }
 
   const clientName = payload.clientName || subData?.full_name || cleanUser || 'Subscriber';
   const clientPhone = payload.phone || subData?.phone || '';
   const area = payload.area || subData?.area || 'Main Service Area';
   const address = payload.address || subData?.address || 'On file';
-  const agentName = payload.assignedAgentName || 'Field Support Team';
+  const agentName = resolvedAgent.fullName || payload.assignedAgentName || 'Field Support Team';
+  const agentPhone = resolvedAgent.phone || '';
 
   const baseVars = {
     subscriberName: clientName,
@@ -1019,41 +1270,82 @@ export async function dispatchComplaintCreatedWhatsApp(payload: {
     agentName,
   };
 
+  const subscriberRef = {
+    ...(subData || {}),
+    username: cleanUser,
+    full_name: clientName,
+    phone: clientPhone,
+  };
+
+  // 1. To Client
   const clientPromise: Promise<AutoWhatsAppTriggerResponse> = isValidWhatsAppPhone(clientPhone)
     ? triggerAutoWhatsAppNotification({
         eventType: 'COMPLAINT_CREATED_CLIENT',
         manualTrigger: true,
         subscriberUsername: cleanUser,
-        subscriber: {
-          ...(subData || {}),
-          username: cleanUser,
-          full_name: clientName,
-          phone: clientPhone,
-        },
+        subscriber: subscriberRef,
+        to: clientPhone,
         messageVars: baseVars,
       })
     : Promise.resolve({
         ok: false,
         status: 'SKIPPED',
-        skippedReason: 'Subscriber phone missing for complaint confirmation',
+        skippedReason: 'Subscriber phone missing',
       });
 
-  const groupPromise: Promise<AutoWhatsAppTriggerResponse> = triggerAutoWhatsAppNotification({
-    eventType: 'COMPLAINT_CREATED_GROUP',
-    manualTrigger: true,
-    subscriberUsername: cleanUser,
-    subscriber: {
-      ...(subData || {}),
-      username: cleanUser,
-      full_name: clientName,
-      phone: clientPhone,
-    },
-    groupJid: payload.groupJid || undefined,
-    messageVars: baseVars,
-  });
+  // 2. To Team WhatsApp Work Group (@g.us)
+  const groupPromise: Promise<AutoWhatsAppTriggerResponse> = resolvedGroupJid
+    ? triggerAutoWhatsAppNotification({
+        eventType: 'COMPLAINT_CREATED_GROUP',
+        manualTrigger: true,
+        subscriberUsername: cleanUser,
+        subscriber: subscriberRef,
+        to: resolvedGroupJid,
+        groupJid: resolvedGroupJid,
+        messageVars: baseVars,
+      })
+    : Promise.resolve({
+        ok: false,
+        status: 'SKIPPED',
+        skippedReason: 'Team Work Group JID (@g.us) not configured',
+      });
 
-  const [clientResult, groupResult] = await Promise.all([clientPromise, groupPromise]);
-  return { clientResult, groupResult };
+  // 3. To Assigned Field Agent
+  const hasAssignedAgent = Boolean(
+    payload.assignedAgentId ||
+      (payload.assignedAgentName &&
+        !/^(field support team|noc support|unassigned)$/i.test(payload.assignedAgentName.trim()))
+  );
+  const agentPromise: Promise<AutoWhatsAppTriggerResponse> = isValidWhatsAppPhone(agentPhone)
+    ? triggerAutoWhatsAppNotification({
+        eventType: 'COMPLAINT_ASSIGNED_AGENT',
+        manualTrigger: true,
+        subscriberUsername: cleanUser,
+        subscriber: subscriberRef,
+        to: agentPhone,
+        messageVars: baseVars,
+      })
+    : Promise.resolve({
+        ok: false,
+        status: 'SKIPPED',
+        skippedReason: hasAssignedAgent
+          ? 'Assigned Agent phone missing in portal_users'
+          : 'No field agent assigned',
+      });
+
+  const [clientResult, groupResult, agentResult] = await Promise.all([
+    clientPromise,
+    groupPromise,
+    agentPromise,
+  ]);
+
+  return {
+    clientResult,
+    groupResult,
+    agentResult,
+    resolvedGroupJid,
+    resolvedAgentPhone: agentPhone || null,
+  };
 }
 
 /**

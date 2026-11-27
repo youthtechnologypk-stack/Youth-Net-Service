@@ -117,6 +117,10 @@ const EVENT_LABELS: Record<string, { label: string; color: string }> = {
     label: 'Complaint (Team Group)',
     color: 'bg-fuchsia-500/15 text-fuchsia-300 border-fuchsia-500/30',
   },
+  COMPLAINT_ASSIGNED_AGENT: {
+    label: 'Complaint (Assigned Agent)',
+    color: 'bg-indigo-500/15 text-indigo-300 border-indigo-500/30',
+  },
   COMPLAINT_RESOLVED_CLIENT: {
     label: 'Complaint Solved',
     color: 'bg-lime-500/15 text-lime-300 border-lime-500/30',
@@ -1452,6 +1456,7 @@ export const WhatsAppGatewayView: React.FC<WhatsAppGatewayViewProps> = ({
               <option value="AGENT_PAYMENT_RECEIPT">Agent Cash Confirmed</option>
               <option value="COMPLAINT_CREATED_CLIENT">Complaint (Client)</option>
               <option value="COMPLAINT_CREATED_GROUP">Complaint (Team Group)</option>
+              <option value="COMPLAINT_ASSIGNED_AGENT">Complaint (Assigned Agent)</option>
               <option value="COMPLAINT_RESOLVED_CLIENT">Complaint Solved</option>
               <option value="CUSTOM_MESSAGE">Custom Broadcast</option>
               <option value="MANUAL_TEST">Gateway Test</option>

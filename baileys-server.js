@@ -110,8 +110,17 @@ function formatWhatsAppDigits(rawPhone) {
   return digits.length >= 10 && digits.length <= 15 ? digits : null;
 }
 
-function formatWhatsAppJid(rawPhone) {
-  const digits = formatWhatsAppDigits(rawPhone);
+function formatWhatsAppJid(rawRecipient) {
+  const clean = String(rawRecipient || '').trim();
+  if (!clean) return null;
+  // Preserve @g.us group JIDs and @s.whatsapp.net user JIDs exact as-is (do NOT strip digits or append @s.whatsapp.net)
+  if (/^[0-9-]{6,40}@g\.us$/i.test(clean)) {
+    return clean.toLowerCase();
+  }
+  if (/^[0-9]{10,15}@s\.whatsapp\.net$/i.test(clean)) {
+    return clean.toLowerCase();
+  }
+  const digits = formatWhatsAppDigits(clean);
   return digits ? `${digits}@s.whatsapp.net` : null;
 }
 
@@ -153,6 +162,7 @@ const DEFAULT_TEMPLATE_MAP = {
   AGENT_PAYMENT_RECEIPT: `*{company_name} — Agent Collection Confirmed*\n\nDear *{agent_name}*,\nYour payment collection has been recorded in the billing ledger.\n\n• *Subscriber:* {client_name} ({username})\n• *Invoice #:* {invoice_no}\n• *Amount Collected:* {amount}\n• *Payment Mode:* {payment_method}\n• *Updated Cash-in-Hand Balance:* {agent_balance}\n\n— *{company_name}* Accounts Desk`,
   COMPLAINT_CREATED_CLIENT: `*{company_name} — Support Ticket Registered*\n\nDear *{client_name}* ({username}),\nWe have received your complaint and assigned our technical support team to resolve it promptly.\n\n• *Ticket ID:* {ticket_id}\n• *Issue Reported:* {issue}\n• *Area / Node:* {area}\n\nWe will notify you as soon as your connection is restored.\n— *{company_name}*\nSupport Helpline: {helpline}`,
   COMPLAINT_CREATED_GROUP: `🚨 *NEW COMPLAINT DISPATCH — {ticket_id}*\n\n• *Client Name:* {client_name}\n• *PPPoE Username:* {username}\n• *Coverage Area / Node:* {area}\n• *Phone Number:* {phone}\n• *Address:* {address}\n• *Assigned Tech:* {agent_name}\n• *Issue Details:* {issue}\n\nPlease attend urgently and mark Solved in the Field Portal once fixed.\n— *{company_name}* NOC`,
+  COMPLAINT_ASSIGNED_AGENT: `🛠️ *ASSIGNED TICKET ALERT — {ticket_id}*\n\nDear *{agent_name}*,\nA new subscriber complaint has been assigned to you:\n\n• *Ticket ID:* {ticket_id}\n• *Client Name:* {client_name} ({username})\n• *Client Phone:* {phone}\n• *Area / Node:* {area}\n• *Address:* {address}\n• *Issue Details:* {issue}\n\nPlease contact the subscriber and resolve promptly.\n— *{company_name}* NOC`,
   COMPLAINT_RESOLVED_CLIENT: `*{company_name} — Complaint Resolved ✅*\n\nDear *{client_name}* ({username}),\nYour support complaint has been marked *RESOLVED* by our technical team.\n\n• *Ticket ID:* {ticket_id}\n• *Issue:* {issue}\n• *Resolved By:* {agent_name}\n\nIf you still experience any issue, please reply or call our support helpline.\n— *{company_name}*\nSupport Helpline: {helpline}`,
 };
 
@@ -177,6 +187,8 @@ function mapEventTypeToTemplateKey(eventType) {
       return 'COMPLAINT_CREATED_CLIENT';
     case 'COMPLAINT_CREATED_GROUP':
       return 'COMPLAINT_CREATED_GROUP';
+    case 'COMPLAINT_ASSIGNED_AGENT':
+      return 'COMPLAINT_ASSIGNED_AGENT';
     case 'COMPLAINT_RESOLVED_CLIENT':
       return 'COMPLAINT_RESOLVED_CLIENT';
     default:
@@ -187,7 +199,7 @@ function mapEventTypeToTemplateKey(eventType) {
 function formatWhatsAppGroupJid(raw) {
   const clean = String(raw || '').trim();
   if (!clean) return null;
-  if (/^[0-9-]{6,36}@g\.us$/i.test(clean)) return clean.toLowerCase();
+  if (/^[0-9-]{6,40}@g\.us$/i.test(clean)) return clean.toLowerCase();
   return null;
 }
 
@@ -220,44 +232,63 @@ async function loadAppSettingsCache() {
   if (!supabase) return;
   if (Date.now() - settingsCache.loadedAt < 30_000) return;
   try {
-    const { data, error } = await supabase
-      .from('app_settings')
-      .select('key, value')
-      .or(`key.like.${WHATSAPP_TEMPLATES_SETTINGS_KEY}%,key.like.${WHATSAPP_TEAM_GROUP_SETTINGS_KEY}%`);
-    if (error || !Array.isArray(data)) {
-      settingsCache.loadedAt = Date.now();
-      return;
-    }
+    const [appRes, sysRes] = await Promise.all([
+      supabase
+        .from('app_settings')
+        .select('key, value')
+        .or(`key.like.${WHATSAPP_TEMPLATES_SETTINGS_KEY}%,key.like.${WHATSAPP_TEAM_GROUP_SETTINGS_KEY}%`),
+      supabase.from('system_settings').select('id, config').eq('id', 'global').maybeSingle(),
+    ]);
     const globalTemplates = {};
     const scopedTemplates = new Map();
     let globalTeamGroup = null;
     const scopedTeamGroups = new Map();
-    for (const row of data) {
-      const key = String(row.key || '').trim();
-      if (!key || !row.value) continue;
-      let parsed;
-      try {
-        parsed = typeof row.value === 'string' ? JSON.parse(row.value) : row.value;
-      } catch {
-        continue;
+
+    // Hydrate fallback Team Work Group from system_settings.config first
+    if (!sysRes.error && sysRes.data?.config && typeof sysRes.data.config === 'object') {
+      const cfg = sysRes.data.config;
+      const sysJid = String(
+        cfg.team_work_group_jid || cfg.teamWhatsAppGroupJid || cfg.team_whatsapp_group_jid || ''
+      ).trim();
+      const sysName = String(
+        cfg.team_work_group_name || cfg.teamWhatsAppGroupName || cfg.team_whatsapp_group_name || ''
+      ).trim();
+      if (sysJid) {
+        globalTeamGroup = { groupJid: sysJid, groupName: sysName, inviteLink: '' };
       }
-      if (!parsed || typeof parsed !== 'object') continue;
-      if (key === WHATSAPP_TEMPLATES_SETTINGS_KEY) {
-        Object.assign(globalTemplates, parsed);
-      } else if (key.startsWith(`${WHATSAPP_TEMPLATES_SETTINGS_KEY}:`)) {
-        scopedTemplates.set(key.slice(`${WHATSAPP_TEMPLATES_SETTINGS_KEY}:`.length), parsed);
-      } else if (key === WHATSAPP_TEAM_GROUP_SETTINGS_KEY) {
-        globalTeamGroup = {
-          groupJid: String(parsed.groupJid || '').trim(),
-          groupName: String(parsed.groupName || '').trim(),
-          inviteLink: String(parsed.inviteLink || '').trim(),
-        };
-      } else if (key.startsWith(`${WHATSAPP_TEAM_GROUP_SETTINGS_KEY}:`)) {
-        scopedTeamGroups.set(key.slice(`${WHATSAPP_TEAM_GROUP_SETTINGS_KEY}:`.length), {
-          groupJid: String(parsed.groupJid || '').trim(),
-          groupName: String(parsed.groupName || '').trim(),
-          inviteLink: String(parsed.inviteLink || '').trim(),
-        });
+    }
+
+    if (!appRes.error && Array.isArray(appRes.data)) {
+      for (const row of appRes.data) {
+        const key = String(row.key || '').trim();
+        if (!key || !row.value) continue;
+        let parsed;
+        try {
+          parsed = typeof row.value === 'string' ? JSON.parse(row.value) : row.value;
+        } catch {
+          continue;
+        }
+        if (!parsed || typeof parsed !== 'object') continue;
+        if (key === WHATSAPP_TEMPLATES_SETTINGS_KEY) {
+          Object.assign(globalTemplates, parsed);
+        } else if (key.startsWith(`${WHATSAPP_TEMPLATES_SETTINGS_KEY}:`)) {
+          scopedTemplates.set(key.slice(`${WHATSAPP_TEMPLATES_SETTINGS_KEY}:`.length), parsed);
+        } else if (key === WHATSAPP_TEAM_GROUP_SETTINGS_KEY) {
+          const jid = String(parsed.groupJid || '').trim();
+          if (jid || !globalTeamGroup) {
+            globalTeamGroup = {
+              groupJid: jid,
+              groupName: String(parsed.groupName || '').trim(),
+              inviteLink: String(parsed.inviteLink || '').trim(),
+            };
+          }
+        } else if (key.startsWith(`${WHATSAPP_TEAM_GROUP_SETTINGS_KEY}:`)) {
+          scopedTeamGroups.set(key.slice(`${WHATSAPP_TEAM_GROUP_SETTINGS_KEY}:`.length), {
+            groupJid: String(parsed.groupJid || '').trim(),
+            groupName: String(parsed.groupName || '').trim(),
+            inviteLink: String(parsed.inviteLink || '').trim(),
+          });
+        }
       }
     }
     settingsCache.loadedAt = Date.now();
@@ -1211,6 +1242,7 @@ async function sendAutomatedMessage({
   subscriberUsername,
   eventType,
   messageVars = {},
+  to = null,
   groupJid = null,
   customMessage = null,
   forceSenderPortalUserId,
@@ -1275,19 +1307,29 @@ async function sendAutomatedMessage({
     null;
 
   const rawPhone = messageVars.phone || resolvedSub?.phone || '';
+  const explicitTarget = String(to || groupJid || '').trim();
+  const explicitTargetIsGroup = Boolean(formatWhatsAppGroupJid(explicitTarget));
+
   let jid = null;
   let recipientDigits = formatWhatsAppDigits(rawPhone) || String(rawPhone || 'unknown');
 
-  if (groupJid || eventType === 'COMPLAINT_CREATED_GROUP') {
-    const candidateGroup = groupJid || teamGroupCfg?.groupJid || '';
+  if (explicitTargetIsGroup || groupJid || eventType === 'COMPLAINT_CREATED_GROUP') {
+    const candidateGroup = explicitTargetIsGroup
+      ? explicitTarget
+      : groupJid || teamGroupCfg?.groupJid || '';
     jid = formatWhatsAppGroupJid(candidateGroup);
     recipientDigits = jid
-      ? teamGroupCfg?.groupName
+      ? teamGroupCfg?.groupName && teamGroupCfg?.groupJid?.toLowerCase() === jid
         ? `${teamGroupCfg.groupName} (${jid})`
         : jid
       : candidateGroup || 'UNCONFIGURED_TEAM_GROUP';
+  } else if (explicitTarget) {
+    // Preserve @g.us or @s.whatsapp.net exact as-is; format plain numbers (+923... / 03...) into 923...@s.whatsapp.net
+    jid = formatWhatsAppJid(explicitTarget);
+    recipientDigits = jid || explicitTarget;
   } else {
     jid = formatWhatsAppJid(rawPhone);
+    recipientDigits = jid || formatWhatsAppDigits(rawPhone) || String(rawPhone || 'unknown');
   }
 
   const messageBody = buildAutomatedMessage(eventType, {
@@ -1887,6 +1929,7 @@ async function handleWhatsAppSend(req, res) {
       'AGENT_PAYMENT_RECEIPT',
       'COMPLAINT_CREATED_CLIENT',
       'COMPLAINT_CREATED_GROUP',
+      'COMPLAINT_ASSIGNED_AGENT',
       'COMPLAINT_RESOLVED_CLIENT',
       'CUSTOM_MESSAGE',
       'MANUAL_TEST',
@@ -1911,6 +1954,11 @@ async function handleWhatsAppSend(req, res) {
       ? String(body.username).trim().toLowerCase()
       : undefined;
 
+    const rawTo = String(body.to || body.recipient || body.agentPhone || '').trim();
+    const rawGroupJid = String(body.groupJid || '').trim();
+    const resolvedGroupJid =
+      formatWhatsAppGroupJid(rawGroupJid) || formatWhatsAppGroupJid(rawTo) || rawGroupJid || null;
+
     const mergedMessageVars = {
       ...(body.messageVars || {}),
       ...(body.phone && !body.messageVars?.phone ? { phone: String(body.phone).trim() } : {}),
@@ -1924,7 +1972,8 @@ async function handleWhatsAppSend(req, res) {
     const isDirectBroadcast =
       eventType === 'MANUAL_TEST' ||
       (eventType === 'CUSTOM_MESSAGE' && !subscriberUsername) ||
-      eventType === 'COMPLAINT_CREATED_GROUP';
+      eventType === 'COMPLAINT_CREATED_GROUP' ||
+      eventType === 'COMPLAINT_ASSIGNED_AGENT';
     let effectiveSubscriber = body.subscriber || null;
 
     // Enforce multi-tenant scope for Dealers & Sub-Dealers
@@ -1972,7 +2021,8 @@ async function handleWhatsAppSend(req, res) {
       subscriberUsername,
       eventType,
       messageVars: mergedMessageVars,
-      groupJid: body.groupJid ? String(body.groupJid).trim() : null,
+      to: rawTo || null,
+      groupJid: resolvedGroupJid,
       customMessage: body.customMessage ? String(body.customMessage).slice(0, 3000) : null,
       manualTrigger: Boolean(body.manualTrigger) || eventType === 'CUSTOM_MESSAGE',
       forceSenderPortalUserId: eventType === 'MANUAL_TEST' ? String(ctx.actor.id) : undefined,

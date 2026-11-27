@@ -124,12 +124,20 @@ export function sanitizeSystemSettings(
       : autoSendRaw !== false && String(autoSendRaw) !== 'false';
 
   const rawGroupJid = String(
-    src.teamWhatsAppGroupJid ?? src.team_whatsapp_group_jid ?? src.groupJid ?? ''
+    src.teamWhatsAppGroupJid ??
+      src.team_work_group_jid ??
+      src.team_whatsapp_group_jid ??
+      src.groupJid ??
+      ''
   ).trim();
   const teamWhatsAppGroupJid = formatWhatsAppGroupJid(rawGroupJid) || rawGroupJid.slice(0, 80);
 
   const teamWhatsAppGroupName = String(
-    src.teamWhatsAppGroupName ?? src.team_whatsapp_group_name ?? src.groupName ?? ''
+    src.teamWhatsAppGroupName ??
+      src.team_work_group_name ??
+      src.team_whatsapp_group_name ??
+      src.groupName ??
+      ''
   )
     .trim()
     .slice(0, 120);
@@ -452,7 +460,11 @@ export async function saveGlobalSystemSettings(
     .upsert(
       {
         id: 'global',
-        config: sanitized,
+        config: {
+          ...sanitized,
+          team_work_group_jid: sanitized.teamWhatsAppGroupJid,
+          team_work_group_name: sanitized.teamWhatsAppGroupName,
+        },
         updated_at: nowIso,
       },
       { onConflict: 'id' }

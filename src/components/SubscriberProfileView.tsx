@@ -82,6 +82,7 @@ import { buildWhatsAppUrl } from '../lib/whatsappBilling';
 import {
   dispatchComplaintCreatedWhatsApp,
   dispatchDualPaymentReceiptWhatsApp,
+  formatComplaintDispatchToastSummary,
 } from '../lib/whatsappRouting';
 import {
   BillingCycleMode,
@@ -1306,7 +1307,7 @@ export const SubscriberProfileView: React.FC<SubscriberProfileViewProps> = ({
 
       if (error) throw new Error(error.message);
 
-      void dispatchComplaintCreatedWhatsApp({
+      const waRes = await dispatchComplaintCreatedWhatsApp({
         ticketId: ticketNo,
         subscriberUsername: cleanUsername,
         clientName: user?.full_name || cleanUsername,
@@ -1314,11 +1315,15 @@ export const SubscriberProfileView: React.FC<SubscriberProfileViewProps> = ({
         area: user?.area || 'Main Service Area',
         address: user?.address || 'On file',
         issue: ticketForm.issue.trim(),
+        assignedAgentId: resolvedAgentId,
         assignedAgentName: resolvedAgentName,
+        assignedAgentPhone:
+          selectedAgent?.whatsapp_phone || selectedAgent?.phone || null,
         subscriber: user || undefined,
-      }).catch(() => {});
+      });
 
-      showToast(`Ticket #${ticketNo} logged successfully! Assigned to ${resolvedAgentName}.`);
+      const summary = formatComplaintDispatchToastSummary(ticketNo, waRes);
+      showToast(summary.message, summary.type === 'success' ? 'success' : 'error');
       setIsNewTicketModalOpen(false);
       setTicketForm({
         issue: '',

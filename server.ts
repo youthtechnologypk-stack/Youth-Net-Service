@@ -3493,6 +3493,7 @@ const handleWhatsAppAutoSend = async (req: Request, res: Response) => {
       'AGENT_PAYMENT_RECEIPT',
       'COMPLAINT_CREATED_CLIENT',
       'COMPLAINT_CREATED_GROUP',
+      'COMPLAINT_ASSIGNED_AGENT',
       'COMPLAINT_RESOLVED_CLIENT',
       'CUSTOM_MESSAGE',
       'MANUAL_TEST',
@@ -3517,6 +3518,15 @@ const handleWhatsAppAutoSend = async (req: Request, res: Response) => {
       ? String(body.username).trim().toLowerCase()
       : undefined;
 
+    const rawTo = String(body.to || body.recipient || body.agentPhone || '').trim();
+    const rawGroupJid = String(body.groupJid || '').trim();
+    const resolvedGroupJid =
+      /^[0-9-]{6,40}@g\.us$/i.test(rawGroupJid)
+        ? rawGroupJid.toLowerCase()
+        : /^[0-9-]{6,40}@g\.us$/i.test(rawTo)
+        ? rawTo.toLowerCase()
+        : rawGroupJid || undefined;
+
     const mergedMessageVars = {
       ...(body.messageVars || {}),
       ...(body.phone && !body.messageVars?.phone ? { phone: String(body.phone).trim() } : {}),
@@ -3530,7 +3540,8 @@ const handleWhatsAppAutoSend = async (req: Request, res: Response) => {
     const isDirectBroadcast =
       eventType === 'MANUAL_TEST' ||
       (eventType === 'CUSTOM_MESSAGE' && !subscriberUsername) ||
-      eventType === 'COMPLAINT_CREATED_GROUP';
+      eventType === 'COMPLAINT_CREATED_GROUP' ||
+      eventType === 'COMPLAINT_ASSIGNED_AGENT';
     let effectiveSubscriber = body.subscriber || null;
 
     // Enforce strict multi-tenant scope so a Dealer/Sub-Dealer cannot trigger messages for another tenant's subscriber
@@ -3575,7 +3586,8 @@ const handleWhatsAppAutoSend = async (req: Request, res: Response) => {
       subscriberUsername,
       eventType: eventType as any,
       messageVars: mergedMessageVars,
-      groupJid: body.groupJid ? String(body.groupJid).trim() : undefined,
+      to: rawTo || undefined,
+      groupJid: resolvedGroupJid,
       customMessage: body.customMessage ? String(body.customMessage).slice(0, 3000) : undefined,
       manualTrigger: Boolean(body.manualTrigger) || eventType === 'CUSTOM_MESSAGE',
       forceSenderPortalUserId:

@@ -45,6 +45,8 @@ import { formatCurrency } from './CurrencyContext';
 import {
   dispatchComplaintCreatedWhatsApp,
   dispatchComplaintResolvedWhatsApp,
+  emitGlobalToast,
+  formatComplaintDispatchToastSummary,
 } from '../lib/whatsappRouting';
 import {
   apiClient,
@@ -265,6 +267,7 @@ interface ISPContextType {
     autoAssignNow?: boolean,
     options?: {
       skipSupabaseInsert?: boolean;
+      skipAutoWhatsApp?: boolean;
       existingId?: string;
       existingTicketNumber?: string;
       existingCreatedAt?: string;
@@ -4480,6 +4483,7 @@ export const ISPProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
     autoAssignNow?: boolean,
     options?: {
       skipSupabaseInsert?: boolean;
+      skipAutoWhatsApp?: boolean;
       existingId?: string;
       existingTicketNumber?: string;
       existingCreatedAt?: string;
@@ -4569,17 +4573,31 @@ export const ISPProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
       }
     }
 
-    // Automated Baileys WhatsApp: Client confirmation + Team Work Group dispatch alert
-    void dispatchComplaintCreatedWhatsApp({
-      ticketId: newTkt.ticketNumber,
-      subscriberUsername: (newTkt.pppoeUsername || newTkt.customerName || newTkt.customerId || '').trim(),
-      clientName: newTkt.customerName,
-      phone: newTkt.customerPhone,
-      area: newTkt.areaNode,
-      address: newTkt.customerAddress,
-      issue: `${newTkt.title}${newTkt.description ? `: ${newTkt.description}` : ''}`,
-      assignedAgentName: assignedAgentName || 'Field Support Team',
-    }).catch(() => {});
+    // Automated Baileys WhatsApp (3-way parallel): Client confirmation + Team Work Group (@g.us) + Assigned Field Agent
+    if (!options?.skipAutoWhatsApp) {
+      const matchedAgent = assignedAgentId
+        ? agents.find((a) => a.id === assignedAgentId)
+        : assignedAgentName
+        ? agents.find((a) => a.name.toLowerCase() === assignedAgentName!.toLowerCase())
+        : undefined;
+      void dispatchComplaintCreatedWhatsApp({
+        ticketId: newTkt.ticketNumber,
+        subscriberUsername: (newTkt.pppoeUsername || newTkt.customerName || newTkt.customerId || '').trim(),
+        clientName: newTkt.customerName,
+        phone: newTkt.customerPhone,
+        area: newTkt.areaNode,
+        address: newTkt.customerAddress,
+        issue: `${newTkt.title}${newTkt.description ? `: ${newTkt.description}` : ''}`,
+        assignedAgentId: assignedAgentId || null,
+        assignedAgentName: assignedAgentName || 'Field Support Team',
+        assignedAgentPhone: matchedAgent?.phone || null,
+      })
+        .then((waRes) => {
+          const summary = formatComplaintDispatchToastSummary(newTkt.ticketNumber, waRes);
+          emitGlobalToast(summary.message, summary.type);
+        })
+        .catch(() => {});
+    }
 
     return newTkt;
   };

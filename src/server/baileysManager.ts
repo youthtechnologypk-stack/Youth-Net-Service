@@ -116,51 +116,68 @@ class MultiTenantBaileysManager {
     if (!supabase) return;
     if (Date.now() - this.settingsCache.loadedAt < 30_000) return;
     try {
-      const { data, error } = await supabase
-        .from('app_settings')
-        .select('key, value')
-        .or(`key.like.${WHATSAPP_TEMPLATES_SETTINGS_KEY}%,key.like.${WHATSAPP_TEAM_GROUP_SETTINGS_KEY}%`);
-
-      if (error || !Array.isArray(data)) {
-        this.settingsCache.loadedAt = Date.now();
-        return;
-      }
+      const [appRes, sysRes] = await Promise.all([
+        supabase
+          .from('app_settings')
+          .select('key, value')
+          .or(`key.like.${WHATSAPP_TEMPLATES_SETTINGS_KEY}%,key.like.${WHATSAPP_TEAM_GROUP_SETTINGS_KEY}%`),
+        supabase.from('system_settings').select('id, config').eq('id', 'global').maybeSingle(),
+      ]);
 
       const globalTemplates: Partial<Record<EditableWhatsAppTemplateKey, string>> = {};
       const scopedTemplates = new Map<string, Partial<Record<EditableWhatsAppTemplateKey, string>>>();
       let globalTeamGroup: TeamWorkGroupConfig | null = null;
       const scopedTeamGroups = new Map<string, TeamWorkGroupConfig>();
 
-      for (const row of data as Array<{ key?: string; value?: string }>) {
-        const key = String(row.key || '').trim();
-        if (!key || !row.value) continue;
-        let parsed: any = null;
-        try {
-          parsed = typeof row.value === 'string' ? JSON.parse(row.value) : row.value;
-        } catch {
-          continue;
+      // Hydrate fallback Team Work Group from system_settings.config
+      if (!sysRes.error && sysRes.data?.config && typeof sysRes.data.config === 'object') {
+        const cfg = sysRes.data.config as Record<string, any>;
+        const sysJid = String(
+          cfg.team_work_group_jid || cfg.teamWhatsAppGroupJid || cfg.team_whatsapp_group_jid || ''
+        ).trim();
+        const sysName = String(
+          cfg.team_work_group_name || cfg.teamWhatsAppGroupName || cfg.team_whatsapp_group_name || ''
+        ).trim();
+        if (sysJid) {
+          globalTeamGroup = { groupJid: sysJid, groupName: sysName, inviteLink: '' };
         }
-        if (!parsed || typeof parsed !== 'object') continue;
+      }
 
-        if (key === WHATSAPP_TEMPLATES_SETTINGS_KEY) {
-          Object.assign(globalTemplates, parsed);
-        } else if (key.startsWith(`${WHATSAPP_TEMPLATES_SETTINGS_KEY}:`)) {
-          const uid = key.slice(`${WHATSAPP_TEMPLATES_SETTINGS_KEY}:`.length);
-          if (uid) scopedTemplates.set(uid, parsed);
-        } else if (key === WHATSAPP_TEAM_GROUP_SETTINGS_KEY) {
-          globalTeamGroup = {
-            groupJid: String(parsed.groupJid || '').trim(),
-            groupName: String(parsed.groupName || '').trim(),
-            inviteLink: String(parsed.inviteLink || '').trim(),
-          };
-        } else if (key.startsWith(`${WHATSAPP_TEAM_GROUP_SETTINGS_KEY}:`)) {
-          const uid = key.slice(`${WHATSAPP_TEAM_GROUP_SETTINGS_KEY}:`.length);
-          if (uid) {
-            scopedTeamGroups.set(uid, {
-              groupJid: String(parsed.groupJid || '').trim(),
-              groupName: String(parsed.groupName || '').trim(),
-              inviteLink: String(parsed.inviteLink || '').trim(),
-            });
+      if (!appRes.error && Array.isArray(appRes.data)) {
+        for (const row of appRes.data as Array<{ key?: string; value?: string }>) {
+          const key = String(row.key || '').trim();
+          if (!key || !row.value) continue;
+          let parsed: any = null;
+          try {
+            parsed = typeof row.value === 'string' ? JSON.parse(row.value) : row.value;
+          } catch {
+            continue;
+          }
+          if (!parsed || typeof parsed !== 'object') continue;
+
+          if (key === WHATSAPP_TEMPLATES_SETTINGS_KEY) {
+            Object.assign(globalTemplates, parsed);
+          } else if (key.startsWith(`${WHATSAPP_TEMPLATES_SETTINGS_KEY}:`)) {
+            const uid = key.slice(`${WHATSAPP_TEMPLATES_SETTINGS_KEY}:`.length);
+            if (uid) scopedTemplates.set(uid, parsed);
+          } else if (key === WHATSAPP_TEAM_GROUP_SETTINGS_KEY) {
+            const jid = String(parsed.groupJid || '').trim();
+            if (jid || !globalTeamGroup) {
+              globalTeamGroup = {
+                groupJid: jid,
+                groupName: String(parsed.groupName || '').trim(),
+                inviteLink: String(parsed.inviteLink || '').trim(),
+              };
+            }
+          } else if (key.startsWith(`${WHATSAPP_TEAM_GROUP_SETTINGS_KEY}:`)) {
+            const uid = key.slice(`${WHATSAPP_TEAM_GROUP_SETTINGS_KEY}:`.length);
+            if (uid) {
+              scopedTeamGroups.set(uid, {
+                groupJid: String(parsed.groupJid || '').trim(),
+                groupName: String(parsed.groupName || '').trim(),
+                inviteLink: String(parsed.inviteLink || '').trim(),
+              });
+            }
           }
         }
       }
@@ -770,6 +787,7 @@ class MultiTenantBaileysManager {
     subscriberUsername?: string | null;
     eventType: WhatsAppEventType;
     messageVars?: Partial<AutomatedMessageTemplateVars> & { phone?: string | null };
+    to?: string | null;
     groupJid?: string | null;
     customMessage?: string | null;
     forceSenderPortalUserId?: string | null;
@@ -919,20 +937,28 @@ class MultiTenantBaileysManager {
     const recipientPhoneRaw = String(
       params.messageVars?.phone || resolvedSubscriber?.phone || ''
     ).trim();
+    const explicitTarget = String(params.to || params.groupJid || '').trim();
+    const explicitTargetIsGroup = Boolean(formatWhatsAppGroupJid(explicitTarget));
 
     let jid: string | null = null;
     let loggedRecipient = recipientPhoneRaw || 'MISSING_PHONE';
 
-    if (params.groupJid || eventType === 'COMPLAINT_CREATED_GROUP') {
-      const candidateGroupJid = params.groupJid || teamGroupConfig?.groupJid || '';
+    if (explicitTargetIsGroup || params.groupJid || eventType === 'COMPLAINT_CREATED_GROUP') {
+      const candidateGroupJid = explicitTargetIsGroup
+        ? explicitTarget
+        : params.groupJid || teamGroupConfig?.groupJid || '';
       jid = formatWhatsAppGroupJid(candidateGroupJid);
       loggedRecipient = jid
-        ? teamGroupConfig?.groupName
+        ? teamGroupConfig?.groupName && teamGroupConfig?.groupJid?.toLowerCase() === jid
           ? `${teamGroupConfig.groupName} (${jid})`
           : jid
         : candidateGroupJid || 'UNCONFIGURED_TEAM_GROUP';
+    } else if (explicitTarget) {
+      jid = formatWhatsAppJid(explicitTarget);
+      loggedRecipient = jid || explicitTarget;
     } else {
       jid = formatWhatsAppJid(recipientPhoneRaw);
+      loggedRecipient = jid || recipientPhoneRaw || 'MISSING_PHONE';
     }
 
     const messageBody = buildAutomatedWhatsAppMessage({

@@ -8,6 +8,11 @@ import { safeMikrotikFetch } from '../services/mikrotikRestClient';
 import { insertTicketSafe, normalizeTicketPriority } from '../lib/anniversaryBilling';
 import { getStoredUser } from '../lib/auth';
 import { filterFieldAgentsForUser, isResellerUser } from '../lib/resellerEngine';
+import {
+  dispatchComplaintCreatedWhatsApp,
+  emitGlobalToast,
+  formatComplaintDispatchToastSummary,
+} from '../lib/whatsappRouting';
 
 export interface CreateTicketModalProps {
   isOpen: boolean;
@@ -385,7 +390,7 @@ export const NewTicketModal: React.FC<CreateTicketModalProps> = ({
         throw new Error(sbErr.message || 'Failed to save ticket to Supabase');
       }
 
-      // 2. Sync ISPContext in-memory state ONLY (skipSupabaseInsert prevents duplicate DB row)
+      // 2. Sync ISPContext in-memory state ONLY (skipSupabaseInsert & skipAutoWhatsApp prevent duplicates)
       createComplaintTicket(
         {
           customerId: selectedSubscriber?.id || `cust-${pppoeUsername || Date.now()}`,
@@ -409,13 +414,33 @@ export const NewTicketModal: React.FC<CreateTicketModalProps> = ({
         false,
         {
           skipSupabaseInsert: true,
+          skipAutoWhatsApp: true,
           existingId: insertedRow?.id,
           existingTicketNumber: insertedRow?.ticket_no || ticketNo,
           existingCreatedAt: insertedRow?.created_at || createdAtIso,
         }
       );
 
-      setStatusMessage(`Ticket ${ticketNo} dispatched successfully to ${assignedName || 'Unassigned Queue'}!`);
+      // 3. Dispatch 3 parallel WhatsApp alerts: Client + Team Work Group (@g.us) + Assigned Field Agent
+      const finalTicketNo = insertedRow?.ticket_no || ticketNo;
+      const waResult = await dispatchComplaintCreatedWhatsApp({
+        ticketId: finalTicketNo,
+        subscriberUsername: cleanSubscriberUsername,
+        clientName: customerName,
+        phone: customerPhone,
+        area: areaNode,
+        address: customerAddress,
+        issue: `[${category.toUpperCase()}] ${title.trim()}${description.trim() ? `: ${description.trim()}` : ''}`,
+        assignedAgentId: assignedId,
+        assignedAgentName: assignedName || 'Field Support Team',
+        assignedAgentPhone:
+          specificAgent?.whatsapp_phone || specificAgent?.phone || null,
+      });
+
+      const summary = formatComplaintDispatchToastSummary(finalTicketNo, waResult);
+      setStatusMessage(summary.message);
+      emitGlobalToast(summary.message, summary.type);
+
       setTitle('');
       setDescription('');
       setAssignedAgentId('');
@@ -423,7 +448,7 @@ export const NewTicketModal: React.FC<CreateTicketModalProps> = ({
 
       setTimeout(() => {
         onClose();
-      }, 650);
+      }, 900);
     } catch (err: any) {
       console.error('Error dispatching ticket:', err);
       setErrorMessage(err?.message || 'Unable to create ticket. Please try again.');
