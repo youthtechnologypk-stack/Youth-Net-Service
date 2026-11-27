@@ -341,6 +341,7 @@ export interface AutomatedMessageTemplateVars {
   amountPaid?: number | null;
   totalAmount?: number | null;
   remainingBalance?: number | null;
+  previousUnpaidBalance?: number | null;
   dueDate?: string | null;
   graceDate?: string | null;
   expiryDate?: string | null;
@@ -420,7 +421,12 @@ export function buildAutomatedWhatsAppMessage(vars: AutomatedMessageTemplateVars
       typeof customText === 'string' && customText.trim()
         ? customText
         : DEFAULT_TEMPLATE_MAP[templateKey];
-    const rendered = renderWhatsAppTemplate(templateBody, renderValues);
+    let rendered = renderWhatsAppTemplate(templateBody, renderValues);
+    const prevUnpaid = Math.max(0, Math.round(Number(vars.previousUnpaidBalance || 0)));
+    if (vars.eventType === 'INVOICE_GENERATED' && prevUnpaid > 0) {
+      const combinedDue = Math.round(primaryAmount + prevUnpaid);
+      rendered += `\n\n⚠️ *Previous Unpaid Balance:* Rs. ${prevUnpaid.toLocaleString()}\n• *Total Combined Payable:* Rs. ${combinedDue.toLocaleString()}`;
+    }
     const shouldAppendPaymentBlock =
       (vars.eventType === 'INVOICE_GENERATED' ||
         vars.eventType === 'PRE_EXPIRY_3D' ||

@@ -330,7 +330,12 @@ function buildAutomatedMessage(eventType, vars = {}) {
       typeof customText === 'string' && customText.trim()
         ? customText
         : DEFAULT_TEMPLATE_MAP[tplKey];
-    const rendered = renderTemplateText(tplBody, renderValues);
+    let rendered = renderTemplateText(tplBody, renderValues);
+    const prevUnpaid = Math.max(0, Math.round(Number(vars.previousUnpaidBalance || 0)));
+    if (eventType === 'INVOICE_GENERATED' && prevUnpaid > 0) {
+      const combinedDue = Math.round(primaryAmount + prevUnpaid);
+      rendered += `\n\n⚠️ *Previous Unpaid Balance:* Rs. ${prevUnpaid.toLocaleString()}\n• *Total Combined Payable:* Rs. ${combinedDue.toLocaleString()}`;
+    }
     const shouldAppendPaymentBlock =
       (eventType === 'INVOICE_GENERATED' ||
         eventType === 'PRE_EXPIRY_3D' ||

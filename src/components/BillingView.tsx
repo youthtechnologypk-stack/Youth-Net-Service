@@ -63,8 +63,7 @@ import {
   safeInsertInvoiceInSupabase,
   safeUpdateInvoiceInSupabase,
   syncSubscriberPackageAndRestoreIfPaid,
-  shiftBillToNextMonth,
-  computeGuardedShiftNextMonthDate,
+  generateNextMonthBillOnShift,
   runFiveDayPreExpiryAutoBillingClient,
 } from '../lib/billingAndNetwork';
 import {
@@ -237,14 +236,14 @@ export const BillingView: React.FC<BillingViewProps> = ({
   const [sendingWaInvoiceId, setSendingWaInvoiceId] = useState<string | null>(null);
   const [waToast, setWaToast] = useState<{
     id: number;
-    status: 'sending' | 'sent' | 'error';
+    status: 'sending' | 'sent' | 'warning' | 'error';
     title: string;
     subtitle?: string;
   } | null>(null);
   const waToastTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   const showWaToast = (
-    toast: { status: 'sending' | 'sent' | 'error'; title: string; subtitle?: string },
+    toast: { status: 'sending' | 'sent' | 'warning' | 'error'; title: string; subtitle?: string },
     autoDismissMs?: number
   ) => {
     if (waToastTimerRef.current) {
@@ -1369,36 +1368,94 @@ export const BillingView: React.FC<BillingViewProps> = ({
   );
 
   const handleShiftInvoiceNextMonth = async (inv: SupabaseInvoice) => {
-    if (!canUseGraceAndShift) {
-      setActionNotice(
-        'Shift Bill to Next Month is disabled for Dealers/Sub-Dealers unless explicitly permitted by Admin.'
+    if (shiftingInvoiceId === inv.id) return;
+    if (!canUseGraceAndShift && !perms.edit_delete_invoice) {
+      showWaToast(
+        {
+          status: 'warning',
+          title: 'Permission required to generate next month’s invoice.',
+          subtitle: 'Contact Admin to enable billing shift/invoice creation.',
+        },
+        7000
       );
       return;
     }
+
     const uname = String(inv.subscriber_username || '').trim().toLowerCase();
     const client = clientByUsername[uname] || null;
     setShiftingInvoiceId(inv.id);
+    showWaToast({
+      status: 'sending',
+      title: `Generating next month's bill for @${uname}...`,
+      subtitle: `Source #${inv.invoice_no} · Due ${inv.due_date || 'N/A'}`,
+    });
+
     try {
-      const res = await shiftBillToNextMonth({
-        username: uname,
-        subscriberId: client?.id || inv.subscriber_id || null,
-        targetInvoice: inv,
+      const res = await generateNextMonthBillOnShift({
+        sourceInvoice: inv,
+        subscriber: client,
         allInvoices: invoices,
-        activeRouter: activeRouterRef.current,
-        preloadedSecrets: liveMikrotikSecrets,
-        preloadedProfiles: liveMikrotikProfiles.map((p) => p.name),
+        paymentAccounts: activePaymentAccounts,
       });
-      setActionNotice(
-        `Shifted Invoice #${inv.invoice_no} (@${uname}) to Next Month (${res.nextDueDate}) — exempt from expiry pool${
-          res.restoredMikrotik
-            ? ` · Restored MikroTik "${res.appliedProfile}" (kicked ${res.kickedSessions} session(s))`
-            : ''
-        }.`
+
+      if (res.alreadyExists) {
+        const warnTitle = "Next month's invoice already exists for this subscriber.";
+        const warnSub = res.existingInvoiceNo
+          ? `Existing bill #${res.existingInvoiceNo} (${res.billingMonthLabel}) for @${uname}`
+          : `${res.billingMonthLabel} bill already open for @${uname}`;
+        showWaToast({ status: 'warning', title: warnTitle, subtitle: warnSub }, 8000);
+        setActionNotice(`${warnTitle} (${warnSub})`);
+        setTimeout(() => setActionNotice(null), 8000);
+        return;
+      }
+
+      if (!res.ok) {
+        const errMsg = res.error || `Unable to generate next month's invoice for @${uname}.`;
+        showWaToast({ status: 'error', title: errMsg, subtitle: `Invoice #${inv.invoice_no}` }, 9000);
+        setActionNotice(errMsg);
+        return;
+      }
+
+      if (res.invoice) {
+        setInvoices((prev) => {
+          const exists = prev.some(
+            (row) => row.id === res.invoice!.id || row.invoice_no === res.invoice!.invoice_no
+          );
+          return exists ? prev : [res.invoice!, ...prev];
+        });
+      }
+
+      const formattedAmount = Math.round(Number(res.amount || 0)).toLocaleString();
+      const confirmTitle = `Shifted to ${res.billingMonthLabel}: New invoice #${res.invoiceNo} (Rs. ${formattedAmount}) added.`;
+      const prevBalNote =
+        res.previousUnpaidBalance > 0
+          ? ` · Prior unpaid Rs. ${Math.round(res.previousUnpaidBalance).toLocaleString()}`
+          : '';
+      const waDetail = res.whatsappSent
+        ? `WhatsApp bill sent to ${formatWhatsAppDisplayPhone(res.whatsappPhone || '') || res.whatsappPhone}${prevBalNote}`
+        : res.whatsappAttempted && res.whatsappError
+        ? `Due ${res.newDueDate}${prevBalNote} · WhatsApp skipped: ${res.whatsappError}`
+        : `Due ${res.newDueDate}${prevBalNote}`;
+
+      showWaToast(
+        {
+          status: 'sent',
+          title: confirmTitle,
+          subtitle: waDetail,
+        },
+        9000
       );
+      setActionNotice(`${confirmTitle} ${waDetail}`);
       setTimeout(() => setActionNotice(null), 9000);
+
       await fetchInvoices();
     } catch (err: any) {
-      setActionNotice(`Unable to shift invoice #${inv.invoice_no}: ${err?.message || 'Error'}`);
+      const errMsg = err?.message || 'Unexpected error while generating next month bill.';
+      showWaToast(
+        { status: 'error', title: `Unable to shift invoice #${inv.invoice_no}`, subtitle: errMsg },
+        9000
+      );
+      setActionNotice(`Unable to shift invoice #${inv.invoice_no}: ${errMsg}`);
     } finally {
       setShiftingInvoiceId(null);
     }
@@ -2223,16 +2280,21 @@ export const BillingView: React.FC<BillingViewProps> = ({
                         </button>
                       )}
                       <div className="flex flex-wrap items-center gap-2 w-full min-w-0">
-                        {canUseGraceAndShift && (
+                        {(canUseGraceAndShift || perms.edit_delete_invoice) && (
                           <button
                             type="button"
                             disabled={shiftingInvoiceId === inv.id}
                             onClick={() => handleShiftInvoiceNextMonth(inv)}
                             className="flex-1 min-w-0 py-2 px-2.5 bg-indigo-950/70 hover:bg-indigo-900/80 text-indigo-300 border border-indigo-700/70 rounded-xl text-xs font-semibold flex items-center justify-center gap-1 transition cursor-pointer disabled:opacity-50"
+                            title="Generate & add next month's bill (+1M)"
                           >
-                            <FastForward className="w-3.5 h-3.5 shrink-0" />
+                            {shiftingInvoiceId === inv.id ? (
+                              <Loader2 className="w-3.5 h-3.5 animate-spin shrink-0" />
+                            ) : (
+                              <FastForward className="w-3.5 h-3.5 shrink-0" />
+                            )}
                             <span className="truncate">
-                              {shiftingInvoiceId === inv.id ? 'Shifting...' : 'Shift Next Mo'}
+                              {shiftingInvoiceId === inv.id ? 'Adding...' : 'Shift +1M'}
                             </span>
                           </button>
                         )}
@@ -2280,6 +2342,24 @@ export const BillingView: React.FC<BillingViewProps> = ({
                     </>
                   ) : (
                     <div className="flex flex-wrap items-center gap-2 w-full min-w-0">
+                      {(canUseGraceAndShift || perms.edit_delete_invoice) && (
+                        <button
+                          type="button"
+                          disabled={shiftingInvoiceId === inv.id}
+                          onClick={() => handleShiftInvoiceNextMonth(inv)}
+                          className="flex-1 min-w-0 py-2.5 px-2.5 bg-indigo-950/70 hover:bg-indigo-900/80 text-indigo-300 border border-indigo-700/70 rounded-xl text-xs font-semibold flex items-center justify-center gap-1 transition cursor-pointer disabled:opacity-50"
+                          title="Generate & add next month's bill (+1M)"
+                        >
+                          {shiftingInvoiceId === inv.id ? (
+                            <Loader2 className="w-3.5 h-3.5 animate-spin shrink-0" />
+                          ) : (
+                            <FastForward className="w-3.5 h-3.5 shrink-0" />
+                          )}
+                          <span className="truncate">
+                            {shiftingInvoiceId === inv.id ? 'Adding...' : 'Shift +1M'}
+                          </span>
+                        </button>
+                      )}
                       <button
                         type="button"
                         disabled={sendingWaInvoiceId === inv.id}
@@ -2392,10 +2472,6 @@ export const BillingView: React.FC<BillingViewProps> = ({
                   const hasGrace = !isPaidRow && hasSubscriberActiveGrace(clientMatch);
                   const graceIso = hasGrace ? getSubscriberGraceUntilIso(clientMatch) : null;
                   const isShifted = !isPaidRow && isSubscriberShiftedNextMonth(clientMatch, inv);
-                  const rowAnchorDay = clientMatch
-                    ? computeBillingAnchorDay(clientMatch)
-                    : inv.cycle_day || new Date().getDate();
-                  const shiftGuard = computeGuardedShiftNextMonthDate(inv.due_date, rowAnchorDay);
 
                   return (
                     <tr
@@ -2520,23 +2596,19 @@ export const BillingView: React.FC<BillingViewProps> = ({
                                   <span>{isPartial ? 'Add Pay' : 'Mark Paid'}</span>
                                 </button>
                               )}
-                              {canUseGraceAndShift && (
+                              {(canUseGraceAndShift || perms.edit_delete_invoice) && (
                                 <button
                                   type="button"
                                   disabled={shiftingInvoiceId === inv.id}
                                   onClick={() => handleShiftInvoiceNextMonth(inv)}
-                                  className={`px-2 py-1 rounded-md text-[11px] font-semibold flex items-center gap-1 transition cursor-pointer disabled:opacity-50 border ${
-                                    shiftGuard.allowed
-                                      ? 'bg-indigo-950/80 hover:bg-indigo-900/90 text-indigo-300 border-indigo-700/70'
-                                      : 'bg-slate-900/80 hover:bg-slate-800 text-slate-400 border-slate-700/80'
-                                  }`}
-                                  title={
-                                    shiftGuard.allowed
-                                      ? `Shift due date to ${shiftGuard.candidateDate} & exempt from expiry pool`
-                                      : `Already shifted (${shiftGuard.currentDate}) — shifting to ${shiftGuard.candidateDate} exceeds 35-day cap (max ${shiftGuard.maxAllowedDate}). Use Edit Invoice to override.`
-                                  }
+                                  className="px-2 py-1 rounded-md text-[11px] font-semibold flex items-center gap-1 transition cursor-pointer disabled:opacity-50 border bg-indigo-950/80 hover:bg-indigo-900/90 text-indigo-300 border-indigo-700/70"
+                                  title="Generate & add next month's bill (+1M) in PostgreSQL and auto-send via WhatsApp"
                                 >
-                                  <FastForward className="w-3 h-3 shrink-0" />
+                                  {shiftingInvoiceId === inv.id ? (
+                                    <Loader2 className="w-3 h-3 animate-spin shrink-0" />
+                                  ) : (
+                                    <FastForward className="w-3 h-3 shrink-0" />
+                                  )}
                                   <span>{shiftingInvoiceId === inv.id ? '...' : 'Shift +1M'}</span>
                                 </button>
                               )}
@@ -2557,6 +2629,22 @@ export const BillingView: React.FC<BillingViewProps> = ({
                             </>
                           ) : (
                             <>
+                              {(canUseGraceAndShift || perms.edit_delete_invoice) && (
+                                <button
+                                  type="button"
+                                  disabled={shiftingInvoiceId === inv.id}
+                                  onClick={() => handleShiftInvoiceNextMonth(inv)}
+                                  className="px-2 py-1 rounded-md text-[11px] font-semibold flex items-center gap-1 transition cursor-pointer disabled:opacity-50 border bg-indigo-950/80 hover:bg-indigo-900/90 text-indigo-300 border-indigo-700/70"
+                                  title="Generate & add next month's bill (+1M) in PostgreSQL and auto-send via WhatsApp"
+                                >
+                                  {shiftingInvoiceId === inv.id ? (
+                                    <Loader2 className="w-3 h-3 animate-spin shrink-0" />
+                                  ) : (
+                                    <FastForward className="w-3 h-3 shrink-0" />
+                                  )}
+                                  <span>{shiftingInvoiceId === inv.id ? '...' : 'Shift +1M'}</span>
+                                </button>
+                              )}
                               <button
                                 type="button"
                                 disabled={sendingWaInvoiceId === inv.id}
@@ -3401,6 +3489,8 @@ export const BillingView: React.FC<BillingViewProps> = ({
             className={`fixed bottom-5 right-5 z-[9995] w-[calc(100vw-2.5rem)] max-w-md rounded-2xl border p-4 shadow-2xl backdrop-blur-md transition-all ${
               waToast.status === 'error'
                 ? 'bg-slate-950/95 border-rose-500/70 text-rose-100 shadow-rose-950/40'
+                : waToast.status === 'warning'
+                ? 'bg-slate-950/95 border-amber-500/70 text-amber-100 shadow-amber-950/40'
                 : waToast.status === 'sending'
                 ? 'bg-slate-950/95 border-cyan-500/70 text-cyan-100 shadow-cyan-950/40'
                 : 'bg-emerald-950/95 border-emerald-500/70 text-emerald-100 shadow-emerald-950/40'
@@ -3411,6 +3501,8 @@ export const BillingView: React.FC<BillingViewProps> = ({
                 className={`mt-0.5 p-1.5 rounded-xl shrink-0 ${
                   waToast.status === 'error'
                     ? 'bg-rose-500/20 text-rose-400'
+                    : waToast.status === 'warning'
+                    ? 'bg-amber-500/20 text-amber-400'
                     : waToast.status === 'sending'
                     ? 'bg-cyan-500/20 text-cyan-400'
                     : 'bg-emerald-500/20 text-emerald-400'
@@ -3418,7 +3510,7 @@ export const BillingView: React.FC<BillingViewProps> = ({
               >
                 {waToast.status === 'sending' ? (
                   <Loader2 className="w-4 h-4 animate-spin" />
-                ) : waToast.status === 'error' ? (
+                ) : waToast.status === 'error' || waToast.status === 'warning' ? (
                   <AlertTriangle className="w-4 h-4" />
                 ) : (
                   <CheckCircle2 className="w-4 h-4" />
@@ -3432,6 +3524,8 @@ export const BillingView: React.FC<BillingViewProps> = ({
                     className={`text-[11px] leading-relaxed flex items-center gap-1.5 ${
                       waToast.status === 'error'
                         ? 'text-rose-200/90'
+                        : waToast.status === 'warning'
+                        ? 'text-amber-200/90 font-mono'
                         : waToast.status === 'sending'
                         ? 'text-cyan-200/90 font-mono'
                         : 'text-emerald-200/90 font-mono'

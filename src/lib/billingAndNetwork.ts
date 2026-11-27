@@ -2743,6 +2743,285 @@ export async function shiftBillToNextMonth(params: {
   };
 }
 
+export interface GenerateNextMonthBillResult {
+  ok: boolean;
+  alreadyExists?: boolean;
+  existingInvoiceNo?: string;
+  invoice?: SupabaseInvoice | null;
+  invoiceNo: string;
+  billingMonthLabel: string;
+  newDueDate: string;
+  amount: number;
+  packageName: string;
+  previousUnpaidBalance: number;
+  whatsappAttempted: boolean;
+  whatsappSent: boolean;
+  whatsappPhone?: string;
+  whatsappError?: string;
+  error?: string;
+}
+
+export function formatBillingMonthLabel(ymd: string): string {
+  const clean = extractYmdString(ymd);
+  if (!clean) {
+    return new Date().toLocaleString('en-US', { month: 'short', year: 'numeric' });
+  }
+  const [y, m] = clean.split('-').map(Number);
+  const dt = new Date(Date.UTC(y || new Date().getUTCFullYear(), Math.max(0, (m || 1) - 1), 15));
+  return dt.toLocaleString('en-US', { month: 'short', year: 'numeric', timeZone: 'UTC' });
+}
+
+/**
+ * Generates and inserts the next billing month's DUE invoice into PostgreSQL/Supabase
+ * when clicking `Shift +1M` on any invoice row (whether PAID or DUE):
+ * 1. Calculates `new_due_date = current_invoice.due_date + 1 calendar month` (aligned to cycle day)
+ *    and `billing_month` (e.g., "Dec 2026").
+ * 2. Prevents accidental double-clicks by verifying no open DUE invoice already exists for that
+ *    subscriber in the target next billing month.
+ * 3. Inserts a brand-new `DUE` invoice with package_name, monthly amount, new_due_date,
+ *    and preserved assigned_agent.
+ * 4. Automatically dispatches the Monthly Invoice Generated WhatsApp message via Baileys Gateway
+ *    in the background (including any previous unpaid balance note if prior invoice is still DUE).
+ */
+export async function generateNextMonthBillOnShift(params: {
+  sourceInvoice: SupabaseInvoice;
+  subscriber?: Record<string, any> | null;
+  allInvoices?: SupabaseInvoice[];
+  paymentAccounts?: any[];
+}): Promise<GenerateNextMonthBillResult> {
+  const inv = params.sourceInvoice;
+  const uname = String(inv.subscriber_username || '').trim().toLowerCase();
+  if (!uname) {
+    return {
+      ok: false,
+      invoiceNo: '',
+      billingMonthLabel: '',
+      newDueDate: '',
+      amount: 0,
+      packageName: '',
+      previousUnpaidBalance: 0,
+      whatsappAttempted: false,
+      whatsappSent: false,
+      error: 'Missing subscriber username on source invoice.',
+    };
+  }
+
+  const nowIso = new Date().toISOString();
+  const todayYmd = nowIso.slice(0, 10);
+
+  // Fetch fresh subscriber row + all existing invoices for this subscriber to prevent race/double-click duplicates
+  const [userRes, freshInvRes] = await Promise.all([
+    params.subscriber?.id && params.subscriber?.phone
+      ? Promise.resolve({ data: params.subscriber })
+      : supabase
+          .from('portal_users')
+          .select('*')
+          .ilike('username', uname)
+          .limit(1)
+          .maybeSingle(),
+    supabase.from('invoices').select('*').ilike('subscriber_username', uname),
+  ]);
+
+  const subscriber: Record<string, any> | null =
+    (userRes?.data as Record<string, any> | null) || params.subscriber || null;
+
+  const baseDueYmd = extractYmdString(inv.due_date) || todayYmd;
+  const baseDayNum = Number(baseDueYmd.split('-')[2]) || new Date().getDate();
+  const anchorDay = subscriber
+    ? computeBillingAnchorDay(subscriber as any)
+    : Number(inv.cycle_day) || baseDayNum;
+
+  const newDueDate = addCalendarMonthsYmd(baseDueYmd, 1, anchorDay);
+  const targetYearMonth = newDueDate.slice(0, 7); // YYYY-MM
+  const billingMonthLabel = formatBillingMonthLabel(newDueDate);
+
+  // Combine live DB invoices + in-memory list for bulletproof duplicate check & prior balance sum
+  const combinedInvoicesMap = new Map<string, SupabaseInvoice>();
+  for (const row of [...(params.allInvoices || []), ...((freshInvRes?.data || []) as SupabaseInvoice[])]) {
+    if (!row) continue;
+    const rowUname = String(row.subscriber_username || '').trim().toLowerCase();
+    if (rowUname !== uname) continue;
+    const key = String(row.id || row.invoice_no || Math.random());
+    combinedInvoicesMap.set(key, row);
+  }
+  const userInvoices = Array.from(combinedInvoicesMap.values());
+
+  // Check if a DUE / unpaid monthly invoice already exists for this subscriber in the target next billing month
+  const existingNextMonth = userInvoices.find((row) => {
+    const invNoUpper = String(row.invoice_no || '').trim().toUpperCase();
+    if (invNoUpper.startsWith('INV-MAT-')) return false;
+    const st = String(row.status || '').toUpperCase();
+    const bal = Math.max(0, (Number(row.amount) || 0) - (Number(row.paid_amount) || 0));
+    if (st === 'PAID' || st === 'CANCELLED' || bal <= 0) return false;
+    const rowDueYm = extractYmdString(row.due_date)?.slice(0, 7);
+    const rowMonthLabel = String((row as any).billing_month || '').trim().toLowerCase();
+    return rowDueYm === targetYearMonth || (rowMonthLabel !== '' && rowMonthLabel === billingMonthLabel.toLowerCase());
+  });
+
+  if (existingNextMonth) {
+    return {
+      ok: false,
+      alreadyExists: true,
+      existingInvoiceNo: existingNextMonth.invoice_no,
+      invoiceNo: existingNextMonth.invoice_no,
+      billingMonthLabel,
+      newDueDate,
+      amount: Number(existingNextMonth.amount || 0),
+      packageName: String(existingNextMonth.package_profile || existingNextMonth.package_name || ''),
+      previousUnpaidBalance: 0,
+      whatsappAttempted: false,
+      whatsappSent: false,
+      error: "Next month's invoice already exists for this subscriber.",
+    };
+  }
+
+  // Compute prior unpaid balance (e.g., if the source invoice or earlier bills are still DUE)
+  const previousUnpaidBalance = userInvoices.reduce((sum, row) => {
+    const st = String(row.status || '').toUpperCase();
+    if (st === 'PAID' || st === 'CANCELLED') return sum;
+    const bal = Math.max(0, (Number(row.amount) || 0) - (Number(row.paid_amount) || 0));
+    return sum + bal;
+  }, 0);
+
+  const packageName =
+    String(
+      subscriber?.original_package_profile ||
+        subscriber?.package_profile_name ||
+        subscriber?.package_name ||
+        subscriber?.package_speed ||
+        inv.package_profile ||
+        inv.package_name ||
+        'Fiber Broadband'
+    ).trim() || 'Fiber Broadband';
+
+  const monthlyAmount =
+    Number(subscriber?.monthly_fee) > 0
+      ? Math.round(Number(subscriber?.monthly_fee))
+      : Number(inv.amount) > 0
+      ? Math.round(Number(inv.amount))
+      : resolvePackageRate(packageName);
+
+  const subscriberId: string | null =
+    subscriber?.id &&
+    /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(String(subscriber.id))
+      ? String(subscriber.id)
+      : inv.subscriber_id || null;
+
+  const assignedAgentId =
+    inv.assigned_agent_id || (subscriber as any)?.assigned_agent_id || null;
+  const assignedAgentName =
+    inv.assigned_agent_name || (subscriber as any)?.assigned_agent_name || null;
+
+  const compactYm = targetYearMonth.replace('-', '');
+  const invoiceNo = `INV-${compactYm}-${Math.floor(1000 + Math.random() * 9000)}`;
+
+  const notesText =
+    previousUnpaidBalance > 0
+      ? `Next-month bill (${billingMonthLabel}) generated via Shift +1M from #${inv.invoice_no}. Previous unpaid balance: Rs. ${Math.round(previousUnpaidBalance).toLocaleString()}.`
+      : `Next-month bill (${billingMonthLabel}) generated via Shift +1M from #${inv.invoice_no}.`;
+
+  const { data: insertedRow, error: insertError } = await safeInsertInvoiceInSupabase({
+    invoice_no: invoiceNo,
+    subscriber_id: subscriberId,
+    subscriber_username: uname,
+    assigned_agent_id: assignedAgentId,
+    assigned_agent_name: assignedAgentName,
+    amount: monthlyAmount,
+    paid_amount: 0,
+    status: 'DUE',
+    due_date: newDueDate,
+    billing_month: billingMonthLabel,
+    cycle_day: anchorDay,
+    package_profile: packageName,
+    package_name: packageName,
+    dealer_id: subscriber?.dealer_id || inv.dealer_id || null,
+    sub_dealer_id: subscriber?.sub_dealer_id || inv.sub_dealer_id || null,
+    notes: notesText,
+    created_at: nowIso,
+  });
+
+  if (insertError) {
+    return {
+      ok: false,
+      invoiceNo,
+      billingMonthLabel,
+      newDueDate,
+      amount: monthlyAmount,
+      packageName,
+      previousUnpaidBalance,
+      whatsappAttempted: false,
+      whatsappSent: false,
+      error: insertError.message || 'Failed to insert next month invoice into Supabase.',
+    };
+  }
+
+  // Record audit log entry (non-blocking)
+  void safeInsertExpiryAuditLog({
+    subscriber_id: subscriberId,
+    username: uname,
+    action_type: 'SHIFTED_NEXT_MONTH',
+    previous_profile: packageName,
+    applied_profile: packageName,
+    triggered_by: 'ADMIN',
+    notes: `Generated next-month DUE invoice #${invoiceNo} (${billingMonthLabel}, Due: ${newDueDate}, Rs. ${monthlyAmount.toLocaleString()}) via Shift +1M from #${inv.invoice_no}.`,
+    created_at: nowIso,
+  }).catch(() => {});
+
+  // Auto-dispatch Monthly Invoice Generated WhatsApp via Baileys Gateway in the background
+  let whatsappAttempted = false;
+  let whatsappSent = false;
+  let whatsappPhone: string | undefined;
+  let whatsappError: string | undefined;
+
+  const subPhone = String(subscriber?.phone || '').trim();
+  if (subPhone && typeof window !== 'undefined') {
+    whatsappAttempted = true;
+    try {
+      const waRes = await triggerAutoWhatsAppNotification({
+        eventType: 'INVOICE_GENERATED',
+        subscriberUsername: uname,
+        subscriber: (subscriber as any) || { username: uname, phone: subPhone },
+        messageVars: {
+          subscriberName: subscriber?.full_name || uname,
+          username: uname,
+          phone: subPhone,
+          packageName,
+          invoiceNo,
+          amountDue: monthlyAmount,
+          totalAmount: monthlyAmount,
+          dueDate: newDueDate,
+          expiryDate: newDueDate,
+          previousUnpaidBalance: previousUnpaidBalance > 0 ? previousUnpaidBalance : undefined,
+          paymentAccounts: params.paymentAccounts,
+        },
+      });
+      whatsappPhone = waRes.formattedPhone;
+      if (waRes.ok && waRes.status === 'SENT') {
+        whatsappSent = true;
+      } else {
+        whatsappError = waRes.error || waRes.skippedReason;
+      }
+    } catch (waErr: any) {
+      whatsappError = waErr?.message || 'WhatsApp background dispatch failed';
+    }
+  }
+
+  return {
+    ok: true,
+    invoice: (insertedRow as SupabaseInvoice | null) || null,
+    invoiceNo,
+    billingMonthLabel,
+    newDueDate,
+    amount: monthlyAmount,
+    packageName,
+    previousUnpaidBalance,
+    whatsappAttempted,
+    whatsappSent,
+    whatsappPhone,
+    whatsappError,
+  };
+}
+
 export interface FiveDayPreExpiryBillingResult {
   success: boolean;
   scanned: number;
