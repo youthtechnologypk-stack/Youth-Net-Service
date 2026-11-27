@@ -22,6 +22,7 @@ import {
   Building2,
   Server,
   PlugZap,
+  X,
 } from 'lucide-react';
 import type { SystemRole, UserAccount } from '../types/auth';
 import type { SupabaseWhatsappLog } from '../services/supabaseClient';
@@ -150,6 +151,11 @@ export const WhatsAppGatewayView: React.FC<WhatsAppGatewayViewProps> = ({
     message: string;
   }>({ state: 'idle', message: '' });
 
+  // QR Pairing Modal & Floating Connected Toast
+  const [isQrModalOpen, setIsQrModalOpen] = useState(false);
+  const [connectedToast, setConnectedToast] = useState<string | null>(null);
+  const prevSessionStatusRef = useRef<string>('DISCONNECTED');
+
   // Branding form state (never clobbered during QR polling)
   const [companyName, setCompanyName] = useState('');
   const [supportPhone, setSupportPhone] = useState('');
@@ -174,11 +180,20 @@ export const WhatsAppGatewayView: React.FC<WhatsAppGatewayViewProps> = ({
     async (silent = false, overrideUrl?: string) => {
       if (!silent) setLoading(true);
       const targetBase = overrideUrl !== undefined ? overrideUrl : activeGatewayUrl;
-      const result = await safeWhatsAppApiFetch<any>(
-        '/api/whatsapp/session/status',
+
+      // Poll /api/whatsapp/status first, transparently falling back to /api/whatsapp/session/status for older gateways
+      let result = await safeWhatsAppApiFetch<any>(
+        '/api/whatsapp/status',
         { headers: buildPortalAuthHeaders() },
         targetBase
       );
+      if (result.httpStatus === 404) {
+        result = await safeWhatsAppApiFetch<any>(
+          '/api/whatsapp/session/status',
+          { headers: buildPortalAuthHeaders() },
+          targetBase
+        );
+      }
 
       if (result.isGatewayUnreachable) {
         setGatewayUnreachable(result.error);
@@ -193,6 +208,11 @@ export const WhatsAppGatewayView: React.FC<WhatsAppGatewayViewProps> = ({
       setGatewayUnreachable(null);
       if (result.ok && result.data?.success) {
         const json = result.data;
+        const normalizedLower = String(
+          json.status || json.session?.status || 'disconnected'
+        ).toLowerCase();
+        const prevLower = String(prevSessionStatusRef.current || '').toLowerCase();
+
         setStatusData(json);
         setGatewayHealth({
           state: 'online',
@@ -204,6 +224,23 @@ export const WhatsAppGatewayView: React.FC<WhatsAppGatewayViewProps> = ({
           setAutoSend(json.branding?.autoSend !== false);
           brandingInitializedRef.current = true;
         }
+
+        // Auto-close QR pairing modal with green "WhatsApp Connected!" toast immediately upon pairing
+        if (normalizedLower === 'connected') {
+          if (isQrModalOpen || prevLower === 'qr_ready' || prevLower === 'connecting') {
+            setIsQrModalOpen(false);
+            const linkedPhone = json.phone || json.session?.phone || '';
+            const msg = linkedPhone
+              ? `WhatsApp Connected! (${linkedPhone})`
+              : 'WhatsApp Connected!';
+            setConnectedToast(msg);
+            setFeedback({ type: 'success', text: msg });
+            window.setTimeout(() => {
+              setConnectedToast((cur) => (cur === msg ? null : cur));
+            }, 6000);
+          }
+        }
+        prevSessionStatusRef.current = normalizedLower;
       } else if (!silent) {
         setFeedback({
           type: 'error',
@@ -212,7 +249,7 @@ export const WhatsAppGatewayView: React.FC<WhatsAppGatewayViewProps> = ({
       }
       if (!silent) setLoading(false);
     },
-    [activeGatewayUrl]
+    [activeGatewayUrl, isQrModalOpen]
   );
 
   const fetchLogs = useCallback(
@@ -246,16 +283,17 @@ export const WhatsAppGatewayView: React.FC<WhatsAppGatewayViewProps> = ({
     };
   }, [currentUser?.id, currentRole]);
 
-  // Poll every 2.5s while CONNECTING or QR_READY so QR refresh & instant pair completion appear live
+  // Poll /api/whatsapp/status every 2 seconds while QR modal is displayed or session is CONNECTING / QR_READY
   useEffect(() => {
-    const st = statusData?.session?.status;
-    if (st !== 'CONNECTING' && st !== 'QR_READY') return;
+    const st = String(statusData?.session?.status || '').toUpperCase();
+    const shouldPoll = isQrModalOpen || st === 'CONNECTING' || st === 'QR_READY';
+    if (!shouldPoll) return;
     if (gatewayUnreachable) return;
     const timer = setInterval(() => {
       fetchStatus(true);
-    }, 2500);
+    }, 2000);
     return () => clearInterval(timer);
-  }, [statusData?.session?.status, gatewayUnreachable, fetchStatus]);
+  }, [isQrModalOpen, statusData?.session?.status, gatewayUnreachable, fetchStatus]);
 
   const handleTestGatewayConnection = async () => {
     const check = normalizeWhatsAppGatewayUrl(gatewayUrlInput);
@@ -321,6 +359,7 @@ export const WhatsAppGatewayView: React.FC<WhatsAppGatewayViewProps> = ({
   const handleStartSession = async () => {
     setActionLoading('start');
     setFeedback(null);
+    setIsQrModalOpen(true);
     try {
       const result = await safeWhatsAppApiFetch<any>(
         '/api/whatsapp/session/start',
@@ -333,6 +372,7 @@ export const WhatsAppGatewayView: React.FC<WhatsAppGatewayViewProps> = ({
       );
 
       if (result.isGatewayUnreachable) {
+        setIsQrModalOpen(false);
         setGatewayUnreachable(result.error);
         setFeedback({ type: 'error', text: result.error || 'Baileys WhatsApp Gateway Server is unreachable.' });
         return;
@@ -341,30 +381,40 @@ export const WhatsAppGatewayView: React.FC<WhatsAppGatewayViewProps> = ({
       setGatewayUnreachable(null);
       const json = result.data;
       if (!result.ok || !json?.success) {
+        setIsQrModalOpen(false);
         setFeedback({
           type: 'error',
           text: result.error || json?.error || 'Failed to initialize WhatsApp QR session.',
         });
       } else {
-        const nextStatus = json.status || json.session?.status;
+        const nextStatus = String(json.status || json.session?.status || 'CONNECTING').toUpperCase();
         const nextQr = json.qrDataUrl || json.session?.qrDataUrl || null;
-        if (nextQr && statusData) {
+        if (statusData) {
           setStatusData({
             ...statusData,
             session: {
               ...statusData.session,
-              status: nextStatus || 'QR_READY',
+              status: nextStatus as any,
               qrDataUrl: nextQr,
             },
           });
         }
-        setFeedback({
-          type: 'info',
-          text:
-            nextStatus === 'CONNECTED'
-              ? `WhatsApp connected (${json.session?.phone || 'Active'}).`
-              : 'Live QR code generated. Open WhatsApp -> Linked Devices -> Link a Device to scan.',
-        });
+        if (nextStatus === 'CONNECTED') {
+          setIsQrModalOpen(false);
+          const msg = json.session?.phone
+            ? `WhatsApp Connected! (${json.session.phone})`
+            : 'WhatsApp Connected!';
+          setConnectedToast(msg);
+          setFeedback({ type: 'success', text: msg });
+          window.setTimeout(() => {
+            setConnectedToast((cur) => (cur === msg ? null : cur));
+          }, 6000);
+        } else {
+          setFeedback({
+            type: 'info',
+            text: 'Live QR code generated. Open WhatsApp -> Linked Devices -> Link a Device to scan.',
+          });
+        }
         await fetchStatus(true);
       }
     } finally {
@@ -451,6 +501,20 @@ export const WhatsAppGatewayView: React.FC<WhatsAppGatewayViewProps> = ({
         });
       } else {
         setGatewayUnreachable(null);
+        if (isMasterAdmin) {
+          import('../lib/systemSettings')
+            .then(({ saveGlobalSystemSettings }) =>
+              saveGlobalSystemSettings({
+                companyDisplayName: companyName.trim() || DEFAULT_MASTER_COMPANY_NAME,
+                ispName: companyName.trim() || DEFAULT_MASTER_COMPANY_NAME,
+                supportHelpline: supportPhone.trim(),
+                baileysGatewayUrl: targetUrl,
+                autoSendMasterSwitch: autoSend,
+                whatsAppGatewayEnabled: autoSend,
+              })
+            )
+            .catch(() => {});
+        }
         setFeedback({
           type: 'success',
           text: json.schemaWarning
@@ -599,6 +663,114 @@ export const WhatsAppGatewayView: React.FC<WhatsAppGatewayViewProps> = ({
 
   return (
     <div className="space-y-6 pb-10">
+      {/* Green Floating "WhatsApp Connected!" Toast */}
+      {connectedToast && (
+        <div
+          role="status"
+          className="fixed bottom-5 right-5 z-50 px-4 py-3 rounded-xl bg-emerald-950/95 border border-emerald-500/60 text-emerald-200 shadow-2xl shadow-emerald-950/70 flex items-center gap-2.5 text-xs font-bold backdrop-blur-md"
+        >
+          <CheckCircle2 className="w-4 h-4 text-emerald-400 shrink-0" />
+          <span>{connectedToast}</span>
+          <button
+            type="button"
+            onClick={() => setConnectedToast(null)}
+            className="ml-2 text-emerald-300/70 hover:text-emerald-100 cursor-pointer"
+          >
+            <X className="w-3.5 h-3.5" />
+          </button>
+        </div>
+      )}
+
+      {/* Live QR Pairing Modal (polls /api/whatsapp/status every 2 seconds & auto-closes on connected) */}
+      {isQrModalOpen && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/75 backdrop-blur-sm p-4">
+          <div className="w-full max-w-md bg-[#0d1117] border border-slate-700/90 rounded-2xl shadow-2xl overflow-hidden">
+            <div className="px-5 py-4 border-b border-slate-800 flex items-center justify-between">
+              <div className="flex items-center gap-2">
+                <QrCode className="w-5 h-5 text-emerald-400" />
+                <div>
+                  <h3 className="text-sm font-bold text-white">Pair WhatsApp Device</h3>
+                  <p className="text-[11px] text-slate-400">
+                    Auto-checking connection every 2 seconds
+                  </p>
+                </div>
+              </div>
+              <button
+                type="button"
+                onClick={() => setIsQrModalOpen(false)}
+                className="p-1.5 rounded-lg text-slate-400 hover:text-white hover:bg-slate-800 transition cursor-pointer"
+                aria-label="Close QR Modal"
+              >
+                <X className="w-4 h-4" />
+              </button>
+            </div>
+
+            <div className="p-6 flex flex-col items-center justify-center text-center space-y-4">
+              {sessionStatus === 'QR_READY' && statusData?.session?.qrDataUrl ? (
+                <>
+                  <div className="bg-white p-3.5 rounded-2xl shadow-xl">
+                    <img
+                      src={statusData.session.qrDataUrl}
+                      alt="WhatsApp Pairing QR Code"
+                      className="w-60 h-60 object-contain"
+                    />
+                  </div>
+                  <div className="space-y-1">
+                    <p className="text-sm font-bold text-amber-300">
+                      Scan with WhatsApp on Your Phone
+                    </p>
+                    <p className="text-xs text-slate-400">
+                      WhatsApp &rarr; Menu (&vellip;) &rarr; Linked Devices &rarr; Link a Device
+                    </p>
+                  </div>
+                  <div className="flex items-center gap-2 text-[11px] text-emerald-300 bg-emerald-500/10 border border-emerald-500/25 px-3 py-1.5 rounded-lg">
+                    <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                    <span>Waiting for scan &amp; handshake... modal will auto-close once connected.</span>
+                  </div>
+                </>
+              ) : (
+                <div className="py-8 space-y-3">
+                  <Loader2 className="w-10 h-10 text-cyan-400 animate-spin mx-auto" />
+                  <p className="text-sm font-bold text-cyan-300">
+                    {sessionStatus === 'CONNECTING'
+                      ? 'Completing WhatsApp Handshake...'
+                      : 'Initializing Baileys Multi-Device Session...'}
+                  </p>
+                  <p className="text-xs text-slate-400 max-w-xs">
+                    Fetching latest WhatsApp Web protocol version and syncing session credentials.
+                  </p>
+                </div>
+              )}
+
+              {statusData?.session?.lastError && (
+                <p className="text-xs text-rose-400 bg-rose-500/10 border border-rose-500/30 rounded-lg px-3 py-2 w-full">
+                  {statusData.session.lastError}
+                </p>
+              )}
+
+              <div className="flex items-center justify-center gap-2 pt-2 w-full">
+                <button
+                  type="button"
+                  onClick={handleStartSession}
+                  disabled={actionLoading === 'start'}
+                  className="inline-flex items-center gap-1.5 px-3.5 py-2 rounded-xl bg-slate-800 hover:bg-slate-700 border border-slate-700 text-slate-200 text-xs font-semibold cursor-pointer disabled:opacity-50"
+                >
+                  <RefreshCw className={`w-3.5 h-3.5 ${actionLoading === 'start' ? 'animate-spin' : ''}`} />
+                  Refresh QR
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setIsQrModalOpen(false)}
+                  className="inline-flex items-center gap-1.5 px-3.5 py-2 rounded-xl bg-slate-900 hover:bg-slate-800 border border-slate-800 text-slate-400 hover:text-slate-200 text-xs font-semibold cursor-pointer"
+                >
+                  Close
+                </button>
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
+
       {/* Header Strip */}
       <div className="flex flex-col gap-3 md:flex-row md:items-center md:justify-between bg-[#0d1117] border border-slate-800/90 rounded-2xl p-5">
         <div>

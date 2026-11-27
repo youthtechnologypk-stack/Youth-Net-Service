@@ -576,6 +576,38 @@ export function getDisplayWhatsAppGatewayUrl(overrideBaseUrl?: string): string {
 
 export async function loadPersistedWhatsAppGatewayUrl(): Promise<string> {
   const localCurrent = getConfiguredWhatsAppGatewayUrl();
+
+  // 1. Check primary global `system_settings` table first
+  try {
+    const { data: sysRow, error: sysErr } = await supabase
+      .from('system_settings')
+      .select('config')
+      .eq('id', 'global')
+      .maybeSingle();
+
+    const sysUrl =
+      !sysErr && sysRow?.config && typeof sysRow.config === 'object'
+        ? String((sysRow.config as Record<string, any>).baileysGatewayUrl || '').trim()
+        : '';
+
+    if (sysUrl) {
+      const parsed = normalizeWhatsAppGatewayUrl(sysUrl);
+      if (parsed.valid && parsed.normalized) {
+        if (typeof window !== 'undefined') {
+          try {
+            window.localStorage.setItem(WHATSAPP_GATEWAY_URL_STORAGE_KEY, parsed.normalized);
+          } catch {
+            // ignore
+          }
+        }
+        return parsed.normalized;
+      }
+    }
+  } catch {
+    // system_settings table may not exist yet; fall through to app_settings
+  }
+
+  // 2. Fallback to legacy `app_settings` table
   try {
     const { data, error } = await supabase
       .from('app_settings')
@@ -626,13 +658,43 @@ export async function saveWhatsAppGatewayUrl(rawUrl: string): Promise<{
   }
 
   let savedToSupabase = false;
+  const nowIso = new Date().toISOString();
+
+  // Persist into `system_settings` (`id = 'global'`) so System Settings & WhatsApp Gateway stay unified
+  try {
+    const { data: existingRow } = await supabase
+      .from('system_settings')
+      .select('config')
+      .eq('id', 'global')
+      .maybeSingle();
+    const mergedConfig = {
+      ...(existingRow?.config && typeof existingRow.config === 'object'
+        ? (existingRow.config as Record<string, any>)
+        : {}),
+      baileysGatewayUrl: check.normalized,
+    };
+    const { error: sysErr } = await supabase.from('system_settings').upsert(
+      {
+        id: 'global',
+        config: mergedConfig,
+        updated_at: nowIso,
+      },
+      { onConflict: 'id' }
+    );
+    if (!sysErr) {
+      savedToSupabase = true;
+    }
+  } catch {
+    // fallback to app_settings below
+  }
+
   try {
     const { error } = await supabase.from('app_settings').upsert(
       [
         {
           key: 'whatsapp_gateway_url',
           value: check.normalized,
-          updated_at: new Date().toISOString(),
+          updated_at: nowIso,
         },
       ],
       { onConflict: 'key' }

@@ -15,6 +15,8 @@
  *   ALLOWED_ORIGINS=*              (optional comma-separated origins, defaults to *)
  */
 
+import fs from 'fs';
+import path from 'path';
 import dotenv from 'dotenv';
 import express from 'express';
 import cors from 'cors';
@@ -28,6 +30,7 @@ dotenv.config();
 const makeWASocket =
   baileys.default?.default ?? baileys.default ?? baileys.makeWASocket;
 const initAuthCreds = baileys.initAuthCreds;
+const useMultiFileAuthState = baileys.useMultiFileAuthState;
 const BufferJSON = baileys.BufferJSON;
 const proto = baileys.proto;
 const DisconnectReason = baileys.DisconnectReason ?? {
@@ -37,6 +40,7 @@ const DisconnectReason = baileys.DisconnectReason ?? {
 const fetchLatestBaileysVersion = baileys.fetchLatestBaileysVersion;
 const Browsers = baileys.Browsers;
 
+const LOCAL_AUTH_INFO_ROOT = path.resolve(process.cwd(), 'auth_info');
 const PORT = Number(process.env.WA_GATEWAY_PORT || process.env.PORT || 3001);
 const DEFAULT_MASTER_COMPANY_NAME = 'Youth Net Service';
 const WHATSAPP_AUTH_SESSIONS_TABLE = 'whatsapp_auth_sessions';
@@ -556,13 +560,75 @@ async function useSupabaseAuthState(supabaseClient, tenantId) {
       };
       await enqueueWrite(() => writeBatch([row]));
     },
+    flushWrites: async () => {
+      await writeQueue.catch(() => {});
+    },
+  };
+}
+
+function resolveSafeLocalAuthDir(tenantId) {
+  const safeId = sanitizePortalUserId(tenantId);
+  if (!safeId) throw new Error('Invalid tenantId for local auth_info.');
+  const resolvedRoot = path.resolve(LOCAL_AUTH_INFO_ROOT);
+  const resolvedTarget = path.resolve(resolvedRoot, `session_${safeId}`);
+  if (!resolvedTarget.startsWith(resolvedRoot + path.sep)) {
+    throw new Error('Unsafe local auth_info path rejected.');
+  }
+  return resolvedTarget;
+}
+
+async function loadTenantAuthState(safeTenantId) {
+  if (supabase && SUPABASE_SERVICE_ROLE_KEY) {
+    try {
+      const { error: probeErr } = await supabase
+        .from(WHATSAPP_AUTH_SESSIONS_TABLE)
+        .select('tenant_id')
+        .limit(1);
+      if (!probeErr) {
+        const res = await useSupabaseAuthState(supabase, safeTenantId);
+        return { ...res, storageMode: 'supabase-postgresql' };
+      }
+    } catch (err) {
+      console.warn(
+        `[Baileys-Auth] Falling back to local auth_info for tenant ${safeTenantId}:`,
+        err?.message
+      );
+    }
+  }
+
+  // Fallback to persistent local auth_info folder when Supabase service key / table isn't configured
+  const authDir = resolveSafeLocalAuthDir(safeTenantId);
+  fs.mkdirSync(authDir, { recursive: true });
+  let localWriteQueue = Promise.resolve();
+  const { state, saveCreds } = await useMultiFileAuthState(authDir);
+  return {
+    state,
+    saveCreds: async () => {
+      localWriteQueue = localWriteQueue.catch(() => {}).then(() => saveCreds());
+      return localWriteQueue;
+    },
+    flushWrites: async () => {
+      await localWriteQueue.catch(() => {});
+    },
+    storageMode: 'local-auth-info',
   };
 }
 
 async function deleteTenantAuthState(supabaseClient, tenantId) {
-  if (!supabaseClient) return;
   const safeTenantId = sanitizePortalUserId(tenantId);
   if (!safeTenantId) return;
+
+  // Clear local auth_info folder if present (ONLY called on 401 loggedOut or explicit logout)
+  try {
+    const localDir = resolveSafeLocalAuthDir(safeTenantId);
+    if (fs.existsSync(localDir)) {
+      fs.rmSync(localDir, { recursive: true, force: true });
+    }
+  } catch (err) {
+    console.warn(`[Baileys-Auth] Failed clearing local auth_info for ${safeTenantId}:`, err?.message);
+  }
+
+  if (!supabaseClient) return;
   const { error } = await supabaseClient
     .from(WHATSAPP_AUTH_SESSIONS_TABLE)
     .delete()
@@ -576,9 +642,19 @@ async function deleteTenantAuthState(supabaseClient, tenantId) {
 }
 
 async function hasPersistedTenantCreds(supabaseClient, tenantId) {
-  if (!supabaseClient) return false;
   const safeTenantId = sanitizePortalUserId(tenantId);
   if (!safeTenantId) return false;
+
+  try {
+    const localDir = resolveSafeLocalAuthDir(safeTenantId);
+    if (fs.existsSync(path.join(localDir, 'creds.json'))) {
+      return true;
+    }
+  } catch {
+    // ignore
+  }
+
+  if (!supabaseClient) return false;
   const { data, error } = await supabaseClient
     .from(WHATSAPP_AUTH_SESSIONS_TABLE)
     .select('tenant_id')
@@ -732,11 +808,6 @@ async function syncUserStatusInSupabase(portalUserId, status, phone) {
 async function startBaileysSession(portalUserId, waitMs = 12000, options = {}) {
   const safeId = sanitizePortalUserId(portalUserId);
   if (!safeId) throw new Error('Invalid portalUserId.');
-  if (!supabase) {
-    throw new Error(
-      'Supabase PostgreSQL is not configured. Set SUPABASE_URL and SUPABASE_SERVICE_ROLE_KEY to persist WhatsApp sessions.'
-    );
-  }
 
   const sessionKey = `session_${safeId}`;
   const state = getOrCreateState(safeId);
@@ -769,28 +840,46 @@ async function startBaileysSession(portalUserId, waitMs = 12000, options = {}) {
   state.lastError = null;
   state.updatedAt = new Date().toISOString();
 
-  const { state: authState, saveCreds } = await useSupabaseAuthState(supabase, safeId);
-  let version;
+  const {
+    state: authState,
+    saveCreds,
+    flushWrites,
+    storageMode,
+  } = await loadTenantAuthState(safeId);
+
+  let version = [2, 3000, 1015901307];
   try {
     const fetched = await fetchLatestBaileysVersion();
-    version = fetched?.version;
-  } catch {
-    version = undefined;
+    if (Array.isArray(fetched?.version) && fetched.version.length === 3) {
+      version = fetched.version;
+      console.log(
+        `[Baileys-Gateway] Tenant ${safeId} using WA Web v${version.join('.')} (latest=${Boolean(fetched.isLatest)}, auth=${storageMode})`
+      );
+    }
+  } catch (vErr) {
+    console.warn(
+      `[Baileys-Gateway] fetchLatestBaileysVersion warning (using fallback ${version.join('.')}):`,
+      vErr?.message
+    );
   }
 
   const sock = makeWASocket({
-    ...(version ? { version } : {}),
+    version,
     auth: authState,
     logger: pino({ level: 'silent' }),
     printQRInTerminal: false,
-    browser: Browsers?.ubuntu
-      ? Browsers.ubuntu('ISP WhatsApp Gateway')
-      : ['ISP Gateway', 'Chrome', '120.0.0'],
+    browser: Browsers?.macOS
+      ? Browsers.macOS('Desktop')
+      : ['Youth Net Service', 'Chrome', '124.0.0'],
     markOnlineOnConnect: false,
     syncFullHistory: false,
+    generateHighQualityLinkPreview: false,
+    connectTimeoutMs: 30_000,
+    defaultQueryTimeoutMs: 30_000,
+    keepAliveIntervalMs: 25_000,
   });
 
-  // Close any socket that may have raced while awaiting Supabase auth state
+  // Close any socket that may have raced while awaiting auth state
   const racedSock = sockets.get(sessionKey);
   if (racedSock && racedSock !== sock) {
     try {
@@ -803,13 +892,17 @@ async function startBaileysSession(portalUserId, waitMs = 12000, options = {}) {
   }
   sockets.set(sessionKey, sock);
 
+  let pendingCredsSave = Promise.resolve();
   sock.ev.on('creds.update', () => {
-    saveCreds().catch((err) => {
-      console.error(
-        `[Baileys-Gateway] Failed saving creds to PostgreSQL for tenant ${safeId}:`,
-        err?.message
-      );
-    });
+    pendingCredsSave = pendingCredsSave
+      .catch(() => {})
+      .then(() => saveCreds())
+      .catch((err) => {
+        console.error(
+          `[Baileys-Gateway] Failed saving creds (${storageMode}) for tenant ${safeId}:`,
+          err?.message
+        );
+      });
   });
 
   sock.ev.on('connection.update', async (update) => {
@@ -844,7 +937,7 @@ async function startBaileysSession(portalUserId, waitMs = 12000, options = {}) {
       await syncUserStatusInSupabase(safeId, 'CONNECTED', state.phone);
       notifyQrWaiters(sessionKey);
       console.log(
-        `[Baileys-Gateway] Connected tenant ${safeId} (${state.phone || 'active'}) [PostgreSQL auth]`
+        `[Baileys-Gateway] Connected tenant ${safeId} (${state.phone || 'active'}) [${storageMode}]`
       );
     }
 
@@ -865,6 +958,7 @@ async function startBaileysSession(portalUserId, waitMs = 12000, options = {}) {
         return;
       }
 
+      // ONLY purge auth credentials when explicitly logged out (401)
       if (loggedOut) {
         clearPendingReconnect(sessionKey);
         state.status = 'DISCONNECTED';
@@ -876,7 +970,7 @@ async function startBaileysSession(portalUserId, waitMs = 12000, options = {}) {
           'Device unlinked / logged out from WhatsApp (401). Scan a fresh QR code to pair again.';
         state.updatedAt = new Date().toISOString();
         console.log(
-          `[Baileys-Gateway] Tenant ${safeId} logged out (401) — purging ${WHATSAPP_AUTH_SESSIONS_TABLE} rows...`
+          `[Baileys-Gateway] Tenant ${safeId} logged out (401) — clearing saved session credentials...`
         );
         await deleteTenantAuthState(supabase, safeId);
         await syncUserStatusInSupabase(safeId, 'DISCONNECTED', null);
@@ -884,6 +978,8 @@ async function startBaileysSession(portalUserId, waitMs = 12000, options = {}) {
         return;
       }
 
+      // Handle WhatsApp QR pairing handoff (515 restartRequired):
+      // NEVER delete auth_info / whatsapp_auth_sessions; flush creds and reconnect within 1 second
       if (restartRequired) {
         state.qrDataUrl = null;
         state.status = 'CONNECTING';
@@ -891,10 +987,17 @@ async function startBaileysSession(portalUserId, waitMs = 12000, options = {}) {
         state.updatedAt = new Date().toISOString();
         state.restart515Attempts = (state.restart515Attempts || 0) + 1;
 
-        if (state.restart515Attempts <= 5) {
-          const delayMs = Math.min(4000, 600 * state.restart515Attempts);
+        try {
+          await pendingCredsSave;
+          await flushWrites();
+        } catch {
+          // ignore
+        }
+
+        if (state.restart515Attempts <= 6) {
+          const delayMs = 800; // Re-initialize makeWASocket within 1 second using saved credentials
           console.log(
-            `[Baileys-Gateway] Restart required (515) for tenant ${safeId} (attempt ${state.restart515Attempts}/5) — triggering clean socket reconnect in ${delayMs}ms...`
+            `[Baileys-Gateway] Restart required (515) for tenant ${safeId} (attempt ${state.restart515Attempts}/6) — credentials preserved & flushed; reconnecting in ${delayMs}ms...`
           );
           clearPendingReconnect(sessionKey);
           const timer = setTimeout(() => {
@@ -1403,8 +1506,8 @@ app.get('/api/whatsapp/health', (_req, res) => {
   });
 });
 
-// 2. Session Status + Branding + Tenant Overview
-app.get('/api/whatsapp/session/status', async (req, res) => {
+// 2. Session Status + Branding + Tenant Overview (exposed on both /api/whatsapp/status & /api/whatsapp/session/status)
+async function handleGetSessionStatus(req, res) {
   try {
     const ctx = await resolveActor(req);
     if (!ctx.ok || !ctx.actor) {
@@ -1443,8 +1546,13 @@ app.get('/api/whatsapp/session/status', async (req, res) => {
       ctx.actor.whatsapp_status === undefined &&
       ctx.actor.allow_subdealer_whatsapp === undefined;
 
+    const normalizedStatus = String(runtime.status || 'DISCONNECTED').toLowerCase();
+
     return res.json({
       success: true,
+      status: normalizedStatus,
+      qrDataUrl: runtime.qrDataUrl || null,
+      phone: runtime.phone || ctx.actor.whatsapp_phone || null,
       portalUserId: String(ctx.actor.id),
       effectiveTier: ctx.effectiveTier,
       canPairOwnWhatsapp: ctx.canPairOwnWhatsapp,
@@ -1463,7 +1571,10 @@ app.get('/api/whatsapp/session/status', async (req, res) => {
   } catch (err) {
     return res.status(500).json({ success: false, error: err?.message || 'Failed to read session status.' });
   }
-});
+}
+
+app.get('/api/whatsapp/status', handleGetSessionStatus);
+app.get('/api/whatsapp/session/status', handleGetSessionStatus);
 
 // 3. Start Session & Generate Live QR Data URL
 app.post('/api/whatsapp/session/start', async (req, res) => {
@@ -2106,26 +2217,45 @@ app.use((err, _req, res, _next) => {
 // ============================================================================
 
 async function restorePersistedSessions() {
-  if (!supabase) {
-    console.warn(
-      '[Baileys-Gateway] Skipping session auto-restore: SUPABASE_URL / SUPABASE_SERVICE_ROLE_KEY not configured.'
-    );
-    return;
+  const tenantSet = new Set();
+
+  if (supabase && SUPABASE_SERVICE_ROLE_KEY) {
+    const ready = await ensureAuthSessionsTable();
+    if (ready) {
+      const dbTenants = await listPersistedTenantIds(supabase);
+      for (const id of dbTenants) tenantSet.add(id);
+    }
   }
 
-  const ready = await ensureAuthSessionsTable();
-  if (!ready) return;
+  // Also restore any locally stored auth_info/session_* credentials
+  try {
+    if (fs.existsSync(LOCAL_AUTH_INFO_ROOT)) {
+      const entries = fs.readdirSync(LOCAL_AUTH_INFO_ROOT, { withFileTypes: true });
+      for (const ent of entries) {
+        if (!ent.isDirectory() || !ent.name.startsWith('session_')) continue;
+        const rawId = ent.name.slice('session_'.length);
+        const safeId = sanitizePortalUserId(rawId);
+        if (!safeId) continue;
+        const credsPath = path.join(resolveSafeLocalAuthDir(safeId), 'creds.json');
+        if (fs.existsSync(credsPath)) {
+          tenantSet.add(safeId);
+        }
+      }
+    }
+  } catch {
+    // ignore local auth_info scan errors
+  }
 
-  const tenantIds = await listPersistedTenantIds(supabase);
+  const tenantIds = Array.from(tenantSet);
   if (tenantIds.length === 0) {
     console.log(
-      `[Baileys-Gateway] No persisted WhatsApp sessions found in ${WHATSAPP_AUTH_SESSIONS_TABLE}. Ready for QR pairing.`
+      '[Baileys-Gateway] No persisted WhatsApp sessions found yet. Ready for QR pairing.'
     );
     return;
   }
 
   console.log(
-    `[Baileys-Gateway] Found ${tenantIds.length} persisted tenant session(s) in ${WHATSAPP_AUTH_SESSIONS_TABLE} — restoring in background...`
+    `[Baileys-Gateway] Found ${tenantIds.length} persisted tenant session(s) — restoring in background...`
   );
 
   for (let i = 0; i < tenantIds.length; i++) {

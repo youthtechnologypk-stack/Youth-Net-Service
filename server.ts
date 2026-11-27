@@ -1456,18 +1456,39 @@ app.delete('/api/mikrotik/routers/:id', async (req: Request, res: Response) => {
  */
 app.get('/api/settings', async (req: Request, res: Response) => {
   try {
+    let supabaseConfig: Record<string, any> | null = null;
+    if (serverSupabase) {
+      try {
+        const { data, error } = await serverSupabase
+          .from('system_settings')
+          .select('config, updated_at')
+          .eq('id', 'global')
+          .maybeSingle();
+        if (!error && data?.config && typeof data.config === 'object') {
+          supabaseConfig = data.config as Record<string, any>;
+        }
+      } catch {
+        // fallback to local routerRepo settings
+      }
+    }
+
     const settings = await getAllSystemSettings();
+    const merged = {
+      currencyCode: settings.currency_code || 'PKR',
+      currencySymbol: settings.currency_symbol || 'Rs.',
+      ispName: settings.isp_name || 'Youth Net Service',
+      companyDisplayName: settings.isp_name || 'Youth Net Service',
+      billingCycleDay: Number(settings.billing_cycle_day || 1),
+      gracePeriodDays: Number(settings.grace_period_days || 3),
+      autoWalledGarden: settings.auto_walled_garden !== 'false',
+      ...settings,
+      ...(supabaseConfig || {}),
+    };
+
     res.json({
       success: true,
-      settings: {
-        currencyCode: settings.currency_code || 'PKR',
-        currencySymbol: settings.currency_symbol || 'Rs.',
-        ispName: settings.isp_name || 'Youth Net Fiber Broadband',
-        billingCycleDay: Number(settings.billing_cycle_day || 1),
-        gracePeriodDays: Number(settings.grace_period_days || 5),
-        autoWalledGarden: settings.auto_walled_garden !== 'false',
-        ...settings,
-      },
+      source: supabaseConfig ? 'supabase' : 'local',
+      settings: merged,
     });
   } catch (err: any) {
     console.error('Error fetching settings:', err);
@@ -1477,31 +1498,34 @@ app.get('/api/settings', async (req: Request, res: Response) => {
 
 /**
  * POST /api/settings and PUT /api/settings
- * Persist global system settings to PostgreSQL system_settings table & disk storage
+ * Persist global system settings to Supabase `system_settings` (`id = 'global'`) & local PostgreSQL/disk storage
  */
 const handleSaveSettings = async (req: Request, res: Response) => {
   try {
+    const body = req.body && typeof req.body === 'object' ? req.body : {};
     const {
       currencyCode,
       currencySymbol,
       currency_code,
       currency_symbol,
       ispName,
+      companyDisplayName,
       billingCycleDay,
       gracePeriodDays,
       autoWalledGarden,
       ...extra
-    } = req.body || {};
+    } = body;
 
     const updates: Record<string, string> = {};
 
-    const finalCode = (currencyCode || currency_code || '').trim();
+    const finalCode = String(currencyCode || currency_code || '').trim();
     if (finalCode) updates.currency_code = finalCode;
 
-    const finalSymbol = (currencySymbol || currency_symbol || '').trim();
+    const finalSymbol = String(currencySymbol || currency_symbol || '').trim();
     if (finalSymbol) updates.currency_symbol = finalSymbol;
 
-    if (ispName) updates.isp_name = String(ispName).trim();
+    const finalBrand = String(companyDisplayName || ispName || '').trim();
+    if (finalBrand) updates.isp_name = finalBrand;
     if (billingCycleDay !== undefined) updates.billing_cycle_day = String(billingCycleDay);
     if (gracePeriodDays !== undefined) updates.grace_period_days = String(gracePeriodDays);
     if (autoWalledGarden !== undefined) updates.auto_walled_garden = String(autoWalledGarden);
@@ -1514,14 +1538,42 @@ const handleSaveSettings = async (req: Request, res: Response) => {
 
     const saved = await saveAllSystemSettings(updates);
 
+    // Also mirror JSONB config to Supabase `system_settings` (`id = 'global'`) if server Supabase is configured
+    if (serverSupabase) {
+      try {
+        const { data: existingRow } = await serverSupabase
+          .from('system_settings')
+          .select('config')
+          .eq('id', 'global')
+          .maybeSingle();
+        const mergedConfig = {
+          ...(existingRow?.config && typeof existingRow.config === 'object'
+            ? (existingRow.config as Record<string, any>)
+            : {}),
+          ...body,
+        };
+        await serverSupabase.from('system_settings').upsert(
+          {
+            id: 'global',
+            config: mergedConfig,
+            updated_at: new Date().toISOString(),
+          },
+          { onConflict: 'id' }
+        );
+      } catch {
+        // non-blocking if Supabase table isn't migrated yet
+      }
+    }
+
     res.json({
       success: true,
-      message: 'System settings saved successfully to PostgreSQL and persistent storage.',
+      message: 'System Settings & Carrier Configuration saved to database.',
       settings: {
         currencyCode: saved.currency_code || 'PKR',
         currencySymbol: saved.currency_symbol || 'Rs.',
-        ispName: saved.isp_name || 'Youth Net Fiber Broadband',
+        ispName: saved.isp_name || 'Youth Net Service',
         ...saved,
+        ...body,
       },
     });
   } catch (err: any) {
@@ -3032,7 +3084,7 @@ app.get('/api/whatsapp/health', (_req: Request, res: Response) => {
   });
 });
 
-app.get('/api/whatsapp/session/status', async (req: Request, res: Response) => {
+const handleGetWhatsAppSessionStatus = async (req: Request, res: Response) => {
   try {
     const ctx = await resolveWhatsAppGatewayActor(req);
     if (!ctx.ok || !ctx.actor) {
@@ -3098,8 +3150,13 @@ app.get('/api/whatsapp/session/status', async (req: Request, res: Response) => {
       targetUser.whatsapp_status === undefined &&
       targetUser.allow_subdealer_whatsapp === undefined;
 
+    const normalizedStatus = String(runtime.status || 'DISCONNECTED').toLowerCase();
+
     return res.json({
       success: true,
+      status: normalizedStatus,
+      qrDataUrl: runtime.qrDataUrl || null,
+      phone: runtime.phone || targetUser.whatsapp_phone || null,
       portalUserId: String(targetUser.id),
       effectiveTier: ctx.effectiveTier,
       canPairOwnWhatsapp: ctx.canPairOwnWhatsapp,
@@ -3122,7 +3179,10 @@ app.get('/api/whatsapp/session/status', async (req: Request, res: Response) => {
   } catch (err: any) {
     return res.status(500).json({ success: false, error: err?.message || 'Failed to read WhatsApp session status' });
   }
-});
+};
+
+app.get('/api/whatsapp/status', handleGetWhatsAppSessionStatus);
+app.get('/api/whatsapp/session/status', handleGetWhatsAppSessionStatus);
 
 app.post('/api/whatsapp/session/start', async (req: Request, res: Response) => {
   try {

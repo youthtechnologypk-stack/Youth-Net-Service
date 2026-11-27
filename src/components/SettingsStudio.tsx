@@ -1,32 +1,44 @@
-import React, { useState } from 'react';
+import React, { useEffect, useState } from 'react';
 import {
-  Sliders,
   Settings as SettingsIcon,
   Server,
-  Radio,
-  Layers,
-  Shield,
-  Bell,
   Save,
   CheckCircle2,
-  Database,
-  Smartphone,
   Globe,
   Clock,
-  Key,
-  HardDrive,
-  RefreshCw,
   Trash2,
   Plus,
+  Loader2,
+  AlertTriangle,
+  Copy,
+  Check,
+  MessageSquare,
+  Phone,
+  Power,
+  Users,
+  PlugZap,
+  RefreshCw,
 } from 'lucide-react';
 import { useISP } from '../context/ISPContext';
 import { useCurrency } from '../context/CurrencyContext';
 import { MikrotikRouter } from '../types/isp';
 import { AddMikrotikDeviceModal } from './AddMikrotikDeviceModal';
 import { DeleteConfirmDialog } from './DeleteConfirmDialog';
+import {
+  DEFAULT_GLOBAL_SYSTEM_SETTINGS,
+  getCachedGlobalSystemSettings,
+  loadGlobalSystemSettings,
+  saveGlobalSystemSettings,
+  SYSTEM_SETTINGS_MIGRATION_SQL,
+} from '../lib/systemSettings';
+import {
+  getDisplayWhatsAppGatewayUrl,
+  normalizeWhatsAppGatewayUrl,
+  safeWhatsAppApiFetch,
+} from '../lib/whatsappRouting';
 
 export const SettingsStudio: React.FC = () => {
-  const { routers, olts, customers, complaints, deleteMikrotikRouter } = useISP();
+  const { routers, olts, deleteMikrotikRouter } = useISP();
   const {
     currencyCode,
     currencySymbol: globalCurrencySymbol,
@@ -35,17 +47,50 @@ export const SettingsStudio: React.FC = () => {
     formatCurrency,
   } = useCurrency();
 
-  const [ispName, setIspName] = useState('Youth Net Fiber Broadband');
-  const [billingCycleDay, setBillingCycleDay] = useState(1);
-  const [gracePeriodDays, setGracePeriodDays] = useState(5);
-  const [defaultSnmpCommunity, setDefaultSnmpCommunity] = useState('public');
-  const [defaultMikrotikApiPort, setDefaultMikrotikApiPort] = useState(8728);
-  const [slaAutoAssignMinutes, setSlaAutoAssignMinutes] = useState(5);
-  const [fiberCutSlaHours, setFiberCutSlaHours] = useState(2);
-  const [whatsAppGatewayEnabled, setWhatsAppGatewayEnabled] = useState(true);
-  const [autoWalledGarden, setAutoWalledGarden] = useState(true);
-  const [saveSuccess, setSaveSuccess] = useState(false);
+  const initialCached = getCachedGlobalSystemSettings();
+
+  const [companyDisplayName, setCompanyDisplayName] = useState(initialCached.companyDisplayName);
+  const [supportHelpline, setSupportHelpline] = useState(initialCached.supportHelpline);
+  const [baileysGatewayUrl, setBaileysGatewayUrl] = useState(initialCached.baileysGatewayUrl);
+  const [autoSendMasterSwitch, setAutoSendMasterSwitch] = useState(
+    initialCached.autoSendMasterSwitch
+  );
+  const [teamWhatsAppGroupName, setTeamWhatsAppGroupName] = useState(
+    initialCached.teamWhatsAppGroupName
+  );
+  const [teamWhatsAppGroupJid, setTeamWhatsAppGroupJid] = useState(
+    initialCached.teamWhatsAppGroupJid
+  );
+  const [billingCycleDay, setBillingCycleDay] = useState(initialCached.billingCycleDay);
+  const [gracePeriodDays, setGracePeriodDays] = useState(initialCached.gracePeriodDays);
+  const [expiryPppProfile, setExpiryPppProfile] = useState(initialCached.expiryPppProfile);
+  const [defaultSnmpCommunity, setDefaultSnmpCommunity] = useState(
+    initialCached.defaultSnmpCommunity
+  );
+  const [defaultMikrotikApiPort, setDefaultMikrotikApiPort] = useState(
+    initialCached.defaultMikrotikApiPort
+  );
+  const [slaAutoAssignMinutes, setSlaAutoAssignMinutes] = useState(
+    initialCached.slaAutoAssignMinutes
+  );
+  const [fiberCutSlaHours, setFiberCutSlaHours] = useState(initialCached.fiberCutSlaHours);
+  const [autoWalledGarden, setAutoWalledGarden] = useState(initialCached.autoWalledGarden);
+
+  const [isLoadingSettings, setIsLoadingSettings] = useState(true);
   const [isSaving, setIsSaving] = useState(false);
+  const [lastSyncedAt, setLastSyncedAt] = useState<string | null>(null);
+  const [tableMissingWarning, setTableMissingWarning] = useState<string | null>(null);
+  const [copiedSql, setCopiedSql] = useState(false);
+
+  const [toast, setToast] = useState<{
+    type: 'success' | 'error';
+    message: string;
+  } | null>(null);
+
+  const [gatewayCheck, setGatewayCheck] = useState<{
+    state: 'idle' | 'testing' | 'online' | 'offline';
+    message: string;
+  }>({ state: 'idle', message: '' });
 
   // Router management in settings
   const [isAddRouterModalOpen, setIsAddRouterModalOpen] = useState(false);
@@ -53,11 +98,53 @@ export const SettingsStudio: React.FC = () => {
   const [isDeleteRouterDialogOpen, setIsDeleteRouterDialogOpen] = useState(false);
   const [isDeletingRouter, setIsDeletingRouter] = useState(false);
 
+  const showToast = (type: 'success' | 'error', message: string, durationMs = 5000) => {
+    setToast({ type, message });
+    window.setTimeout(() => {
+      setToast((prev) => (prev?.message === message ? null : prev));
+    }, durationMs);
+  };
+
+  const hydrateFromDatabase = async () => {
+    setIsLoadingSettings(true);
+    try {
+      const res = await loadGlobalSystemSettings();
+      const s = res.settings || DEFAULT_GLOBAL_SYSTEM_SETTINGS;
+      setCompanyDisplayName(s.companyDisplayName);
+      setSupportHelpline(s.supportHelpline);
+      setBaileysGatewayUrl(s.baileysGatewayUrl);
+      setAutoSendMasterSwitch(s.autoSendMasterSwitch);
+      setTeamWhatsAppGroupName(s.teamWhatsAppGroupName);
+      setTeamWhatsAppGroupJid(s.teamWhatsAppGroupJid);
+      setBillingCycleDay(s.billingCycleDay);
+      setGracePeriodDays(s.gracePeriodDays);
+      setExpiryPppProfile(s.expiryPppProfile);
+      setAutoWalledGarden(s.autoWalledGarden);
+      setDefaultMikrotikApiPort(s.defaultMikrotikApiPort);
+      setDefaultSnmpCommunity(s.defaultSnmpCommunity);
+      setSlaAutoAssignMinutes(s.slaAutoAssignMinutes);
+      setFiberCutSlaHours(s.fiberCutSlaHours);
+      setLastSyncedAt(res.updatedAt);
+
+      if (res.tableMissing) {
+        setTableMissingWarning(
+          res.error || 'Supabase table "system_settings" has not been created yet.'
+        );
+      } else {
+        setTableMissingWarning(null);
+      }
+    } finally {
+      setIsLoadingSettings(false);
+    }
+  };
+
+  useEffect(() => {
+    void hydrateFromDatabase();
+  }, []);
+
   const handleSelectPresetCurrency = async (code: string, symbol: string) => {
-    // Immediately updates the Global Context and triggers an instant re-render across the entire dashboard
     await updateCurrency(code, symbol);
-    setSaveSuccess(true);
-    setTimeout(() => setSaveSuccess(false), 3000);
+    showToast('success', `Currency updated to ${code} (${symbol}) and saved to database.`);
   };
 
   const handleCustomSymbolChange = async (newSymbol: string) => {
@@ -68,35 +155,123 @@ export const SettingsStudio: React.FC = () => {
     await updateCurrency(newCode, globalCurrencySymbol);
   };
 
+  const handleTestGateway = async () => {
+    const check = normalizeWhatsAppGatewayUrl(baileysGatewayUrl);
+    if (!check.valid) {
+      setGatewayCheck({ state: 'offline', message: check.error || 'Invalid URL' });
+      return;
+    }
+    setGatewayCheck({ state: 'testing', message: 'Checking gateway...' });
+    const res = await safeWhatsAppApiFetch<any>(
+      '/api/whatsapp/health',
+      { method: 'GET', headers: { Accept: 'application/json' } },
+      check.normalized
+    );
+    if (res.ok && res.data?.success) {
+      const count = Number(res.data?.connectedSessionsCount ?? 0);
+      setGatewayCheck({
+        state: 'online',
+        message: `Online (${count} linked session${count === 1 ? '' : 's'})`,
+      });
+    } else {
+      setGatewayCheck({
+        state: 'offline',
+        message: `Unreachable at ${getDisplayWhatsAppGatewayUrl(check.normalized)}`,
+      });
+    }
+  };
+
+  const handleCopySql = async () => {
+    try {
+      await navigator.clipboard.writeText(SYSTEM_SETTINGS_MIGRATION_SQL);
+      setCopiedSql(true);
+      setTimeout(() => setCopiedSql(false), 2500);
+    } catch {
+      // ignore clipboard errors
+    }
+  };
+
   const handleSave = async (e: React.FormEvent) => {
     e.preventDefault();
     setIsSaving(true);
     try {
-      await fetch('/api/settings', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          currencyCode,
-          currencySymbol: globalCurrencySymbol,
-          ispName,
-          billingCycleDay,
-          gracePeriodDays,
-          autoWalledGarden,
-        }),
+      const result = await saveGlobalSystemSettings({
+        companyDisplayName: companyDisplayName.trim() || DEFAULT_GLOBAL_SYSTEM_SETTINGS.companyDisplayName,
+        ispName: companyDisplayName.trim() || DEFAULT_GLOBAL_SYSTEM_SETTINGS.ispName,
+        supportHelpline: supportHelpline.trim(),
+        baileysGatewayUrl: baileysGatewayUrl.trim(),
+        autoSendMasterSwitch,
+        whatsAppGatewayEnabled: autoSendMasterSwitch,
+        teamWhatsAppGroupName: teamWhatsAppGroupName.trim(),
+        teamWhatsAppGroupJid: teamWhatsAppGroupJid.trim(),
+        billingCycleDay,
+        gracePeriodDays,
+        expiryPppProfile: expiryPppProfile.trim() || DEFAULT_GLOBAL_SYSTEM_SETTINGS.expiryPppProfile,
+        autoWalledGarden,
+        currencyCode,
+        currencySymbol: globalCurrencySymbol,
+        defaultMikrotikApiPort,
+        defaultSnmpCommunity: defaultSnmpCommunity.trim() || 'public',
+        slaAutoAssignMinutes,
+        fiberCutSlaHours,
       });
-      setSaveSuccess(true);
-      setTimeout(() => setSaveSuccess(false), 3500);
-    } catch (err) {
-      console.warn('Failed to save settings to server:', err);
-      setSaveSuccess(true);
-      setTimeout(() => setSaveSuccess(false), 3500);
+
+      if (!result.ok) {
+        if (result.tableMissing) {
+          setTableMissingWarning(result.error || 'Table public.system_settings does not exist.');
+        }
+        showToast(
+          'error',
+          result.error || 'Failed to save System Settings & Carrier Configuration to Supabase.',
+          8000
+        );
+        return;
+      }
+
+      setTableMissingWarning(null);
+      setBaileysGatewayUrl(result.settings.baileysGatewayUrl);
+      setCompanyDisplayName(result.settings.companyDisplayName);
+      setLastSyncedAt(result.updatedAt || new Date().toISOString());
+      showToast('success', 'System Settings & Carrier Configuration saved to database.');
+    } catch (err: any) {
+      showToast(
+        'error',
+        err?.message || 'Unexpected error saving System Settings & Carrier Configuration.',
+        8000
+      );
     } finally {
       setIsSaving(false);
     }
   };
 
   return (
-    <div className="space-y-6 text-xs font-sans max-w-5xl mx-auto">
+    <div className="space-y-6 text-xs font-sans max-w-5xl mx-auto pb-8">
+      {/* Floating Confirmation / Error Toast */}
+      {toast && (
+        <div
+          role="status"
+          className={`fixed bottom-5 right-5 z-50 max-w-md px-4 py-3 rounded-xl border shadow-2xl flex items-start gap-2.5 text-xs font-semibold backdrop-blur-md transition-all ${
+            toast.type === 'success'
+              ? 'bg-emerald-950/95 border-emerald-500/60 text-emerald-200 shadow-emerald-950/60'
+              : 'bg-rose-950/95 border-rose-500/60 text-rose-200 shadow-rose-950/60'
+          }`}
+        >
+          {toast.type === 'success' ? (
+            <CheckCircle2 className="w-4 h-4 text-emerald-400 shrink-0 mt-0.5" />
+          ) : (
+            <AlertTriangle className="w-4 h-4 text-rose-400 shrink-0 mt-0.5" />
+          )}
+          <span className="leading-relaxed">{toast.message}</span>
+          <button
+            type="button"
+            onClick={() => setToast(null)}
+            className="ml-2 text-[11px] opacity-70 hover:opacity-100 cursor-pointer"
+          >
+            ✕
+          </button>
+        </div>
+      )}
+
       {/* Settings Top Header */}
       <div className="bg-slate-900 border border-slate-800 rounded-xl p-5 shadow-lg flex flex-col sm:flex-row items-start sm:items-center justify-between gap-4">
         <div className="flex items-center gap-3">
@@ -108,42 +283,220 @@ export const SettingsStudio: React.FC = () => {
               System Settings &amp; Carrier Configuration
             </h3>
             <p className="text-xs text-slate-400 mt-0.5">
-              Configure global ISP billing policies, MikroTik API limits, VSOL SNMP parameters, and SLA auto-assignment.
+              Persisted globally in Supabase PostgreSQL (<code className="text-cyan-300">system_settings</code>) for all Admins, Dealers, and browser sessions.
             </p>
           </div>
         </div>
 
-        {saveSuccess && (
-          <div className="px-3 py-1.5 rounded-lg bg-emerald-950 border border-emerald-700 text-emerald-300 font-mono flex items-center gap-1.5">
-            <CheckCircle2 className="w-4 h-4 text-emerald-400" />
-            <span>Settings Saved Successfully!</span>
-          </div>
-        )}
+        <div className="flex items-center gap-2.5">
+          {lastSyncedAt && !isLoadingSettings && (
+            <span className="text-[11px] font-mono text-emerald-400 bg-emerald-950/60 border border-emerald-800/60 px-2.5 py-1 rounded-lg">
+              Synced: {new Date(lastSyncedAt).toLocaleTimeString()}
+            </span>
+          )}
+          <button
+            type="button"
+            onClick={hydrateFromDatabase}
+            disabled={isLoadingSettings}
+            className="px-3 py-1.5 rounded-lg bg-slate-800 hover:bg-slate-700 border border-slate-700 text-slate-200 font-semibold flex items-center gap-1.5 transition cursor-pointer disabled:opacity-50"
+          >
+            <RefreshCw className={`w-3.5 h-3.5 ${isLoadingSettings ? 'animate-spin' : ''}`} />
+            <span>Reload DB</span>
+          </button>
+        </div>
       </div>
 
+      {/* Missing Table / RLS Warning Banner with 1-Click SQL */}
+      {tableMissingWarning && (
+        <div className="bg-amber-950/60 border border-amber-500/40 rounded-xl p-4 flex flex-col sm:flex-row items-start sm:items-center justify-between gap-3">
+          <div className="flex items-start gap-2.5">
+            <AlertTriangle className="w-5 h-5 text-amber-400 shrink-0 mt-0.5" />
+            <div className="space-y-1">
+              <p className="text-xs font-bold text-amber-200">
+                Supabase Table Migration Needed: public.system_settings
+              </p>
+              <p className="text-[11px] text-amber-200/80">{tableMissingWarning}</p>
+            </div>
+          </div>
+          <button
+            type="button"
+            onClick={handleCopySql}
+            className="inline-flex items-center gap-1.5 px-3.5 py-2 rounded-lg bg-amber-500/20 hover:bg-amber-500/30 border border-amber-500/40 text-amber-100 text-xs font-bold shrink-0 cursor-pointer"
+          >
+            {copiedSql ? <Check className="w-3.5 h-3.5" /> : <Copy className="w-3.5 h-3.5" />}
+            {copiedSql ? 'SQL Copied!' : 'Copy system_settings SQL'}
+          </button>
+        </div>
+      )}
+
       <form onSubmit={handleSave} className="space-y-6">
-        {/* Section 1: Carrier Profile & Billing Policy */}
+        {/* Section 1: Company Branding, WhatsApp Gateway & Team Group */}
         <div className="bg-slate-900 border border-slate-800 rounded-xl p-5 shadow-lg space-y-4">
-          <div className="flex items-center gap-2 pb-2 border-b border-slate-800">
-            <Globe className="w-4 h-4 text-cyan-400" />
-            <h4 className="font-bold text-white text-xs uppercase tracking-wider font-mono">
-              ISP Profile &amp; Automated Billing Rules
-            </h4>
+          <div className="flex items-center justify-between pb-2 border-b border-slate-800">
+            <div className="flex items-center gap-2">
+              <MessageSquare className="w-4 h-4 text-emerald-400" />
+              <h4 className="font-bold text-white text-xs uppercase tracking-wider font-mono">
+                Company Branding, Baileys Gateway &amp; Team Work Group
+              </h4>
+            </div>
+            {isLoadingSettings && (
+              <span className="text-[11px] text-cyan-400 flex items-center gap-1 font-mono">
+                <Loader2 className="w-3 h-3 animate-spin" /> Loading from Supabase...
+              </span>
+            )}
           </div>
 
-          <div className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-3 gap-4 font-mono">
+          <div className="grid grid-cols-1 sm:grid-cols-2 gap-4 font-mono">
             <div>
-              <label className="block text-slate-400 mb-1 font-semibold">ISP Carrier Brand Name</label>
+              <label className="block text-slate-300 mb-1 font-semibold">
+                Company Display Name (Carrier Brand)
+              </label>
               <input
                 type="text"
-                value={ispName}
-                onChange={(e) => setIspName(e.target.value)}
+                value={companyDisplayName}
+                onChange={(e) => setCompanyDisplayName(e.target.value)}
+                placeholder="e.g. Youth Net Service"
                 className="w-full bg-slate-950 border border-slate-700 rounded-lg px-3 py-2 text-white text-xs focus:outline-none focus:border-cyan-500"
               />
             </div>
 
             <div>
-              <label className="block text-slate-400 mb-1 font-semibold">Billing Generation Day</label>
+              <label className="block text-slate-300 mb-1 font-semibold flex items-center gap-1.5">
+                <Phone className="w-3 h-3 text-cyan-400" />
+                <span>Support Helpline Number</span>
+              </label>
+              <input
+                type="text"
+                value={supportHelpline}
+                onChange={(e) => setSupportHelpline(e.target.value)}
+                placeholder="e.g. +92 323 4193599"
+                className="w-full bg-slate-950 border border-slate-700 rounded-lg px-3 py-2 text-white text-xs focus:outline-none focus:border-cyan-500"
+              />
+            </div>
+          </div>
+
+          {/* Baileys Gateway Server URL */}
+          <div className="font-mono space-y-1.5">
+            <div className="flex items-center justify-between gap-2">
+              <label className="block text-slate-300 font-semibold">
+                Baileys Gateway Server URL
+              </label>
+              {gatewayCheck.state !== 'idle' && (
+                <span
+                  className={`text-[10px] font-bold px-2 py-0.5 rounded border ${
+                    gatewayCheck.state === 'online'
+                      ? 'bg-emerald-950 text-emerald-300 border-emerald-700'
+                      : gatewayCheck.state === 'testing'
+                      ? 'bg-cyan-950 text-cyan-300 border-cyan-700'
+                      : 'bg-rose-950 text-rose-300 border-rose-700'
+                  }`}
+                >
+                  {gatewayCheck.message}
+                </span>
+              )}
+            </div>
+            <div className="flex flex-col sm:flex-row gap-2">
+              <input
+                type="text"
+                value={baileysGatewayUrl}
+                onChange={(e) => setBaileysGatewayUrl(e.target.value)}
+                placeholder="https://your-baileys-server.up.railway.app or http://localhost:3001 (blank = built-in)"
+                className="flex-1 bg-slate-950 border border-slate-700 rounded-lg px-3 py-2 text-white text-xs focus:outline-none focus:border-cyan-500"
+              />
+              <button
+                type="button"
+                onClick={handleTestGateway}
+                disabled={gatewayCheck.state === 'testing'}
+                className="px-3.5 py-2 rounded-lg bg-slate-800 hover:bg-slate-700 border border-slate-700 text-cyan-300 font-bold flex items-center gap-1.5 transition cursor-pointer shrink-0 disabled:opacity-50"
+              >
+                {gatewayCheck.state === 'testing' ? (
+                  <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                ) : (
+                  <PlugZap className="w-3.5 h-3.5" />
+                )}
+                <span>Test Gateway</span>
+              </button>
+            </div>
+          </div>
+
+          {/* Team WhatsApp Work Group */}
+          <div className="grid grid-cols-1 sm:grid-cols-2 gap-4 font-mono">
+            <div>
+              <label className="block text-slate-300 mb-1 font-semibold flex items-center gap-1.5">
+                <Users className="w-3 h-3 text-emerald-400" />
+                <span>Team WhatsApp Work Group Name</span>
+              </label>
+              <input
+                type="text"
+                value={teamWhatsAppGroupName}
+                onChange={(e) => setTeamWhatsAppGroupName(e.target.value)}
+                placeholder="e.g. Youth Net Field Technicians"
+                className="w-full bg-slate-950 border border-slate-700 rounded-lg px-3 py-2 text-white text-xs focus:outline-none focus:border-cyan-500"
+              />
+            </div>
+
+            <div>
+              <label className="block text-slate-300 mb-1 font-semibold">
+                Team WhatsApp Work Group JID
+              </label>
+              <input
+                type="text"
+                value={teamWhatsAppGroupJid}
+                onChange={(e) => setTeamWhatsAppGroupJid(e.target.value)}
+                placeholder="e.g. 120363012345678901@g.us"
+                className="w-full bg-slate-950 border border-slate-700 rounded-lg px-3 py-2 text-white text-xs focus:outline-none focus:border-cyan-500"
+              />
+            </div>
+          </div>
+
+          {/* Auto-Send Master Switch */}
+          <div className="flex items-center justify-between p-3.5 rounded-lg bg-slate-950 border border-slate-800">
+            <div className="flex items-start gap-2.5">
+              <Power
+                className={`w-4 h-4 mt-0.5 ${
+                  autoSendMasterSwitch ? 'text-emerald-400' : 'text-slate-500'
+                }`}
+              />
+              <div>
+                <span className="font-bold text-white block">
+                  Auto-Send Master Switch (WhatsApp Background Automation)
+                </span>
+                <span className="text-[11px] text-slate-400">
+                  Automatically dispatch Welcome Credentials, 5-Day Pre-Expiry Invoices, Grace Warnings, Auto-Suspension Notices, Complaints, and Paid Receipts via Baileys.
+                </span>
+              </div>
+            </div>
+            <button
+              type="button"
+              onClick={() => setAutoSendMasterSwitch((prev) => !prev)}
+              className={`relative w-12 h-6 rounded-full transition-colors shrink-0 cursor-pointer ${
+                autoSendMasterSwitch ? 'bg-emerald-500' : 'bg-slate-700'
+              }`}
+              aria-label="Toggle Auto-Send Master Switch"
+            >
+              <span
+                className={`absolute top-0.5 left-0.5 w-5 h-5 rounded-full bg-white transition-transform ${
+                  autoSendMasterSwitch ? 'translate-x-6' : 'translate-x-0'
+                }`}
+              />
+            </button>
+          </div>
+        </div>
+
+        {/* Section 2: Billing, Grace Period & Currency Rules */}
+        <div className="bg-slate-900 border border-slate-800 rounded-xl p-5 shadow-lg space-y-4">
+          <div className="flex items-center gap-2 pb-2 border-b border-slate-800">
+            <Globe className="w-4 h-4 text-cyan-400" />
+            <h4 className="font-bold text-white text-xs uppercase tracking-wider font-mono">
+              Billing, Grace Rules &amp; Localization Currency
+            </h4>
+          </div>
+
+          <div className="grid grid-cols-1 sm:grid-cols-3 gap-4 font-mono">
+            <div>
+              <label className="block text-slate-400 mb-1 font-semibold">
+                Billing Generation Day
+              </label>
               <input
                 type="number"
                 min={1}
@@ -155,7 +508,9 @@ export const SettingsStudio: React.FC = () => {
             </div>
 
             <div>
-              <label className="block text-slate-400 mb-1 font-semibold">Overdue Grace Period (Days)</label>
+              <label className="block text-slate-400 mb-1 font-semibold">
+                Post-Due Grace Period (Days)
+              </label>
               <input
                 type="number"
                 min={0}
@@ -165,9 +520,22 @@ export const SettingsStudio: React.FC = () => {
                 className="w-full bg-slate-950 border border-slate-700 rounded-lg px-3 py-2 text-white text-xs focus:outline-none focus:border-cyan-500"
               />
             </div>
+
+            <div>
+              <label className="block text-slate-400 mb-1 font-semibold">
+                MikroTik Expiry Pool Profile
+              </label>
+              <input
+                type="text"
+                value={expiryPppProfile}
+                onChange={(e) => setExpiryPppProfile(e.target.value)}
+                placeholder="EXPIRED-16-POOL"
+                className="w-full bg-slate-950 border border-slate-700 rounded-lg px-3 py-2 text-white text-xs focus:outline-none focus:border-cyan-500"
+              />
+            </div>
           </div>
 
-          {/* Localization & Currency Setting (Instant Reactive Re-render) */}
+          {/* Localization & Currency Setting */}
           <div className="pt-3 border-t border-slate-800 space-y-3 font-mono">
             <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2">
               <div>
@@ -175,7 +543,7 @@ export const SettingsStudio: React.FC = () => {
                   Localization &amp; Billing Currency Setting
                 </label>
                 <span className="text-[11px] text-slate-400">
-                  Select your operating currency. Changes persist in PostgreSQL &amp; update the entire dashboard in real-time.
+                  Changes persist to Supabase <code className="text-cyan-300">system_settings</code> &amp; update the entire dashboard immediately.
                 </span>
               </div>
               <div className="flex items-center gap-2 bg-slate-950 px-3 py-1.5 rounded-lg border border-slate-800 text-[11px]">
@@ -187,7 +555,6 @@ export const SettingsStudio: React.FC = () => {
               </div>
             </div>
 
-            {/* Quick Currency Selector Presets */}
             <div>
               <span className="text-[10px] text-slate-400 block mb-1.5 uppercase tracking-wider">
                 Quick Preset Selection (Click to apply immediately):
@@ -214,7 +581,6 @@ export const SettingsStudio: React.FC = () => {
               </div>
             </div>
 
-            {/* Custom Currency Code & Symbol Override */}
             <div className="grid grid-cols-1 sm:grid-cols-3 gap-3 pt-2">
               <div>
                 <label className="block text-slate-400 mb-1 font-semibold text-[11px]">
@@ -242,7 +608,6 @@ export const SettingsStudio: React.FC = () => {
                 />
               </div>
 
-              {/* Dynamic Live Formatting Preview */}
               <div className="bg-slate-950 p-2.5 rounded-lg border border-slate-800 flex flex-col justify-center">
                 <span className="text-[10px] text-slate-400 block mb-1">Live Format Preview:</span>
                 <div className="flex items-center justify-between text-xs font-bold">
@@ -257,9 +622,9 @@ export const SettingsStudio: React.FC = () => {
 
             <div className="flex items-center justify-between p-3 rounded-lg bg-slate-950 border border-slate-800 mt-2">
               <div>
-                <span className="font-bold text-white block">Auto Walled-Garden Isolation</span>
+                <span className="font-bold text-white block">Auto Expiry-Pool Isolation</span>
                 <span className="text-[11px] text-slate-400">
-                  Automatically push overdue PPPoE subscribers to isolation address-list on 6th of month.
+                  Automatically move unpaid PPPoE subscribers to the Expiry Pool once their grace period expires.
                 </span>
               </div>
               <input
@@ -272,18 +637,20 @@ export const SettingsStudio: React.FC = () => {
           </div>
         </div>
 
-        {/* Section 2: Hardware Gateway Parameters (MikroTik & VSOL OLT) */}
+        {/* Section 3: Hardware Gateway & Carrier Defaults (MikroTik & VSOL OLT) */}
         <div className="bg-slate-900 border border-slate-800 rounded-xl p-5 shadow-lg space-y-4">
           <div className="flex items-center gap-2 pb-2 border-b border-slate-800">
             <Server className="w-4 h-4 text-cyan-400" />
             <h4 className="font-bold text-white text-xs uppercase tracking-wider font-mono">
-              Hardware Gateway Settings (MikroTik &amp; VSOL OLT)
+              Router &amp; Carrier Defaults (MikroTik &amp; VSOL OLT)
             </h4>
           </div>
 
           <div className="grid grid-cols-1 sm:grid-cols-3 gap-4 font-mono">
             <div>
-              <label className="block text-slate-400 mb-1 font-semibold">Default RouterOS API Port</label>
+              <label className="block text-slate-400 mb-1 font-semibold">
+                Default RouterOS API Port
+              </label>
               <input
                 type="number"
                 value={defaultMikrotikApiPort}
@@ -293,7 +660,9 @@ export const SettingsStudio: React.FC = () => {
             </div>
 
             <div>
-              <label className="block text-slate-400 mb-1 font-semibold">Default SNMP Community String</label>
+              <label className="block text-slate-400 mb-1 font-semibold">
+                Default SNMP Community String
+              </label>
               <input
                 type="text"
                 value={defaultSnmpCommunity}
@@ -303,14 +672,16 @@ export const SettingsStudio: React.FC = () => {
             </div>
 
             <div>
-              <label className="block text-slate-400 mb-1 font-semibold">Active OLT Hardware Nodes</label>
+              <label className="block text-slate-400 mb-1 font-semibold">
+                Active OLT Hardware Nodes
+              </label>
               <div className="p-2 rounded bg-slate-950 border border-slate-800 text-cyan-400 font-bold">
                 {olts.length} Registered Chassis
               </div>
             </div>
           </div>
 
-          {/* Configured MikroTik Routers List in Settings */}
+          {/* Configured MikroTik Routers List */}
           <div className="pt-3 border-t border-slate-800 space-y-3">
             <div className="flex items-center justify-between">
               <span className="text-slate-300 font-bold font-mono text-xs flex items-center gap-1.5">
@@ -343,7 +714,8 @@ export const SettingsStudio: React.FC = () => {
                     <div>
                       <span className="text-white font-bold block">{router.name}</span>
                       <span className="text-[11px] text-slate-400">
-                        {router.ipAddress}:{router.apiPort} &bull; {router.model} &bull; {router.version}
+                        {router.ipAddress}:{router.apiPort} &bull; {router.model} &bull;{' '}
+                        {router.version}
                       </span>
                     </div>
                   </div>
@@ -374,23 +746,25 @@ export const SettingsStudio: React.FC = () => {
           </div>
         </div>
 
-        {/* Section 3: SLA Engine & WhatsApp Dispatch */}
+        {/* Section 4: Complaint SLA Timers */}
         <div className="bg-slate-900 border border-slate-800 rounded-xl p-5 shadow-lg space-y-4">
           <div className="flex items-center gap-2 pb-2 border-b border-slate-800">
             <Clock className="w-4 h-4 text-cyan-400" />
             <h4 className="font-bold text-white text-xs uppercase tracking-wider font-mono">
-              Complaint SLA Timers &amp; WhatsApp Notifications
+              Complaint SLA Timers
             </h4>
           </div>
 
-          <div className="grid grid-cols-1 sm:grid-cols-3 gap-4 font-mono">
+          <div className="grid grid-cols-1 sm:grid-cols-2 gap-4 font-mono">
             <div>
-              <label className="block text-slate-400 mb-1 font-semibold">Auto-Assign SLA Timeout</label>
+              <label className="block text-slate-400 mb-1 font-semibold">
+                Auto-Assign SLA Timeout
+              </label>
               <div className="flex items-center gap-2">
                 <input
                   type="number"
                   min={1}
-                  max={60}
+                  max={240}
                   value={slaAutoAssignMinutes}
                   onChange={(e) => setSlaAutoAssignMinutes(Number(e.target.value))}
                   className="w-full bg-slate-950 border border-slate-700 rounded-lg px-3 py-2 text-white text-xs focus:outline-none focus:border-cyan-500"
@@ -400,12 +774,14 @@ export const SettingsStudio: React.FC = () => {
             </div>
 
             <div>
-              <label className="block text-slate-400 mb-1 font-semibold">Fiber Cut Resolution SLA</label>
+              <label className="block text-slate-400 mb-1 font-semibold">
+                Fiber Cut Resolution SLA
+              </label>
               <div className="flex items-center gap-2">
                 <input
                   type="number"
                   min={1}
-                  max={24}
+                  max={72}
                   value={fiberCutSlaHours}
                   onChange={(e) => setFiberCutSlaHours(Number(e.target.value))}
                   className="w-full bg-slate-950 border border-slate-700 rounded-lg px-3 py-2 text-white text-xs focus:outline-none focus:border-cyan-500"
@@ -413,33 +789,25 @@ export const SettingsStudio: React.FC = () => {
                 <span className="text-slate-400">hours</span>
               </div>
             </div>
-
-            <div className="flex items-center justify-between p-3 rounded-lg bg-slate-950 border border-slate-800">
-              <div>
-                <span className="font-bold text-white block">WhatsApp Gateway</span>
-                <span className="text-[10px] text-slate-400">Dispatch receipts &amp; outage notices</span>
-              </div>
-              <input
-                type="checkbox"
-                checked={whatsAppGatewayEnabled}
-                onChange={(e) => setWhatsAppGatewayEnabled(e.target.checked)}
-                className="w-4 h-4 accent-cyan-500 cursor-pointer"
-              />
-            </div>
           </div>
         </div>
 
         {/* Save Bar */}
-        <div className="flex items-center justify-between p-4 bg-slate-900 border border-slate-800 rounded-xl">
+        <div className="flex flex-col sm:flex-row items-start sm:items-center justify-between gap-3 p-4 bg-slate-900 border border-slate-800 rounded-xl">
           <span className="text-slate-400 text-xs font-mono">
-            Changes take effect immediately across all NOC, Agent, and Subscriber consoles.
+            Saves directly to Supabase <code className="text-cyan-300">system_settings</code> (id: &apos;global&apos;) and syncs across all Admin, Dealer &amp; browser sessions.
           </span>
           <button
             type="submit"
-            className="px-6 py-2.5 bg-gradient-to-r from-cyan-600 to-blue-600 hover:from-cyan-500 hover:to-blue-500 text-slate-950 font-bold rounded-xl transition shadow-lg shadow-cyan-950/50 flex items-center gap-2 cursor-pointer"
+            disabled={isSaving || isLoadingSettings}
+            className="px-6 py-2.5 bg-gradient-to-r from-cyan-600 to-blue-600 hover:from-cyan-500 hover:to-blue-500 disabled:opacity-60 text-slate-950 font-bold rounded-xl transition shadow-lg shadow-cyan-950/50 flex items-center gap-2 cursor-pointer shrink-0"
           >
-            <Save className="w-4 h-4" />
-            <span>Save System Preferences</span>
+            {isSaving ? (
+              <Loader2 className="w-4 h-4 animate-spin" />
+            ) : (
+              <Save className="w-4 h-4" />
+            )}
+            <span>{isSaving ? 'Saving Configuration...' : 'Save Configuration'}</span>
           </button>
         </div>
       </form>

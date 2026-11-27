@@ -31,7 +31,10 @@ const makeWASocket: any =
   (baileys as any).default ??
   (baileys as any).makeWASocket;
 const useMultiFileAuthState: any = (baileys as any).useMultiFileAuthState;
-const DisconnectReason: any = (baileys as any).DisconnectReason ?? { loggedOut: 401 };
+const DisconnectReason: any = (baileys as any).DisconnectReason ?? {
+  loggedOut: 401,
+  restartRequired: 515,
+};
 const fetchLatestBaileysVersion: any = (baileys as any).fetchLatestBaileysVersion;
 const Browsers: any = (baileys as any).Browsers;
 
@@ -402,21 +405,25 @@ class MultiTenantBaileysManager {
         auth: state,
         logger: silentLogger,
         printQRInTerminal: false,
-        browser: Browsers?.ubuntu ? Browsers.ubuntu('YouthNet Gateway') : ['YouthNet Gateway', 'Chrome', '1.0.0'],
+        browser: Browsers?.macOS ? Browsers.macOS('Desktop') : ['YouthNet Gateway', 'Chrome', '124.0.0'],
         syncFullHistory: false,
         markOnlineOnConnect: false,
-        connectTimeoutMs: 25_000,
-        defaultQueryTimeoutMs: 25_000,
+        generateHighQualityLinkPreview: false,
+        connectTimeoutMs: 30_000,
+        defaultQueryTimeoutMs: 30_000,
+        keepAliveIntervalMs: 25_000,
       });
 
       this.sessions.set(sessionKey, sock);
 
-      sock.ev.on('creds.update', async () => {
-        try {
-          await saveCreds();
-        } catch {
-          // ignore transient creds write error
-        }
+      let pendingCredsSave = Promise.resolve();
+      sock.ev.on('creds.update', () => {
+        pendingCredsSave = pendingCredsSave
+          .catch(() => {})
+          .then(() => saveCreds())
+          .catch(() => {
+            // ignore transient creds write error
+          });
       });
 
       sock.ev.on('connection.update', async (update: any) => {
@@ -469,10 +476,13 @@ class MultiTenantBaileysManager {
             lastDisconnect?.error?.statusCode ??
             0;
           const isLoggedOut = statusCode === DisconnectReason.loggedOut || statusCode === 401;
+          const isRestartRequired =
+            statusCode === DisconnectReason.restartRequired || statusCode === 515;
           const errMsg = lastDisconnect?.error?.message || `Closed (code ${statusCode || 'unknown'})`;
 
           this.sessions.delete(sessionKey);
 
+          // ONLY clear session files when statusCode === DisconnectReason.loggedOut (401)
           if (isLoggedOut) {
             try {
               const dir = resolveSafeBaileysAuthDir(safeId);
@@ -486,13 +496,47 @@ class MultiTenantBaileysManager {
               status: 'DISCONNECTED',
               qrDataUrl: null,
               phone: null,
-              lastError: 'WhatsApp session logged out from device. Scan QR to reconnect.',
+              lastError: 'WhatsApp session logged out from device (401). Scan QR to reconnect.',
               reconnectAttempts: 0,
             });
             await this.updatePortalUserWhatsAppColumns(supabase, safeId, {
               whatsapp_status: 'DISCONNECTED',
               whatsapp_phone: null,
             });
+          } else if (isRestartRequired) {
+            // QR scan handoff (515): NEVER delete authDir / creds.json; flush creds & reconnect within 1 second
+            try {
+              await pendingCredsSave;
+            } catch {
+              // ignore
+            }
+            const currentMeta = this.getSessionState(safeId);
+            const attempts = (currentMeta.reconnectAttempts || 0) + 1;
+
+            if (attempts <= 6) {
+              this.setSessionState(safeId, {
+                status: 'CONNECTING',
+                qrDataUrl: null,
+                lastError: null,
+                reconnectAttempts: attempts,
+              });
+              this.clearReconnectTimer(safeId);
+              console.log(
+                `[Baileys] Restart required (515) for ${sessionKey} (attempt ${attempts}/6) — reconnecting in 800ms with saved credentials...`
+              );
+              const timer = setTimeout(() => {
+                this.reconnectTimers.delete(safeId);
+                this.startSession(safeId, supabase).catch(() => {});
+              }, 800);
+              this.reconnectTimers.set(safeId, timer);
+            } else {
+              this.setSessionState(safeId, {
+                status: 'DISCONNECTED',
+                qrDataUrl: null,
+                lastError: 'WhatsApp stream restart limit reached (515). Click Generate QR to reconnect.',
+                reconnectAttempts: 0,
+              });
+            }
           } else {
             const currentMeta = this.getSessionState(safeId);
             const attempts = (currentMeta.reconnectAttempts || 0) + 1;

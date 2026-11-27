@@ -81,44 +81,46 @@ export const CurrencyProvider: React.FC<{ children: React.ReactNode }> = ({ chil
 
   const [isLoading, setIsLoading] = useState<boolean>(true);
 
-  // 2. Fetch persisted settings from PostgreSQL system_settings table on mount
+  // 2. Fetch persisted settings from Supabase `system_settings` (`id = 'global'`) on app load
   useEffect(() => {
     let isMounted = true;
     const fetchPersistedSettings = async () => {
       try {
-        const res = await fetch('/api/settings');
-        if (res.ok) {
-          const data = await res.json();
-          if (data.success && data.settings) {
-            const serverCode = data.settings.currencyCode || data.settings.currency_code;
-            const serverSymbol = data.settings.currencySymbol || data.settings.currency_symbol;
-
-            if (isMounted) {
-              if (serverCode) {
-                setCurrencyCode(serverCode);
-                localStorage.setItem(STORAGE_KEY_CODE, serverCode);
-              }
-              if (serverSymbol) {
-                setCurrencySymbol(serverSymbol);
-                localStorage.setItem(STORAGE_KEY_SYMBOL, serverSymbol);
-              }
-            }
+        const { loadGlobalSystemSettings } = await import('../lib/systemSettings');
+        const loaded = await loadGlobalSystemSettings();
+        if (isMounted && loaded?.settings) {
+          if (loaded.settings.currencyCode) {
+            setCurrencyCode(loaded.settings.currencyCode);
+            localStorage.setItem(STORAGE_KEY_CODE, loaded.settings.currencyCode);
+          }
+          if (loaded.settings.currencySymbol) {
+            setCurrencySymbol(loaded.settings.currencySymbol);
+            localStorage.setItem(STORAGE_KEY_SYMBOL, loaded.settings.currencySymbol);
           }
         }
       } catch (err) {
-        console.warn('[CurrencyContext] Offline or settings fetch failed, using cached settings:', err);
+        console.warn('[CurrencyContext] Settings load fallback:', err);
       } finally {
         if (isMounted) setIsLoading(false);
       }
     };
 
+    const handleSettingsUpdated = (ev: Event) => {
+      const detail = (ev as CustomEvent)?.detail;
+      if (!isMounted || !detail) return;
+      if (detail.currencyCode) setCurrencyCode(detail.currencyCode);
+      if (detail.currencySymbol) setCurrencySymbol(detail.currencySymbol);
+    };
+
     fetchPersistedSettings();
+    window.addEventListener('youthnet:system-settings-updated', handleSettingsUpdated);
     return () => {
       isMounted = false;
+      window.removeEventListener('youthnet:system-settings-updated', handleSettingsUpdated);
     };
   }, []);
 
-  // 3. Update Currency handler: immediately updates state & localStorage, and syncs to PostgreSQL
+  // 3. Update Currency handler: immediately updates state & localStorage, and persists to Supabase `system_settings`
   const updateCurrency = useCallback(async (newCode: string, newSymbol?: string) => {
     const code = newCode.trim().toUpperCase();
     let symbol = newSymbol?.trim();
@@ -138,18 +140,15 @@ export const CurrencyProvider: React.FC<{ children: React.ReactNode }> = ({ chil
       localStorage.setItem(STORAGE_KEY_SYMBOL, symbol);
     }
 
-    // Persist to PostgreSQL system_settings table
+    // Persist to Supabase `system_settings` (`id = 'global'`) + backend `/api/settings`
     try {
-      await fetch('/api/settings', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          currencyCode: code,
-          currencySymbol: symbol,
-        }),
+      const { saveGlobalSystemSettings } = await import('../lib/systemSettings');
+      await saveGlobalSystemSettings({
+        currencyCode: code,
+        currencySymbol: symbol,
       });
     } catch (err) {
-      console.warn('[CurrencyContext] Could not persist to PostgreSQL system_settings table:', err);
+      console.warn('[CurrencyContext] Could not persist to system_settings:', err);
     }
   }, []);
 
