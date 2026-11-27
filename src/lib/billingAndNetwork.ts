@@ -4,11 +4,14 @@ import { RouterAuthInfo, getActiveRouterAuth, resolveRestHostAndPort } from '../
 import {
   MAX_AUTO_DUE_DATE_FUTURE_DAYS,
   addCalendarMonthsYmd,
+  buildCycleDateString,
   computeBillingAnchorDay,
+  computeNextCycleDueDate,
   exceedsMaxAutoFutureDays,
   extractYmdString,
   getMaxAllowedAutoDueDateYmd,
   resolvePackageRate,
+  resolveSubscriberBillingCycle,
 } from './anniversaryBilling';
 import { isMissingTableOrColumnError } from './expiryUtils';
 import {
@@ -25,6 +28,7 @@ import {
 import { getStoredUser, getStoredToken } from './auth';
 import { hasExplicitAdminGracePermission } from './staffPermissions';
 import { triggerAutoWhatsAppNotification } from './whatsappRouting';
+import { getCachedGlobalSystemSettings } from './systemSettings';
 
 export const PARENT_FLEET_ROUTER = 'SADDAR FLEET ROUTER';
 
@@ -612,6 +616,40 @@ export function compute31DayRechargeExpiry(
 }
 
 /**
+ * Computes late-payment-safe +31-day recharge expiry strictly anchored to the invoice's `due_date`:
+ *   new_expiry = invoice.due_date + rechargeDays
+ * Even if the client pays several days late (e.g., Due 25 Nov, Paid 30 Nov), validity still
+ * extends from 25 Nov + 31 days = 26 Dec, preserving their original monthly billing cycle.
+ */
+export function computeAnchoredDueDateRechargeExpiry(
+  invoiceDueDateRaw?: string | null,
+  rechargeDays = 31,
+  fallbackRefDate: Date = new Date()
+): { expiryYmd: string; expiryIso: string; anchoredDueYmd: string | null } {
+  const days = Math.max(1, Math.round(Number(rechargeDays) || 31));
+  const dueYmd = extractYmdString(invoiceDueDateRaw || undefined);
+  if (dueYmd) {
+    const [y, m, d] = dueYmd.split('-').map((n) => Number(n));
+    const dt = new Date(Date.UTC(y, (m || 1) - 1, d || 1));
+    dt.setUTCDate(dt.getUTCDate() + days);
+    const expiryYmd = `${dt.getUTCFullYear()}-${String(dt.getUTCMonth() + 1).padStart(2, '0')}-${String(
+      dt.getUTCDate()
+    ).padStart(2, '0')}`;
+    return {
+      expiryYmd,
+      expiryIso: `${expiryYmd}T14:00:00+05:00`,
+      anchoredDueYmd: dueYmd,
+    };
+  }
+  const fallback = compute31DayRechargeExpiry(null, fallbackRefDate, days);
+  return {
+    expiryYmd: fallback.expiryYmd,
+    expiryIso: fallback.expiryIso,
+    anchoredDueYmd: null,
+  };
+}
+
+/**
  * Fetches the configured MikroTik Expiry Pool PPPoE profile name from `isp_billing_settings`,
  * falling back to `'EXPIRED-16-POOL'` if unset.
  */
@@ -652,6 +690,10 @@ export async function restoreSubscriberOnInvoicePaid(
     expiryProfileName?: string;
     selectedProfile?: string;
     rechargeDays?: number;
+    /** Anchors +31-day recharge strictly to the invoice's due_date (preserving billing cycle on late payments). */
+    invoiceDueDate?: string | null;
+    /** Explicit calendar YYYY-MM-DD expiry chosen via the Manual Activate / Recharge custom date picker. */
+    customExpiryDate?: string | null;
     activeRouter?: RouterAuthInfo;
     preloadedSecrets?: Array<Record<string, any>>;
     preloadedProfiles?: string[];
@@ -668,6 +710,8 @@ export async function restoreSubscriberOnInvoicePaid(
   restoredProfile: string;
   kickedSessions: number;
   newExpiryIso: string;
+  anchoredFromDueDate?: string | null;
+  validitySummary?: string;
   insufficientWalletFunds?: boolean;
   walletChargedAmount?: number;
   error?: string;
@@ -684,6 +728,7 @@ export async function restoreSubscriberOnInvoicePaid(
       restoredProfile: 'default',
       kickedSessions: 0,
       newExpiryIso: fallback.expiryYmd,
+      anchoredFromDueDate: null,
     };
   }
 
@@ -693,6 +738,8 @@ export async function restoreSubscriberOnInvoicePaid(
   let anchorDay = new Date().getDate();
   const initialRecharge = compute31DayRechargeExpiry(null, new Date(), rechargeDays);
   let rechargedExpiryYmd = initialRecharge.expiryYmd;
+  let anchoredFromDueDate: string | null = null;
+  let validitySummary = `Valid till ${rechargedExpiryYmd}`;
 
   try {
     // 1. Read subscriber record from Supabase + live MikroTik secret/profiles in parallel
@@ -740,15 +787,41 @@ export async function restoreSubscriberOnInvoicePaid(
 
     subscriberId = userRecord?.id || null;
     if (userRecord) {
-      anchorDay = computeBillingAnchorDay(userRecord);
+      const cycleInfo = resolveSubscriberBillingCycle(
+        userRecord as any,
+        getCachedGlobalSystemSettings()
+      );
+      anchorDay = cycleInfo.cycleDay;
     }
 
-    // 31-day prepaid recharge: max(today, current_expiry) + 31 days
+    // Determine exact new expiry date:
+    // Priority 1: Explicit Custom Expiry Date from Manual Activate / Recharge date picker
+    // Priority 2: Invoice Due Date anchored recharge (`invoice.due_date + 31 days`) to preserve billing cycle even on late payments
+    // Priority 3: Standard manual +31-day recharge (`max(today, current_expiry) + rechargeDays`)
+    const explicitCustomYmd = extractYmdString(options?.customExpiryDate || undefined);
+    const invoiceDueYmd = extractYmdString(options?.invoiceDueDate || undefined);
     const currentExpiryRaw =
       userRecord?.expiry_date || (userRecord as any)?.next_billing_date || null;
-    const computed = compute31DayRechargeExpiry(currentExpiryRaw, new Date(), rechargeDays);
-    rechargedExpiryYmd = computed.expiryYmd;
-    const finalExpiryIso = computed.expiryIso;
+
+    let finalExpiryIso: string;
+    if (explicitCustomYmd) {
+      rechargedExpiryYmd = explicitCustomYmd;
+      finalExpiryIso = `${explicitCustomYmd}T14:00:00+05:00`;
+      anchoredFromDueDate = null;
+      validitySummary = `Custom Expiry -> Valid till ${rechargedExpiryYmd}`;
+    } else if (invoiceDueYmd) {
+      const anchored = computeAnchoredDueDateRechargeExpiry(invoiceDueYmd, rechargeDays);
+      rechargedExpiryYmd = anchored.expiryYmd;
+      finalExpiryIso = anchored.expiryIso;
+      anchoredFromDueDate = anchored.anchoredDueYmd;
+      validitySummary = `Recharged from Due Date ${anchoredFromDueDate} -> Valid till ${rechargedExpiryYmd}`;
+    } else {
+      const computed = compute31DayRechargeExpiry(currentExpiryRaw, new Date(), rechargeDays);
+      rechargedExpiryYmd = computed.expiryYmd;
+      finalExpiryIso = computed.expiryIso;
+      anchoredFromDueDate = null;
+      validitySummary = `Recharged +${rechargeDays}d -> Valid till ${rechargedExpiryYmd}`;
+    }
 
     // Resolve exact Active Monthly Package Profile:
     // explicit non-expiry override -> ORIG_PKG comment -> live non-expiry secret -> Supabase original_package_profile -> live profiles
@@ -929,6 +1002,7 @@ export async function restoreSubscriberOnInvoicePaid(
           invoiceNo: options?.invoiceNo,
           paymentMethod: options?.paymentMethod || 'Verified Payment',
           expiryDate: rechargedExpiryYmd,
+          anchoredDueDate: anchoredFromDueDate || undefined,
         },
       });
     }
@@ -938,6 +1012,8 @@ export async function restoreSubscriberOnInvoicePaid(
       restoredProfile,
       kickedSessions,
       newExpiryIso: rechargedExpiryYmd,
+      anchoredFromDueDate,
+      validitySummary,
       walletChargedAmount,
     };
   } catch (err) {
@@ -947,6 +1023,8 @@ export async function restoreSubscriberOnInvoicePaid(
       restoredProfile,
       kickedSessions: 0,
       newExpiryIso: rechargedExpiryYmd,
+      anchoredFromDueDate,
+      validitySummary,
     };
   }
 }
@@ -1679,7 +1757,10 @@ export async function bulkReceivePayments(params: {
   let settledInvoicesCount = 0;
   let totalCollected = 0;
   const affectedUsers = new Set<string>();
-  const latestPaymentByUser = new Map<string, { amount: number; invoiceNo?: string }>();
+  const latestPaymentByUser = new Map<
+    string,
+    { amount: number; invoiceNo?: string; dueDate?: string | null }
+  >();
 
   for (let i = 0; i < validItems.length; i++) {
     const { invoice, amountToCollect } = validItems[i];
@@ -1753,9 +1834,14 @@ export async function bulkReceivePayments(params: {
         openBalanceByUser.set(uname, remaining);
         affectedUsers.add(uname);
         const prevPay = latestPaymentByUser.get(uname);
+        const latestDue =
+          invoice.due_date && (!prevPay?.dueDate || invoice.due_date > prevPay.dueDate)
+            ? invoice.due_date
+            : prevPay?.dueDate || invoice.due_date || null;
         latestPaymentByUser.set(uname, {
           amount: (prevPay?.amount || 0) + amountToCollect,
           invoiceNo: invoice.invoice_no,
+          dueDate: latestDue,
         });
       }
     } catch (err: any) {
@@ -1819,6 +1905,7 @@ export async function bulkReceivePayments(params: {
       preloadedActive,
       amountPaid: payMeta?.amount,
       invoiceNo: payMeta?.invoiceNo,
+      invoiceDueDate: payMeta?.dueDate || null,
       paymentMethod,
     });
     if (restoreRes.success) {
@@ -2826,12 +2913,10 @@ export async function generateNextMonthBillOnShift(params: {
     (userRes?.data as Record<string, any> | null) || params.subscriber || null;
 
   const baseDueYmd = extractYmdString(inv.due_date) || todayYmd;
-  const baseDayNum = Number(baseDueYmd.split('-')[2]) || new Date().getDate();
-  const anchorDay = subscriber
-    ? computeBillingAnchorDay(subscriber as any)
-    : Number(inv.cycle_day) || baseDayNum;
-
-  const newDueDate = addCalendarMonthsYmd(baseDueYmd, 1, anchorDay);
+  const globalSettings = getCachedGlobalSystemSettings();
+  const cycleCalc = computeNextCycleDueDate(baseDueYmd, subscriber as any, globalSettings);
+  const anchorDay = cycleCalc.cycleDay;
+  const newDueDate = cycleCalc.nextDueDate;
   const targetYearMonth = newDueDate.slice(0, 7); // YYYY-MM
   const billingMonthLabel = formatBillingMonthLabel(newDueDate);
 
@@ -3187,9 +3272,20 @@ export async function runFiveDayPreExpiryAutoBillingClient(options?: {
       Number(sub.monthly_fee) > 0 ? Number(sub.monthly_fee) : resolvePackageRate(pkgName);
     if (amount <= 0) continue;
 
-    const compactYm = expiryYmd.slice(0, 7).replace('-', '');
+    const globalSettings = getCachedGlobalSystemSettings();
+    const cycleInfo = resolveSubscriberBillingCycle(sub as any, globalSettings);
+    const anchorDay = cycleInfo.cycleDay;
+    // Align auto-generated invoice due_date to fixed Monthly Billing Cycle day when configured,
+    // or keep rolling expiry_date in rolling_31 mode.
+    let alignedDueYmd = expiryYmd;
+    if (cycleInfo.mode === 'fixed_day') {
+      const [eyNum, emNum] = expiryYmd.split('-').map(Number);
+      const candidateFixed = buildCycleDateString(eyNum, Math.max(0, (emNum || 1) - 1), anchorDay);
+      alignedDueYmd = candidateFixed >= todayYmd ? candidateFixed : expiryYmd;
+    }
+
+    const compactYm = alignedDueYmd.slice(0, 7).replace('-', '');
     const invoiceNo = `INV-${compactYm}-${Math.floor(1000 + Math.random() * 9000)}`;
-    const anchorDay = computeBillingAnchorDay(sub as any);
 
     const { error } = await safeInsertInvoiceInSupabase({
       invoice_no: invoiceNo,
@@ -3199,7 +3295,7 @@ export async function runFiveDayPreExpiryAutoBillingClient(options?: {
       amount,
       paid_amount: 0,
       status: 'DUE',
-      due_date: expiryYmd,
+      due_date: alignedDueYmd,
       cycle_day: anchorDay,
       package_profile: pkgName,
       package_name: pkgName,

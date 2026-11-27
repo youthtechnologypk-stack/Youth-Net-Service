@@ -20,7 +20,9 @@ export interface GlobalSystemSettings {
   whatsAppGatewayEnabled: boolean;
   teamWhatsAppGroupJid: string;
   teamWhatsAppGroupName: string;
+  billingCycleMode: 'fixed_day' | 'rolling_31';
   billingCycleDay: number;
+  autoInvoiceDaysBeforeExpiry: number;
   gracePeriodDays: number;
   expiryPppProfile: string;
   autoWalledGarden: boolean;
@@ -41,7 +43,9 @@ export const DEFAULT_GLOBAL_SYSTEM_SETTINGS: GlobalSystemSettings = {
   whatsAppGatewayEnabled: true,
   teamWhatsAppGroupJid: '',
   teamWhatsAppGroupName: '',
+  billingCycleMode: 'fixed_day',
   billingCycleDay: 1,
+  autoInvoiceDaysBeforeExpiry: 5,
   gracePeriodDays: 3,
   expiryPppProfile: 'EXPIRED-16-POOL',
   autoWalledGarden: true,
@@ -165,6 +169,14 @@ export function sanitizeSystemSettings(
       .trim()
       .slice(0, 64) || 'public';
 
+  const rawCycleMode = String(
+    src.billingCycleMode ?? src.billing_cycle_mode ?? DEFAULT_GLOBAL_SYSTEM_SETTINGS.billingCycleMode
+  )
+    .trim()
+    .toLowerCase();
+  const billingCycleMode: 'fixed_day' | 'rolling_31' =
+    rawCycleMode === 'rolling_31' || rawCycleMode === 'rolling' ? 'rolling_31' : 'fixed_day';
+
   return {
     companyDisplayName: companyName,
     ispName: companyName,
@@ -174,11 +186,18 @@ export function sanitizeSystemSettings(
     whatsAppGatewayEnabled: autoSend,
     teamWhatsAppGroupJid,
     teamWhatsAppGroupName,
+    billingCycleMode,
     billingCycleDay: clampInt(
       src.billingCycleDay ?? src.billing_cycle_day,
       DEFAULT_GLOBAL_SYSTEM_SETTINGS.billingCycleDay,
       1,
-      28
+      31
+    ),
+    autoInvoiceDaysBeforeExpiry: clampInt(
+      src.autoInvoiceDaysBeforeExpiry ?? src.auto_invoice_days_before_expiry,
+      DEFAULT_GLOBAL_SYSTEM_SETTINGS.autoInvoiceDaysBeforeExpiry,
+      1,
+      15
     ),
     gracePeriodDays: clampInt(
       src.gracePeriodDays ?? src.grace_period_days,

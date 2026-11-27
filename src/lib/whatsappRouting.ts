@@ -343,6 +343,7 @@ export interface AutomatedMessageTemplateVars {
   remainingBalance?: number | null;
   previousUnpaidBalance?: number | null;
   dueDate?: string | null;
+  anchoredDueDate?: string | null;
   graceDate?: string | null;
   expiryDate?: string | null;
   daysRemaining?: number | null;
@@ -426,6 +427,16 @@ export function buildAutomatedWhatsAppMessage(vars: AutomatedMessageTemplateVars
     if (vars.eventType === 'INVOICE_GENERATED' && prevUnpaid > 0) {
       const combinedDue = Math.round(primaryAmount + prevUnpaid);
       rendered += `\n\n⚠️ *Previous Unpaid Balance:* Rs. ${prevUnpaid.toLocaleString()}\n• *Total Combined Payable:* Rs. ${combinedDue.toLocaleString()}`;
+    }
+    const anchoredDue = String(vars.anchoredDueDate || '').trim();
+    const validTill = String(vars.expiryDate || '').trim();
+    if (
+      vars.eventType === 'PAYMENT_RESTORED' &&
+      anchoredDue &&
+      validTill &&
+      !rendered.includes('Recharged from Due Date')
+    ) {
+      rendered += `\n• *Billing Cycle:* Recharged from Due Date ${anchoredDue} -> Valid till ${validTill}`;
     }
     const shouldAppendPaymentBlock =
       (vars.eventType === 'INVOICE_GENERATED' ||
@@ -1126,6 +1137,7 @@ export async function dispatchDualPaymentReceiptWhatsApp(payload: {
   remainingBalance?: number;
   paymentMethod?: string | null;
   expiryDate?: string | null;
+  anchoredDueDate?: string | null;
   agentId?: string | null;
   agentName?: string | null;
   agentPhone?: string | null;
@@ -1205,6 +1217,7 @@ export async function dispatchDualPaymentReceiptWhatsApp(payload: {
           remainingBalance: payload.remainingBalance ?? 0,
           paymentMethod: payload.paymentMethod || 'Cash',
           expiryDate: payload.expiryDate || undefined,
+          anchoredDueDate: payload.anchoredDueDate || undefined,
           agentName: resolvedAgentName,
         },
       })

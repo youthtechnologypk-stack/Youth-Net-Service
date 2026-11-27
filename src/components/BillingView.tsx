@@ -551,9 +551,10 @@ export const BillingView: React.FC<BillingViewProps> = ({
           ? selectedInvoice.due_date
           : new Date();
 
-      // STRICT PREPAID WALLET PAYMENT GATE + 31-DAY RECHARGE BEFORE MARKING INVOICE PAID
+      // STRICT PREPAID WALLET PAYMENT GATE + 31-DAY DUE-DATE-ANCHORED RECHARGE BEFORE MARKING INVOICE PAID
       let rechargedExpiryYmd: string | null = null;
       let restoredProfileName: string | null = null;
+      let anchoredDueDateYmd: string | null = null;
       if (newStatus === 'PAID') {
         if (markPaidWalletStatus?.blocked) {
           const msg =
@@ -572,6 +573,7 @@ export const BillingView: React.FC<BillingViewProps> = ({
             selectedInvoice.package_profile || selectedInvoice.package_name || undefined,
           amountPaid: enteredVal,
           invoiceNo: selectedInvoice.invoice_no,
+          invoiceDueDate: selectedInvoice.due_date || null,
           paymentMethod: paidPaymentMethod,
           skipAutoWhatsapp: true,
         });
@@ -584,6 +586,7 @@ export const BillingView: React.FC<BillingViewProps> = ({
         }
         rechargedExpiryYmd = restoreRes.newExpiryIso || null;
         restoredProfileName = restoreRes.restoredProfile || null;
+        anchoredDueDateYmd = restoreRes.anchoredFromDueDate || selectedInvoice.due_date || null;
       }
 
       // 1. Update invoice in Supabase (preserve historical due_date; +31d validity lives on portal_users)
@@ -679,12 +682,17 @@ export const BillingView: React.FC<BillingViewProps> = ({
         nextExpiryDate: nextExpiryStr,
       });
 
+      const anchoredRangeLabel =
+        newStatus === 'PAID' && rechargedExpiryYmd
+          ? anchoredDueDateYmd
+            ? `Recharged from Due Date ${anchoredDueDateYmd} -> Valid till ${rechargedExpiryYmd}`
+            : `Recharged +31 days -> Valid till ${rechargedExpiryYmd}`
+          : '';
+
       setActionNotice(
         `Recorded ${formatCurrency(enteredVal)} for Invoice #${invoiceSnapshot.invoice_no}! Status: ${newStatus}.${
-          newStatus === 'PAID' && rechargedExpiryYmd
-            ? ` Recharged +31 days (valid until ${rechargedExpiryYmd}${
-                restoredProfileName ? ` on ${restoredProfileName}` : ''
-              }).`
+          anchoredRangeLabel
+            ? ` ${anchoredRangeLabel}${restoredProfileName ? ` (${restoredProfileName})` : ''}.`
             : ''
         }${targetAgentId ? ` Credited to ${targetAgentName}'s Cash-in-Hand.` : ''}`
       );
@@ -700,7 +708,9 @@ export const BillingView: React.FC<BillingViewProps> = ({
         showWaToast({
           status: 'sending',
           title: `Sending WhatsApp receipt to ${displayName}${targetAgentId ? ` & Agent ${targetAgentName}` : ''}...`,
-          subtitle: `Invoice #${invoiceSnapshot.invoice_no}`,
+          subtitle: anchoredRangeLabel
+            ? `${anchoredRangeLabel} · #${invoiceSnapshot.invoice_no}`
+            : `Invoice #${invoiceSnapshot.invoice_no}`,
         });
 
         const { clientResult, agentResult } = await dispatchDualPaymentReceiptWhatsApp({
@@ -729,6 +739,7 @@ export const BillingView: React.FC<BillingViewProps> = ({
           remainingBalance: remainingAfterPay,
           paymentMethod: paidPaymentMethod,
           expiryDate: nextExpiryStr,
+          anchoredDueDate: anchoredDueDateYmd,
           agentId: targetAgentId || null,
           agentName: targetAgentName,
           agentPhone: targetAgentPhone,
@@ -743,16 +754,20 @@ export const BillingView: React.FC<BillingViewProps> = ({
           showWaToast(
             {
               status: 'sent',
-              title: `WhatsApp receipt sent to ${clientResult.formattedPhone || displayName}${agentNote}`,
-              subtitle: `Invoice #${invoiceSnapshot.invoice_no} via ${clientResult.senderCompanyName || 'WhatsApp Gateway'}`,
+              title: `Paid & WhatsApp receipt sent to ${clientResult.formattedPhone || displayName}${agentNote}`,
+              subtitle: anchoredRangeLabel
+                ? `${anchoredRangeLabel} · #${invoiceSnapshot.invoice_no}`
+                : `Invoice #${invoiceSnapshot.invoice_no} via ${clientResult.senderCompanyName || 'WhatsApp Gateway'}`,
             },
-            7000
+            9000
           );
         } else {
           showWaToast(
             {
               status: 'error',
-              title: `WhatsApp receipt failed for ${displayName}`,
+              title: anchoredRangeLabel
+                ? `Marked PAID (${anchoredRangeLabel}) — WhatsApp not sent`
+                : `WhatsApp receipt failed for ${displayName}`,
               subtitle:
                 clientResult.error ||
                 clientResult.skippedReason ||
@@ -913,12 +928,14 @@ export const BillingView: React.FC<BillingViewProps> = ({
         const restoreRes = await restoreSubscriberOnInvoicePaid(invoiceToEdit.subscriber_username, {
           triggeredBy: 'ADMIN',
           notes: `Invoice #${invoiceToEdit.invoice_no} updated to PAID`,
+          invoiceDueDate: updatedData.due_date || editDueDate || invoiceToEdit.due_date || null,
+          invoiceNo: invoiceToEdit.invoice_no,
           activeRouter: activeRouterRef.current,
         });
         if (restoreRes.insufficientWalletFunds || (!restoreRes.success && restoreRes.error)) {
           throw new Error(restoreRes.error || 'Insufficient Dealer Wallet Balance');
         }
-        syncNote = ` Restored to "${restoreRes.restoredProfile}" & kicked ${restoreRes.kickedSessions} session(s).`;
+        syncNote = ` ${restoreRes.validitySummary || `Valid till ${restoreRes.newExpiryIso}`} · Restored "${restoreRes.restoredProfile}" & kicked ${restoreRes.kickedSessions} session(s).`;
       }
 
       await updateInvoiceApi(invoiceToEdit.id, {

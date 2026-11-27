@@ -790,6 +790,9 @@ export const BillingManagement: React.FC<BillingManagementProps> = ({
         if (targetUsername) {
           void restoreSubscriberOnInvoicePaid(targetUsername, {
             triggeredBy: 'ADMIN',
+            invoiceNo: invoice.invoiceNumber,
+            invoiceDueDate: invoice.dueDate || null,
+            amountPaid: details.amount,
             notes: `NOC Studio payment recorded for Invoice #${invoice.invoiceNumber}`,
           }).then(() => {
             void fetchPortalClients();

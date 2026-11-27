@@ -67,6 +67,7 @@ import { AreaNodeSelector } from './AreaNodeSelector';
 import {
   fetchMikrotikInterfaceTrafficOnce,
   restoreSubscriberOnInvoicePaid,
+  compute31DayRechargeExpiry,
   addCalendarMonthDateString,
   fetchNetworkAreas,
   resolveAreaFromUsername,
@@ -83,11 +84,15 @@ import {
   dispatchDualPaymentReceiptWhatsApp,
 } from '../lib/whatsappRouting';
 import {
+  BillingCycleMode,
   computeBillingAnchorDay,
   computeNextBillingDateFromInstall,
+  computeNextCycleDueDate,
   extractYmdString,
+  formatOrdinalDay,
   insertTicketSafe,
   normalizeTicketPriority,
+  resolveSubscriberBillingCycle,
 } from '../lib/anniversaryBilling';
 import { isMissingTableOrColumnError } from '../lib/expiryUtils';
 import { getStoredUser } from '../lib/auth';
@@ -217,6 +222,8 @@ export const SubscriberProfileView: React.FC<SubscriberProfileViewProps> = ({
     address: '',
     area: '',
     installationDate: new Date().toISOString().slice(0, 10),
+    billingCycleMode: 'fixed_day' as BillingCycleMode,
+    billingCycleDay: new Date().getDate(),
     accountStatus: 'ACTIVE' as 'ACTIVE' | 'EXPIRED' | 'SUSPENDED',
     packageSpeed: '30 Mbps',
     packageVolumeGb: 1500,
@@ -231,6 +238,9 @@ export const SubscriberProfileView: React.FC<SubscriberProfileViewProps> = ({
   });
   const [isSavingEdit, setIsSavingEdit] = useState<boolean>(false);
   const [isManualRecharging, setIsManualRecharging] = useState<boolean>(false);
+  const [isManualRechargeModalOpen, setIsManualRechargeModalOpen] = useState<boolean>(false);
+  const [manualRechargeCustomDate, setManualRechargeCustomDate] = useState<string>('');
+  const [manualRechargeError, setManualRechargeError] = useState<string | null>(null);
   const [editWalletStatus, setEditWalletStatus] = useState<WalletGatePreviewResult | null>(null);
   const [editWalletError, setEditWalletError] = useState<string | null>(null);
   const [paymentWalletStatus, setPaymentWalletStatus] = useState<WalletGatePreviewResult | null>(null);
@@ -267,21 +277,25 @@ export const SubscriberProfileView: React.FC<SubscriberProfileViewProps> = ({
     return packageChangedToActivePlan || restoringToActive;
   }, [activeOwnerResellerId, editForm.packageSpeed, editForm.accountStatus, liveSecretProfile, mikrotikSecret, user]);
 
-  const editAnchorDay = useMemo(
-    () =>
-      computeBillingAnchorDay({
+  const editAnchorDay = useMemo(() => {
+    if (editForm.billingCycleMode === 'rolling_31') {
+      return computeBillingAnchorDay({
         installation_date: editForm.installationDate || new Date().toISOString().slice(0, 10),
-      }),
-    [editForm.installationDate]
-  );
+      });
+    }
+    return Math.min(31, Math.max(1, Math.round(Number(editForm.billingCycleDay) || 1)));
+  }, [editForm.billingCycleMode, editForm.billingCycleDay, editForm.installationDate]);
 
   const editNextBillingPreview = useMemo(
     () =>
-      computeNextBillingDateFromInstall(
+      computeNextCycleDueDate(
         editForm.installationDate || new Date().toISOString().slice(0, 10),
-        editAnchorDay
-      ),
-    [editForm.installationDate, editAnchorDay]
+        {
+          billing_cycle_mode: editForm.billingCycleMode,
+          billing_anchor_day: editAnchorDay,
+        }
+      ).nextDueDate,
+    [editForm.installationDate, editForm.billingCycleMode, editAnchorDay]
   );
 
   // Add Material Modal form
@@ -442,6 +456,7 @@ export const SubscriberProfileView: React.FC<SubscriberProfileViewProps> = ({
         const resolvedInstallDate =
           extractYmdString(userData.installation_date || userData.created_at) ||
           new Date().toISOString().slice(0, 10);
+        const resolvedCycle = resolveSubscriberBillingCycle(userData);
         setEditForm({
           fullName: userData.full_name || '',
           phone: userData.phone || '',
@@ -449,6 +464,8 @@ export const SubscriberProfileView: React.FC<SubscriberProfileViewProps> = ({
           address: userData.address || '',
           area: userData.area || '',
           installationDate: resolvedInstallDate,
+          billingCycleMode: resolvedCycle.mode,
+          billingCycleDay: resolvedCycle.cycleDay,
           accountStatus: (userData.account_status as any) || 'ACTIVE',
           packageSpeed: userData.package_speed || '30 Mbps',
           packageVolumeGb: userData.package_volume_gb || 1500,
@@ -1011,8 +1028,15 @@ export const SubscriberProfileView: React.FC<SubscriberProfileViewProps> = ({
     try {
       const normalizedInstallDate =
         extractYmdString(editForm.installationDate) || new Date().toISOString().slice(0, 10);
-      const anchorDay = computeBillingAnchorDay({ installation_date: normalizedInstallDate });
-      const nextBillingDate = computeNextBillingDateFromInstall(normalizedInstallDate, anchorDay);
+      const selectedCycleMode: BillingCycleMode = editForm.billingCycleMode;
+      const anchorDay =
+        selectedCycleMode === 'rolling_31'
+          ? computeBillingAnchorDay({ installation_date: normalizedInstallDate })
+          : Math.min(31, Math.max(1, Math.round(Number(editForm.billingCycleDay) || 1)));
+      const nextBillingDate = computeNextCycleDueDate(normalizedInstallDate, {
+        billing_cycle_mode: selectedCycleMode,
+        billing_anchor_day: anchorDay,
+      }).nextDueDate;
       const targetPackageProfile = String(editForm.packageSpeed || '').trim();
 
       // STRICT PREPAID WALLET PAYMENT GATE BEFORE CHANGING PACKAGE OR RESTORING ACTIVE STATUS
@@ -1066,6 +1090,14 @@ export const SubscriberProfileView: React.FC<SubscriberProfileViewProps> = ({
         await kickMikrotikActiveSessionForUser(cleanUsername, activeRouter).catch(() => {});
       }
 
+      const existingPerms =
+        user?.permissions && typeof user.permissions === 'object' ? { ...(user.permissions as any) } : {};
+      const updatedPerms = {
+        ...existingPerms,
+        billing_cycle_mode: selectedCycleMode,
+        billing_cycle_day: anchorDay,
+      };
+
       const baseUpdatePayload: Partial<SupabasePortalUser> = {
         full_name: editForm.fullName,
         phone: editForm.phone,
@@ -1073,7 +1105,6 @@ export const SubscriberProfileView: React.FC<SubscriberProfileViewProps> = ({
         address: editForm.address,
         area: editForm.area,
         installation_date: normalizedInstallDate,
-        expiry_date: nextBillingDate,
         account_status: editForm.accountStatus,
         package_speed: editForm.packageSpeed,
         package_volume_gb: Number(editForm.packageVolumeGb),
@@ -1095,8 +1126,17 @@ export const SubscriberProfileView: React.FC<SubscriberProfileViewProps> = ({
 
       const extendedPayload: Partial<SupabasePortalUser> = {
         ...baseUpdatePayload,
-        billing_anchor_day: anchorDay,
+        billing_cycle_mode: selectedCycleMode,
+        billing_anchor_day: selectedCycleMode === 'rolling_31' ? 0 : anchorDay,
         next_billing_date: nextBillingDate,
+        permissions: updatedPerms as any,
+      };
+
+      const fallbackCyclePayload: Partial<SupabasePortalUser> = {
+        ...baseUpdatePayload,
+        billing_anchor_day: selectedCycleMode === 'rolling_31' ? 0 : anchorDay,
+        next_billing_date: nextBillingDate,
+        permissions: updatedPerms as any,
       };
 
       const runUpdate = (payload: Partial<SupabasePortalUser>) =>
@@ -1106,8 +1146,12 @@ export const SubscriberProfileView: React.FC<SubscriberProfileViewProps> = ({
 
       let { error } = await runUpdate(extendedPayload);
       if (error && isMissingTableOrColumnError(error)) {
-        const retry = await runUpdate(baseUpdatePayload);
-        error = retry.error;
+        const retry1 = await runUpdate(fallbackCyclePayload);
+        error = retry1.error;
+      }
+      if (error && isMissingTableOrColumnError(error)) {
+        const retry2 = await runUpdate(baseUpdatePayload);
+        error = retry2.error;
       }
 
       if (error) throw new Error(error.message);
@@ -1128,8 +1172,12 @@ export const SubscriberProfileView: React.FC<SubscriberProfileViewProps> = ({
         }
       }
 
+      const cycleDesc =
+        selectedCycleMode === 'rolling_31'
+          ? 'Rolling 31-Day Cycle'
+          : `Fixed Day (${formatOrdinalDay(anchorDay)} of every month)`;
       showToast(
-        `Subscriber @${cleanUsername} updated! Billing Day: ${anchorDay} of every month • Next Due: ${nextBillingDate}.`
+        `Subscriber @${cleanUsername} updated! Billing Cycle: ${cycleDesc} • Next Due: ${nextBillingDate}.`
       );
       setIsEditUserModalOpen(false);
       await fetchAllProfileData();
@@ -1285,14 +1333,39 @@ export const SubscriberProfileView: React.FC<SubscriberProfileViewProps> = ({
     }
   };
 
-  // Action 5b: Manual 31-Day Prepaid Recharge (Expiry Pool -> Active Package + Session Kick + Baileys Receipt)
-  const handleManualRecharge31Days = async () => {
+  // Action 5b: Open Manual Activate / Recharge Modal with Custom Expiry Date Picker
+  const openManualRechargeModal = () => {
+    if (!perms.collect_fee) {
+      showToast('Permission required: Receive Cash / Manual Recharge is disabled for your account.', 'error');
+      return;
+    }
+    const defaultExpiry = compute31DayRechargeExpiry(user?.expiry_date, new Date(), 31).expiryYmd;
+    setManualRechargeCustomDate(defaultExpiry);
+    setManualRechargeError(null);
+    setIsManualRechargeModalOpen(true);
+  };
+
+  const applyManualRechargePreset = (days: number) => {
+    const presetYmd = compute31DayRechargeExpiry(user?.expiry_date, new Date(), days).expiryYmd;
+    setManualRechargeCustomDate(presetYmd);
+    setManualRechargeError(null);
+  };
+
+  const handleConfirmManualRecharge = async (e?: React.FormEvent) => {
+    if (e) e.preventDefault();
     if (!perms.collect_fee) {
       showToast('Permission required: Receive Cash / Manual Recharge is disabled for your account.', 'error');
       return;
     }
     if (!cleanUsername) return;
+    const cleanDate = manualRechargeCustomDate.trim();
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(cleanDate)) {
+      setManualRechargeError('Please select a valid Custom Expiry / Activation Date.');
+      return;
+    }
+
     setIsManualRecharging(true);
+    setManualRechargeError(null);
     try {
       const targetPkg =
         user?.original_package_profile ||
@@ -1302,26 +1375,31 @@ export const SubscriberProfileView: React.FC<SubscriberProfileViewProps> = ({
         undefined;
       const res = await restoreSubscriberOnInvoicePaid(cleanUsername, {
         triggeredBy: 'ADMIN',
-        rechargeDays: 31,
+        customExpiryDate: cleanDate,
         selectedProfile: targetPkg,
         performedBy: getStoredUser()?.fullName || getStoredUser()?.username || 'Subscriber 360 Desk',
-        notes: `Manual +31-day Recharge via Subscriber 360 Profile`,
+        notes: `Manual Activate / Recharge until ${cleanDate} via Subscriber 360 Profile`,
         activeRouter,
         paymentMethod: 'Manual Recharge',
         amountPaid: Number(user?.monthly_fee || 0),
       });
 
       if (!res.success) {
-        showToast(res.error || 'Manual recharge failed (check dealer wallet / MikroTik connection).', 'error');
+        const msg = res.error || 'Manual recharge failed (check dealer wallet / MikroTik connection).';
+        setManualRechargeError(msg);
+        showToast(msg, 'error');
         return;
       }
 
+      setIsManualRechargeModalOpen(false);
       showToast(
-        `Recharged +31 days! Valid until ${res.newExpiryIso} on "${res.restoredProfile}" (${res.kickedSessions} session kicked) • WhatsApp receipt dispatched.`
+        `Activated & recharged until ${res.newExpiryIso} on "${res.restoredProfile}" (${res.kickedSessions} session kicked) • WhatsApp receipt dispatched.`
       );
       await fetchAllProfileData();
     } catch (err: any) {
-      showToast(`Manual recharge error: ${err?.message || 'Failed'}`, 'error');
+      const msg = err?.message || 'Manual recharge failed.';
+      setManualRechargeError(msg);
+      showToast(`Manual recharge error: ${msg}`, 'error');
     } finally {
       setIsManualRecharging(false);
     }
@@ -1363,6 +1441,8 @@ export const SubscriberProfileView: React.FC<SubscriberProfileViewProps> = ({
       setPaymentWalletError(null);
       let rechargedExpiryYmd: string | null = null;
       let restoredProfileName: string | null = null;
+      let anchoredDueYmd: string | null = null;
+      let validitySummaryText: string | null = null;
       if (newStatus === 'PAID') {
         if (paymentWalletStatus?.blocked) {
           const msg =
@@ -1379,6 +1459,7 @@ export const SubscriberProfileView: React.FC<SubscriberProfileViewProps> = ({
           selectedProfile: inv.package_profile || inv.package_name || undefined,
           amountPaid: enteredVal,
           invoiceNo: inv.invoice_no,
+          invoiceDueDate: inv.due_date || null,
           paymentMethod: paymentModeInput,
           skipAutoWhatsapp: true,
         });
@@ -1391,6 +1472,8 @@ export const SubscriberProfileView: React.FC<SubscriberProfileViewProps> = ({
         }
         rechargedExpiryYmd = restoreRes.newExpiryIso || null;
         restoredProfileName = restoreRes.restoredProfile || null;
+        anchoredDueYmd = restoreRes.anchoredFromDueDate || (inv.due_date ? String(inv.due_date).slice(0, 10) : null);
+        validitySummaryText = restoreRes.validitySummary || null;
       }
 
       await supabase.from('invoices').update(invUpdate).eq('id', inv.id);
@@ -1442,6 +1525,7 @@ export const SubscriberProfileView: React.FC<SubscriberProfileViewProps> = ({
         remainingBalance: Math.max(0, remaining),
         paymentMethod: paymentModeInput,
         expiryDate: rechargedExpiryYmd || inv.due_date,
+        anchoredDueDate: anchoredDueYmd,
         agentId: collectingAgentInput || null,
         agentName: agentObj?.full_name || 'Recovery Agent',
         agentPhone: agentPhone || agentObj?.phone || '',
@@ -1450,7 +1534,11 @@ export const SubscriberProfileView: React.FC<SubscriberProfileViewProps> = ({
 
       showToast(
         `Payment of ${formatCurrency(enteredVal)} recorded (${newStatus})${
-          rechargedExpiryYmd ? ` • Recharged +31d until ${rechargedExpiryYmd}` : ''
+          validitySummaryText
+            ? ` • ${validitySummaryText}`
+            : rechargedExpiryYmd
+            ? ` • Recharged until ${rechargedExpiryYmd}`
+            : ''
         }`
       );
       setIsRecordPaymentModalOpen(false);
@@ -1617,11 +1705,16 @@ export const SubscriberProfileView: React.FC<SubscriberProfileViewProps> = ({
           performedBy: getStoredUser()?.fullName || getStoredUser()?.username || 'Subscriber 360 Desk',
           notes: `Invoice #${invoiceToEdit.invoice_no} marked PAID via Subscriber 360 Edit`,
           activeRouter,
+          invoiceNo: invoiceToEdit.invoice_no,
+          invoiceDueDate: editInvoiceForm.dueDate || invoiceToEdit.due_date || null,
+          amountPaid: amountNum,
         });
         if (restoreRes.insufficientWalletFunds || (!restoreRes.success && restoreRes.error)) {
           throw new Error(restoreRes.error || 'Insufficient Dealer Wallet Balance. Renewal blocked.');
         }
-        if (restoreRes.restoredProfile) {
+        if (restoreRes.validitySummary) {
+          restoreNote = ` ${restoreRes.validitySummary}.`;
+        } else if (restoreRes.restoredProfile) {
           restoreNote = ` Restored MikroTik profile "${restoreRes.restoredProfile}".`;
         }
       }
@@ -1971,10 +2064,18 @@ export const SubscriberProfileView: React.FC<SubscriberProfileViewProps> = ({
             </div>
             <div className="flex justify-between items-center">
               <span className="text-slate-400 font-sans">Monthly Billing Cycle:</span>
-              <span className="text-cyan-400 font-bold">
-                Day {computeBillingAnchorDay(user || {})} &bull; Next Due:{' '}
-                {extractYmdString(user?.next_billing_date || user?.expiry_date) ||
-                  computeNextBillingDateFromInstall(user?.installation_date || user?.created_at)}
+              <span className="text-cyan-400 font-bold text-right">
+                {(() => {
+                  const cycle = resolveSubscriberBillingCycle(user || {});
+                  const cycleTag =
+                    cycle.mode === 'rolling_31'
+                      ? 'Rolling 31-Day'
+                      : `Fixed ${formatOrdinalDay(cycle.cycleDay)}`;
+                  const nextDue =
+                    extractYmdString(user?.next_billing_date || user?.expiry_date) ||
+                    computeNextBillingDateFromInstall(user?.installation_date || user?.created_at);
+                  return `${cycleTag} • Valid/Due: ${nextDue}`;
+                })()}
               </span>
             </div>
 
@@ -2016,20 +2117,20 @@ export const SubscriberProfileView: React.FC<SubscriberProfileViewProps> = ({
             </div>
           </div>
 
-          {/* MANUAL +31 DAY RECHARGE BUTTON */}
+          {/* MANUAL ACTIVATE / RECHARGE WITH CUSTOM EXPIRY DATE */}
           {perms.collect_fee && (
             <button
               type="button"
-              onClick={handleManualRecharge31Days}
+              onClick={openManualRechargeModal}
               disabled={isManualRecharging}
               className="w-full px-3 py-2.5 rounded-xl bg-emerald-600/90 hover:bg-emerald-500 text-slate-950 font-bold text-xs transition flex items-center justify-center gap-2 cursor-pointer shadow-md shadow-emerald-950/40 active:scale-[0.99] disabled:opacity-50"
-              title="Extend validity +31 days, switch MikroTik from Expiry Pool to active monthly package, kick stale session & send WhatsApp receipt"
+              title="Open Manual Activate / Recharge dialog to set custom expiry date, switch MikroTik from Expiry Pool to active monthly package & dispatch WhatsApp receipt"
             >
               <Zap className={`w-3.5 h-3.5 ${isManualRecharging ? 'animate-spin' : ''}`} />
               <span>
                 {isManualRecharging
-                  ? 'Recharging +31 Days & Activating...'
-                  : 'Manual Recharge (+31 Days & Activate)'}
+                  ? 'Activating & Updating Expiry...'
+                  : 'Manual Activate / Recharge (Custom Expiry)'}
               </span>
             </button>
           )}
@@ -3212,20 +3313,110 @@ export const SubscriberProfileView: React.FC<SubscriberProfileViewProps> = ({
                 </div>
               )}
 
-              <div className="p-3 bg-slate-900/90 rounded-xl border border-slate-800 space-y-1.5">
-                <label className="block font-medium text-slate-300">
-                  Installation Date (Monthly Billing Anchor)
-                </label>
-                <input
-                  type="date"
-                  required
-                  value={editForm.installationDate}
-                  onChange={(e) => setEditForm({ ...editForm, installationDate: e.target.value })}
-                  className="w-full px-3 py-2 bg-slate-950 border border-slate-700 rounded-lg text-white font-mono focus:outline-none focus:border-cyan-500"
-                />
-                <div className="text-[11px] font-mono text-cyan-400 pt-0.5">
-                  Monthly Billing Day: <strong className="text-white">{editAnchorDay}</strong> of every month &bull; Next Due Date:{' '}
-                  <strong className="text-emerald-400">{editNextBillingPreview}</strong>
+              <div className="p-3 bg-slate-900/90 rounded-xl border border-slate-800 space-y-2.5">
+                <div>
+                  <label className="block font-medium text-slate-300 mb-1">
+                    Installation Date
+                  </label>
+                  <input
+                    type="date"
+                    required
+                    value={editForm.installationDate}
+                    onChange={(e) => setEditForm({ ...editForm, installationDate: e.target.value })}
+                    className="w-full px-3 py-2 bg-slate-950 border border-slate-700 rounded-lg text-white font-mono focus:outline-none focus:border-cyan-500"
+                  />
+                </div>
+
+                <div className="pt-2 border-t border-slate-800 space-y-2">
+                  <div className="flex items-center justify-between">
+                    <span className="font-semibold text-cyan-300 flex items-center gap-1.5">
+                      <Calendar className="w-3.5 h-3.5" />
+                      Monthly Billing Cycle
+                    </span>
+                    <span className="text-[10px] font-mono text-slate-400">
+                      Applies to auto-invoices &amp; Shift +1M
+                    </span>
+                  </div>
+
+                  <div className="grid grid-cols-2 gap-2">
+                    <button
+                      type="button"
+                      onClick={() => setEditForm({ ...editForm, billingCycleMode: 'fixed_day' })}
+                      className={`px-2.5 py-2 rounded-lg border text-left transition cursor-pointer ${
+                        editForm.billingCycleMode === 'fixed_day'
+                          ? 'bg-cyan-950/60 border-cyan-500 text-cyan-200 font-semibold'
+                          : 'bg-slate-950 border-slate-800 text-slate-400 hover:border-slate-700'
+                      }`}
+                    >
+                      <div className="text-[11px]">Fixed Day of Month</div>
+                      <div className="text-[10px] text-slate-400 font-normal">Day 1–31 every month</div>
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => setEditForm({ ...editForm, billingCycleMode: 'rolling_31' })}
+                      className={`px-2.5 py-2 rounded-lg border text-left transition cursor-pointer ${
+                        editForm.billingCycleMode === 'rolling_31'
+                          ? 'bg-cyan-950/60 border-cyan-500 text-cyan-200 font-semibold'
+                          : 'bg-slate-950 border-slate-800 text-slate-400 hover:border-slate-700'
+                      }`}
+                    >
+                      <div className="text-[11px]">Rolling 31-Day Cycle</div>
+                      <div className="text-[10px] text-slate-400 font-normal">+31 days per renewal</div>
+                    </button>
+                  </div>
+
+                  {editForm.billingCycleMode === 'fixed_day' && (
+                    <div className="space-y-1.5">
+                      <div className="flex items-center gap-2">
+                        <label className="text-[11px] text-slate-300 whitespace-nowrap">
+                          Billing Cycle Day:
+                        </label>
+                        <input
+                          type="number"
+                          min={1}
+                          max={31}
+                          value={editForm.billingCycleDay}
+                          onChange={(e) =>
+                            setEditForm({
+                              ...editForm,
+                              billingCycleDay: Math.min(31, Math.max(1, Number(e.target.value) || 1)),
+                            })
+                          }
+                          className="w-20 px-2.5 py-1.5 bg-slate-950 border border-slate-700 rounded-lg text-white font-mono text-center focus:outline-none focus:border-cyan-500"
+                        />
+                        <div className="flex flex-wrap gap-1">
+                          {[1, 5, 10, 15, 25].map((d) => (
+                            <button
+                              key={d}
+                              type="button"
+                              onClick={() => setEditForm({ ...editForm, billingCycleDay: d })}
+                              className={`px-2 py-1 rounded text-[10px] font-mono border cursor-pointer transition ${
+                                editForm.billingCycleDay === d
+                                  ? 'bg-cyan-600 border-cyan-500 text-slate-950 font-bold'
+                                  : 'bg-slate-950 border-slate-700 text-slate-300 hover:border-cyan-500'
+                              }`}
+                            >
+                              {formatOrdinalDay(d)}
+                            </button>
+                          ))}
+                        </div>
+                      </div>
+                    </div>
+                  )}
+
+                  <div className="text-[11px] font-mono text-cyan-400 pt-0.5">
+                    {editForm.billingCycleMode === 'rolling_31' ? (
+                      <>
+                        Mode: <strong className="text-white">Rolling 31-Day Cycle</strong> &bull; Projected Next Due:{' '}
+                        <strong className="text-emerald-400">{editNextBillingPreview}</strong>
+                      </>
+                    ) : (
+                      <>
+                        Monthly Billing Day: <strong className="text-white">{formatOrdinalDay(editAnchorDay)}</strong> of every month &bull; Next Due Date:{' '}
+                        <strong className="text-emerald-400">{editNextBillingPreview}</strong>
+                      </>
+                    )}
+                  </div>
                 </div>
               </div>
 
@@ -4349,6 +4540,120 @@ export const SubscriberProfileView: React.FC<SubscriberProfileViewProps> = ({
               </div>
             );
           })(),
+          document.body
+        )}
+
+      {/* MODAL 11: MANUAL ACTIVATE / RECHARGE WITH CUSTOM EXPIRY DATE PICKER */}
+      {isManualRechargeModalOpen &&
+        typeof document !== 'undefined' &&
+        ReactDOM.createPortal(
+          <div className="fixed inset-0 z-[999999] flex items-center justify-center bg-black/80 backdrop-blur-sm p-3 overflow-y-auto font-sans">
+            <div className="w-[95vw] sm:w-full max-w-md mx-auto rounded-2xl box-border bg-[#111A2E] border border-emerald-700/70 p-5 shadow-2xl space-y-4">
+              <div className="flex items-center justify-between pb-3 border-b border-slate-800">
+                <div className="flex items-center gap-2.5">
+                  <div className="p-2 bg-emerald-950 border border-emerald-700 text-emerald-400 rounded-xl">
+                    <Zap className="w-4 h-4" />
+                  </div>
+                  <div>
+                    <h3 className="text-sm font-bold text-white">Manual Activate / Recharge</h3>
+                    <p className="text-[11px] text-slate-400 font-mono">
+                      @{cleanUsername} &bull; {effectivePackage}
+                    </p>
+                  </div>
+                </div>
+                <button
+                  type="button"
+                  onClick={() => setIsManualRechargeModalOpen(false)}
+                  className="text-slate-400 hover:text-white cursor-pointer"
+                >
+                  <X className="w-4 h-4" />
+                </button>
+              </div>
+
+              <form onSubmit={handleConfirmManualRecharge} className="space-y-4 text-xs">
+                <div className="p-3 rounded-xl bg-slate-900/90 border border-slate-800 space-y-1.5 font-mono">
+                  <div className="flex justify-between">
+                    <span className="text-slate-400 font-sans">Current Expiry:</span>
+                    <span className="text-amber-300 font-semibold">
+                      {extractYmdString(user?.expiry_date) || 'Not set / Expired'}
+                    </span>
+                  </div>
+                  <div className="flex justify-between">
+                    <span className="text-slate-400 font-sans">Target MikroTik Profile:</span>
+                    <span className="text-cyan-300 font-semibold">
+                      {user?.original_package_profile ||
+                        user?.package_profile_name ||
+                        user?.package_name ||
+                        effectivePackage}
+                    </span>
+                  </div>
+                </div>
+
+                <div className="space-y-2">
+                  <label className="block font-semibold text-emerald-300">
+                    Custom Expiry / Activation Date *
+                  </label>
+                  <input
+                    type="date"
+                    required
+                    value={manualRechargeCustomDate}
+                    onChange={(e) => {
+                      setManualRechargeCustomDate(e.target.value);
+                      setManualRechargeError(null);
+                    }}
+                    className="w-full px-3 py-2.5 bg-slate-950 border border-emerald-600/60 rounded-xl text-white font-mono text-sm focus:outline-none focus:border-emerald-400"
+                  />
+
+                  <div className="flex flex-wrap items-center gap-1.5 pt-1">
+                    <span className="text-[10px] text-slate-400 mr-1">Quick Presets:</span>
+                    {[15, 31, 60, 90].map((days) => (
+                      <button
+                        key={days}
+                        type="button"
+                        onClick={() => applyManualRechargePreset(days)}
+                        className="px-2.5 py-1 rounded-lg bg-slate-900 hover:bg-emerald-950 border border-slate-700 hover:border-emerald-500 text-slate-200 hover:text-emerald-300 font-mono text-[11px] transition cursor-pointer"
+                      >
+                        +{days} Days
+                      </button>
+                    ))}
+                  </div>
+                  <p className="text-[11px] text-slate-400 leading-relaxed">
+                    Defaults to <code className="text-emerald-400">max(Today, Current Expiry) + 31 days</code>. Selecting any custom date saves immediately to PostgreSQL and switches MikroTik PPPoE from Expiry Pool to the active package until that date.
+                  </p>
+                </div>
+
+                {manualRechargeError && (
+                  <div className="rounded-xl border border-rose-500/70 bg-rose-950/90 px-3 py-2.5 text-xs font-semibold text-rose-200 flex items-start gap-2">
+                    <AlertTriangle className="w-4 h-4 text-rose-400 shrink-0 mt-0.5" />
+                    <span>{manualRechargeError}</span>
+                  </div>
+                )}
+
+                <div className="flex items-center justify-end gap-2.5 pt-2 border-t border-slate-800">
+                  <button
+                    type="button"
+                    onClick={() => setIsManualRechargeModalOpen(false)}
+                    disabled={isManualRecharging}
+                    className="px-4 py-2 bg-slate-800 hover:bg-slate-700 text-slate-300 rounded-lg font-medium transition cursor-pointer"
+                  >
+                    Cancel
+                  </button>
+                  <button
+                    type="submit"
+                    disabled={isManualRecharging}
+                    className="px-5 py-2 bg-emerald-600 hover:bg-emerald-500 disabled:opacity-50 text-slate-950 font-bold rounded-lg transition shadow flex items-center gap-1.5 cursor-pointer"
+                  >
+                    <Zap className={`w-3.5 h-3.5 ${isManualRecharging ? 'animate-spin' : ''}`} />
+                    <span>
+                      {isManualRecharging
+                        ? 'Activating...'
+                        : `Activate Until ${manualRechargeCustomDate || '...'}`}
+                    </span>
+                  </button>
+                </div>
+              </form>
+            </div>
+          </div>,
           document.body
         )}
 

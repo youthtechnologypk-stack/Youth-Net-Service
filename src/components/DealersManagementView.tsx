@@ -21,6 +21,11 @@ import {
   Save,
   ShieldCheck,
   Gauge,
+  Trash2,
+  Percent,
+  UserCheck,
+  UserX,
+  Receipt,
 } from 'lucide-react';
 import {
   supabase,
@@ -39,7 +44,9 @@ import {
   ResellerTier,
   computeTariffMargin,
   createResellerAccount,
+  deleteResellerAccount,
   fetchResellerDataBundle,
+  getResellerCommissionRate,
   getResellerPoolMbps,
   getResellerTier,
   rechargeResellerWallet,
@@ -110,6 +117,19 @@ export const DealersManagementView: React.FC<DealersManagementViewProps> = ({
   const [dealers, setDealers] = useState<SupabasePortalUser[]>([]);
   const [subDealers, setSubDealers] = useState<SupabasePortalUser[]>([]);
   const [subscribers, setSubscribers] = useState<SupabasePortalUser[]>([]);
+  const [invoices, setInvoices] = useState<
+    Array<{
+      id: string;
+      invoice_no?: string | null;
+      subscriber_username?: string | null;
+      amount?: number | null;
+      paid_amount?: number | null;
+      status?: string | null;
+      due_date?: string | null;
+      dealer_id?: string | null;
+      sub_dealer_id?: string | null;
+    }>
+  >([]);
   const [tariffs, setTariffs] = useState<SupabaseResellerTariff[]>([]);
   const [ledger, setLedger] = useState<SupabaseResellerWalletLedger[]>([]);
   const [liveProfiles, setLiveProfiles] = useState<Array<{ name: string; rateLimit?: string }>>([]);
@@ -132,11 +152,13 @@ export const DealersManagementView: React.FC<DealersManagementViewProps> = ({
   const [createModalTier, setCreateModalTier] = useState<ResellerTier | null>(null);
   const [createForm, setCreateForm] = useState({
     fullName: '',
+    companyName: '',
     username: '',
     password: '',
     phone: '',
     area: '',
     parentDealerId: '',
+    commissionRate: '15',
     creditLimit: '0',
     bandwidthPoolCapMbps: '100',
     maxActiveUsers: '100',
@@ -144,6 +166,11 @@ export const DealersManagementView: React.FC<DealersManagementViewProps> = ({
     canCreateSubdealers: true,
   });
   const [isCreating, setIsCreating] = useState<boolean>(false);
+
+  // Delete Dealer Modal State (Master Admin only)
+  const [deleteTarget, setDeleteTarget] = useState<SupabasePortalUser | null>(null);
+  const [deleteReassignToId, setDeleteReassignToId] = useState<string>('');
+  const [isDeletingReseller, setIsDeletingReseller] = useState<boolean>(false);
 
   // Recharge Wallet Modal State
   const [rechargeTarget, setRechargeTarget] = useState<SupabasePortalUser | null>(null);
@@ -158,9 +185,11 @@ export const DealersManagementView: React.FC<DealersManagementViewProps> = ({
   const [transferNotes, setTransferNotes] = useState<string>('');
   const [isTransferring, setIsTransferring] = useState<boolean>(false);
 
-  // Drawer State (Wholesale Tariff Matrix + Profile/Caps Editor)
+  // Drawer State (Overview & Subscribers + Wholesale Tariff Matrix + Profile/Caps Editor)
   const [drawerReseller, setDrawerReseller] = useState<SupabasePortalUser | null>(null);
-  const [drawerTab, setDrawerTab] = useState<'tariffs' | 'settings'>('tariffs');
+  const [drawerTab, setDrawerTab] = useState<'overview' | 'tariffs' | 'settings'>('overview');
+  const [drawerSubSearch, setDrawerSubSearch] = useState<string>('');
+  const [drawerSubStatusFilter, setDrawerSubStatusFilter] = useState<'ALL' | 'ACTIVE' | 'EXPIRED'>('ALL');
   const [tariffDrafts, setTariffDrafts] = useState<
     Record<string, { wholesale: string; retail: string }>
   >({});
@@ -170,6 +199,7 @@ export const DealersManagementView: React.FC<DealersManagementViewProps> = ({
     fullName: '',
     phone: '',
     area: '',
+    commissionRate: '0',
     creditLimit: '0',
     bandwidthPoolCapMbps: '0',
     maxActiveUsers: '0',
@@ -192,10 +222,20 @@ export const DealersManagementView: React.FC<DealersManagementViewProps> = ({
   const loadData = useCallback(async () => {
     setIsLoading(true);
     try {
-      const bundle = await fetchResellerDataBundle();
+      const [bundle, invRes] = await Promise.all([
+        fetchResellerDataBundle(),
+        supabase
+          .from('invoices')
+          .select('id, invoice_no, subscriber_username, amount, paid_amount, status, due_date, dealer_id, sub_dealer_id')
+          .order('created_at', { ascending: false })
+          .limit(3000),
+      ]);
       setDealers(bundle.dealers);
       setSubDealers(bundle.subDealers);
       setSubscribers(bundle.subscribers);
+      if (!invRes.error && Array.isArray(invRes.data)) {
+        setInvoices(invRes.data as any[]);
+      }
       setTariffs(bundle.tariffs);
       setLedger(bundle.ledger);
       setMissingSchema(bundle.missingSchema);
@@ -322,26 +362,95 @@ export const DealersManagementView: React.FC<DealersManagementViewProps> = ({
     return set;
   }, [activeSessions]);
 
+  const isSubscriberExpiredOrPool = useCallback((sub: SupabasePortalUser): boolean => {
+    const acc = String(sub.account_status || '').toUpperCase();
+    const bill = String(sub.billing_status || '').toUpperCase();
+    const pkg = String(sub.package_profile_name || sub.package_speed || '').trim();
+    if (
+      Boolean(sub.is_suspended) ||
+      acc === 'SUSPENDED' ||
+      acc === 'EXPIRED' ||
+      acc === 'PENDING_RECHARGE' ||
+      bill === 'SUSPENDED_EXPIRED' ||
+      bill === 'EXPIRED' ||
+      bill === 'PENDING_RECHARGE' ||
+      (pkg && isExpiryOrBlockedProfile(pkg))
+    ) {
+      return true;
+    }
+    if (sub.expiry_date) {
+      const d = new Date(sub.expiry_date);
+      if (!Number.isNaN(d.getTime())) {
+        const todayStart = new Date();
+        todayStart.setHours(0, 0, 0, 0);
+        if (d.getTime() < todayStart.getTime()) return true;
+      }
+    }
+    return false;
+  }, []);
+
   // Subscriber counts per reseller (attribute to leaf Sub-Dealer first, else Dealer, preventing double counting)
   const subscriberStatsByReseller = useMemo(() => {
-    const map = new Map<string, { total: number; active: number; online: number }>();
+    const map = new Map<string, { total: number; active: number; expired: number; online: number }>();
     for (const sub of subscribers) {
       const ownerId = sub.sub_dealer_id || sub.dealer_id || sub.parent_dealer_id || null;
       if (!ownerId) continue;
-      const cur = map.get(ownerId) || { total: 0, active: 0, online: 0 };
+      const cur = map.get(ownerId) || { total: 0, active: 0, expired: 0, online: 0 };
       cur.total += 1;
-      const isSuspended =
-        Boolean(sub.is_suspended) ||
-        String(sub.account_status || '').toUpperCase() === 'SUSPENDED' ||
-        String(sub.billing_status || '').toUpperCase() === 'SUSPENDED_EXPIRED';
-      if (!isSuspended) cur.active += 1;
+      if (isSubscriberExpiredOrPool(sub)) {
+        cur.expired += 1;
+      } else {
+        cur.active += 1;
+      }
       if (onlineUsernameSet.has(String(sub.username || '').trim().toLowerCase())) {
         cur.online += 1;
       }
       map.set(ownerId, cur);
     }
     return map;
-  }, [subscribers, onlineUsernameSet]);
+  }, [subscribers, onlineUsernameSet, isSubscriberExpiredOrPool]);
+
+  // Helper to get ALL subscribers belonging to a Dealer (including child sub-dealers) or Sub-Dealer
+  const getSubscribersForReseller = useCallback(
+    (reseller: SupabasePortalUser | null): SupabasePortalUser[] => {
+      if (!reseller) return [];
+      const tier = getResellerTier(reseller);
+      const idSet = new Set<string>([reseller.id]);
+      if (tier === 'DEALER') {
+        subDealers.forEach((s) => {
+          if (s.parent_dealer_id === reseller.id) idSet.add(s.id);
+        });
+      }
+      return subscribers.filter((sub) => {
+        if (tier === 'SUB_DEALER') {
+          return sub.sub_dealer_id === reseller.id || (sub.dealer_id === reseller.id && !sub.sub_dealer_id);
+        }
+        return (
+          (sub.dealer_id && idSet.has(sub.dealer_id)) ||
+          (sub.sub_dealer_id && idSet.has(sub.sub_dealer_id)) ||
+          (sub.parent_dealer_id && idSet.has(sub.parent_dealer_id))
+        );
+      });
+    },
+    [subscribers, subDealers]
+  );
+
+  // Per-subscriber due & collected totals from invoices
+  const invoiceSummaryByUsername = useMemo(() => {
+    const map = new Map<string, { due: number; collected: number }>();
+    for (const inv of invoices) {
+      const uname = String(inv.subscriber_username || '').trim().toLowerCase();
+      if (!uname) continue;
+      const cur = map.get(uname) || { due: 0, collected: 0 };
+      const amt = Math.max(0, Number(inv.amount) || 0);
+      const st = String(inv.status || '').toUpperCase();
+      const paid = st === 'PAID' ? amt : Math.max(0, Number(inv.paid_amount) || 0);
+      cur.collected += paid;
+      cur.due += Math.max(0, amt - paid);
+      map.set(uname, cur);
+    }
+    return map;
+  }, [invoices]);
 
   // Top KPI Strip calculations
   const kpis = useMemo(() => {
@@ -434,6 +543,7 @@ export const DealersManagementView: React.FC<DealersManagementViewProps> = ({
     setCreateModalTier(tier);
     setCreateForm({
       fullName: '',
+      companyName: '',
       username: '',
       password: '',
       phone: '+92 3',
@@ -442,6 +552,7 @@ export const DealersManagementView: React.FC<DealersManagementViewProps> = ({
         tier === 'SUB_DEALER'
           ? preselectedParentId || (isDealerSession ? currentUser?.id || '' : dealers[0]?.id || '')
           : '',
+      commissionRate: tier === 'DEALER' ? '15' : '10',
       creditLimit: '0',
       bandwidthPoolCapMbps: tier === 'DEALER' ? '200' : '50',
       maxActiveUsers: tier === 'DEALER' ? '200' : '50',
@@ -465,11 +576,13 @@ export const DealersManagementView: React.FC<DealersManagementViewProps> = ({
       const res = await createResellerAccount({
         tierLevel: createModalTier,
         fullName: createForm.fullName,
+        companyName: createForm.companyName.trim() || createForm.fullName.trim(),
         username: createForm.username,
         password: createForm.password,
         phone: createForm.phone,
         area: createForm.area,
         parentDealerId: parentId,
+        commissionRate: Number(createForm.commissionRate) || 0,
         creditLimit: Number(createForm.creditLimit) || 0,
         bandwidthPoolCapMbps: Number(createForm.bandwidthPoolCapMbps) || 0,
         maxActiveUsers: Number(createForm.maxActiveUsers) || 0,
@@ -597,14 +710,20 @@ export const DealersManagementView: React.FC<DealersManagementViewProps> = ({
     }
   };
 
-  // Open Tariff & Profile Drawer
-  const openResellerDrawer = (reseller: SupabasePortalUser, initialTab: 'tariffs' | 'settings' = 'tariffs') => {
+  // Open Dealer Overview / Tariff / Settings Drawer
+  const openResellerDrawer = (
+    reseller: SupabasePortalUser,
+    initialTab: 'overview' | 'tariffs' | 'settings' = 'overview'
+  ) => {
     setDrawerReseller(reseller);
     setDrawerTab(initialTab);
+    setDrawerSubSearch('');
+    setDrawerSubStatusFilter('ALL');
     setEditCapsForm({
       fullName: reseller.full_name || '',
       phone: reseller.phone || '',
       area: reseller.area || '',
+      commissionRate: String(getResellerCommissionRate(reseller)),
       creditLimit: String(Number(reseller.credit_limit || 0)),
       bandwidthPoolCapMbps: String(getResellerPoolMbps(reseller)),
       maxActiveUsers: String(Number(reseller.max_active_users || 0)),
@@ -628,6 +747,114 @@ export const DealersManagementView: React.FC<DealersManagementViewProps> = ({
     });
     setTariffDrafts(drafts);
   };
+
+  // Delete Dealer / Sub-Dealer Modal Handlers (Master Admin only)
+  const openDeleteModal = (reseller: SupabasePortalUser) => {
+    setDeleteTarget(reseller);
+    setDeleteReassignToId('');
+  };
+
+  const handleConfirmDeleteReseller = async () => {
+    if (!deleteTarget || !isAdmin) return;
+    setIsDeletingReseller(true);
+    try {
+      const res = await deleteResellerAccount({
+        resellerId: deleteTarget.id,
+        reassignToDealerId: deleteReassignToId || null,
+        performedBy: currentUser?.fullName || currentUser?.username || 'Master Admin',
+      });
+      if (!res.ok) {
+        showToast('error', res.error || 'Failed to delete reseller account.');
+        return;
+      }
+      const targetName = deleteTarget.full_name || deleteTarget.username;
+      const destLabel = deleteReassignToId
+        ? dealers.find((d) => d.id === deleteReassignToId)?.full_name || 'selected Dealer'
+        : 'Master Direct ISP';
+      setDeleteTarget(null);
+      if (drawerReseller?.id === deleteTarget.id) {
+        setDrawerReseller(null);
+      }
+      showToast(
+        'success',
+        `Deleted "${targetName}". Safely reassigned ${res.reassignedSubscribers} subscriber(s)${
+          res.reassignedSubDealers > 0 ? ` and ${res.reassignedSubDealers} sub-dealer(s)` : ''
+        } to ${destLabel}.`
+      );
+      await loadData();
+    } finally {
+      setIsDeletingReseller(false);
+    }
+  };
+
+  // Live computed overview for the currently open Dealer Drawer
+  const drawerOverviewData = useMemo(() => {
+    if (!drawerReseller) {
+      return {
+        allSubscribers: [] as SupabasePortalUser[],
+        filteredSubscribers: [] as SupabasePortalUser[],
+        activeCount: 0,
+        expiredCount: 0,
+        onlineCount: 0,
+        collectedRevenue: 0,
+        pendingDues: 0,
+      };
+    }
+    const allSubs = getSubscribersForReseller(drawerReseller);
+    let activeCount = 0;
+    let expiredCount = 0;
+    let onlineCount = 0;
+    let collectedRevenue = 0;
+    let pendingDues = 0;
+
+    for (const sub of allSubs) {
+      if (isSubscriberExpiredOrPool(sub)) {
+        expiredCount += 1;
+      } else {
+        activeCount += 1;
+      }
+      const uname = String(sub.username || '').trim().toLowerCase();
+      if (onlineUsernameSet.has(uname)) onlineCount += 1;
+      const invSum = invoiceSummaryByUsername.get(uname);
+      if (invSum) {
+        collectedRevenue += invSum.collected;
+        pendingDues += invSum.due;
+      }
+    }
+
+    const q = drawerSubSearch.trim().toLowerCase();
+    const filteredSubscribers = allSubs.filter((sub) => {
+      const expired = isSubscriberExpiredOrPool(sub);
+      if (drawerSubStatusFilter === 'ACTIVE' && expired) return false;
+      if (drawerSubStatusFilter === 'EXPIRED' && !expired) return false;
+      if (!q) return true;
+      return (
+        String(sub.full_name || '').toLowerCase().includes(q) ||
+        String(sub.username || '').toLowerCase().includes(q) ||
+        String(sub.phone || '').toLowerCase().includes(q) ||
+        String(sub.area || '').toLowerCase().includes(q) ||
+        String(sub.package_speed || sub.package_name || '').toLowerCase().includes(q)
+      );
+    });
+
+    return {
+      allSubscribers: allSubs,
+      filteredSubscribers,
+      activeCount,
+      expiredCount,
+      onlineCount,
+      collectedRevenue,
+      pendingDues,
+    };
+  }, [
+    drawerReseller,
+    getSubscribersForReseller,
+    isSubscriberExpiredOrPool,
+    onlineUsernameSet,
+    invoiceSummaryByUsername,
+    drawerSubSearch,
+    drawerSubStatusFilter,
+  ]);
 
   // Combined live MikroTik profiles + any saved tariff profile names for the open drawer
   const drawerProfileRows = useMemo(() => {
@@ -723,6 +950,7 @@ export const DealersManagementView: React.FC<DealersManagementViewProps> = ({
         fullName: editCapsForm.fullName,
         phone: editCapsForm.phone,
         area: editCapsForm.area,
+        commissionRate: Number(editCapsForm.commissionRate) || 0,
         creditLimit: Number(editCapsForm.creditLimit) || 0,
         bandwidthPoolCapMbps: Number(editCapsForm.bandwidthPoolCapMbps) || 0,
         maxActiveUsers: Number(editCapsForm.maxActiveUsers) || 0,
@@ -746,6 +974,7 @@ export const DealersManagementView: React.FC<DealersManagementViewProps> = ({
               full_name: editCapsForm.fullName,
               phone: editCapsForm.phone,
               area: editCapsForm.area,
+              commission_rate: Number(editCapsForm.commissionRate) || 0,
               credit_limit: Number(editCapsForm.creditLimit) || 0,
               bandwidth_pool_cap_mbps: Number(editCapsForm.bandwidthPoolCapMbps) || 0,
               assigned_pool_mbps: Number(editCapsForm.bandwidthPoolCapMbps) || 0,
@@ -847,7 +1076,7 @@ export const DealersManagementView: React.FC<DealersManagementViewProps> = ({
               className="inline-flex items-center gap-1.5 px-3.5 py-2 rounded-lg bg-cyan-600 hover:bg-cyan-500 text-white text-xs font-semibold transition whitespace-nowrap shrink-0 cursor-pointer"
             >
               <Plus className="w-3.5 h-3.5" />
-              <span>Create Dealer</span>
+              <span>Add New Dealer</span>
             </button>
           )}
         </div>
@@ -1032,7 +1261,7 @@ export const DealersManagementView: React.FC<DealersManagementViewProps> = ({
                   <th className="py-3 px-3 font-semibold">Area / Contact</th>
                   <th className="py-3 px-3 font-semibold text-right">Wallet Balance</th>
                   <th className="py-3 px-3 font-semibold text-right">Credit Limit</th>
-                  <th className="py-3 px-3 font-semibold text-right">BW Cap / Users</th>
+                  <th className="py-3 px-3 font-semibold text-right">Subscribers / BW Cap</th>
                   <th className="py-3 px-4 font-semibold text-right">Actions</th>
                 </tr>
               </thead>
@@ -1052,7 +1281,7 @@ export const DealersManagementView: React.FC<DealersManagementViewProps> = ({
                       </p>
                       <p className="text-xs text-slate-500 dark:text-slate-400 mt-1">
                         {isAdmin
-                          ? 'Click "Create Dealer" to onboard your first wholesale reseller.'
+                          ? 'Click "+ Add New Dealer" to onboard your first wholesale reseller.'
                           : 'No sub-dealers are linked under your account yet.'}
                       </p>
                     </td>
@@ -1076,12 +1305,25 @@ export const DealersManagementView: React.FC<DealersManagementViewProps> = ({
                       const stats = subscriberStatsByReseller.get(dealer.id) || {
                         total: 0,
                         active: 0,
+                        expired: 0,
                         online: 0,
                       };
+                      const childTotalSum = children.reduce(
+                        (s, c) => s + (subscriberStatsByReseller.get(c.id)?.total || 0),
+                        0
+                      );
                       const childActiveSum = children.reduce(
                         (s, c) => s + (subscriberStatsByReseller.get(c.id)?.active || 0),
                         0
                       );
+                      const childExpiredSum = children.reduce(
+                        (s, c) => s + (subscriberStatsByReseller.get(c.id)?.expired || 0),
+                        0
+                      );
+                      const combinedTotalUsers = stats.total + childTotalSum;
+                      const combinedActiveUsers = stats.active + childActiveSum;
+                      const combinedExpiredUsers = stats.expired + childExpiredSum;
+                      const dealerCommission = getResellerCommissionRate(dealer);
                       const isSuspended =
                         String(dealer.account_status || 'ACTIVE').toUpperCase() === 'SUSPENDED';
 
@@ -1109,13 +1351,23 @@ export const DealersManagementView: React.FC<DealersManagementViewProps> = ({
                                   )}
                                 </button>
                                 <div className="min-w-0">
-                                  <div className="flex items-center gap-2">
-                                    <span className="font-semibold text-slate-900 dark:text-slate-100">
+                                  <div className="flex items-center gap-2 flex-wrap">
+                                    <button
+                                      type="button"
+                                      onClick={() => openResellerDrawer(dealer, 'overview')}
+                                      className="font-semibold text-slate-900 dark:text-slate-100 hover:text-cyan-600 dark:hover:text-cyan-400 transition text-left cursor-pointer"
+                                      title="Click to open Dealer Overview & Live Subscribers List"
+                                    >
                                       {dealer.full_name}
-                                    </span>
+                                    </button>
                                     <span className="text-[11px] font-mono text-cyan-600 dark:text-cyan-400">
                                       DEALER
                                     </span>
+                                    {dealerCommission > 0 && (
+                                      <span className="text-[10px] font-mono text-amber-600 dark:text-amber-400">
+                                        {dealerCommission}% share
+                                      </span>
+                                    )}
                                     {isSuspended && (
                                       <span className="text-[11px] font-mono text-rose-500">
                                         SUSPENDED
@@ -1123,9 +1375,12 @@ export const DealersManagementView: React.FC<DealersManagementViewProps> = ({
                                     )}
                                   </div>
                                   <div className="text-[11px] text-slate-500 dark:text-slate-400 font-mono mt-0.5">
-                                    @{dealer.username} · {children.length} sub-dealer
-                                    {children.length === 1 ? '' : 's'}
-                                    {dealer.can_create_subdealers ? ' · Can create sub-dealers' : ''}
+                                    @{dealer.username}
+                                    {dealer.company_name && dealer.company_name !== dealer.full_name
+                                      ? ` · ${dealer.company_name}`
+                                      : ''}
+                                    {' · '}
+                                    {children.length} sub-dealer{children.length === 1 ? '' : 's'}
                                   </div>
                                 </div>
                               </div>
@@ -1157,19 +1412,28 @@ export const DealersManagementView: React.FC<DealersManagementViewProps> = ({
                               {formatRs(dealer.credit_limit)}
                             </td>
 
-                            <td className="py-3.5 px-3 text-right font-mono tabular-nums text-slate-700 dark:text-slate-300">
-                              <div>
+                            <td className="py-3.5 px-3 text-right font-mono tabular-nums">
+                              <button
+                                type="button"
+                                onClick={() => openResellerDrawer(dealer, 'overview')}
+                                className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-lg border border-cyan-500/40 bg-cyan-500/10 hover:bg-cyan-500/20 text-cyan-700 dark:text-cyan-300 font-semibold text-xs transition cursor-pointer"
+                                title="Click to inspect all assigned subscribers, active/expired counts, and revenue summary"
+                              >
+                                <Users className="w-3.5 h-3.5" />
+                                <span>{combinedTotalUsers} Users</span>
+                              </button>
+                              <div className="text-[10px] text-slate-500 dark:text-slate-400 mt-1">
+                                <span className="text-emerald-600 dark:text-emerald-400">
+                                  {combinedActiveUsers} active
+                                </span>
+                                {' · '}
+                                <span className="text-amber-600 dark:text-amber-400">
+                                  {combinedExpiredUsers} exp
+                                </span>
+                                {' · '}
                                 {getResellerPoolMbps(dealer) > 0
-                                  ? `${getResellerPoolMbps(dealer)} Mbps`
-                                  : 'Unmetered'}
-                              </div>
-                              <div className="text-[11px] text-slate-500 dark:text-slate-400 mt-0.5">
-                                {stats.active}
-                                {childActiveSum > 0 ? ` (+${childActiveSum} sub)` : ''} /{' '}
-                                {Number(dealer.max_active_users || 0) > 0
-                                  ? dealer.max_active_users
-                                  : '∞'}{' '}
-                                users
+                                  ? `${getResellerPoolMbps(dealer)}M`
+                                  : '∞ Mbps'}
                               </div>
                             </td>
 
@@ -1241,6 +1505,18 @@ export const DealersManagementView: React.FC<DealersManagementViewProps> = ({
                                   <SlidersHorizontal className="w-3 h-3" />
                                   <span>Tariffs</span>
                                 </button>
+
+                                {isAdmin && (
+                                  <button
+                                    type="button"
+                                    onClick={() => openDeleteModal(dealer)}
+                                    title="Delete Dealer (re-assigns linked subscribers safely)"
+                                    className="inline-flex items-center gap-1 px-2 py-1.5 rounded-lg border border-rose-500/40 bg-rose-50 dark:bg-rose-950/40 hover:bg-rose-100 dark:hover:bg-rose-900/60 text-rose-600 dark:text-rose-300 text-[11px] font-medium transition whitespace-nowrap cursor-pointer"
+                                  >
+                                    <Trash2 className="w-3 h-3" />
+                                    <span>Delete</span>
+                                  </button>
+                                )}
                               </div>
                             </td>
                           </tr>
@@ -1251,8 +1527,10 @@ export const DealersManagementView: React.FC<DealersManagementViewProps> = ({
                               const subStats = subscriberStatsByReseller.get(sub.id) || {
                                 total: 0,
                                 active: 0,
+                                expired: 0,
                                 online: 0,
                               };
+                              const subCommission = getResellerCommissionRate(sub);
                               const subSuspended =
                                 String(sub.account_status || 'ACTIVE').toUpperCase() === 'SUSPENDED';
 
@@ -1263,13 +1541,23 @@ export const DealersManagementView: React.FC<DealersManagementViewProps> = ({
                                 >
                                   <td className="py-3 pl-12 pr-4">
                                     <div className="border-l-2 border-slate-300 dark:border-slate-700 pl-3">
-                                      <div className="flex items-center gap-2">
-                                        <span className="font-medium text-slate-800 dark:text-slate-200">
+                                      <div className="flex items-center gap-2 flex-wrap">
+                                        <button
+                                          type="button"
+                                          onClick={() => openResellerDrawer(sub, 'overview')}
+                                          className="font-medium text-slate-800 dark:text-slate-200 hover:text-cyan-600 dark:hover:text-cyan-400 transition text-left cursor-pointer"
+                                          title="Click to view this Sub-Dealer's subscribers & overview"
+                                        >
                                           {sub.full_name}
-                                        </span>
+                                        </button>
                                         <span className="text-[10px] font-mono text-sky-600 dark:text-sky-400">
                                           SUB-DEALER
                                         </span>
+                                        {subCommission > 0 && (
+                                          <span className="text-[10px] font-mono text-amber-600 dark:text-amber-400">
+                                            {subCommission}%
+                                          </span>
+                                        )}
                                         {subSuspended && (
                                           <span className="text-[10px] font-mono text-rose-500">
                                             SUSPENDED
@@ -1305,18 +1593,17 @@ export const DealersManagementView: React.FC<DealersManagementViewProps> = ({
                                     {formatRs(sub.credit_limit)}
                                   </td>
 
-                                  <td className="py-3 px-3 text-right font-mono tabular-nums text-slate-700 dark:text-slate-300">
-                                    <div>
-                                      {getResellerPoolMbps(sub) > 0
-                                        ? `${getResellerPoolMbps(sub)} Mbps`
-                                        : 'Unmetered'}
-                                    </div>
-                                    <div className="text-[11px] text-slate-500 dark:text-slate-400 mt-0.5">
-                                      {subStats.active} /{' '}
-                                      {Number(sub.max_active_users || 0) > 0
-                                        ? sub.max_active_users
-                                        : '∞'}{' '}
-                                      users
+                                  <td className="py-3 px-3 text-right font-mono tabular-nums">
+                                    <button
+                                      type="button"
+                                      onClick={() => openResellerDrawer(sub, 'overview')}
+                                      className="inline-flex items-center gap-1 px-2 py-1 rounded-lg border border-sky-500/40 bg-sky-500/10 hover:bg-sky-500/20 text-sky-700 dark:text-sky-300 font-semibold text-[11px] transition cursor-pointer"
+                                    >
+                                      <Users className="w-3 h-3" />
+                                      <span>{subStats.total} Users</span>
+                                    </button>
+                                    <div className="text-[10px] text-slate-500 dark:text-slate-400 mt-0.5">
+                                      {subStats.active} active · {subStats.expired} exp
                                     </div>
                                   </td>
 
@@ -1381,6 +1668,17 @@ export const DealersManagementView: React.FC<DealersManagementViewProps> = ({
                                         <SlidersHorizontal className="w-3 h-3" />
                                         <span>Tariffs</span>
                                       </button>
+
+                                      {isAdmin && (
+                                        <button
+                                          type="button"
+                                          onClick={() => openDeleteModal(sub)}
+                                          title="Delete Sub-Dealer"
+                                          className="inline-flex items-center gap-1 px-2 py-1.5 rounded-lg border border-rose-500/40 bg-rose-50 dark:bg-rose-950/40 hover:bg-rose-100 dark:hover:bg-rose-900/60 text-rose-600 dark:text-rose-300 text-[11px] font-medium transition whitespace-nowrap cursor-pointer"
+                                        >
+                                          <Trash2 className="w-3 h-3" />
+                                        </button>
+                                      )}
                                     </div>
                                   </td>
                                 </tr>
@@ -1395,17 +1693,22 @@ export const DealersManagementView: React.FC<DealersManagementViewProps> = ({
                       const subStats = subscriberStatsByReseller.get(sub.id) || {
                         total: 0,
                         active: 0,
+                        expired: 0,
                         online: 0,
                       };
                       return (
                         <tr key={sub.id} className="hover:bg-slate-50 dark:hover:bg-slate-800/40">
                           <td className="py-3 px-4">
-                            <div className="font-medium text-slate-900 dark:text-slate-100">
+                            <button
+                              type="button"
+                              onClick={() => openResellerDrawer(sub, 'overview')}
+                              className="font-medium text-slate-900 dark:text-slate-100 hover:text-cyan-500 transition text-left cursor-pointer"
+                            >
                               {sub.full_name}{' '}
                               <span className="text-[10px] font-mono text-sky-500 ml-1">
                                 SUB-DEALER (UNLINKED)
                               </span>
-                            </div>
+                            </button>
                             <div className="text-[11px] font-mono text-slate-500">@{sub.username}</div>
                           </td>
                           <td className="py-3 px-3 text-slate-600 dark:text-slate-300">
@@ -1417,8 +1720,15 @@ export const DealersManagementView: React.FC<DealersManagementViewProps> = ({
                           <td className="py-3 px-3 text-right font-mono tabular-nums text-slate-500">
                             {formatRs(sub.credit_limit)}
                           </td>
-                          <td className="py-3 px-3 text-right font-mono tabular-nums text-slate-500">
-                            {subStats.active} / {sub.max_active_users || '∞'} users
+                          <td className="py-3 px-3 text-right font-mono tabular-nums">
+                            <button
+                              type="button"
+                              onClick={() => openResellerDrawer(sub, 'overview')}
+                              className="inline-flex items-center gap-1 px-2 py-1 rounded-lg border border-sky-500/40 bg-sky-500/10 text-sky-600 dark:text-sky-300 font-semibold text-[11px] cursor-pointer"
+                            >
+                              <Users className="w-3 h-3" />
+                              <span>{subStats.total} Users</span>
+                            </button>
                           </td>
                           <td className="py-3 px-4 text-right">
                             <div className="inline-flex items-center gap-1.5">
@@ -1442,6 +1752,15 @@ export const DealersManagementView: React.FC<DealersManagementViewProps> = ({
                               >
                                 Tariffs
                               </button>
+                              {isAdmin && (
+                                <button
+                                  type="button"
+                                  onClick={() => openDeleteModal(sub)}
+                                  className="px-2 py-1.5 rounded-lg border border-rose-500/40 bg-rose-50 dark:bg-rose-950/40 text-rose-600 dark:text-rose-300 text-[11px] cursor-pointer"
+                                >
+                                  <Trash2 className="w-3 h-3" />
+                                </button>
+                              )}
                             </div>
                           </td>
                         </tr>
@@ -1594,10 +1913,10 @@ export const DealersManagementView: React.FC<DealersManagementViewProps> = ({
             <div className="flex items-center justify-between px-5 py-4 border-b border-slate-200 dark:border-slate-800">
               <div>
                 <h2 className="text-sm font-semibold text-slate-900 dark:text-slate-100">
-                  {createModalTier === 'DEALER' ? 'Create Master Dealer' : 'Create Sub-Dealer'}
+                  {createModalTier === 'DEALER' ? 'Add New Master Dealer' : 'Create Sub-Dealer'}
                 </h2>
                 <p className="text-[11px] text-slate-500 dark:text-slate-400 mt-0.5">
-                  Provisions login credentials, wallet balance, and bandwidth/user caps in Supabase
+                  Provisions login credentials, brand name, commission rate, wallet &amp; caps in PostgreSQL
                 </p>
               </div>
               <button
@@ -1609,24 +1928,39 @@ export const DealersManagementView: React.FC<DealersManagementViewProps> = ({
               </button>
             </div>
 
-            <form onSubmit={handleCreateSubmit} className="p-5 space-y-3.5 text-xs">
+            <form onSubmit={handleCreateSubmit} className="p-5 space-y-3.5 text-xs max-h-[82vh] overflow-y-auto">
               <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
                 <div>
                   <label className="block text-[11px] font-medium text-slate-600 dark:text-slate-300 mb-1">
-                    Full Name / Franchise Name *
+                    Dealer Full Name *
                   </label>
                   <input
                     type="text"
                     required
                     value={createForm.fullName}
                     onChange={(e) => setCreateForm((p) => ({ ...p, fullName: e.target.value }))}
-                    placeholder="e.g. Saddar Fiber Network"
+                    placeholder="e.g. Tariq Mahmood"
                     className="w-full px-3 py-2 rounded-lg border border-slate-300 dark:border-slate-700 bg-white dark:bg-slate-950 text-slate-900 dark:text-slate-100 focus:outline-none focus:border-cyan-500"
                   />
                 </div>
                 <div>
                   <label className="block text-[11px] font-medium text-slate-600 dark:text-slate-300 mb-1">
-                    Phone Number *
+                    Company / Brand Name
+                  </label>
+                  <input
+                    type="text"
+                    value={createForm.companyName}
+                    onChange={(e) => setCreateForm((p) => ({ ...p, companyName: e.target.value }))}
+                    placeholder="e.g. Saddar Fiber Network"
+                    className="w-full px-3 py-2 rounded-lg border border-slate-300 dark:border-slate-700 bg-white dark:bg-slate-950 text-slate-900 dark:text-slate-100 focus:outline-none focus:border-cyan-500"
+                  />
+                </div>
+              </div>
+
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                <div>
+                  <label className="block text-[11px] font-medium text-slate-600 dark:text-slate-300 mb-1">
+                    Phone / WhatsApp Number *
                   </label>
                   <input
                     type="text"
@@ -1636,6 +1970,26 @@ export const DealersManagementView: React.FC<DealersManagementViewProps> = ({
                     placeholder="+92 300 1234567"
                     className="w-full px-3 py-2 rounded-lg border border-slate-300 dark:border-slate-700 bg-white dark:bg-slate-950 text-slate-900 dark:text-slate-100 focus:outline-none focus:border-cyan-500 font-mono"
                   />
+                </div>
+                <div>
+                  <label className="block text-[11px] font-medium text-slate-600 dark:text-slate-300 mb-1">
+                    Commission / Share Rate (%)
+                  </label>
+                  <div className="relative">
+                    <input
+                      type="number"
+                      min="0"
+                      max="100"
+                      step="0.5"
+                      value={createForm.commissionRate}
+                      onChange={(e) =>
+                        setCreateForm((p) => ({ ...p, commissionRate: e.target.value }))
+                      }
+                      placeholder="15"
+                      className="w-full px-3 py-2 pr-8 rounded-lg border border-slate-300 dark:border-slate-700 bg-white dark:bg-slate-950 text-slate-900 dark:text-slate-100 focus:outline-none focus:border-cyan-500 font-mono"
+                    />
+                    <Percent className="w-3.5 h-3.5 text-slate-400 absolute right-2.5 top-2.5 pointer-events-none" />
+                  </div>
                 </div>
               </div>
 
@@ -1671,7 +2025,7 @@ export const DealersManagementView: React.FC<DealersManagementViewProps> = ({
               <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
                 <div>
                   <label className="block text-[11px] font-medium text-slate-600 dark:text-slate-300 mb-1">
-                    Area / Coverage Zone
+                    Assigned Coverage Areas / Nodes
                   </label>
                   <input
                     type="text"
@@ -2006,58 +2360,89 @@ export const DealersManagementView: React.FC<DealersManagementViewProps> = ({
         </div>
       )}
 
-      {/* SLIDE-OVER DRAWER: WHOLESALE PACKAGE TARIFF MATRIX & PROFILE CAPS */}
+      {/* SLIDE-OVER DRAWER: DEALER OVERVIEW, LIVE SUBSCRIBERS, TARIFF MATRIX & PROFILE */}
       {drawerReseller && (
         <div className="fixed inset-0 z-50 bg-slate-950/75 backdrop-blur-xs flex justify-end">
-          <div className="w-full max-w-2xl h-full bg-white dark:bg-slate-900 border-l border-slate-200 dark:border-slate-800 shadow-2xl flex flex-col">
-            <div className="flex items-center justify-between px-5 py-4 border-b border-slate-200 dark:border-slate-800 shrink-0">
-              <div>
-                <div className="flex items-center gap-2">
-                  <h2 className="text-base font-semibold text-slate-900 dark:text-slate-100">
+          <div className="w-full max-w-3xl h-full bg-white dark:bg-slate-900 border-l border-slate-200 dark:border-slate-800 shadow-2xl flex flex-col">
+            <div className="flex items-center justify-between px-5 py-4 border-b border-slate-200 dark:border-slate-800 shrink-0 gap-3">
+              <div className="min-w-0">
+                <div className="flex items-center gap-2 flex-wrap">
+                  <h2 className="text-base font-semibold text-slate-900 dark:text-slate-100 truncate">
                     {drawerReseller.full_name}
                   </h2>
                   <span className="text-[11px] font-mono text-cyan-600 dark:text-cyan-400">
                     {getResellerTier(drawerReseller) === 'DEALER' ? 'MASTER DEALER' : 'SUB-DEALER'}
                   </span>
+                  {getResellerCommissionRate(drawerReseller) > 0 && (
+                    <span className="text-[11px] font-mono text-amber-600 dark:text-amber-400">
+                      · {getResellerCommissionRate(drawerReseller)}% Commission
+                    </span>
+                  )}
                 </div>
-                <p className="text-xs text-slate-500 dark:text-slate-400 font-mono mt-0.5">
-                  @{drawerReseller.username} · Wallet {formatRs(drawerReseller.wallet_balance)} · Credit{' '}
-                  {formatRs(drawerReseller.credit_limit)}
+                <p className="text-xs text-slate-500 dark:text-slate-400 font-mono mt-0.5 truncate">
+                  @{drawerReseller.username}
+                  {drawerReseller.company_name && drawerReseller.company_name !== drawerReseller.full_name
+                    ? ` · ${drawerReseller.company_name}`
+                    : ''}
+                  {' · '}Wallet {formatRs(drawerReseller.wallet_balance)} · Area: {drawerReseller.area || '—'}
                 </p>
               </div>
-              <button
-                type="button"
-                onClick={() => setDrawerReseller(null)}
-                className="p-1.5 rounded-lg text-slate-400 hover:text-slate-200 hover:bg-slate-800 cursor-pointer"
-              >
-                <X className="w-4 h-4" />
-              </button>
+              <div className="flex items-center gap-2 shrink-0">
+                {isAdmin && (
+                  <button
+                    type="button"
+                    onClick={() => openDeleteModal(drawerReseller)}
+                    className="inline-flex items-center gap-1 px-2.5 py-1.5 rounded-lg border border-rose-500/40 bg-rose-50 dark:bg-rose-950/40 hover:bg-rose-100 dark:hover:bg-rose-900/60 text-rose-600 dark:text-rose-300 text-xs font-medium cursor-pointer"
+                  >
+                    <Trash2 className="w-3.5 h-3.5" />
+                    <span>Delete Dealer</span>
+                  </button>
+                )}
+                <button
+                  type="button"
+                  onClick={() => setDrawerReseller(null)}
+                  className="p-1.5 rounded-lg text-slate-400 hover:text-slate-200 hover:bg-slate-800 cursor-pointer"
+                >
+                  <X className="w-4 h-4" />
+                </button>
+              </div>
             </div>
 
             {/* Drawer Tabs */}
-            <div className="flex items-center justify-between px-5 border-b border-slate-200 dark:border-slate-800 shrink-0">
+            <div className="flex items-center justify-between px-5 border-b border-slate-200 dark:border-slate-800 shrink-0 gap-2 overflow-x-auto">
               <div className="flex items-center gap-1">
                 <button
                   type="button"
+                  onClick={() => setDrawerTab('overview')}
+                  className={`px-3 py-2.5 text-xs font-semibold border-b-2 transition cursor-pointer whitespace-nowrap ${
+                    drawerTab === 'overview'
+                      ? 'border-cyan-500 text-cyan-600 dark:text-cyan-400'
+                      : 'border-transparent text-slate-500 hover:text-slate-300'
+                  }`}
+                >
+                  Overview &amp; Subscribers ({drawerOverviewData.allSubscribers.length})
+                </button>
+                <button
+                  type="button"
                   onClick={() => setDrawerTab('tariffs')}
-                  className={`px-3 py-2.5 text-xs font-semibold border-b-2 transition cursor-pointer ${
+                  className={`px-3 py-2.5 text-xs font-semibold border-b-2 transition cursor-pointer whitespace-nowrap ${
                     drawerTab === 'tariffs'
                       ? 'border-cyan-500 text-cyan-600 dark:text-cyan-400'
                       : 'border-transparent text-slate-500 hover:text-slate-300'
                   }`}
                 >
-                  Wholesale Package Tariff Matrix ({drawerProfileRows.length})
+                  Wholesale Tariffs ({drawerProfileRows.length})
                 </button>
                 <button
                   type="button"
                   onClick={() => setDrawerTab('settings')}
-                  className={`px-3 py-2.5 text-xs font-semibold border-b-2 transition cursor-pointer ${
+                  className={`px-3 py-2.5 text-xs font-semibold border-b-2 transition cursor-pointer whitespace-nowrap ${
                     drawerTab === 'settings'
                       ? 'border-cyan-500 text-cyan-600 dark:text-cyan-400'
                       : 'border-transparent text-slate-500 hover:text-slate-300'
                   }`}
                 >
-                  Limits &amp; Account Profile
+                  Limits &amp; Profile
                 </button>
               </div>
 
@@ -2066,7 +2451,7 @@ export const DealersManagementView: React.FC<DealersManagementViewProps> = ({
                   type="button"
                   onClick={handleSaveAllTariffs}
                   disabled={isSavingAllTariffs}
-                  className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-cyan-600 hover:bg-cyan-500 disabled:opacity-60 text-white text-xs font-semibold cursor-pointer"
+                  className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-cyan-600 hover:bg-cyan-500 disabled:opacity-60 text-white text-xs font-semibold cursor-pointer shrink-0"
                 >
                   <Save className="w-3.5 h-3.5" />
                   <span>{isSavingAllTariffs ? 'Saving...' : 'Save All Tariffs'}</span>
@@ -2076,7 +2461,206 @@ export const DealersManagementView: React.FC<DealersManagementViewProps> = ({
 
             {/* Drawer Body */}
             <div className="flex-1 overflow-y-auto p-5">
-              {drawerTab === 'tariffs' ? (
+              {drawerTab === 'overview' ? (
+                <div className="space-y-4">
+                  {/* 4 Dealer Summary KPI Cards */}
+                  <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
+                    <div className="rounded-xl border border-slate-200 dark:border-slate-800 bg-slate-50 dark:bg-slate-950/60 p-3.5">
+                      <div className="flex items-center justify-between text-[11px] text-slate-500 dark:text-slate-400">
+                        <span>Total Users</span>
+                        <Users className="w-3.5 h-3.5 text-cyan-500" />
+                      </div>
+                      <div className="mt-1.5 text-xl font-mono font-bold tabular-nums text-slate-900 dark:text-slate-100">
+                        {drawerOverviewData.allSubscribers.length}
+                      </div>
+                      <div className="text-[10px] text-slate-500 font-mono mt-0.5">
+                        {drawerOverviewData.onlineCount} online now
+                      </div>
+                    </div>
+
+                    <div className="rounded-xl border border-slate-200 dark:border-slate-800 bg-slate-50 dark:bg-slate-950/60 p-3.5">
+                      <div className="flex items-center justify-between text-[11px] text-slate-500 dark:text-slate-400">
+                        <span>Active vs Expired</span>
+                        <UserCheck className="w-3.5 h-3.5 text-emerald-500" />
+                      </div>
+                      <div className="mt-1.5 text-xl font-mono font-bold tabular-nums flex items-baseline gap-1.5">
+                        <span className="text-emerald-600 dark:text-emerald-400">
+                          {drawerOverviewData.activeCount}
+                        </span>
+                        <span className="text-slate-400 text-xs">/</span>
+                        <span className="text-amber-600 dark:text-amber-400">
+                          {drawerOverviewData.expiredCount}
+                        </span>
+                      </div>
+                      <div className="text-[10px] text-slate-500 font-mono mt-0.5">
+                        Active / Expiry Pool
+                      </div>
+                    </div>
+
+                    <div className="rounded-xl border border-slate-200 dark:border-slate-800 bg-slate-50 dark:bg-slate-950/60 p-3.5">
+                      <div className="flex items-center justify-between text-[11px] text-slate-500 dark:text-slate-400">
+                        <span>Collected Revenue</span>
+                        <Wallet className="w-3.5 h-3.5 text-emerald-500" />
+                      </div>
+                      <div className="mt-1.5 text-base font-mono font-bold tabular-nums text-emerald-600 dark:text-emerald-400 truncate">
+                        {formatRs(drawerOverviewData.collectedRevenue)}
+                      </div>
+                      <div className="text-[10px] text-slate-500 font-mono mt-0.5">
+                        Paid invoices total
+                      </div>
+                    </div>
+
+                    <div className="rounded-xl border border-slate-200 dark:border-slate-800 bg-slate-50 dark:bg-slate-950/60 p-3.5">
+                      <div className="flex items-center justify-between text-[11px] text-slate-500 dark:text-slate-400">
+                        <span>Pending Dues</span>
+                        <Receipt className="w-3.5 h-3.5 text-rose-500" />
+                      </div>
+                      <div className="mt-1.5 text-base font-mono font-bold tabular-nums text-rose-600 dark:text-rose-400 truncate">
+                        {formatRs(drawerOverviewData.pendingDues)}
+                      </div>
+                      <div className="text-[10px] text-slate-500 font-mono mt-0.5">
+                        Unpaid client balance
+                      </div>
+                    </div>
+                  </div>
+
+                  {/* Search & Status Filter for Assigned Subscribers */}
+                  <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2.5">
+                    <div className="relative flex-1">
+                      <Search className="w-3.5 h-3.5 text-slate-400 absolute left-3 top-2.5 pointer-events-none" />
+                      <input
+                        type="text"
+                        value={drawerSubSearch}
+                        onChange={(e) => setDrawerSubSearch(e.target.value)}
+                        placeholder="Search subscriber name, @username, phone, area, package..."
+                        className="w-full pl-8 pr-3 py-1.5 rounded-lg border border-slate-300 dark:border-slate-700 bg-white dark:bg-slate-950 text-xs text-slate-900 dark:text-slate-100 focus:outline-none focus:border-cyan-500"
+                      />
+                    </div>
+                    <div className="flex items-center gap-1 shrink-0">
+                      {(['ALL', 'ACTIVE', 'EXPIRED'] as const).map((st) => (
+                        <button
+                          key={st}
+                          type="button"
+                          onClick={() => setDrawerSubStatusFilter(st)}
+                          className={`px-2.5 py-1.5 rounded-lg text-[11px] font-semibold border transition cursor-pointer ${
+                            drawerSubStatusFilter === st
+                              ? 'bg-cyan-600 border-cyan-500 text-white'
+                              : 'border-slate-300 dark:border-slate-700 text-slate-600 dark:text-slate-300 hover:border-cyan-500'
+                          }`}
+                        >
+                          {st === 'ALL'
+                            ? `All (${drawerOverviewData.allSubscribers.length})`
+                            : st === 'ACTIVE'
+                            ? `Active (${drawerOverviewData.activeCount})`
+                            : `Expired (${drawerOverviewData.expiredCount})`}
+                        </button>
+                      ))}
+                    </div>
+                  </div>
+
+                  {/* Assigned Subscribers Table */}
+                  <div className="rounded-xl border border-slate-200 dark:border-slate-800 overflow-hidden">
+                    <div className="overflow-x-auto">
+                      <table className="w-full text-left border-collapse text-xs">
+                        <thead>
+                          <tr className="border-b border-slate-200 dark:border-slate-800 bg-slate-50 dark:bg-slate-950/60 text-[11px] uppercase tracking-wider text-slate-500 dark:text-slate-400">
+                            <th className="py-2.5 px-3 font-semibold">Subscriber</th>
+                            <th className="py-2.5 px-3 font-semibold">Contact / Area</th>
+                            <th className="py-2.5 px-3 font-semibold">Package</th>
+                            <th className="py-2.5 px-3 font-semibold">Status &amp; Expiry</th>
+                            <th className="py-2.5 px-3 font-semibold text-right">Due Balance</th>
+                          </tr>
+                        </thead>
+                        <tbody className="divide-y divide-slate-200 dark:divide-slate-800/80">
+                          {drawerOverviewData.filteredSubscribers.length === 0 ? (
+                            <tr>
+                              <td colSpan={5} className="py-10 text-center text-slate-500">
+                                {drawerOverviewData.allSubscribers.length === 0
+                                  ? 'No subscribers are assigned to this Dealer yet.'
+                                  : 'No subscribers match your search/status filter.'}
+                              </td>
+                            </tr>
+                          ) : (
+                            drawerOverviewData.filteredSubscribers.map((sub) => {
+                              const expired = isSubscriberExpiredOrPool(sub);
+                              const unameLower = String(sub.username || '').trim().toLowerCase();
+                              const isOnline = onlineUsernameSet.has(unameLower);
+                              const invSum = invoiceSummaryByUsername.get(unameLower) || {
+                                due: 0,
+                                collected: 0,
+                              };
+                              const expiryStr = sub.expiry_date
+                                ? String(sub.expiry_date).slice(0, 10)
+                                : '—';
+                              return (
+                                <tr
+                                  key={sub.id}
+                                  className="hover:bg-slate-50/70 dark:hover:bg-slate-800/30 transition"
+                                >
+                                  <td className="py-2.5 px-3">
+                                    <div className="font-semibold text-slate-900 dark:text-slate-100 flex items-center gap-1.5">
+                                      <span
+                                        className={`w-2 h-2 rounded-full shrink-0 ${
+                                          isOnline ? 'bg-emerald-500' : 'bg-slate-400'
+                                        }`}
+                                        title={isOnline ? 'Online on MikroTik' : 'Offline'}
+                                      />
+                                      <span>{sub.full_name || sub.username}</span>
+                                    </div>
+                                    <div className="text-[11px] font-mono text-slate-500">
+                                      @{sub.username}
+                                    </div>
+                                  </td>
+                                  <td className="py-2.5 px-3 text-slate-600 dark:text-slate-300">
+                                    <div className="font-mono text-[11px]">{sub.phone || '—'}</div>
+                                    <div className="text-[10px] text-slate-500">{sub.area || '—'}</div>
+                                  </td>
+                                  <td className="py-2.5 px-3 font-mono text-slate-700 dark:text-slate-200">
+                                    {sub.original_package_profile ||
+                                      sub.package_profile_name ||
+                                      sub.package_speed ||
+                                      '—'}
+                                  </td>
+                                  <td className="py-2.5 px-3">
+                                    <span
+                                      className={`inline-flex items-center gap-1 text-[10px] font-mono font-semibold ${
+                                        expired
+                                          ? 'text-amber-600 dark:text-amber-400'
+                                          : 'text-emerald-600 dark:text-emerald-400'
+                                      }`}
+                                    >
+                                      {expired ? (
+                                        <UserX className="w-3 h-3" />
+                                      ) : (
+                                        <UserCheck className="w-3 h-3" />
+                                      )}
+                                      {expired ? 'EXPIRED / POOL' : 'ACTIVE'}
+                                    </span>
+                                    <div className="text-[10px] font-mono text-slate-500 mt-0.5">
+                                      Exp: {expiryStr}
+                                    </div>
+                                  </td>
+                                  <td className="py-2.5 px-3 text-right font-mono tabular-nums">
+                                    <span
+                                      className={
+                                        invSum.due > 0
+                                          ? 'text-rose-600 dark:text-rose-400 font-semibold'
+                                          : 'text-emerald-600 dark:text-emerald-400'
+                                      }
+                                    >
+                                      {formatRs(invSum.due)}
+                                    </span>
+                                  </td>
+                                </tr>
+                              );
+                            })
+                          )}
+                        </tbody>
+                      </table>
+                    </div>
+                  </div>
+                </div>
+              ) : drawerTab === 'tariffs' ? (
                 <div className="space-y-4">
                   <div className="flex items-center justify-between text-xs text-slate-500 dark:text-slate-400">
                     <span>
@@ -2343,20 +2927,39 @@ export const DealersManagementView: React.FC<DealersManagementViewProps> = ({
                     </label>
                   )}
 
-                  <div>
-                    <label className="block text-[11px] font-medium text-slate-600 dark:text-slate-300 mb-1">
-                      WhatsApp Company Display Name
-                    </label>
-                    <input
-                      type="text"
-                      disabled={!canEditDrawerReseller}
-                      value={editCapsForm.companyName}
-                      onChange={(e) =>
-                        setEditCapsForm((p) => ({ ...p, companyName: e.target.value }))
-                      }
-                      placeholder="e.g. Ali Fiber Net"
-                      className="w-full px-3 py-2 rounded-lg border border-slate-300 dark:border-slate-700 bg-white dark:bg-slate-950 text-slate-900 dark:text-slate-100 disabled:opacity-60"
-                    />
+                  <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                    <div>
+                      <label className="block text-[11px] font-medium text-slate-600 dark:text-slate-300 mb-1">
+                        Company / Brand Display Name
+                      </label>
+                      <input
+                        type="text"
+                        disabled={!canEditDrawerReseller}
+                        value={editCapsForm.companyName}
+                        onChange={(e) =>
+                          setEditCapsForm((p) => ({ ...p, companyName: e.target.value }))
+                        }
+                        placeholder="e.g. Ali Fiber Net"
+                        className="w-full px-3 py-2 rounded-lg border border-slate-300 dark:border-slate-700 bg-white dark:bg-slate-950 text-slate-900 dark:text-slate-100 disabled:opacity-60"
+                      />
+                    </div>
+                    <div>
+                      <label className="block text-[11px] font-medium text-slate-600 dark:text-slate-300 mb-1">
+                        Commission / Share Rate (%)
+                      </label>
+                      <input
+                        type="number"
+                        min="0"
+                        max="100"
+                        step="0.5"
+                        disabled={!canEditDrawerReseller}
+                        value={editCapsForm.commissionRate}
+                        onChange={(e) =>
+                          setEditCapsForm((p) => ({ ...p, commissionRate: e.target.value }))
+                        }
+                        className="w-full px-3 py-2 rounded-lg border border-slate-300 dark:border-slate-700 bg-white dark:bg-slate-950 font-mono text-slate-900 dark:text-slate-100 disabled:opacity-60"
+                      />
+                    </div>
                   </div>
 
                   <label className="flex items-center justify-between gap-3 rounded-lg border border-emerald-500/25 bg-emerald-500/5 px-3.5 py-2.5 cursor-pointer">
@@ -2417,6 +3020,103 @@ export const DealersManagementView: React.FC<DealersManagementViewProps> = ({
               )}
             </div>
           </div>
+        </div>
+      )}
+
+      {/* MODAL 4: DELETE DEALER / SUB-DEALER CONFIRMATION WITH SAFE USER REASSIGNMENT */}
+      {deleteTarget && isAdmin && (
+        <div className="fixed inset-0 z-[60] bg-slate-950/80 backdrop-blur-xs flex items-center justify-center p-4">
+          {(() => {
+            const linkedSubsCount = getSubscribersForReseller(deleteTarget).length;
+            const childSubCount =
+              getResellerTier(deleteTarget) === 'DEALER'
+                ? subDealers.filter((s) => s.parent_dealer_id === deleteTarget.id).length
+                : 0;
+            const otherDealers = dealers.filter((d) => d.id !== deleteTarget.id);
+            return (
+              <div className="w-full max-w-md rounded-xl border border-rose-500/50 bg-white dark:bg-slate-900 shadow-2xl overflow-hidden">
+                <div className="flex items-center justify-between px-5 py-4 border-b border-slate-200 dark:border-slate-800">
+                  <div className="flex items-center gap-2.5">
+                    <div className="p-2 rounded-lg bg-rose-500/15 text-rose-500">
+                      <Trash2 className="w-4 h-4" />
+                    </div>
+                    <div>
+                      <h2 className="text-sm font-semibold text-slate-900 dark:text-slate-100">
+                        Delete {getResellerTier(deleteTarget) === 'DEALER' ? 'Dealer' : 'Sub-Dealer'}
+                      </h2>
+                      <p className="text-[11px] font-mono text-slate-500">
+                        {deleteTarget.full_name} (@{deleteTarget.username})
+                      </p>
+                    </div>
+                  </div>
+                  <button
+                    type="button"
+                    onClick={() => setDeleteTarget(null)}
+                    disabled={isDeletingReseller}
+                    className="p-1.5 rounded-lg text-slate-400 hover:text-slate-200 hover:bg-slate-800 cursor-pointer"
+                  >
+                    <X className="w-4 h-4" />
+                  </button>
+                </div>
+
+                <div className="p-5 space-y-4 text-xs">
+                  <div className="rounded-lg border border-amber-500/40 bg-amber-50 dark:bg-amber-950/40 p-3 text-amber-900 dark:text-amber-200 space-y-1">
+                    <p className="font-semibold">
+                      Safe Reassignment Before Deletion:
+                    </p>
+                    <p>
+                      This account currently owns{' '}
+                      <strong className="font-mono">{linkedSubsCount} subscriber(s)</strong>
+                      {childSubCount > 0 ? (
+                        <>
+                          {' '}and <strong className="font-mono">{childSubCount} sub-dealer(s)</strong>
+                        </>
+                      ) : null}
+                      . Choose where to safely reassign them before removing the account.
+                    </p>
+                  </div>
+
+                  <div>
+                    <label className="block text-[11px] font-medium text-slate-600 dark:text-slate-300 mb-1">
+                      Reassign Linked Users &amp; Invoices To
+                    </label>
+                    <select
+                      value={deleteReassignToId}
+                      onChange={(e) => setDeleteReassignToId(e.target.value)}
+                      className="w-full px-3 py-2 rounded-lg border border-slate-300 dark:border-slate-700 bg-white dark:bg-slate-950 text-slate-900 dark:text-slate-100 focus:outline-none focus:border-rose-500"
+                    >
+                      <option value="">Master Direct ISP (No Dealer / Direct Subscribers)</option>
+                      {otherDealers.map((d) => (
+                        <option key={d.id} value={d.id}>
+                          [Dealer] {d.full_name} (@{d.username})
+                        </option>
+                      ))}
+                    </select>
+                  </div>
+
+                  <div className="flex items-center justify-end gap-2 pt-2 border-t border-slate-200 dark:border-slate-800">
+                    <button
+                      type="button"
+                      onClick={() => setDeleteTarget(null)}
+                      disabled={isDeletingReseller}
+                      className="px-3.5 py-2 rounded-lg border border-slate-300 dark:border-slate-700 text-slate-700 dark:text-slate-300 font-medium cursor-pointer"
+                    >
+                      Cancel
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => void handleConfirmDeleteReseller()}
+                      disabled={isDeletingReseller}
+                      className="inline-flex items-center gap-1.5 px-4 py-2 rounded-lg bg-rose-600 hover:bg-rose-500 disabled:opacity-60 text-white font-semibold cursor-pointer"
+                    >
+                      <Trash2 className="w-3.5 h-3.5" />
+                      <span>{isDeletingReseller ? 'Deleting & Reassigning...' : 'Confirm Delete'}</span>
+                    </button>
+                  </div>
+                </div>
+              </div>
+            );
+          })()}
         </div>
       )}
     </div>

@@ -619,13 +619,49 @@ export const SubscriberProfileDrawer: React.FC<SubscriberProfileDrawerProps> = (
     };
   }, [customer, parsedComment]);
 
-  // Operational Action 0: Manual Recharge / Extend Package (+31 Days)
+  const computeDefaultCustomExpiryYmd = (baseExpiry?: string | null, days: number = 31): string => {
+    const todayYmd = new Date().toISOString().slice(0, 10);
+    const curYmd =
+      baseExpiry && /^\d{4}-\d{2}-\d{2}/.test(String(baseExpiry))
+        ? String(baseExpiry).slice(0, 10)
+        : '';
+    const base = curYmd && curYmd > todayYmd ? curYmd : todayYmd;
+    const [y, m, d] = base.split('-').map(Number);
+    const dt = new Date(Date.UTC(y, (m || 1) - 1, d || 1));
+    dt.setUTCDate(dt.getUTCDate() + days);
+    return dt.toISOString().slice(0, 10);
+  };
+
+  const [customExpiryDate, setCustomExpiryDate] = useState<string>(() =>
+    computeDefaultCustomExpiryYmd(customer?.expiryDate, 31)
+  );
+
+  useEffect(() => {
+    setCustomExpiryDate(computeDefaultCustomExpiryYmd(customer?.expiryDate, 31));
+  }, [username, customer?.expiryDate]);
+
+  // Operational Action 0: Manual Activate / Recharge with Custom Expiry Date
   const handleRenewPackage = async () => {
     if (!username) return;
+    if (!customExpiryDate || !/^\d{4}-\d{2}-\d{2}$/.test(customExpiryDate)) {
+      setActionFeedback({
+        type: 'error',
+        message: 'Please select a valid Custom Expiry / Activation Date.',
+      });
+      return;
+    }
     setActionLoading('renew');
     setActionFeedback(null);
     try {
-      const res = await renewSubscriberPackage(username, 31);
+      const todayMs = Date.UTC(
+        new Date().getUTCFullYear(),
+        new Date().getUTCMonth(),
+        new Date().getUTCDate()
+      );
+      const [cy, cm, cd] = customExpiryDate.split('-').map(Number);
+      const customMs = Date.UTC(cy, (cm || 1) - 1, cd || 1);
+      const diffDays = Math.max(1, Math.round((customMs - todayMs) / 86_400_000));
+      const res = await renewSubscriberPackage(username, diffDays, customExpiryDate);
       setActionFeedback({
         type: res.success ? 'success' : 'error',
         message: res.message,
@@ -1334,24 +1370,63 @@ export const SubscriberProfileDrawer: React.FC<SubscriberProfileDrawerProps> = (
                   </h3>
                 </div>
 
-                <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-3">
-                  {/* Action 0: Renew / Extend Package */}
-                  <button
-                    onClick={handleRenewPackage}
-                    disabled={actionLoading === 'renew'}
-                    className="p-3 bg-cyan-950/40 hover:bg-cyan-950/70 border border-cyan-800/80 hover:border-cyan-600 rounded-lg text-left transition group disabled:opacity-50 cursor-pointer shadow-md"
-                  >
-                    <div className="flex items-center justify-between text-xs font-bold text-cyan-300 mb-1">
-                      <span>+ Renew (+30 Days)</span>
-                      <RefreshCw className={`w-4 h-4 text-cyan-400 ${actionLoading === 'renew' ? 'animate-spin' : ''}`} />
+                {/* Manual Activate / Recharge with Custom Expiry Date Picker */}
+                <div className="mb-3 p-3.5 rounded-xl bg-emerald-950/30 border border-emerald-700/50 space-y-2.5">
+                  <div className="flex flex-wrap items-center justify-between gap-2">
+                    <div className="flex items-center gap-2">
+                      <Calendar className="w-4 h-4 text-emerald-400" />
+                      <span className="text-xs font-bold text-emerald-300">
+                        Manual Activate / Recharge (Custom Expiry Date)
+                      </span>
                     </div>
-                    <p className="text-[11px] text-slate-300">
-                      Extends validity by 30 days and restores active high-speed RouterOS profile.
-                    </p>
-                    <span className="text-[10px] text-cyan-400 group-hover:text-cyan-200 font-mono mt-2 block font-bold">
-                      {actionLoading === 'renew' ? 'Renewing Account...' : 'Extend +30 Days →'}
-                    </span>
-                  </button>
+                    <div className="flex items-center gap-1.5">
+                      {[15, 31, 60].map((d) => (
+                        <button
+                          key={d}
+                          type="button"
+                          onClick={() =>
+                            setCustomExpiryDate(
+                              computeDefaultCustomExpiryYmd(customer?.expiryDate, d)
+                            )
+                          }
+                          className="px-2 py-0.5 rounded-md bg-slate-900 hover:bg-emerald-900/60 border border-emerald-700/50 text-[10px] font-mono font-bold text-emerald-300 transition cursor-pointer"
+                        >
+                          +{d}d
+                        </button>
+                      ))}
+                    </div>
+                  </div>
+                  <div className="flex flex-col sm:flex-row items-stretch sm:items-end gap-2.5">
+                    <div className="flex-1">
+                      <label className="block text-[10px] font-mono uppercase tracking-wider text-slate-400 mb-1">
+                        Custom Expiry / Activation Date
+                      </label>
+                      <input
+                        type="date"
+                        value={customExpiryDate}
+                        onChange={(e) => setCustomExpiryDate(e.target.value)}
+                        className="w-full px-3 py-2 rounded-lg bg-slate-950 border border-slate-700 text-white font-mono text-xs focus:outline-none focus:border-emerald-500"
+                      />
+                    </div>
+                    <button
+                      type="button"
+                      onClick={handleRenewPackage}
+                      disabled={actionLoading === 'renew'}
+                      className="px-4 py-2 rounded-lg bg-emerald-600 hover:bg-emerald-500 text-slate-950 font-bold text-xs flex items-center justify-center gap-1.5 transition cursor-pointer disabled:opacity-50 shrink-0 shadow"
+                    >
+                      <RefreshCw
+                        className={`w-3.5 h-3.5 ${actionLoading === 'renew' ? 'animate-spin' : ''}`}
+                      />
+                      <span>
+                        {actionLoading === 'renew'
+                          ? 'Activating...'
+                          : `Activate Until ${customExpiryDate || 'Selected Date'}`}
+                      </span>
+                    </button>
+                  </div>
+                </div>
+
+                <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-3">
 
                   {/* Action 1: Shift to Expired Pool */}
                   <button

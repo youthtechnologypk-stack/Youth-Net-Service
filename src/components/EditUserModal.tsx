@@ -11,6 +11,7 @@ import {
   DollarSign,
   Link as LinkIcon,
   MapPin,
+  Calendar,
 } from 'lucide-react';
 import { UserAccount, SystemRole } from '../types/auth';
 import { useISP } from '../context/ISPContext';
@@ -26,6 +27,12 @@ import {
   resolveStaffPermissions,
 } from '../lib/staffPermissions';
 import { StaffPermissionsEditor } from './StaffPermissionsEditor';
+import {
+  BillingCycleMode,
+  formatOrdinalDay,
+  resolveSubscriberBillingCycle,
+} from '../lib/anniversaryBilling';
+import { isMissingTableOrColumnError } from '../lib/expiryUtils';
 
 interface EditUserModalProps {
   isOpen: boolean;
@@ -54,6 +61,8 @@ export const EditUserModal: React.FC<EditUserModalProps> = ({
   const [department, setDepartment] = useState('');
   const [linkedCustomerId, setLinkedCustomerId] = useState('');
   const [linkedAgentId, setLinkedAgentId] = useState('');
+  const [billingCycleMode, setBillingCycleMode] = useState<BillingCycleMode>('fixed_day');
+  const [billingCycleDay, setBillingCycleDay] = useState<number>(new Date().getDate());
   const [staffPermissions, setStaffPermissions] = useState<StaffPermissions>(() =>
     getDefaultPermissionsForRole('AGENT')
   );
@@ -100,8 +109,26 @@ export const EditUserModal: React.FC<EditUserModalProps> = ({
       setLinkedAgentId(user.linkedAgentId || '');
       setStaffPermissions(resolveStaffPermissions(user, user.role));
       setError(null);
+      if (isOpen && user.role === 'CLIENT') {
+        supabase
+          .from('portal_users')
+          .select('billing_cycle_mode, billing_anchor_day, installation_date, created_at, permissions')
+          .ilike('username', user.username)
+          .limit(1)
+          .maybeSingle()
+          .then(
+            ({ data }) => {
+              if (data) {
+                const resolved = resolveSubscriberBillingCycle(data as any);
+                setBillingCycleMode(resolved.mode);
+                setBillingCycleDay(resolved.cycleDay);
+              }
+            },
+            () => {}
+          );
+      }
     }
-  }, [user]);
+  }, [user, isOpen]);
 
   if (!isOpen || !user) return null;
 
@@ -142,13 +169,34 @@ export const EditUserModal: React.FC<EditUserModalProps> = ({
     try {
       await onSave(updated);
 
-      // When selected, store actual PPPoE username into user's profile record in Supabase
-      if (role === 'CLIENT' && linkedCustomerId) {
+      // Persist CLIENT billing cycle settings & area into portal_users (adaptive column fallback)
+      if (role === 'CLIENT') {
         try {
-          await supabase
+          const safeCycleDay = Math.min(31, Math.max(1, Math.round(Number(billingCycleDay) || 1)));
+          const anchorValue = billingCycleMode === 'rolling_31' ? 0 : safeCycleDay;
+          const basePatch: Record<string, any> = {
+            ...(linkedCustomerId ? { area: assignedArea || 'Sector G-11' } : {}),
+            billing_anchor_day: anchorValue,
+            permissions: {
+              ...CLIENT_NO_PERMISSIONS,
+              billing_cycle_mode: billingCycleMode,
+              billing_cycle_day: safeCycleDay,
+            },
+          };
+          const fullPatch = {
+            ...basePatch,
+            billing_cycle_mode: billingCycleMode,
+          };
+          const { error: cycleErr } = await supabase
             .from('portal_users')
-            .update({ area: assignedArea || 'Sector G-11' })
-            .eq('username', user.username);
+            .update(fullPatch)
+            .ilike('username', user.username);
+          if (cycleErr && isMissingTableOrColumnError(cycleErr)) {
+            await supabase
+              .from('portal_users')
+              .update(basePatch)
+              .ilike('username', user.username);
+          }
         } catch (sbErr) {
           console.warn('Supabase update linked subscriber notice:', sbErr);
         }
@@ -342,6 +390,68 @@ export const EditUserModal: React.FC<EditUserModalProps> = ({
               <p className="text-[11px] text-slate-500">
                 Directly bound to live MikroTik RouterOS <code className="text-cyan-400 font-mono">/ppp/secret</code> credentials.
               </p>
+
+              <div className="pt-3 border-t border-slate-800 space-y-2">
+                <div className="text-cyan-400 font-bold flex items-center gap-1.5">
+                  <Calendar className="w-3.5 h-3.5" />
+                  <span>Monthly Billing Cycle</span>
+                </div>
+                <div className="grid grid-cols-2 gap-2">
+                  <button
+                    type="button"
+                    onClick={() => setBillingCycleMode('fixed_day')}
+                    className={`px-2.5 py-2 rounded-lg border text-left transition cursor-pointer ${
+                      billingCycleMode === 'fixed_day'
+                        ? 'bg-cyan-950/60 border-cyan-500 text-cyan-200 font-semibold'
+                        : 'bg-slate-900 border-slate-800 text-slate-400 hover:border-slate-700'
+                    }`}
+                  >
+                    <div className="text-[11px]">Fixed Day of Month</div>
+                    <div className="text-[10px] text-slate-400 font-normal">Day 1–31 monthly</div>
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => setBillingCycleMode('rolling_31')}
+                    className={`px-2.5 py-2 rounded-lg border text-left transition cursor-pointer ${
+                      billingCycleMode === 'rolling_31'
+                        ? 'bg-cyan-950/60 border-cyan-500 text-cyan-200 font-semibold'
+                        : 'bg-slate-900 border-slate-800 text-slate-400 hover:border-slate-700'
+                    }`}
+                  >
+                    <div className="text-[11px]">Rolling 31-Day Cycle</div>
+                    <div className="text-[10px] text-slate-400 font-normal">+31 days per renewal</div>
+                  </button>
+                </div>
+                {billingCycleMode === 'fixed_day' && (
+                  <div className="flex flex-wrap items-center gap-2">
+                    <label className="text-[11px] text-slate-300">Cycle Day:</label>
+                    <input
+                      type="number"
+                      min={1}
+                      max={31}
+                      value={billingCycleDay}
+                      onChange={(e) =>
+                        setBillingCycleDay(Math.min(31, Math.max(1, Number(e.target.value) || 1)))
+                      }
+                      className="w-16 px-2 py-1 bg-slate-900 border border-slate-700 rounded-lg text-white font-mono text-center focus:outline-none focus:border-cyan-500"
+                    />
+                    {[1, 5, 10, 15, 25].map((d) => (
+                      <button
+                        key={d}
+                        type="button"
+                        onClick={() => setBillingCycleDay(d)}
+                        className={`px-2 py-1 rounded text-[10px] font-mono border cursor-pointer transition ${
+                          billingCycleDay === d
+                            ? 'bg-cyan-600 border-cyan-500 text-slate-950 font-bold'
+                            : 'bg-slate-900 border-slate-700 text-slate-300 hover:border-cyan-500'
+                        }`}
+                      >
+                        {formatOrdinalDay(d)}
+                      </button>
+                    ))}
+                  </div>
+                )}
+              </div>
             </div>
           )}
 

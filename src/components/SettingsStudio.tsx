@@ -61,7 +61,13 @@ export const SettingsStudio: React.FC = () => {
   const [teamWhatsAppGroupJid, setTeamWhatsAppGroupJid] = useState(
     initialCached.teamWhatsAppGroupJid
   );
+  const [billingCycleMode, setBillingCycleMode] = useState<'fixed_day' | 'rolling_31'>(
+    initialCached.billingCycleMode
+  );
   const [billingCycleDay, setBillingCycleDay] = useState(initialCached.billingCycleDay);
+  const [autoInvoiceDaysBeforeExpiry, setAutoInvoiceDaysBeforeExpiry] = useState(
+    initialCached.autoInvoiceDaysBeforeExpiry
+  );
   const [gracePeriodDays, setGracePeriodDays] = useState(initialCached.gracePeriodDays);
   const [expiryPppProfile, setExpiryPppProfile] = useState(initialCached.expiryPppProfile);
   const [defaultSnmpCommunity, setDefaultSnmpCommunity] = useState(
@@ -116,7 +122,9 @@ export const SettingsStudio: React.FC = () => {
       setAutoSendMasterSwitch(s.autoSendMasterSwitch);
       setTeamWhatsAppGroupName(s.teamWhatsAppGroupName);
       setTeamWhatsAppGroupJid(s.teamWhatsAppGroupJid);
+      setBillingCycleMode(s.billingCycleMode);
       setBillingCycleDay(s.billingCycleDay);
+      setAutoInvoiceDaysBeforeExpiry(s.autoInvoiceDaysBeforeExpiry);
       setGracePeriodDays(s.gracePeriodDays);
       setExpiryPppProfile(s.expiryPppProfile);
       setAutoWalledGarden(s.autoWalledGarden);
@@ -204,7 +212,9 @@ export const SettingsStudio: React.FC = () => {
         whatsAppGatewayEnabled: autoSendMasterSwitch,
         teamWhatsAppGroupName: teamWhatsAppGroupName.trim(),
         teamWhatsAppGroupJid: teamWhatsAppGroupJid.trim(),
+        billingCycleMode,
         billingCycleDay,
+        autoInvoiceDaysBeforeExpiry,
         gracePeriodDays,
         expiryPppProfile: expiryPppProfile.trim() || DEFAULT_GLOBAL_SYSTEM_SETTINGS.expiryPppProfile,
         autoWalledGarden,
@@ -492,21 +502,123 @@ export const SettingsStudio: React.FC = () => {
             </h4>
           </div>
 
-          <div className="grid grid-cols-1 sm:grid-cols-3 gap-4 font-mono">
-            <div>
-              <label className="block text-slate-400 mb-1 font-semibold">
-                Billing Generation Day
-              </label>
-              <input
-                type="number"
-                min={1}
-                max={28}
-                value={billingCycleDay}
-                onChange={(e) => setBillingCycleDay(Number(e.target.value))}
-                className="w-full bg-slate-950 border border-slate-700 rounded-lg px-3 py-2 text-white text-xs focus:outline-none focus:border-cyan-500"
-              />
+          {/* Monthly Billing Cycle Policy (Global Default) */}
+          <div className="p-4 rounded-xl bg-slate-950 border border-slate-800 space-y-3 font-mono">
+            <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2">
+              <div>
+                <span className="text-xs font-bold text-white block">
+                  Monthly Billing Cycle Policy (Global Default)
+                </span>
+                <span className="text-[11px] text-slate-400 font-sans">
+                  Controls how auto-generated invoices (5 days before expiry) and Shift +1M renewals align due dates for subscribers using the global default.
+                </span>
+              </div>
+              <div className="inline-flex rounded-lg border border-slate-700 bg-slate-900 p-0.5 shrink-0">
+                <button
+                  type="button"
+                  onClick={() => setBillingCycleMode('fixed_day')}
+                  className={`px-3 py-1.5 rounded-md text-[11px] font-bold transition cursor-pointer ${
+                    billingCycleMode === 'fixed_day'
+                      ? 'bg-cyan-600 text-slate-950 shadow'
+                      : 'text-slate-300 hover:text-white'
+                  }`}
+                >
+                  Fixed Day (1–31)
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setBillingCycleMode('rolling_31')}
+                  className={`px-3 py-1.5 rounded-md text-[11px] font-bold transition cursor-pointer ${
+                    billingCycleMode === 'rolling_31'
+                      ? 'bg-indigo-500 text-white shadow'
+                      : 'text-slate-300 hover:text-white'
+                  }`}
+                >
+                  Rolling 31-Day Cycle
+                </button>
+              </div>
             </div>
 
+            {billingCycleMode === 'fixed_day' ? (
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 pt-1">
+                <div>
+                  <label className="block text-slate-400 mb-1 font-semibold">
+                    Fixed Monthly Billing Cycle Day (1–31)
+                  </label>
+                  <div className="flex items-center gap-2">
+                    <input
+                      type="number"
+                      min={1}
+                      max={31}
+                      value={billingCycleDay}
+                      onChange={(e) =>
+                        setBillingCycleDay(Math.max(1, Math.min(31, Number(e.target.value) || 1)))
+                      }
+                      className="w-24 bg-slate-900 border border-slate-700 rounded-lg px-3 py-2 text-white text-xs font-bold focus:outline-none focus:border-cyan-500"
+                    />
+                    <div className="flex flex-wrap items-center gap-1">
+                      {[1, 5, 10, 15, 25].map((day) => (
+                        <button
+                          key={day}
+                          type="button"
+                          onClick={() => setBillingCycleDay(day)}
+                          className={`px-2 py-1 rounded text-[10px] font-bold border transition cursor-pointer ${
+                            billingCycleDay === day
+                              ? 'bg-cyan-950 border-cyan-500 text-cyan-300'
+                              : 'bg-slate-900 border-slate-700 text-slate-400 hover:text-white'
+                          }`}
+                        >
+                          {day === 1 ? '1st' : `${day}th`}
+                        </button>
+                      ))}
+                    </div>
+                  </div>
+                </div>
+                <div>
+                  <label className="block text-slate-400 mb-1 font-semibold">
+                    Auto-Invoice Lead Time (Days Before Expiry)
+                  </label>
+                  <input
+                    type="number"
+                    min={1}
+                    max={15}
+                    value={autoInvoiceDaysBeforeExpiry}
+                    onChange={(e) =>
+                      setAutoInvoiceDaysBeforeExpiry(
+                        Math.max(1, Math.min(15, Number(e.target.value) || 5))
+                      )
+                    }
+                    className="w-full bg-slate-900 border border-slate-700 rounded-lg px-3 py-2 text-white text-xs focus:outline-none focus:border-cyan-500"
+                  />
+                </div>
+              </div>
+            ) : (
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 pt-1 items-center">
+                <p className="text-[11px] text-indigo-300 font-sans bg-indigo-950/40 border border-indigo-800/60 rounded-lg p-2.5">
+                  Rolling 31-Day Cycle active: each renewal and Shift +1M advances due dates by exactly +31 days from the prior cycle date.
+                </p>
+                <div>
+                  <label className="block text-slate-400 mb-1 font-semibold">
+                    Auto-Invoice Lead Time (Days Before Expiry)
+                  </label>
+                  <input
+                    type="number"
+                    min={1}
+                    max={15}
+                    value={autoInvoiceDaysBeforeExpiry}
+                    onChange={(e) =>
+                      setAutoInvoiceDaysBeforeExpiry(
+                        Math.max(1, Math.min(15, Number(e.target.value) || 5))
+                      )
+                    }
+                    className="w-full bg-slate-900 border border-slate-700 rounded-lg px-3 py-2 text-white text-xs focus:outline-none focus:border-cyan-500"
+                  />
+                </div>
+              </div>
+            )}
+          </div>
+
+          <div className="grid grid-cols-1 sm:grid-cols-2 gap-4 font-mono">
             <div>
               <label className="block text-slate-400 mb-1 font-semibold">
                 Post-Due Grace Period (Days)

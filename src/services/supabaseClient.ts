@@ -40,8 +40,10 @@ export interface SupabasePortalUser {
   patch_cord_qty?: number | null;
   installation_date?: string | null;
   billing_anchor_day?: number | null;
+  billing_cycle_mode?: 'fixed_day' | 'rolling_31' | string | null;
   next_billing_date?: string | null;
   expiry_date?: string | null;
+  commission_rate?: number | null;
   package_name?: string | null;
   package_profile_name?: string | null;
   original_package_profile?: string | null;

@@ -583,6 +583,7 @@ export const FieldAgentPortal: React.FC<FieldAgentPortalProps> = ({
 
       let rechargedExpiryYmd = nextExpiryDate;
       let restoredProfileName: string | undefined;
+      let anchoredDueDateYmd: string | null = inv.due_date || null;
       if (newStatus === 'PAID') {
         const restoreRes = await restoreSubscriberOnInvoicePaid(inv.subscriber_username, {
           triggeredBy: 'AGENT_PAYMENT_SYNC',
@@ -590,11 +591,15 @@ export const FieldAgentPortal: React.FC<FieldAgentPortalProps> = ({
           selectedProfile: inv.package_profile || inv.package_name || undefined,
           amountPaid: enteredVal,
           invoiceNo: inv.invoice_no,
+          invoiceDueDate: inv.due_date || null,
           paymentMethod: 'Cash Handover',
           skipAutoWhatsapp: true,
         });
         if (restoreRes.newExpiryIso) rechargedExpiryYmd = restoreRes.newExpiryIso;
         if (restoreRes.restoredProfile) restoredProfileName = restoreRes.restoredProfile;
+        if (restoreRes.anchoredFromDueDate !== undefined) {
+          anchoredDueDateYmd = restoreRes.anchoredFromDueDate;
+        }
       }
 
       // 2. Increment agent's cash_in_hand in portal_users by ONLY enteredVal
@@ -644,6 +649,7 @@ export const FieldAgentPortal: React.FC<FieldAgentPortalProps> = ({
         remainingBalance: Math.max(0, totalAmount - finalPaidAmount),
         paymentMethod: 'Cash Handover',
         expiryDate: rechargedExpiryYmd,
+        anchoredDueDate: anchoredDueDateYmd,
         agentId: effectiveAgentId,
         agentName: (agentRecord as any)?.full_name || currentUser.fullName,
         agentPhone: (agentRecord as any)?.phone || (currentUser as any)?.phone || '',

@@ -336,6 +336,16 @@ function buildAutomatedMessage(eventType, vars = {}) {
       const combinedDue = Math.round(primaryAmount + prevUnpaid);
       rendered += `\n\n⚠️ *Previous Unpaid Balance:* Rs. ${prevUnpaid.toLocaleString()}\n• *Total Combined Payable:* Rs. ${combinedDue.toLocaleString()}`;
     }
+    const anchoredDue = String(vars.anchoredDueDate || '').trim();
+    const validTill = String(vars.expiryDate || '').trim();
+    if (
+      eventType === 'PAYMENT_RESTORED' &&
+      anchoredDue &&
+      validTill &&
+      !rendered.includes('Recharged from Due Date')
+    ) {
+      rendered += `\n• *Billing Cycle:* Recharged from Due Date ${anchoredDue} -> Valid till ${validTill}`;
+    }
     const shouldAppendPaymentBlock =
       (eventType === 'INVOICE_GENERATED' ||
         eventType === 'PRE_EXPIRY_3D' ||

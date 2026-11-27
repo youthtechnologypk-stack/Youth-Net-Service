@@ -291,7 +291,11 @@ interface ISPContextType {
   testOltSnmpConnection: (ipAddress: string, community: string, port: number) => Promise<{ success: boolean; latencyMs: number; sysDescr?: string; message: string }>;
   // Subscriber Expiration & Lifecycle Management
   checkAndApplyExpiredSubscribers: () => Promise<{ checked: number; expiredCount: number }>;
-  renewSubscriberPackage: (username: string, additionalDays?: number) => Promise<{ success: boolean; message: string; expiryDate: string }>;
+  renewSubscriberPackage: (
+    username: string,
+    additionalDays?: number,
+    customExpiryDate?: string
+  ) => Promise<{ success: boolean; message: string; expiryDate: string }>;
   // Unified Portal Users & Agents Store
   portalUsers: UserAccount[];
   setPortalUsers: React.Dispatch<React.SetStateAction<UserAccount[]>>;
@@ -4218,10 +4222,11 @@ export const ISPProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
     return { checked, expiredCount };
   };
 
-  // Manual Recharge / Extend Subscriber Package (+31 Days prepaid default)
+  // Manual Recharge / Extend Subscriber Package (+31 Days prepaid default or Custom Expiry Date)
   const renewSubscriberPackage = async (
     username: string,
-    additionalDays: number = 31
+    additionalDays: number = 31,
+    customExpiryDate?: string
   ): Promise<{ success: boolean; message: string; expiryDate: string }> => {
     const targetRouter = routers.find((r) => r.id === selectedRouterId) || routers[0];
     const cleanUsername = (username || '').trim().toLowerCase();
@@ -4237,16 +4242,21 @@ export const ISPProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
         }
       : undefined;
 
-    // Atomic 31-day prepaid recharge:
-    // max(today, current_expiry) + additionalDays -> switch MikroTik from Expiry Pool to active package
-    // -> kick stale PPPoE session -> update Supabase -> auto-dispatch Paid Receipt & Recharge WhatsApp
+    const cleanCustomDate = String(customExpiryDate || '').trim() || undefined;
+
+    // Atomic prepaid recharge or Custom Expiry Date activation:
+    // Switches MikroTik from Expiry Pool to active package -> kicks stale PPPoE session
+    // -> updates Supabase -> auto-dispatches Paid Receipt & Recharge WhatsApp
     const restoreRes = await restoreSubscriberOnInvoicePaid(cleanUsername, {
       triggeredBy: 'ADMIN',
       rechargeDays: additionalDays,
+      customExpiryDate: cleanCustomDate,
       selectedProfile: targetProfile,
       activeRouter: routerAuth,
-      paymentMethod: 'Manual Recharge',
-      notes: `Manual Recharge (+${additionalDays} days) via NOC Console`,
+      paymentMethod: cleanCustomDate ? 'Manual Custom Activation' : 'Manual Recharge',
+      notes: cleanCustomDate
+        ? `Manual Custom Activation until ${cleanCustomDate} via NOC Console`
+        : `Manual Recharge (+${additionalDays} days) via NOC Console`,
     });
 
     if (!restoreRes.success && restoreRes.error) {
@@ -4260,7 +4270,7 @@ export const ISPProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
     const newExpDate = restoreRes.newExpiryIso;
     const appliedProfile = restoreRes.restoredProfile || targetProfile || 'default';
 
-    // Update local React state so UI reflects ACTIVE status & new +31 day validity immediately
+    // Update local React state so UI reflects ACTIVE status & new validity immediately
     setCustomers((prev) =>
       prev.map((c) =>
         (c?.pppoeUsername || '').toLowerCase() === cleanUsername
@@ -4278,16 +4288,22 @@ export const ISPProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
       actor: 'admin',
       actorRole: 'ADMIN',
       actionType: 'SUBSCRIBER_RENEW',
-      actionTitle: `Manual Recharge (+${additionalDays} Days)`,
+      actionTitle: cleanCustomDate
+        ? `Manual Activate (Custom Expiry: ${newExpDate})`
+        : `Manual Recharge (+${additionalDays} Days)`,
       target: username,
       severity: 'SUCCESS',
-      details: `Recharged @${username} by +${additionalDays} days until ${newExpDate}. Active profile "${appliedProfile}" restored (kicked ${restoreRes.kickedSessions} session(s)).`,
-      metadata: { username, additionalDays, newExpiry: newExpDate, profile: appliedProfile },
+      details: cleanCustomDate
+        ? `Manually activated @${username} with custom expiry date ${newExpDate}. Active profile "${appliedProfile}" restored (kicked ${restoreRes.kickedSessions} session(s)).`
+        : `Recharged @${username} by +${additionalDays} days until ${newExpDate}. Active profile "${appliedProfile}" restored (kicked ${restoreRes.kickedSessions} session(s)).`,
+      metadata: { username, additionalDays, customExpiryDate: cleanCustomDate, newExpiry: newExpDate, profile: appliedProfile },
     });
 
     return {
       success: true,
-      message: `Subscriber @${username} recharged for +${additionalDays} days until ${newExpDate} on "${appliedProfile}". Receipt sent via WhatsApp.`,
+      message: cleanCustomDate
+        ? `Subscriber @${username} manually activated until ${newExpDate} on "${appliedProfile}". Receipt sent via WhatsApp.`
+        : `Subscriber @${username} recharged for +${additionalDays} days until ${newExpDate} on "${appliedProfile}". Receipt sent via WhatsApp.`,
       expiryDate: newExpDate,
     };
   };

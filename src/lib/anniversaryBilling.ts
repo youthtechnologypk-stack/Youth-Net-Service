@@ -451,6 +451,109 @@ export function addDaysToYmd(baseYmd: string, days: number): string {
   return new Date(utcMs).toISOString().slice(0, 10);
 }
 
+export type BillingCycleMode = 'fixed_day' | 'rolling_31';
+
+export function formatOrdinalDay(day: number): string {
+  const d = Math.max(1, Math.min(31, Math.floor(Number(day) || 1)));
+  if (d >= 11 && d <= 13) return `${d}th`;
+  switch (d % 10) {
+    case 1:
+      return `${d}st`;
+    case 2:
+      return `${d}nd`;
+    case 3:
+      return `${d}rd`;
+    default:
+      return `${d}th`;
+  }
+}
+
+/**
+ * Resolves a subscriber's effective Monthly Billing Cycle (mode + cycleDay):
+ * - Checks explicit subscriber `billing_cycle_mode` (or `permissions.billing_cycle_mode`)
+ * - Supports `billing_anchor_day === 0` fallback convention for `'rolling_31'`
+ * - Falls back to provided global settings (`fixed_day` + `billingCycleDay` or `rolling_31`)
+ */
+export function resolveSubscriberBillingCycle(
+  sub?: {
+    billing_cycle_mode?: string | null;
+    billing_anchor_day?: number | null;
+    installation_date?: string | null;
+    created_at?: string | null;
+    expiry_date?: string | null;
+    permissions?: Record<string, any> | null;
+  } | null,
+  globalDefaults?: { billingCycleMode?: BillingCycleMode; billingCycleDay?: number } | null
+): { mode: BillingCycleMode; cycleDay: number; source: 'subscriber' | 'global' } {
+  const rawMode = String(
+    sub?.billing_cycle_mode ?? (sub?.permissions as any)?.billing_cycle_mode ?? ''
+  )
+    .trim()
+    .toLowerCase();
+
+  if (rawMode === 'rolling_31' || rawMode === 'rolling') {
+    const day =
+      Number(sub?.billing_anchor_day) >= 1 && Number(sub?.billing_anchor_day) <= 31
+        ? Math.floor(Number(sub?.billing_anchor_day))
+        : computeBillingAnchorDay(sub || {});
+    return { mode: 'rolling_31', cycleDay: day, source: 'subscriber' };
+  }
+
+  if (rawMode === 'fixed_day' || rawMode === 'fixed') {
+    const explicitDay = Number(
+      sub?.billing_anchor_day ?? (sub?.permissions as any)?.billing_cycle_day
+    );
+    const cycleDay =
+      Number.isFinite(explicitDay) && explicitDay >= 1 && explicitDay <= 31
+        ? Math.floor(explicitDay)
+        : computeBillingAnchorDay(sub || {});
+    return { mode: 'fixed_day', cycleDay, source: 'subscriber' };
+  }
+
+  // Fallback sentinel: billing_anchor_day === 0 indicates rolling_31 when billing_cycle_mode column is absent
+  if (sub && sub.billing_anchor_day !== null && sub.billing_anchor_day !== undefined && Number(sub.billing_anchor_day) === 0) {
+    return {
+      mode: 'rolling_31',
+      cycleDay: computeBillingAnchorDay({ ...sub, billing_anchor_day: null }),
+      source: 'subscriber',
+    };
+  }
+
+  const explicitAnchor = Number(sub?.billing_anchor_day);
+  if (Number.isFinite(explicitAnchor) && explicitAnchor >= 1 && explicitAnchor <= 31) {
+    return { mode: 'fixed_day', cycleDay: Math.floor(explicitAnchor), source: 'subscriber' };
+  }
+
+  const fallbackMode: BillingCycleMode =
+    globalDefaults?.billingCycleMode === 'rolling_31' ? 'rolling_31' : 'fixed_day';
+  const globalDay = Number(globalDefaults?.billingCycleDay);
+  const fallbackDay =
+    Number.isFinite(globalDay) && globalDay >= 1 && globalDay <= 31
+      ? Math.floor(globalDay)
+      : computeBillingAnchorDay(sub || {});
+
+  return { mode: fallbackMode, cycleDay: fallbackDay, source: 'global' };
+}
+
+/**
+ * Computes the next billing due date for Shift +1M or 5-day pre-expiry auto-billing
+ * aligned to the subscriber's configured Monthly Billing Cycle (Fixed Day 1-31 or Rolling +31 Days).
+ */
+export function computeNextCycleDueDate(
+  baseDueYmd: string,
+  sub?: Parameters<typeof resolveSubscriberBillingCycle>[0],
+  globalDefaults?: Parameters<typeof resolveSubscriberBillingCycle>[1]
+): { nextDueDate: string; mode: BillingCycleMode; cycleDay: number } {
+  const cleanBase = extractYmdString(baseDueYmd) || new Date().toISOString().slice(0, 10);
+  const { mode, cycleDay } = resolveSubscriberBillingCycle(sub, globalDefaults);
+  if (mode === 'rolling_31') {
+    const nextDueDate = addDaysToYmd(cleanBase, 31);
+    return { nextDueDate, mode, cycleDay: Number(nextDueDate.slice(8, 10)) || cycleDay };
+  }
+  const nextDueDate = addCalendarMonthsYmd(cleanBase, 1, cycleDay);
+  return { nextDueDate, mode, cycleDay };
+}
+
 /**
  * Signed whole-day difference: targetYmd - refTodayYmd.
  */

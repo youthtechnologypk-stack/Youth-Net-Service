@@ -108,6 +108,15 @@ export function getResellerPoolMbps(row?: ResellerSubjectLike | null): number {
   return Number.isFinite(num) ? Math.max(0, num) : 0;
 }
 
+export function getResellerCommissionRate(row?: Partial<SupabasePortalUser> | null): number {
+  if (!row) return 0;
+  const direct = (row as any).commission_rate;
+  const permFallback = (row.permissions as any)?.commission_rate;
+  const num = Number(direct ?? permFallback ?? 0);
+  if (!Number.isFinite(num)) return 0;
+  return Math.min(100, Math.max(0, Math.round(num * 100) / 100));
+}
+
 export interface ResellerScope {
   isIsolated: boolean;
   tier: ResellerTier | null;
@@ -268,6 +277,7 @@ const OPTIONAL_PORTAL_USER_COLUMNS = new Set([
   'whatsapp_auto_send',
   'whatsapp_support_phone',
   'allow_subdealer_whatsapp',
+  'commission_rate',
 ]);
 
 async function adaptivePortalUsersInsert(
@@ -1314,6 +1324,7 @@ export async function createResellerAccount(input: {
   canCreateSubdealers: boolean;
   allowSubdealerWhatsapp?: boolean;
   companyName?: string;
+  commissionRate?: number;
   initialWalletBalance?: number;
   performedBy?: string;
 }): Promise<{ ok: boolean; user?: SupabasePortalUser; schemaMissing?: boolean; error?: string }> {
@@ -1332,7 +1343,11 @@ export async function createResellerAccount(input: {
   const bandwidthCap = Math.max(0, Math.round(Number(input.bandwidthPoolCapMbps) || 0));
   const maxActiveUsers = Math.max(0, Math.round(Number(input.maxActiveUsers) || 0));
   const initialWallet = Math.max(0, Number(input.initialWalletBalance) || 0);
-  const perms = getDefaultPermissionsForRole(input.tierLevel);
+  const commissionRate = Math.min(100, Math.max(0, Math.round((Number(input.commissionRate) || 0) * 100) / 100));
+  const perms = {
+    ...getDefaultPermissionsForRole(input.tierLevel),
+    commission_rate: commissionRate,
+  };
 
   const payload: Record<string, any> = {
     username: cleanUsername,
@@ -1351,6 +1366,7 @@ export async function createResellerAccount(input: {
     can_create_subdealers: input.tierLevel === 'DEALER' ? Boolean(input.canCreateSubdealers) : false,
     allow_subdealer_whatsapp: Boolean(input.allowSubdealerWhatsapp),
     company_name: input.companyName?.trim() || cleanName,
+    commission_rate: commissionRate,
     whatsapp_status: 'DISCONNECTED',
     whatsapp_auto_send: true,
     can_access_gis_map: perms.gis_map !== 'none',
@@ -1407,6 +1423,7 @@ export async function updateResellerAccount(
     canCreateSubdealers?: boolean;
     allowSubdealerWhatsapp?: boolean;
     companyName?: string;
+    commissionRate?: number;
     accountStatus?: 'ACTIVE' | 'SUSPENDED';
     password?: string;
   }
@@ -1431,6 +1448,20 @@ export async function updateResellerAccount(
   if (updates.companyName !== undefined) {
     patch.company_name = updates.companyName.trim();
   }
+  if (updates.commissionRate !== undefined) {
+    const safeRate = Math.min(100, Math.max(0, Math.round((Number(updates.commissionRate) || 0) * 100) / 100));
+    patch.commission_rate = safeRate;
+    const { data: existingRow } = await supabase
+      .from('portal_users')
+      .select('permissions')
+      .eq('id', resellerId)
+      .maybeSingle();
+    const prevPerms =
+      existingRow?.permissions && typeof existingRow.permissions === 'object'
+        ? { ...(existingRow.permissions as any) }
+        : {};
+    patch.permissions = { ...prevPerms, commission_rate: safeRate };
+  }
   if (updates.accountStatus !== undefined) patch.account_status = updates.accountStatus;
   if (updates.password && updates.password.trim()) patch.password = updates.password.trim();
 
@@ -1439,6 +1470,156 @@ export async function updateResellerAccount(
     return { ok: false, error: formatSupabaseError(error) };
   }
   return { ok: true };
+}
+
+/**
+ * Safely deletes a Dealer or Sub-Dealer account (Master Admin only) after reassigning
+ * all linked subscribers, invoices, child sub-dealers, and field agents to either
+ * Master Direct ISP (`reassignToDealerId = null`) or another Dealer.
+ */
+export async function deleteResellerAccount(params: {
+  resellerId: string;
+  reassignToDealerId?: string | null;
+  performedBy?: string;
+}): Promise<{
+  ok: boolean;
+  reassignedSubscribers: number;
+  reassignedSubDealers: number;
+  error?: string;
+}> {
+  const targetId = String(params.resellerId || '').trim();
+  const nextDealerId = params.reassignToDealerId ? String(params.reassignToDealerId).trim() : null;
+
+  if (!targetId) {
+    return { ok: false, reassignedSubscribers: 0, reassignedSubDealers: 0, error: 'Missing reseller ID.' };
+  }
+  if (nextDealerId && nextDealerId === targetId) {
+    return {
+      ok: false,
+      reassignedSubscribers: 0,
+      reassignedSubDealers: 0,
+      error: 'Cannot reassign users to the same Dealer being deleted.',
+    };
+  }
+
+  const { data: allRows, error: scanErr } = await supabase.from('portal_users').select('*');
+  if (scanErr) {
+    return {
+      ok: false,
+      reassignedSubscribers: 0,
+      reassignedSubDealers: 0,
+      error: formatSupabaseError(scanErr),
+    };
+  }
+
+  const users = (allRows || []) as SupabasePortalUser[];
+  const targetReseller = users.find((u) => u.id === targetId);
+  if (!targetReseller) {
+    return {
+      ok: false,
+      reassignedSubscribers: 0,
+      reassignedSubDealers: 0,
+      error: 'Reseller account not found.',
+    };
+  }
+
+  const targetTier = getResellerTier(targetReseller);
+  const replacementDealer = nextDealerId ? users.find((u) => u.id === nextDealerId) || null : null;
+
+  // 1. Reassign child sub-dealers if deleting a Master Dealer
+  let reassignedSubDealers = 0;
+  if (targetTier === 'DEALER') {
+    const childSubs = users.filter(
+      (u) => u.id !== targetId && u.parent_dealer_id === targetId && getResellerTier(u) === 'SUB_DEALER'
+    );
+    for (const sub of childSubs) {
+      await adaptivePortalUsersUpdate(sub.id, {
+        parent_dealer_id: replacementDealer ? replacementDealer.id : null,
+      });
+      reassignedSubDealers += 1;
+    }
+  }
+
+  // 2. Reassign all linked subscribers (and their invoices) safely
+  const linkedSubscribers = users.filter((u) => {
+    if (String(u.role || '').toUpperCase() !== 'CLIENT') return false;
+    return u.dealer_id === targetId || u.sub_dealer_id === targetId || u.parent_dealer_id === targetId;
+  });
+
+  let reassignedSubscribers = 0;
+  for (const sub of linkedSubscribers) {
+    const nextStamp: OwnershipStamp = replacementDealer
+      ? {
+          dealer_id:
+            getResellerTier(replacementDealer) === 'SUB_DEALER'
+              ? replacementDealer.parent_dealer_id || null
+              : replacementDealer.id,
+          sub_dealer_id:
+            getResellerTier(replacementDealer) === 'SUB_DEALER'
+              ? replacementDealer.id
+              : sub.sub_dealer_id === targetId
+              ? null
+              : sub.sub_dealer_id || null,
+          created_by_id: sub.created_by_id === targetId ? null : sub.created_by_id || null,
+        }
+      : {
+          dealer_id: sub.dealer_id === targetId ? null : sub.dealer_id || null,
+          sub_dealer_id: sub.sub_dealer_id === targetId ? null : sub.sub_dealer_id || null,
+          created_by_id: sub.created_by_id === targetId ? null : sub.created_by_id || null,
+        };
+
+    // If moving to Master Direct ISP, clear both dealer_id and sub_dealer_id on direct subscribers of this reseller
+    if (!replacementDealer) {
+      if (targetTier === 'DEALER' && !sub.sub_dealer_id) {
+        nextStamp.dealer_id = null;
+        nextStamp.sub_dealer_id = null;
+      } else if (targetTier === 'SUB_DEALER') {
+        nextStamp.sub_dealer_id = null;
+        nextStamp.dealer_id = targetReseller.parent_dealer_id || null;
+      }
+    }
+
+    await stampOwnershipOnPortalUserAndInvoices(sub.username, nextStamp, {
+      userId: sub.id,
+      updateInvoices: true,
+    });
+    reassignedSubscribers += 1;
+  }
+
+  // 3. Reassign any field agents linked to this reseller
+  const linkedAgents = users.filter(
+    (u) =>
+      u.id !== targetId &&
+      isFieldAgentRole(u.role) &&
+      (u.dealer_id === targetId || u.sub_dealer_id === targetId || u.created_by_id === targetId)
+  );
+  for (const ag of linkedAgents) {
+    await adaptivePortalUsersUpdate(ag.id, {
+      dealer_id: replacementDealer ? replacementDealer.id : null,
+      sub_dealer_id: ag.sub_dealer_id === targetId ? null : ag.sub_dealer_id || null,
+    });
+  }
+
+  // 4. Clean up reseller tariffs (best-effort)
+  try {
+    await supabase.from('reseller_tariffs').delete().eq('reseller_id', targetId);
+  } catch {
+    // Ignore optional table cleanup errors
+  }
+
+  // 5. Delete the reseller row from portal_users
+  const { error: delErr } = await supabase.from('portal_users').delete().eq('id', targetId);
+  if (delErr) {
+    return {
+      ok: false,
+      reassignedSubscribers,
+      reassignedSubDealers,
+      error: `Failed to delete reseller account: ${formatSupabaseError(delErr)}`,
+    };
+  }
+
+  broadcastResellerWalletUpdated({ resellerId: targetId, walletBalance: 0 });
+  return { ok: true, reassignedSubscribers, reassignedSubDealers };
 }
 
 export async function upsertResellerTariff(params: {
