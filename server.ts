@@ -3331,11 +3331,50 @@ app.get('/api/whatsapp/groups', async (req: Request, res: Response) => {
     if (!ctx.ok || !ctx.actor) {
       return res.status(ctx.statusCode || 401).json({ success: false, groups: [], error: ctx.error });
     }
-    const result = await baileysManager.fetchConnectedGroups(String(ctx.actor.id));
-    return res.status(result.ok ? 200 : 400).json({
-      success: result.ok,
-      groups: result.groups,
-      error: result.error,
+
+    const candidateIds: string[] = [];
+    const requestedId = String(req.query?.portalUserId || '').trim();
+    if (requestedId && ctx.effectiveTier === 'ADMIN' && /^[a-zA-Z0-9_-]{1,80}$/.test(requestedId)) {
+      candidateIds.push(requestedId);
+    }
+    candidateIds.push(String(ctx.actor.id));
+    if (ctx.effectiveTier === 'SUB_DEALER' && ctx.actor.parent_dealer_id) {
+      candidateIds.push(String(ctx.actor.parent_dealer_id));
+    }
+    for (const u of ctx.allUsers || []) {
+      const role = String(u.role || '').trim().toUpperCase();
+      const tier = String(u.tier_level || '').trim().toUpperCase();
+      if (role === 'ADMIN' || tier === 'ADMIN') {
+        candidateIds.push(String(u.id));
+      }
+    }
+
+    const seen = new Set<string>();
+    let lastResult: { ok: boolean; groups: Array<{ id: string; subject: string; participantsCount: number }>; error?: string } = {
+      ok: false,
+      groups: [],
+      error: 'WhatsApp session is not connected. Pair your WhatsApp via QR first to fetch groups.',
+    };
+    let sessionOwnerId: string | null = null;
+
+    for (const cid of candidateIds) {
+      if (!cid || seen.has(cid)) continue;
+      seen.add(cid);
+      const attempt = await baileysManager.fetchConnectedGroups(cid);
+      if (attempt.ok) {
+        lastResult = attempt;
+        sessionOwnerId = cid;
+        break;
+      }
+      lastResult = attempt;
+    }
+
+    return res.status(lastResult.ok ? 200 : 400).json({
+      success: lastResult.ok,
+      groups: lastResult.groups,
+      count: lastResult.groups.length,
+      sessionOwnerId,
+      error: lastResult.error,
     });
   } catch (err: any) {
     return res.status(500).json({

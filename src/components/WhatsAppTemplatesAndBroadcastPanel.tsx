@@ -231,47 +231,64 @@ export const WhatsAppTemplatesAndBroadcastPanel: React.FC<
   }, [loadTemplatesAndGroup, loadBroadcastAudience]);
 
   // --- Team Work Group Handlers ---
-  const handleFetchConnectedGroups = async () => {
-    setFetchingGroups(true);
-    setGroupBanner(null);
-    try {
-      const res = await safeWhatsAppApiFetch<{
-        success?: boolean;
-        groups?: ConnectedGroupItem[];
-        error?: string;
-      }>('/api/whatsapp/groups', {
-        method: 'GET',
-        headers: buildPortalAuthHeaders(),
-      });
+  const handleFetchConnectedGroups = useCallback(
+    async (silent = false) => {
+      setFetchingGroups(true);
+      if (!silent) setGroupBanner(null);
+      try {
+        const res = await safeWhatsAppApiFetch<{
+          success?: boolean;
+          groups?: ConnectedGroupItem[];
+          error?: string;
+        }>('/api/whatsapp/groups', {
+          method: 'GET',
+          headers: buildPortalAuthHeaders(),
+        });
 
-      if (!res.ok || !res.data?.success) {
-        setGroupBanner({
-          type: 'error',
-          text:
-            res.data?.error ||
-            res.error ||
-            'Could not fetch WhatsApp groups. Ensure your WhatsApp session is CONNECTED above.',
-        });
-        return;
-      }
+        if (!res.ok || !res.data?.success) {
+          if (!silent) {
+            setGroupBanner({
+              type: 'error',
+              text:
+                res.data?.error ||
+                res.error ||
+                'Could not fetch WhatsApp groups. Ensure your WhatsApp session is CONNECTED above.',
+            });
+          }
+          return;
+        }
 
-      const list = res.data.groups || [];
-      setConnectedGroups(list);
-      if (list.length === 0) {
-        setGroupBanner({
-          type: 'info',
-          text: 'No WhatsApp groups found on this linked account. Join your Team Work Group on WhatsApp first.',
-        });
-      } else {
-        setGroupBanner({
-          type: 'success',
-          text: `Loaded ${list.length} connected WhatsApp group(s). Select your Team Work Group below and click Save.`,
-        });
+        const list = res.data.groups || [];
+        setConnectedGroups(list);
+        if (!silent) {
+          if (list.length === 0) {
+            setGroupBanner({
+              type: 'info',
+              text: 'No WhatsApp groups found on this linked account. Join your Team Work Group on WhatsApp first.',
+            });
+          } else {
+            setGroupBanner({
+              type: 'success',
+              text: `Loaded ${list.length} connected WhatsApp group(s). Select a group from the dropdown to auto-fill its @g.us JID.`,
+            });
+          }
+        }
+      } finally {
+        setFetchingGroups(false);
       }
-    } finally {
-      setFetchingGroups(false);
+    },
+    []
+  );
+
+  const autoFetchedGroupsRef = useRef(false);
+  useEffect(() => {
+    if (isConnected && !autoFetchedGroupsRef.current) {
+      autoFetchedGroupsRef.current = true;
+      void handleFetchConnectedGroups(true);
+    } else if (!isConnected) {
+      autoFetchedGroupsRef.current = false;
     }
-  };
+  }, [isConnected, handleFetchConnectedGroups]);
 
   const handleSaveTeamGroup = async () => {
     setSavingGroup(true);
@@ -613,7 +630,7 @@ export const WhatsAppTemplatesAndBroadcastPanel: React.FC<
           <div className="flex flex-wrap items-center gap-2">
             <button
               type="button"
-              onClick={handleFetchConnectedGroups}
+              onClick={() => void handleFetchConnectedGroups(false)}
               disabled={fetchingGroups}
               className="px-3 py-1.5 rounded-xl bg-cyan-500/15 hover:bg-cyan-500/25 border border-cyan-500/35 text-cyan-200 text-xs font-semibold flex items-center gap-1.5 transition disabled:opacity-50"
             >
@@ -622,7 +639,7 @@ export const WhatsAppTemplatesAndBroadcastPanel: React.FC<
               ) : (
                 <RefreshCw className="w-3.5 h-3.5" />
               )}
-              Fetch Connected Groups
+              Fetch WhatsApp Groups
             </button>
             <button
               type="button"
@@ -659,32 +676,64 @@ export const WhatsAppTemplatesAndBroadcastPanel: React.FC<
           </div>
         )}
 
-        {connectedGroups.length > 0 && (
-          <div className="bg-slate-900/70 border border-cyan-500/25 rounded-xl p-3">
-            <label className="block text-[11px] font-semibold text-cyan-300 mb-1.5">
-              Select from Live Connected WhatsApp Groups ({connectedGroups.length} found)
+        {/* Always-Visible Fetch WhatsApp Groups Dropdown Selector */}
+        <div className="bg-slate-900/70 border border-cyan-500/25 rounded-xl p-3">
+          <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2 mb-1.5">
+            <label className="text-[11px] font-semibold text-cyan-300">
+              Fetch WhatsApp Groups — Select Group to Auto-Fill @g.us JID
+              {connectedGroups.length > 0 ? ` (${connectedGroups.length} loaded)` : ''}
             </label>
+            <span className="text-[10px] text-slate-400">
+              Selecting a group automatically populates the JID &amp; Display Name below
+            </span>
+          </div>
+          <div className="flex flex-col sm:flex-row items-stretch sm:items-center gap-2">
             <select
-              value={teamGroup.groupJid}
+              value={connectedGroups.some((g) => g.id === teamGroup.groupJid) ? teamGroup.groupJid : ''}
               onChange={(e) => {
-                const chosen = connectedGroups.find((g) => g.id === e.target.value);
+                const selectedId = e.target.value;
+                if (!selectedId) return;
+                const chosen = connectedGroups.find((g) => g.id === selectedId);
                 setTeamGroup((prev) => ({
                   ...prev,
-                  groupJid: e.target.value,
+                  groupJid: selectedId,
                   groupName: chosen ? chosen.subject : prev.groupName,
                 }));
               }}
-              className="w-full bg-slate-950 border border-slate-700 rounded-xl px-3 py-2 text-xs text-slate-100 focus:outline-none focus:border-cyan-500"
+              className="flex-1 bg-slate-950 border border-slate-700 rounded-xl px-3 py-2 text-xs text-slate-100 focus:outline-none focus:border-cyan-500"
             >
-              <option value="">-- Choose your Team WhatsApp Work Group --</option>
+              <option value="">
+                {fetchingGroups
+                  ? 'Loading connected WhatsApp groups...'
+                  : connectedGroups.length > 0
+                  ? '-- Select a WhatsApp Group to auto-fill @g.us JID --'
+                  : '-- Click "Fetch WhatsApp Groups" to load your connected groups --'}
+              </option>
               {connectedGroups.map((g) => (
                 <option key={g.id} value={g.id}>
-                  {g.subject} ({g.participantsCount} members) — {g.id}
+                  {g.subject}
+                  {typeof g.participantsCount === 'number' && g.participantsCount > 0
+                    ? ` (${g.participantsCount} members)`
+                    : ''}{' '}
+                  — {g.id}
                 </option>
               ))}
             </select>
+            <button
+              type="button"
+              onClick={() => void handleFetchConnectedGroups(false)}
+              disabled={fetchingGroups}
+              className="px-3.5 py-2 rounded-xl bg-cyan-500/20 hover:bg-cyan-500/30 border border-cyan-500/40 text-cyan-200 text-xs font-semibold flex items-center justify-center gap-1.5 transition disabled:opacity-50 shrink-0"
+            >
+              {fetchingGroups ? (
+                <Loader2 className="w-3.5 h-3.5 animate-spin" />
+              ) : (
+                <RefreshCw className="w-3.5 h-3.5" />
+              )}
+              Fetch WhatsApp Groups
+            </button>
           </div>
-        )}
+        </div>
 
         <div className="grid grid-cols-1 md:grid-cols-3 gap-3">
           <div>

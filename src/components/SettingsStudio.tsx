@@ -32,6 +32,7 @@ import {
   SYSTEM_SETTINGS_MIGRATION_SQL,
 } from '../lib/systemSettings';
 import {
+  buildPortalAuthHeaders,
   getDisplayWhatsAppGatewayUrl,
   normalizeWhatsAppGatewayUrl,
   safeWhatsAppApiFetch,
@@ -97,6 +98,11 @@ export const SettingsStudio: React.FC = () => {
     state: 'idle' | 'testing' | 'online' | 'offline';
     message: string;
   }>({ state: 'idle', message: '' });
+
+  const [fetchedWaGroups, setFetchedWaGroups] = useState<
+    Array<{ id: string; subject: string; participantsCount?: number }>
+  >([]);
+  const [isFetchingWaGroups, setIsFetchingWaGroups] = useState(false);
 
   // Router management in settings
   const [isAddRouterModalOpen, setIsAddRouterModalOpen] = useState(false);
@@ -430,32 +436,116 @@ export const SettingsStudio: React.FC = () => {
           </div>
 
           {/* Team WhatsApp Work Group */}
-          <div className="grid grid-cols-1 sm:grid-cols-2 gap-4 font-mono">
-            <div>
-              <label className="block text-slate-300 mb-1 font-semibold flex items-center gap-1.5">
-                <Users className="w-3 h-3 text-emerald-400" />
-                <span>Team WhatsApp Work Group Name</span>
-              </label>
-              <input
-                type="text"
-                value={teamWhatsAppGroupName}
-                onChange={(e) => setTeamWhatsAppGroupName(e.target.value)}
-                placeholder="e.g. Youth Net Field Technicians"
-                className="w-full bg-slate-950 border border-slate-700 rounded-lg px-3 py-2 text-white text-xs focus:outline-none focus:border-cyan-500"
-              />
+          <div className="space-y-3 font-mono">
+            <div className="p-3 rounded-lg bg-slate-950/80 border border-cyan-500/25 space-y-2">
+              <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2">
+                <label className="text-xs font-semibold text-cyan-300 flex items-center gap-1.5">
+                  <Users className="w-3.5 h-3.5 text-cyan-400" />
+                  <span>
+                    Fetch WhatsApp Groups (Auto-Fill @g.us JID)
+                    {fetchedWaGroups.length > 0 ? ` — ${fetchedWaGroups.length} found` : ''}
+                  </span>
+                </label>
+                <button
+                  type="button"
+                  disabled={isFetchingWaGroups}
+                  onClick={async () => {
+                    setIsFetchingWaGroups(true);
+                    try {
+                      const res = await safeWhatsAppApiFetch<{
+                        success?: boolean;
+                        groups?: Array<{ id: string; subject: string; participantsCount?: number }>;
+                        error?: string;
+                      }>('/api/whatsapp/groups', {
+                        method: 'GET',
+                        headers: buildPortalAuthHeaders(),
+                      });
+                      if (!res.ok || !res.data?.success) {
+                        showToast(
+                          'error',
+                          res.data?.error ||
+                            res.error ||
+                            'Could not fetch WhatsApp groups. Ensure WhatsApp is connected first.'
+                        );
+                        return;
+                      }
+                      const list = res.data.groups || [];
+                      setFetchedWaGroups(list);
+                      showToast(
+                        'success',
+                        list.length > 0
+                          ? `Loaded ${list.length} WhatsApp group(s). Select a group to fill its @g.us JID.`
+                          : 'No WhatsApp groups found on this connected session.'
+                      );
+                    } finally {
+                      setIsFetchingWaGroups(false);
+                    }
+                  }}
+                  className="px-3 py-1.5 rounded-lg bg-cyan-500/15 hover:bg-cyan-500/25 border border-cyan-500/35 text-cyan-200 text-xs font-semibold flex items-center gap-1.5 transition cursor-pointer disabled:opacity-50"
+                >
+                  {isFetchingWaGroups ? (
+                    <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                  ) : (
+                    <RefreshCw className="w-3.5 h-3.5" />
+                  )}
+                  <span>Fetch WhatsApp Groups</span>
+                </button>
+              </div>
+              <select
+                value={fetchedWaGroups.some((g) => g.id === teamWhatsAppGroupJid) ? teamWhatsAppGroupJid : ''}
+                onChange={(e) => {
+                  const selectedId = e.target.value;
+                  if (!selectedId) return;
+                  const chosen = fetchedWaGroups.find((g) => g.id === selectedId);
+                  setTeamWhatsAppGroupJid(selectedId);
+                  if (chosen?.subject) {
+                    setTeamWhatsAppGroupName(chosen.subject);
+                  }
+                }}
+                className="w-full bg-slate-900 border border-slate-700 rounded-lg px-3 py-2 text-white text-xs focus:outline-none focus:border-cyan-500"
+              >
+                <option value="">
+                  {isFetchingWaGroups
+                    ? 'Fetching connected WhatsApp groups...'
+                    : fetchedWaGroups.length > 0
+                    ? '-- Select a WhatsApp Group to auto-fill @g.us JID --'
+                    : '-- Click "Fetch WhatsApp Groups" to load connected groups --'}
+                </option>
+                {fetchedWaGroups.map((g) => (
+                  <option key={g.id} value={g.id}>
+                    {g.subject} — {g.id}
+                  </option>
+                ))}
+              </select>
             </div>
 
-            <div>
-              <label className="block text-slate-300 mb-1 font-semibold">
-                Team WhatsApp Work Group JID
-              </label>
-              <input
-                type="text"
-                value={teamWhatsAppGroupJid}
-                onChange={(e) => setTeamWhatsAppGroupJid(e.target.value)}
-                placeholder="e.g. 120363012345678901@g.us"
-                className="w-full bg-slate-950 border border-slate-700 rounded-lg px-3 py-2 text-white text-xs focus:outline-none focus:border-cyan-500"
-              />
+            <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+              <div>
+                <label className="block text-slate-300 mb-1 font-semibold flex items-center gap-1.5">
+                  <Users className="w-3 h-3 text-emerald-400" />
+                  <span>Team WhatsApp Work Group Name</span>
+                </label>
+                <input
+                  type="text"
+                  value={teamWhatsAppGroupName}
+                  onChange={(e) => setTeamWhatsAppGroupName(e.target.value)}
+                  placeholder="e.g. Youth Net Field Technicians"
+                  className="w-full bg-slate-950 border border-slate-700 rounded-lg px-3 py-2 text-white text-xs focus:outline-none focus:border-cyan-500"
+                />
+              </div>
+
+              <div>
+                <label className="block text-slate-300 mb-1 font-semibold">
+                  Team WhatsApp Work Group JID
+                </label>
+                <input
+                  type="text"
+                  value={teamWhatsAppGroupJid}
+                  onChange={(e) => setTeamWhatsAppGroupJid(e.target.value)}
+                  placeholder="e.g. 120363012345678901@g.us"
+                  className="w-full bg-slate-950 border border-slate-700 rounded-lg px-3 py-2 text-white text-xs focus:outline-none focus:border-cyan-500"
+                />
+              </div>
             </div>
           </div>
 

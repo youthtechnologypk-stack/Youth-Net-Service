@@ -1727,29 +1727,79 @@ app.get('/api/whatsapp/groups', async (req, res) => {
     if (!ctx.ok || !ctx.actor) {
       return res.status(ctx.statusCode || 401).json({ success: false, groups: [], error: ctx.error });
     }
-    const safeId = sanitizePortalUserId(ctx.actor.id);
-    const sessionKey = `session_${safeId}`;
-    const sock = sockets.get(sessionKey);
-    const st = states.get(sessionKey);
-    if (!sock || st?.status !== 'CONNECTED') {
+
+    // Build tenant-safe candidate session IDs in strict priority order:
+    // 1. Optional ?portalUserId (Master Admin only, sanitized)
+    // 2. Actor's own connected session
+    // 3. Parent Dealer's connected session (for Sub-Dealers)
+    // 4. Connected Master Admin session (hierarchical fallback)
+    const candidateIds = [];
+    const requestedId = sanitizePortalUserId(String(req.query?.portalUserId || '').trim());
+    if (requestedId && ctx.effectiveTier === 'ADMIN') {
+      candidateIds.push(requestedId);
+    }
+
+    const actorSafeId = sanitizePortalUserId(ctx.actor.id);
+    if (actorSafeId) candidateIds.push(actorSafeId);
+
+    if (ctx.effectiveTier === 'SUB_DEALER' && ctx.actor.parent_dealer_id) {
+      const parentId = sanitizePortalUserId(ctx.actor.parent_dealer_id);
+      if (parentId) candidateIds.push(parentId);
+    }
+
+    const adminUsers = (ctx.allUsers || []).filter((u) => getEffectiveTier(u) === 'ADMIN');
+    for (const adm of adminUsers) {
+      const admId = sanitizePortalUserId(adm.id);
+      if (admId) candidateIds.push(admId);
+    }
+
+    const seen = new Set();
+    let sock = null;
+    let resolvedSessionOwnerId = null;
+
+    for (const cid of candidateIds) {
+      if (!cid || seen.has(cid)) continue;
+      seen.add(cid);
+      const sessionKey = `session_${cid}`;
+      const candidateSock = sockets.get(sessionKey);
+      const candidateState = states.get(sessionKey);
+      if (candidateSock && candidateState?.status === 'CONNECTED') {
+        sock = candidateSock;
+        resolvedSessionOwnerId = cid;
+        break;
+      }
+    }
+
+    if (!sock) {
       return res.status(400).json({
         success: false,
         groups: [],
         error: 'WhatsApp session is not connected. Pair your WhatsApp via QR first to fetch groups.',
       });
     }
+
     const participating = await sock.groupFetchAllParticipating();
     const groups = Object.values(participating || {})
-      .map((g) => ({
-        id: String(g?.id || '').trim(),
-        subject: String(g?.subject || 'Unnamed Group').trim(),
-        participantsCount: Array.isArray(g?.participants) ? g.participants.length : 0,
+      .map((group) => ({
+        id: String(group?.id || '').trim(),
+        subject: String(group?.subject || 'Unnamed Group').trim(),
+        participantsCount: Array.isArray(group?.participants) ? group.participants.length : 0,
       }))
-      .filter((g) => Boolean(formatWhatsAppGroupJid(g.id)))
+      .filter((group) => Boolean(formatWhatsAppGroupJid(group.id)))
       .sort((a, b) => a.subject.localeCompare(b.subject));
-    return res.json({ success: true, groups });
+
+    return res.json({
+      success: true,
+      groups,
+      count: groups.length,
+      sessionOwnerId: resolvedSessionOwnerId,
+    });
   } catch (err) {
-    return res.status(500).json({ success: false, groups: [], error: err?.message || 'Failed to fetch WhatsApp groups.' });
+    return res.status(500).json({
+      success: false,
+      groups: [],
+      error: err?.message || 'Failed to fetch WhatsApp groups.',
+    });
   }
 });
 
