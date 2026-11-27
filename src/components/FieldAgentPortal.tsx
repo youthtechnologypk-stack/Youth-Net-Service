@@ -39,6 +39,7 @@ import {
   SupabaseWhatsappBillingConfig,
 } from '../services/supabaseClient';
 import { restoreSubscriberOnInvoicePaid, addCalendarMonthDateString } from '../lib/billingAndNetwork';
+import { dispatchDualPaymentReceiptWhatsApp } from '../lib/whatsappRouting';
 import {
   DEFAULT_SUPPORT_WHATSAPP,
   WHATSAPP_CONFIG_UPDATED_EVENT,
@@ -565,16 +566,13 @@ export const FieldAgentPortal: React.FC<FieldAgentPortalProps> = ({
         return;
       }
 
-      // 1. Update invoice in Supabase: status, paid_amount, paid_at, and calendar-month renewal on PAID
+      // 1. Update invoice in Supabase: status, paid_amount, paid_at (preserve historical due_date)
       const invoiceUpdateData: Partial<SupabaseInvoice> = {
         status: newStatus,
         paid_amount: finalPaidAmount,
         paid_at: newStatus === 'PAID' ? nowIso : (inv.paid_at || null),
         cycle_day: anchorDay,
       };
-      if (newStatus === 'PAID') {
-        invoiceUpdateData.due_date = nextExpiryDate;
-      }
 
       const { error: invErr } = await supabase
         .from('invoices')
@@ -583,14 +581,26 @@ export const FieldAgentPortal: React.FC<FieldAgentPortalProps> = ({
 
       if (invErr) throw invErr;
 
+      let rechargedExpiryYmd = nextExpiryDate;
+      let restoredProfileName: string | undefined;
       if (newStatus === 'PAID') {
-        await restoreSubscriberOnInvoicePaid(inv.subscriber_username);
+        const restoreRes = await restoreSubscriberOnInvoicePaid(inv.subscriber_username, {
+          triggeredBy: 'AGENT_PAYMENT_SYNC',
+          performedBy: currentUser.fullName || currentUser.username,
+          selectedProfile: inv.package_profile || inv.package_name || undefined,
+          amountPaid: enteredVal,
+          invoiceNo: inv.invoice_no,
+          paymentMethod: 'Cash Handover',
+          skipAutoWhatsapp: true,
+        });
+        if (restoreRes.newExpiryIso) rechargedExpiryYmd = restoreRes.newExpiryIso;
+        if (restoreRes.restoredProfile) restoredProfileName = restoreRes.restoredProfile;
       }
 
       // 2. Increment agent's cash_in_hand in portal_users by ONLY enteredVal
       const { data: agentRecord } = await supabase
         .from('portal_users')
-        .select('cash_in_hand')
+        .select('cash_in_hand, phone, full_name')
         .eq('id', effectiveAgentId)
         .maybeSingle();
 
@@ -623,6 +633,22 @@ export const FieldAgentPortal: React.FC<FieldAgentPortalProps> = ({
       try {
         await collectAgentCashPayment(inv.id, effectiveAgentId, enteredVal);
       } catch {}
+
+      // 4. Dual Payment Receipt via Baileys (Client Paid Receipt + Agent Cash Collection Confirmation)
+      void dispatchDualPaymentReceiptWhatsApp({
+        invoiceNo: inv.invoice_no,
+        subscriberUsername: inv.subscriber_username,
+        packageName: restoredProfileName || inv.package_name || inv.package_profile || 'Fiber Broadband',
+        amountPaid: enteredVal,
+        totalAmount,
+        remainingBalance: Math.max(0, totalAmount - finalPaidAmount),
+        paymentMethod: 'Cash Handover',
+        expiryDate: rechargedExpiryYmd,
+        agentId: effectiveAgentId,
+        agentName: (agentRecord as any)?.full_name || currentUser.fullName,
+        agentPhone: (agentRecord as any)?.phone || (currentUser as any)?.phone || '',
+        agentUpdatedCashBalance: newCash,
+      }).catch(() => {});
 
       applyOptimisticAndReceipt(false);
       await fetchAgentData();

@@ -21,7 +21,7 @@ export const DEFAULT_ISP_BILLING_SETTINGS: IspBillingSettingsRecord = {
   id: 1,
   expiry_ppp_profile: 'EXPIRED-16-POOL',
   suspension_mode: 'EXPIRED_PROFILE',
-  grace_hours: 24,
+  grace_hours: 72,
   cutoff_time_pkt: '14:00',
   jazzcash_title: '',
   jazzcash_number: '',
@@ -151,7 +151,7 @@ export async function loadBillingSettingsFromDb(
         String(d.suspension_mode || 'EXPIRED_PROFILE').toUpperCase() === 'DISABLE_SECRET'
           ? 'DISABLE_SECRET'
           : 'EXPIRED_PROFILE',
-      grace_hours: Number.isFinite(Number(d.grace_hours)) ? Number(d.grace_hours) : 24,
+      grace_hours: Number.isFinite(Number(d.grace_hours)) && Number(d.grace_hours) > 0 ? Number(d.grace_hours) : 72,
       cutoff_time_pkt: String(d.cutoff_time_pkt || '14:00').trim(),
       jazzcash_title: String(d.jazzcash_title || ''),
       jazzcash_number: String(d.jazzcash_number || ''),

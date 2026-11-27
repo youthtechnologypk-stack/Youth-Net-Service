@@ -36,7 +36,15 @@ import {
   resolveAreaFromUsername,
   NetworkAreaNode,
   NETWORK_AREAS_UPDATED_EVENT,
+  fetchConfiguredExpiryProfileName,
+  syncMikrotikSecretProfile,
+  kickMikrotikActiveSessionForUser,
 } from '../lib/billingAndNetwork';
+import {
+  isExpiryOrBlockedProfile,
+  upsertOrigPkgComment,
+} from '../lib/mikrotikProfileSync';
+import { provisionPppoeSecretRest } from '../services/mikrotikRestClient';
 import {
   ADMIN_FULL_PERMISSIONS,
   CLIENT_NO_PERMISSIONS,
@@ -292,6 +300,13 @@ export const CreateAccountModal: React.FC<CreateAccountModalProps> = ({
     }
 
     // 2. Persist directly to Supabase PostgreSQL portal_users table
+    const nowIso = new Date().toISOString();
+    const todayYmd = nowIso.slice(0, 10);
+    const assignedPaidPkg =
+      selectedSubscriber?.profile && !isExpiryOrBlockedProfile(selectedSubscriber.profile)
+        ? String(selectedSubscriber.profile).trim()
+        : '';
+
     try {
       const effectivePerms: StaffPermissions =
         role === 'ADMIN'
@@ -322,20 +337,55 @@ export const CreateAccountModal: React.FC<CreateAccountModalProps> = ({
         can_access_gis_map: effectivePerms.gis_map !== 'none',
         gis_map_permission: effectivePerms.gis_map,
         permissions: effectivePerms,
+        ...(role === 'CLIENT'
+          ? {
+              account_status: 'EXPIRED',
+              billing_status: 'PENDING_RECHARGE',
+              is_suspended: true,
+              expiry_date: nowIso,
+              next_billing_date: todayYmd,
+              ...(assignedPaidPkg
+                ? {
+                    original_package_profile: assignedPaidPkg,
+                    package_name: assignedPaidPkg,
+                    package_profile_name: assignedPaidPkg,
+                    package_speed: assignedPaidPkg,
+                  }
+                : {}),
+            }
+          : {}),
         ...(creatorDealerId ? { dealer_id: creatorDealerId } : {}),
         ...(creatorSubDealerId ? { sub_dealer_id: creatorSubDealerId } : {}),
         ...(creator?.id ? { created_by_id: String(creator.id) } : {}),
-        created_at: new Date().toISOString(),
+        created_at: nowIso,
       };
-      const { error: insertErr } = await supabase.from('portal_users').insert([newUserPayload]);
-      if (insertErr && isMissingPermissionsColumnError(insertErr)) {
-        const {
-          can_access_gis_map: _c,
-          gis_map_permission: _p,
-          permissions: _perms,
-          ...legacyPayload
-        } = newUserPayload;
-        await supabase.from('portal_users').insert([legacyPayload]);
+
+      const workingPayload: Record<string, any> = { ...newUserPayload };
+      let inserted = false;
+      for (let attempt = 0; attempt < 8; attempt++) {
+        const { error: insertErr } = await supabase.from('portal_users').insert([workingPayload]);
+        if (!insertErr) {
+          inserted = true;
+          break;
+        }
+        if (isMissingPermissionsColumnError(insertErr)) {
+          delete workingPayload.can_access_gis_map;
+          delete workingPayload.gis_map_permission;
+          delete workingPayload.permissions;
+          continue;
+        }
+        const msg = String(insertErr.message || '');
+        const colMatch =
+          msg.match(/Could not find the ['"]([a-zA-Z0-9_]+)['"] column/i) ||
+          msg.match(/column\s+["']?([a-zA-Z0-9_]+)["']?\s+/i);
+        if (colMatch?.[1] && colMatch[1] in workingPayload) {
+          delete workingPayload[colMatch[1]];
+          continue;
+        }
+        break;
+      }
+
+      if (inserted && !('permissions' in workingPayload)) {
         await updatePortalUserPermissions({
           userId: newUser.id,
           username: cleanUsername,
@@ -344,6 +394,54 @@ export const CreateAccountModal: React.FC<CreateAccountModalProps> = ({
       }
     } catch (sbErr) {
       console.warn('Failed inserting to Supabase portal_users:', sbErr);
+    }
+
+    // 2b. New Client Account -> Default MikroTik PPPoE Secret to Expiry Pool (never activate paid speed on creation)
+    if (role === 'CLIENT') {
+      try {
+        const expiryPoolProfile = await fetchConfiguredExpiryProfileName();
+        const targetRouter =
+          routers.find((r) => r.id === selectedRouterId) || routers[0];
+        const routerAuth = targetRouter
+          ? {
+              host: targetRouter.ipAddress,
+              port: targetRouter.apiPort || 80,
+              username: targetRouter.username || 'admin',
+              password: targetRouter.password || '',
+            }
+          : undefined;
+
+        const commentWithOrigPkg = assignedPaidPkg
+          ? upsertOrigPkgComment(
+              `PENDING_RECHARGE | Created: ${todayYmd}`,
+              assignedPaidPkg
+            )
+          : `PENDING_RECHARGE | Created: ${todayYmd}`;
+
+        // Try updating existing PPPoE secret onto Expiry Pool first
+        const syncRes = await syncMikrotikSecretProfile(
+          cleanUsername,
+          expiryPoolProfile,
+          { disabled: 'false', comment: commentWithOrigPkg },
+          routerAuth
+        );
+
+        // If secret doesn't exist yet on MikroTik, create it directly on Expiry Pool
+        if (!syncRes.ok && targetRouter) {
+          await provisionPppoeSecretRest(targetRouter, {
+            name: cleanUsername,
+            password: plainPass,
+            service: 'pppoe',
+            profile: expiryPoolProfile,
+            comment: commentWithOrigPkg,
+          }).catch(() => {});
+        }
+
+        // Disconnect any stale active session so Expiry Pool applies immediately
+        await kickMikrotikActiveSessionForUser(cleanUsername, routerAuth).catch(() => {});
+      } catch (mkErr) {
+        console.warn('Expiry Pool default MikroTik assignment notice:', mkErr);
+      }
     }
 
     // 3. Persist to server backend API
@@ -454,6 +552,10 @@ export const CreateAccountModal: React.FC<CreateAccountModalProps> = ({
                       <span>{liveSubscribers.length} real subscribers</span>
                     )}
                   </div>
+                </div>
+
+                <div className="rounded-lg border border-amber-500/35 bg-amber-950/30 px-3 py-2 text-[11px] text-amber-200 leading-relaxed">
+                  New client accounts are assigned to the <span className="font-bold text-amber-300">Expiry Pool</span> (<span className="font-mono">PENDING_RECHARGE</span>) by default. Their active monthly speed profile activates for <span className="font-bold text-emerald-300">+31 days</span> once an invoice is marked <span className="font-bold">PAID</span> or manually recharged.
                 </div>
 
                 <div className="relative">

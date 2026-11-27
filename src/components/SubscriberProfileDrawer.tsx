@@ -619,21 +619,21 @@ export const SubscriberProfileDrawer: React.FC<SubscriberProfileDrawerProps> = (
     };
   }, [customer, parsedComment]);
 
-  // Operational Action 0: Renew / Extend Package (+30 Days)
+  // Operational Action 0: Manual Recharge / Extend Package (+31 Days)
   const handleRenewPackage = async () => {
     if (!username) return;
     setActionLoading('renew');
     setActionFeedback(null);
     try {
-      const res = await renewSubscriberPackage(username, 30);
+      const res = await renewSubscriberPackage(username, 31);
       setActionFeedback({
-        type: 'success',
+        type: res.success ? 'success' : 'error',
         message: res.message,
       });
     } catch (err: any) {
       setActionFeedback({
         type: 'error',
-        message: err.message || 'Failed to renew subscriber package.',
+        message: err.message || 'Failed to recharge subscriber package.',
       });
     } finally {
       setActionLoading(null);

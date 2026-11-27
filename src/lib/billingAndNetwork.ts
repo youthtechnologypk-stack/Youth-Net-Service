@@ -8,6 +8,7 @@ import {
   exceedsMaxAutoFutureDays,
   extractYmdString,
   getMaxAllowedAutoDueDateYmd,
+  resolvePackageRate,
 } from './anniversaryBilling';
 import { isMissingTableOrColumnError } from './expiryUtils';
 import {
@@ -21,7 +22,7 @@ import {
   refundResellerWallet,
   resolveActiveResellerIdForSubscriber,
 } from './resellerEngine';
-import { getStoredUser } from './auth';
+import { getStoredUser, getStoredToken } from './auth';
 import { hasExplicitAdminGracePermission } from './staffPermissions';
 import { triggerAutoWhatsAppNotification } from './whatsappRouting';
 
@@ -581,13 +582,67 @@ export async function syncProfilesFromMikrotikToSupabase(
 }
 
 /**
- * Instant 5-Second Restore Hook (DB + MikroTik Atomic Sync):
- * 1. Reads live MikroTik secret (`ORIG_PKG:<exact_profile>` comment or non-expiry profile) & Supabase backups
- * 2. Updates Supabase first: +1 calendar month expiry_date/next_billing_date anchored to installation day,
- *    is_suspended=false, billing_status='ACTIVE', grace_until=null, grace_ends_at=null, last_restored_at=now
- * 3. Restores MikroTik /rest/ppp/secret/{id} to exact adopted profile (disabled='false')
- * 4. Kicks any 16.16.16.x / stale active PPPoE session for instant reconnect
- * 5. Inserts 'RESTORED_ON_PAYMENT' into expiry_audit_logs
+ * Computes exact +31 days (or custom days) prepaid recharge expiry:
+ *   new_expiry = max(today, current_expiry) + rechargeDays
+ * Uses YYYY-MM-DD calendar arithmetic to prevent DST off-by-one shifts.
+ */
+export function compute31DayRechargeExpiry(
+  currentExpiryRaw?: string | null,
+  refDate: Date = new Date(),
+  rechargeDays = 31
+): { expiryYmd: string; expiryIso: string; baseYmd: string } {
+  const days = Math.max(1, Math.round(Number(rechargeDays) || 31));
+  const todayYmd =
+    extractYmdString(refDate.toISOString()) ||
+    `${refDate.getUTCFullYear()}-${String(refDate.getUTCMonth() + 1).padStart(2, '0')}-${String(
+      refDate.getUTCDate()
+    ).padStart(2, '0')}`;
+  const currentYmd = extractYmdString(currentExpiryRaw || undefined);
+  const baseYmd = currentYmd && currentYmd > todayYmd ? currentYmd : todayYmd;
+
+  const [y, m, d] = baseYmd.split('-').map((n) => Number(n));
+  const dt = new Date(Date.UTC(y, (m || 1) - 1, d || 1));
+  dt.setUTCDate(dt.getUTCDate() + days);
+
+  const expiryYmd = `${dt.getUTCFullYear()}-${String(dt.getUTCMonth() + 1).padStart(2, '0')}-${String(
+    dt.getUTCDate()
+  ).padStart(2, '0')}`;
+  const expiryIso = `${expiryYmd}T14:00:00+05:00`;
+  return { expiryYmd, expiryIso, baseYmd };
+}
+
+/**
+ * Fetches the configured MikroTik Expiry Pool PPPoE profile name from `isp_billing_settings`,
+ * falling back to `'EXPIRED-16-POOL'` if unset.
+ */
+export async function fetchConfiguredExpiryProfileName(
+  fallback = 'EXPIRED-16-POOL'
+): Promise<string> {
+  try {
+    const { data, error } = await supabase
+      .from('isp_billing_settings')
+      .select('expiry_ppp_profile')
+      .limit(1)
+      .maybeSingle();
+    if (!error && data && typeof (data as any).expiry_ppp_profile === 'string') {
+      const val = String((data as any).expiry_ppp_profile).trim();
+      if (val) return val;
+    }
+  } catch {
+    // ignore missing table/column
+  }
+  return fallback;
+}
+
+/**
+ * Instant 31-Day Prepaid Recharge & MikroTik Restore Hook (DB + MikroTik Atomic Sync):
+ * Executed ONLY when an invoice is marked PAID or an Admin/Dealer executes a Manual Recharge:
+ * 1. Computes `max(today, current_expiry) + 31 days`
+ * 2. Switches MikroTik `/ppp/secret/{id}` from Expiry Pool back to exact Active Monthly Package Profile (`disabled='false'`)
+ * 3. Kicks any stale / Expiry-Pool active PPPoE session so CPE reconnects immediately on active speed pool
+ * 4. Updates Supabase (`account_status='ACTIVE'`, `billing_status='ACTIVE'`, `is_suspended=false`, `expiry_date`, `next_billing_date`)
+ * 5. Inserts 'RESTORED_ON_PAYMENT' into `expiry_audit_logs`
+ * 6. Dispatches Paid Receipt & 31-Day Recharge Confirmation via Baileys WhatsApp Gateway
  */
 export async function restoreSubscriberOnInvoicePaid(
   subscriberUsername: string,
@@ -595,6 +650,8 @@ export async function restoreSubscriberOnInvoicePaid(
     triggeredBy?: 'ADMIN' | 'AGENT_PAYMENT_SYNC' | 'CRON_2PM';
     notes?: string;
     expiryProfileName?: string;
+    selectedProfile?: string;
+    rechargeDays?: number;
     activeRouter?: RouterAuthInfo;
     preloadedSecrets?: Array<Record<string, any>>;
     preloadedProfiles?: string[];
@@ -618,17 +675,24 @@ export async function restoreSubscriberOnInvoicePaid(
   const cleanUser = (subscriberUsername || '').trim().toLowerCase();
   const nowIso = new Date().toISOString();
   const triggeredBy = options?.triggeredBy || 'AGENT_PAYMENT_SYNC';
+  const rechargeDays = Math.max(1, Math.round(Number(options?.rechargeDays ?? 31)));
 
   if (!cleanUser) {
-    const fallbackExpiryIso = `${addCalendarMonthDateString(new Date())}T14:00:00+05:00`;
-    return { success: false, restoredProfile: 'default', kickedSessions: 0, newExpiryIso: fallbackExpiryIso };
+    const fallback = compute31DayRechargeExpiry(null, new Date(), rechargeDays);
+    return {
+      success: false,
+      restoredProfile: 'default',
+      kickedSessions: 0,
+      newExpiryIso: fallback.expiryYmd,
+    };
   }
 
   let restoredProfile = 'default';
   let previousProfile: string | null = null;
   let subscriberId: string | null = null;
   let anchorDay = new Date().getDate();
-  let nextAnniversaryYmd = addCalendarMonthDateString(new Date(), anchorDay);
+  const initialRecharge = compute31DayRechargeExpiry(null, new Date(), rechargeDays);
+  let rechargedExpiryYmd = initialRecharge.expiryYmd;
 
   try {
     // 1. Read subscriber record from Supabase + live MikroTik secret/profiles in parallel
@@ -677,25 +741,31 @@ export async function restoreSubscriberOnInvoicePaid(
     subscriberId = userRecord?.id || null;
     if (userRecord) {
       anchorDay = computeBillingAnchorDay(userRecord);
-      const baseAnchor =
-        extractYmdString((userRecord as any).next_billing_date) ||
-        extractYmdString(userRecord.expiry_date) ||
-        extractYmdString(new Date().toISOString())!;
-      const todayYmd = extractYmdString(new Date().toISOString())!;
-      let candidateNext = addCalendarMonthsYmd(baseAnchor, 1, anchorDay);
-      if (candidateNext <= todayYmd) {
-        candidateNext = addCalendarMonthsYmd(todayYmd, 1, anchorDay);
-      }
-      nextAnniversaryYmd = candidateNext;
     }
-    const finalExpiryIso = `${nextAnniversaryYmd}T14:00:00+05:00`;
 
-    // Resolve exact MikroTik profile: ORIG_PKG comment -> live non-expiry secret -> Supabase original_package_profile -> live profiles
+    // 31-day prepaid recharge: max(today, current_expiry) + 31 days
+    const currentExpiryRaw =
+      userRecord?.expiry_date || (userRecord as any)?.next_billing_date || null;
+    const computed = compute31DayRechargeExpiry(currentExpiryRaw, new Date(), rechargeDays);
+    rechargedExpiryYmd = computed.expiryYmd;
+    const finalExpiryIso = computed.expiryIso;
+
+    // Resolve exact Active Monthly Package Profile:
+    // explicit non-expiry override -> ORIG_PKG comment -> live non-expiry secret -> Supabase original_package_profile -> live profiles
+    const explicitProfile = String(options?.selectedProfile || '').trim();
     const origCommentPkg = extractOrigPkgFromComment(
       liveSecret?.comment,
       options?.expiryProfileName
     );
-    if (origCommentPkg) {
+    if (explicitProfile && !isExpiryOrBlockedProfile(explicitProfile, options?.expiryProfileName)) {
+      restoredProfile =
+        resolveExactSubscriberProfile({
+          liveSecret: { ...liveSecret, profile: explicitProfile },
+          subscriber: userRecord as any,
+          mikrotikProfiles,
+          expiryProfileName: options?.expiryProfileName,
+        }) || explicitProfile;
+    } else if (origCommentPkg) {
       restoredProfile =
         resolveExactSubscriberProfile({
           liveSecret: { ...liveSecret, profile: origCommentPkg },
@@ -715,21 +785,25 @@ export async function restoreSubscriberOnInvoicePaid(
     // 1b. Strict Prepaid Reseller Wallet Payment Gate on Renewal / Restore
     let walletChargedAmount = 0;
     const ownerResellerId = resolveActiveResellerIdForSubscriber(userRecord as any, getStoredUser());
-    if (ownerResellerId && !options?.skipWalletDeduction && !isExpiryOrBlockedProfile(restoredProfile, options?.expiryProfileName)) {
+    if (
+      ownerResellerId &&
+      !options?.skipWalletDeduction &&
+      !isExpiryOrBlockedProfile(restoredProfile, options?.expiryProfileName)
+    ) {
       const walletRes = await checkAndDeductResellerWallet({
         resellerId: ownerResellerId,
         profileName: restoredProfile,
         subscriberUsername: cleanUser,
         txType: 'RENEWAL_DEDUCTION',
         performedBy: options?.performedBy || triggeredBy,
-        notes: options?.notes || `Renewal / restore for @${cleanUser} (${restoredProfile})`,
+        notes: options?.notes || `31-day recharge / restore for @${cleanUser} (${restoredProfile})`,
       });
       if (!walletRes.ok) {
         return {
           success: false,
           restoredProfile,
           kickedSessions: 0,
-          newExpiryIso: nextAnniversaryYmd,
+          newExpiryIso: rechargedExpiryYmd,
           insufficientWalletFunds: Boolean(walletRes.insufficientFunds || walletRes.tariffMissing),
           error: walletRes.error || 'Insufficient Wallet Balance',
         };
@@ -737,12 +811,17 @@ export async function restoreSubscriberOnInvoicePaid(
       walletChargedAmount = walletRes.chargedAmount;
     }
 
-    // 2. Restore MikroTik secret back to exact adopted profile & disabled='false'
-    //    If RouterOS fails AFTER a reseller wallet deduction, automatically refund the wallet!
+    // 2. Switch MikroTik secret from Expiry Pool back to Active Monthly Package Profile & disabled='false'
+    //    Preserve ORIG_PKG:<restoredProfile> in comment. Auto-refund reseller wallet if RouterOS fails.
+    const isNonExpiryTarget = !isExpiryOrBlockedProfile(restoredProfile, options?.expiryProfileName);
+    const updatedComment = isNonExpiryTarget
+      ? upsertOrigPkgComment(liveSecret?.comment, restoredProfile)
+      : undefined;
+
     const syncRes: any = await syncMikrotikSecretProfile(
       cleanUser,
       restoredProfile,
-      { disabled: 'false', preloadedSecret: liveSecret },
+      { disabled: 'false', comment: updatedComment, preloadedSecret: liveSecret },
       options?.activeRouter
     );
 
@@ -759,7 +838,7 @@ export async function restoreSubscriberOnInvoicePaid(
         success: false,
         restoredProfile,
         kickedSessions: 0,
-        newExpiryIso: nextAnniversaryYmd,
+        newExpiryIso: rechargedExpiryYmd,
         walletChargedAmount: 0,
         error: `MikroTik restore failed (${syncRes.error || 'Router unreachable'}). Rs. ${walletChargedAmount.toLocaleString()} was automatically refunded to your wallet.`,
       };
@@ -767,11 +846,12 @@ export async function restoreSubscriberOnInvoicePaid(
 
     previousProfile =
       syncRes.previousProfile ||
-      ((userRecord as any)?.billing_status === 'SUSPENDED_EXPIRED'
+      ((userRecord as any)?.billing_status === 'SUSPENDED_EXPIRED' ||
+      (userRecord as any)?.billing_status === 'PENDING_RECHARGE'
         ? options?.expiryProfileName || 'EXPIRED-16-POOL'
         : null);
 
-    // 3. Update Supabase (+1 calendar month anniversary expiry, ACTIVE status, clear grace/suspension, persist adopted profile)
+    // 3. Update Supabase (+31 days prepaid expiry, ACTIVE status, clear grace/suspension, persist active profile)
     if (userRecord?.id) {
       await safeUpdatePortalUserFields(
         userRecord.id,
@@ -785,10 +865,11 @@ export async function restoreSubscriberOnInvoicePaid(
           last_restored_at: nowIso,
           expiry_date: finalExpiryIso,
           billing_anchor_day: anchorDay,
-          next_billing_date: nextAnniversaryYmd,
+          next_billing_date: rechargedExpiryYmd,
           original_package_profile: restoredProfile,
           package_name: restoredProfile,
           package_profile_name: restoredProfile,
+          package_speed: restoredProfile,
         },
         {
           account_status: 'ACTIVE',
@@ -801,12 +882,12 @@ export async function restoreSubscriberOnInvoicePaid(
         },
         {
           account_status: 'ACTIVE',
-          expiry_date: nextAnniversaryYmd,
+          expiry_date: rechargedExpiryYmd,
         }
       ).catch(() => {});
     }
 
-    // 4. Kick any stale or 16.16.16.x active PPPoE session so CPE reconnects immediately on real speed profile
+    // 4. Kick any stale or Expiry-Pool active PPPoE session so CPE reconnects immediately on active speed pool
     const kickedSessions = await kickMikrotikActiveSessionForUser(
       cleanUser,
       options?.activeRouter,
@@ -825,13 +906,13 @@ export async function restoreSubscriberOnInvoicePaid(
           triggered_by: triggeredBy,
           notes:
             options?.notes ||
-            `Atomic payment restore: +1 calendar month expiry (${nextAnniversaryYmd}), profile=${restoredProfile}, kicked=${kickedSessions}`,
+            `Atomic ${rechargeDays}-day prepaid recharge: valid until ${rechargedExpiryYmd}, profile=${restoredProfile}, kicked=${kickedSessions}`,
           created_at: nowIso,
         },
       ]);
     } catch {}
 
-    // 6. Zero-click background WhatsApp Payment Receipt & Service Restored notification
+    // 6. Zero-click background WhatsApp Paid Receipt & 31-Day Recharge Confirmation
     if (!options?.skipAutoWhatsapp && typeof window !== 'undefined') {
       const subData = userRes?.data as any;
       void triggerAutoWhatsAppNotification({
@@ -847,7 +928,7 @@ export async function restoreSubscriberOnInvoicePaid(
           remainingBalance: 0,
           invoiceNo: options?.invoiceNo,
           paymentMethod: options?.paymentMethod || 'Verified Payment',
-          expiryDate: nextAnniversaryYmd,
+          expiryDate: rechargedExpiryYmd,
         },
       });
     }
@@ -856,7 +937,7 @@ export async function restoreSubscriberOnInvoicePaid(
       success: true,
       restoredProfile,
       kickedSessions,
-      newExpiryIso: nextAnniversaryYmd,
+      newExpiryIso: rechargedExpiryYmd,
       walletChargedAmount,
     };
   } catch (err) {
@@ -865,7 +946,7 @@ export async function restoreSubscriberOnInvoicePaid(
       success: false,
       restoredProfile,
       kickedSessions: 0,
-      newExpiryIso: nextAnniversaryYmd,
+      newExpiryIso: rechargedExpiryYmd,
     };
   }
 }
@@ -1053,6 +1134,9 @@ export async function syncSubscriberPackageAndRestoreIfPaid(params: {
   selectedProfile: string;
   isPaid: boolean;
   invoiceNo?: string;
+  amountPaid?: number;
+  paymentMethod?: string;
+  skipAutoWhatsapp?: boolean;
   triggeredBy?: 'ADMIN' | 'AGENT_PAYMENT_SYNC' | 'CRON_2PM';
   activeRouter?: RouterAuthInfo;
   preloadedSecrets?: Array<Record<string, any>>;
@@ -1062,6 +1146,7 @@ export async function syncSubscriberPackageAndRestoreIfPaid(params: {
   mikrotikUpdated: boolean;
   kickedSessions: number;
   appliedProfile: string;
+  newExpiryIso?: string;
   insufficientWalletFunds?: boolean;
   error?: string;
 }> {
@@ -1082,11 +1167,14 @@ export async function syncSubscriberPackageAndRestoreIfPaid(params: {
   let mikrotikUpdated = false;
   let kickedSessions = 0;
   let subscriberId: string | null = null;
+  let newExpiryIso: string | undefined;
 
   try {
     const { data: userRow } = await supabase
       .from('portal_users')
-      .select('id, billing_status, account_status, dealer_id, sub_dealer_id, is_suspended')
+      .select(
+        'id, full_name, phone, monthly_fee, expiry_date, next_billing_date, billing_status, account_status, dealer_id, sub_dealer_id, is_suspended'
+      )
       .ilike('username', cleanUser)
       .limit(1)
       .maybeSingle();
@@ -1156,6 +1244,12 @@ export async function syncSubscriberPackageAndRestoreIfPaid(params: {
         };
       }
 
+      // Compute exact +31 day recharge validity: max(today, current_expiry) + 31 days
+      const recharged = compute31DayRechargeExpiry(
+        (userRow as any)?.expiry_date || (userRow as any)?.next_billing_date || null
+      );
+      newExpiryIso = recharged.expiryYmd;
+
       if (userRow?.id) {
         subscriberId = String(userRow.id);
         await safeUpdatePortalUserFields(
@@ -1164,6 +1258,7 @@ export async function syncSubscriberPackageAndRestoreIfPaid(params: {
             original_package_profile: isNonExpiry ? cleanProfile : undefined,
             package_name: cleanProfile,
             package_profile_name: cleanProfile,
+            package_speed: cleanProfile,
             is_suspended: false,
             shifted_to_next_month: false,
             billing_status: 'ACTIVE',
@@ -1171,6 +1266,8 @@ export async function syncSubscriberPackageAndRestoreIfPaid(params: {
             grace_until: null,
             grace_ends_at: null,
             last_restored_at: nowIso,
+            expiry_date: recharged.expiryIso,
+            next_billing_date: recharged.expiryYmd,
           },
           {
             original_package_profile: isNonExpiry ? cleanProfile : undefined,
@@ -1179,10 +1276,12 @@ export async function syncSubscriberPackageAndRestoreIfPaid(params: {
             account_status: 'ACTIVE',
             grace_ends_at: null,
             last_restored_at: nowIso,
+            expiry_date: recharged.expiryIso,
           },
           {
             package_profile_name: cleanProfile,
             account_status: 'ACTIVE',
+            expiry_date: recharged.expiryYmd,
           }
         );
         subscriberUpdated = true;
@@ -1203,11 +1302,30 @@ export async function syncSubscriberPackageAndRestoreIfPaid(params: {
             previous_profile: mkRes.previousProfile || null,
             applied_profile: cleanProfile,
             triggered_by: params.triggeredBy || 'ADMIN',
-            notes: `Invoice ${params.invoiceNo ? `#${params.invoiceNo} ` : ''}saved as PAID -> MikroTik set to "${cleanProfile}" (kicked ${kickedSessions} session(s)).`,
+            notes: `Invoice ${params.invoiceNo ? `#${params.invoiceNo} ` : ''}saved as PAID -> +31d expiry (${recharged.expiryYmd}), MikroTik set to "${cleanProfile}" (kicked ${kickedSessions} session(s)).`,
             created_at: nowIso,
           },
         ]);
       } catch {}
+
+      if (!params.skipAutoWhatsapp && typeof window !== 'undefined') {
+        void triggerAutoWhatsAppNotification({
+          eventType: 'PAYMENT_RESTORED',
+          subscriberUsername: cleanUser,
+          subscriber: (userRow as any) || { username: cleanUser },
+          messageVars: {
+            subscriberName: (userRow as any)?.full_name || cleanUser,
+            username: cleanUser,
+            phone: (userRow as any)?.phone || undefined,
+            packageName: cleanProfile,
+            amountPaid: params.amountPaid ?? Number((userRow as any)?.monthly_fee || 0),
+            remainingBalance: 0,
+            invoiceNo: params.invoiceNo,
+            paymentMethod: params.paymentMethod || 'Verified Payment',
+            expiryDate: recharged.expiryYmd,
+          },
+        });
+      }
     } else if (userRow?.id && isNonExpiry) {
       subscriberId = String(userRow.id);
       await safeUpdatePortalUserFields(
@@ -1236,6 +1354,7 @@ export async function syncSubscriberPackageAndRestoreIfPaid(params: {
     mikrotikUpdated,
     kickedSessions,
     appliedProfile: cleanProfile,
+    newExpiryIso,
   };
 }
 
@@ -1560,6 +1679,7 @@ export async function bulkReceivePayments(params: {
   let settledInvoicesCount = 0;
   let totalCollected = 0;
   const affectedUsers = new Set<string>();
+  const latestPaymentByUser = new Map<string, { amount: number; invoiceNo?: string }>();
 
   for (let i = 0; i < validItems.length; i++) {
     const { invoice, amountToCollect } = validItems[i];
@@ -1574,10 +1694,9 @@ export async function bulkReceivePayments(params: {
       const anchorDay = clientMatch
         ? computeBillingAnchorDay(clientMatch as any)
         : invoice.cycle_day || new Date().getDate();
-      const renewalBase =
-        invoice.due_date && invoice.due_date >= todayYmd ? invoice.due_date : new Date();
-      const nextDueDate = addCalendarMonthDateString(renewalBase, anchorDay);
 
+      // Preserve the paid invoice's original due_date for historical audit accuracy;
+      // the subscriber's +31 day validity is updated on portal_users by restoreSubscriberOnInvoicePaid.
       const { error: invErr } = await supabase
         .from('invoices')
         .update({
@@ -1585,7 +1704,6 @@ export async function bulkReceivePayments(params: {
           paid_amount: totalAmount,
           paid_at: nowIso,
           cycle_day: anchorDay,
-          due_date: nextDueDate,
         })
         .eq('id', invoice.id);
 
@@ -1634,6 +1752,11 @@ export async function bulkReceivePayments(params: {
         const remaining = Math.max(0, (openBalanceByUser.get(uname) || 0) - amountToCollect);
         openBalanceByUser.set(uname, remaining);
         affectedUsers.add(uname);
+        const prevPay = latestPaymentByUser.get(uname);
+        latestPaymentByUser.set(uname, {
+          amount: (prevPay?.amount || 0) + amountToCollect,
+          invoiceNo: invoice.invoice_no,
+        });
       }
     } catch (err: any) {
       errors.push(`Invoice #${invoice.invoice_no}: ${err?.message || 'Update failed'}`);
@@ -1678,21 +1801,25 @@ export async function bulkReceivePayments(params: {
     }
   }
 
-  // Automatically restore exact MikroTik profile for every subscriber whose balance is now 0
+  // Automatically recharge +31 days, restore active MikroTik profile, kick stale session & dispatch Baileys receipt
   let restoredSubscribersCount = 0;
   let kickedSessions = 0;
   for (const uname of affectedUsers) {
     const remainingDue = openBalanceByUser.get(uname) ?? 0;
     if (remainingDue > 0) continue;
+    const payMeta = latestPaymentByUser.get(uname);
 
     const restoreRes = await restoreSubscriberOnInvoicePaid(uname, {
       triggeredBy: agentId ? 'AGENT_PAYMENT_SYNC' : 'ADMIN',
-      notes: `Auto-restored on Bulk Receive (${paymentMethod})`,
+      notes: `Auto-recharged +31 days on Bulk Receive (${paymentMethod})`,
       expiryProfileName,
       activeRouter,
       preloadedSecrets,
       preloadedProfiles,
       preloadedActive,
+      amountPaid: payMeta?.amount,
+      invoiceNo: payMeta?.invoiceNo,
+      paymentMethod,
     });
     if (restoreRes.success) {
       restoredSubscribersCount++;
@@ -2613,5 +2740,245 @@ export async function shiftBillToNextMonth(params: {
     restoredMikrotik,
     kickedSessions,
     appliedProfile: restoredProfile,
+  };
+}
+
+export interface FiveDayPreExpiryBillingResult {
+  success: boolean;
+  scanned: number;
+  invoicesGenerated: number;
+  whatsappSent: number;
+  skippedExisting: number;
+  failed: number;
+  totalBilled: number;
+  source: 'backend' | 'client_supabase';
+  errors?: string[];
+}
+
+/**
+ * Triggers the 5-Day Pre-Expiry Auto-Billing & Automated WhatsApp Delivery workflow:
+ * Scans active subscribers whose `expiry_date` is within 5 days (`expiry_date - today <= 5 days`)
+ * and who do not already have an open DUE invoice for the upcoming cycle, generates their
+ * monthly DUE invoice (`due_date = subscriber.expiry_date`, WITHOUT extending validity),
+ * and immediately dispatches the invoice via Baileys WhatsApp Gateway.
+ *
+ * Calls the authenticated backend endpoint first, falling back seamlessly to direct Supabase +
+ * Baileys client execution when running on static hosting (e.g., Netlify without local Express).
+ */
+export async function runFiveDayPreExpiryAutoBillingClient(options?: {
+  daysBeforeExpiry?: number;
+  dealerId?: string | null;
+  subDealerId?: string | null;
+}): Promise<FiveDayPreExpiryBillingResult> {
+  const daysBeforeExpiry = Math.max(1, Math.min(15, Number(options?.daysBeforeExpiry ?? 5)));
+
+  // 1. Prefer authenticated backend engine when available
+  try {
+    const storedUser = getStoredUser();
+    const storedToken = getStoredToken();
+    const authHeaders: Record<string, string> = { 'Content-Type': 'application/json' };
+    if (storedToken) {
+      authHeaders['Authorization'] = `Bearer ${storedToken}`;
+      authHeaders['x-portal-auth-token'] = `Bearer ${storedToken}`;
+    }
+    if (storedUser) {
+      if (storedUser.id) authHeaders['x-portal-user-id'] = String(storedUser.id);
+      if (storedUser.username) authHeaders['x-portal-username'] = String(storedUser.username);
+      if (storedUser.role) authHeaders['x-portal-role'] = String(storedUser.role);
+      if ((storedUser as any).tierLevel) authHeaders['x-portal-tier'] = String((storedUser as any).tierLevel);
+      if ((storedUser as any).parentDealerId) {
+        authHeaders['x-portal-parent-dealer-id'] = String((storedUser as any).parentDealerId);
+      }
+    }
+    const res = await fetch('/api/billing/run-5day-pre-expiry-billing', {
+      method: 'POST',
+      headers: authHeaders,
+      body: JSON.stringify({ daysBeforeExpiry }),
+    });
+    const contentType = res.headers.get('content-type') || '';
+    if (res.ok && contentType.includes('application/json')) {
+      const json = await res.json();
+      if (json && typeof json === 'object' && json.success !== false) {
+        return {
+          success: true,
+          scanned: Number(json.scanned || 0),
+          invoicesGenerated: Number(json.invoicesGenerated || 0),
+          whatsappSent: Number(json.whatsappSent ?? json.sent ?? 0),
+          skippedExisting: Number(json.skippedExisting ?? json.skipped ?? 0),
+          failed: Number(json.failed || 0),
+          totalBilled: Number(json.totalBilled || 0),
+          source: 'backend',
+          errors: Array.isArray(json.errors) ? json.errors : undefined,
+        };
+      }
+    }
+  } catch {
+    // Fallback to direct Supabase + Baileys client execution below
+  }
+
+  // 2. Direct Supabase + Baileys client-side execution (for static deployments / Netlify)
+  const now = new Date();
+  const nowIso = now.toISOString();
+  const todayYmd =
+    extractYmdString(nowIso) ||
+    `${now.getUTCFullYear()}-${String(now.getUTCMonth() + 1).padStart(2, '0')}-${String(
+      now.getUTCDate()
+    ).padStart(2, '0')}`;
+  const [ty, tm, td] = todayYmd.split('-').map(Number);
+  const todayUtcMs = Date.UTC(ty, (tm || 1) - 1, td || 1);
+
+  let clientQuery = supabase.from('portal_users').select('*').eq('role', 'CLIENT');
+  if (options?.subDealerId) {
+    clientQuery = clientQuery.eq('sub_dealer_id', options.subDealerId);
+  } else if (options?.dealerId) {
+    clientQuery = clientQuery.eq('dealer_id', options.dealerId);
+  }
+
+  const [{ data: clients }, { data: existingInvoices }] = await Promise.all([
+    clientQuery,
+    supabase
+      .from('invoices')
+      .select('id, invoice_no, subscriber_username, amount, paid_amount, status, due_date, created_at'),
+  ]);
+
+  const activeClients = ((clients || []) as Array<Record<string, any>>).filter((c) => {
+    const acc = String(c.account_status || 'ACTIVE').toUpperCase();
+    const bil = String(c.billing_status || 'ACTIVE').toUpperCase();
+    if (c.is_suspended === true) return false;
+    if (['EXPIRED', 'SUSPENDED', 'DELETED', 'PENDING_RECHARGE'].includes(acc)) return false;
+    if (['SUSPENDED_EXPIRED', 'PENDING_RECHARGE'].includes(bil)) return false;
+    return true;
+  });
+
+  const openNonMaterialInvoiceByUser = new Set<string>();
+  const existingDueKey = new Set<string>();
+  for (const inv of (existingInvoices || []) as Array<Record<string, any>>) {
+    const uname = String(inv.subscriber_username || '').trim().toLowerCase();
+    if (!uname) continue;
+    const invNoUpper = String(inv.invoice_no || '').trim().toUpperCase();
+    if (invNoUpper.startsWith('INV-MAT-')) continue;
+
+    const st = String(inv.status || '').toUpperCase();
+    const balance = Math.max(0, (Number(inv.amount) || 0) - (Number(inv.paid_amount) || 0));
+    if (st !== 'PAID' && st !== 'CANCELLED' && balance > 0) {
+      openNonMaterialInvoiceByUser.add(uname);
+    }
+    const dueYmd = extractYmdString(inv.due_date);
+    if (dueYmd) {
+      existingDueKey.add(`${uname}::${dueYmd}`);
+    }
+  }
+
+  let invoicesGenerated = 0;
+  let whatsappSent = 0;
+  let skippedExisting = 0;
+  let failed = 0;
+  let totalBilled = 0;
+  const errors: string[] = [];
+
+  for (const sub of activeClients) {
+    const uname = String(sub.username || '').trim().toLowerCase();
+    if (!uname) continue;
+
+    const expiryYmd = extractYmdString(sub.expiry_date || sub.next_billing_date);
+    if (!expiryYmd) continue;
+
+    const [ey, em, ed] = expiryYmd.split('-').map(Number);
+    const expUtcMs = Date.UTC(ey, (em || 1) - 1, ed || 1);
+    const daysUntilExpiry = Math.round((expUtcMs - todayUtcMs) / 86_400_000);
+
+    // Only auto-generate when expiry_date is <= 5 days away (and not ancient > 30d stale)
+    if (daysUntilExpiry > daysBeforeExpiry || daysUntilExpiry < -30) continue;
+
+    if (openNonMaterialInvoiceByUser.has(uname) || existingDueKey.has(`${uname}::${expiryYmd}`)) {
+      skippedExisting++;
+      continue;
+    }
+
+    const pkgName =
+      String(
+        sub.original_package_profile ||
+          sub.package_profile_name ||
+          sub.package_name ||
+          sub.package_speed ||
+          'Fiber Broadband'
+      ).trim() || 'Fiber Broadband';
+
+    const amount =
+      Number(sub.monthly_fee) > 0 ? Number(sub.monthly_fee) : resolvePackageRate(pkgName);
+    if (amount <= 0) continue;
+
+    const compactYm = expiryYmd.slice(0, 7).replace('-', '');
+    const invoiceNo = `INV-${compactYm}-${Math.floor(1000 + Math.random() * 9000)}`;
+    const anchorDay = computeBillingAnchorDay(sub as any);
+
+    const { error } = await safeInsertInvoiceInSupabase({
+      invoice_no: invoiceNo,
+      subscriber_username: uname,
+      assigned_agent_id: null,
+      assigned_agent_name: null,
+      amount,
+      paid_amount: 0,
+      status: 'DUE',
+      due_date: expiryYmd,
+      cycle_day: anchorDay,
+      package_profile: pkgName,
+      package_name: pkgName,
+      dealer_id: sub.dealer_id || null,
+      sub_dealer_id: sub.sub_dealer_id || null,
+      created_at: nowIso,
+    });
+
+    if (error) {
+      failed++;
+      errors.push(`@${uname}: ${error.message || 'Insert failed'}`);
+      continue;
+    }
+
+    invoicesGenerated++;
+    totalBilled += amount;
+    openNonMaterialInvoiceByUser.add(uname);
+    existingDueKey.add(`${uname}::${expiryYmd}`);
+
+    // Immediately auto-deliver monthly DUE invoice via Baileys WhatsApp Gateway
+    if (sub.phone) {
+      try {
+        const waRes = await triggerAutoWhatsAppNotification({
+          eventType: 'INVOICE_GENERATED',
+          subscriberUsername: uname,
+          subscriber: sub as any,
+          messageVars: {
+            subscriberName: sub.full_name || uname,
+            username: uname,
+            phone: sub.phone,
+            packageName: pkgName,
+            invoiceNo,
+            amountDue: amount,
+            totalAmount: amount,
+            dueDate: expiryYmd,
+            expiryDate: expiryYmd,
+          },
+        });
+        if (waRes?.ok) {
+          whatsappSent++;
+        } else {
+          failed++;
+        }
+      } catch {
+        failed++;
+      }
+    }
+  }
+
+  return {
+    success: true,
+    scanned: activeClients.length,
+    invoicesGenerated,
+    whatsappSent,
+    skippedExisting,
+    failed,
+    totalBilled,
+    source: 'client_supabase',
+    errors: errors.length > 0 ? errors : undefined,
   };
 }

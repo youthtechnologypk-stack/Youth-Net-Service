@@ -36,6 +36,7 @@ import {
   saveWhatsAppGatewayUrl,
   WHATSAPP_GATEWAY_MIGRATION_SQL,
 } from '../lib/whatsappRouting';
+import { WhatsAppTemplatesAndBroadcastPanel } from './WhatsAppTemplatesAndBroadcastPanel';
 
 interface WhatsAppGatewayViewProps {
   currentUser: UserAccount | null;
@@ -79,21 +80,49 @@ const EVENT_LABELS: Record<string, { label: string; color: string }> = {
     label: 'Welcome / Provisioned',
     color: 'bg-cyan-500/15 text-cyan-300 border-cyan-500/30',
   },
+  PORTAL_CREDENTIALS: {
+    label: 'Account Credentials',
+    color: 'bg-cyan-500/15 text-cyan-300 border-cyan-500/30',
+  },
   INVOICE_GENERATED: {
-    label: 'Monthly Invoice',
+    label: 'Monthly Invoice (+31d)',
     color: 'bg-indigo-500/15 text-indigo-300 border-indigo-500/30',
   },
   PRE_EXPIRY_3D: {
     label: '3-Day Pre-Expiry',
     color: 'bg-amber-500/15 text-amber-300 border-amber-500/30',
   },
+  GRACE_PERIOD_3D: {
+    label: '3-Day Grace Notice',
+    color: 'bg-orange-500/15 text-orange-300 border-orange-500/30',
+  },
   AUTO_SUSPENSION: {
     label: 'Auto-Suspension (16.16)',
     color: 'bg-rose-500/15 text-rose-300 border-rose-500/30',
   },
   PAYMENT_RESTORED: {
-    label: 'Paid & Restored',
+    label: 'Paid Receipt (Client)',
     color: 'bg-emerald-500/15 text-emerald-300 border-emerald-500/30',
+  },
+  AGENT_PAYMENT_RECEIPT: {
+    label: 'Agent Cash Confirmed',
+    color: 'bg-teal-500/15 text-teal-300 border-teal-500/30',
+  },
+  COMPLAINT_CREATED_CLIENT: {
+    label: 'Complaint (Client)',
+    color: 'bg-purple-500/15 text-purple-300 border-purple-500/30',
+  },
+  COMPLAINT_CREATED_GROUP: {
+    label: 'Complaint (Team Group)',
+    color: 'bg-fuchsia-500/15 text-fuchsia-300 border-fuchsia-500/30',
+  },
+  COMPLAINT_RESOLVED_CLIENT: {
+    label: 'Complaint Solved',
+    color: 'bg-lime-500/15 text-lime-300 border-lime-500/30',
+  },
+  CUSTOM_MESSAGE: {
+    label: 'Custom Broadcast',
+    color: 'bg-sky-500/15 text-sky-300 border-sky-500/30',
   },
   MANUAL_TEST: {
     label: 'Gateway Test',
@@ -508,12 +537,16 @@ export const WhatsAppGatewayView: React.FC<WhatsAppGatewayViewProps> = ({
       if (!result.ok || !json?.success) {
         setFeedback({
           type: 'error',
-          text: result.error || json?.error || 'Failed to run 3-day pre-expiry sweep.',
+          text: result.error || json?.error || 'Failed to run 5-day pre-expiry auto-billing.',
         });
       } else {
+        const invGen = Number(json.invoicesGenerated ?? 0);
+        const waSent = Number(json.whatsappSent ?? json.sent ?? 0);
+        const skipped = Number(json.skippedExisting ?? json.skipped ?? 0);
+        const failed = Number(json.failed ?? 0);
         setFeedback({
           type: 'success',
-          text: `3-Day Pre-Expiry Sweep complete: ${json.scanned} due soon | ${json.sent} Sent | ${json.skipped} Skipped (already sent today) | ${json.failed} Failed.`,
+          text: `5-Day Pre-Expiry Auto-Billing complete: ${json.scanned ?? 0} scanned | ${invGen} DUE Invoices Generated | ${waSent} WhatsApp Sent | ${skipped} Skipped | ${failed} Failed.`,
         });
         await fetchLogs();
       }
@@ -596,7 +629,7 @@ export const WhatsAppGatewayView: React.FC<WhatsAppGatewayViewProps> = ({
               ) : (
                 <Sparkles className="w-3.5 h-3.5" />
               )}
-              Run 3-Day Pre-Expiry Auto-Send
+              Run 5-Day Pre-Expiry Auto-Billing
             </button>
           )}
           <button
@@ -1198,6 +1231,16 @@ export const WhatsAppGatewayView: React.FC<WhatsAppGatewayViewProps> = ({
           </div>
         )}
 
+      {/* Team Work Group, 10 Editable Automated Templates & Custom Broadcast Builder */}
+      <WhatsAppTemplatesAndBroadcastPanel
+        currentUser={currentUser}
+        effectiveTier={statusData?.effectiveTier || 'ADMIN'}
+        companyName={companyName || statusData?.branding?.companyName || DEFAULT_MASTER_COMPANY_NAME}
+        supportPhone={supportPhone || statusData?.branding?.supportPhone || ''}
+        isConnected={sessionStatus === 'CONNECTED'}
+        onMessageSent={() => void fetchLogs()}
+      />
+
       {/* Scoped Real-Time Delivery Log */}
       <div className="bg-[#0d1117] border border-slate-800 rounded-2xl overflow-hidden">
         <div className="p-4 border-b border-slate-800 flex flex-col lg:flex-row lg:items-center lg:justify-between gap-3">
@@ -1228,10 +1271,17 @@ export const WhatsAppGatewayView: React.FC<WhatsAppGatewayViewProps> = ({
             >
               <option value="ALL">All Events</option>
               <option value="PROVISION_WELCOME">Welcome / Provisioned</option>
-              <option value="INVOICE_GENERATED">Monthly Invoice</option>
+              <option value="PORTAL_CREDENTIALS">Account Credentials</option>
+              <option value="INVOICE_GENERATED">Monthly Invoice (+31d)</option>
               <option value="PRE_EXPIRY_3D">3-Day Pre-Expiry</option>
+              <option value="GRACE_PERIOD_3D">3-Day Grace Notice</option>
               <option value="AUTO_SUSPENSION">Auto-Suspension</option>
-              <option value="PAYMENT_RESTORED">Paid &amp; Restored</option>
+              <option value="PAYMENT_RESTORED">Paid Receipt (Client)</option>
+              <option value="AGENT_PAYMENT_RECEIPT">Agent Cash Confirmed</option>
+              <option value="COMPLAINT_CREATED_CLIENT">Complaint (Client)</option>
+              <option value="COMPLAINT_CREATED_GROUP">Complaint (Team Group)</option>
+              <option value="COMPLAINT_RESOLVED_CLIENT">Complaint Solved</option>
+              <option value="CUSTOM_MESSAGE">Custom Broadcast</option>
               <option value="MANUAL_TEST">Gateway Test</option>
             </select>
 

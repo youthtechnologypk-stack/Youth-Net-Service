@@ -81,6 +81,27 @@ export const resolvePackageRate = (profileOrSpeed?: string, monthlyFee?: number)
   return 2000;
 };
 
+function addDaysYmd(base: Date | string, days: number): string {
+  let d: Date;
+  if (typeof base === 'string') {
+    const clean = base.trim().slice(0, 10);
+    d = /^\d{4}-\d{2}-\d{2}$/.test(clean) ? new Date(`${clean}T12:00:00Z`) : new Date(base);
+  } else {
+    d = new Date(base.getTime());
+  }
+  if (Number.isNaN(d.getTime())) d = new Date();
+  d.setUTCDate(d.getUTCDate() + days);
+  return d.toISOString().slice(0, 10);
+}
+
+function computeRecharged31DayExpiry(currentExpiryRaw?: string | null): string {
+  const todayYmd = new Date().toISOString().slice(0, 10);
+  const currentYmd = currentExpiryRaw ? String(currentExpiryRaw).trim().slice(0, 10) : '';
+  const baseYmd =
+    /^\d{4}-\d{2}-\d{2}$/.test(currentYmd) && currentYmd > todayYmd ? currentYmd : todayYmd;
+  return addDaysYmd(baseYmd, 31);
+}
+
 export const CreateInvoiceModal: React.FC<CreateInvoiceModalProps> = ({
   isOpen,
   onClose,
@@ -100,12 +121,12 @@ export const CreateInvoiceModal: React.FC<CreateInvoiceModalProps> = ({
   const lockedSubscriber = defaultSubscriberUsername || defaultCustomerId || '';
   const isLocked = Boolean(lockedSubscriber);
 
-  // Form states - calendar-month anniversary cycle
+  // Form states - default Due Date = Current Date + 3 days (editable)
   const [selectedSubscriberUsername, setSelectedSubscriberUsername] = useState<string>(lockedSubscriber);
   const [selectedPackageProfile, setSelectedPackageProfile] = useState<string>('');
   const [amount, setAmount] = useState<number | string>(2000);
   const [anchorDay, setAnchorDay] = useState<number>(() => new Date().getDate());
-  const [dueDate, setDueDate] = useState<string>(() => addCalendarMonthDateString(new Date()));
+  const [dueDate, setDueDate] = useState<string>(() => addDaysYmd(new Date(), 3));
   const [selectedAgentId, setSelectedAgentId] = useState<string>('');
 
   // Dropdown & Search states for MikroTik PPPoE secrets & live profiles
@@ -342,8 +363,8 @@ export const CreateInvoiceModal: React.FC<CreateInvoiceModalProps> = ({
       if (data) {
         const subAnchor = computeBillingAnchorDay(data as any);
         setAnchorDay(subAnchor);
-        setDueDate((data as any).next_billing_date?.slice(0, 10) || addCalendarMonthDateString(new Date(), subAnchor));
       }
+      // Keep default Due Date at Current Date + 3 days (editable by admin/dealer)
 
       const resolved = resolvePreselectedInvoiceProfile({
         username: clean,
@@ -385,6 +406,7 @@ export const CreateInvoiceModal: React.FC<CreateInvoiceModalProps> = ({
       setToastMessage(null);
       setErrorMessage(null);
       setIsSubmitting(false);
+      setDueDate(addDaysYmd(new Date(), 3));
 
       if (lockedSubscriber) {
         setSelectedSubscriberUsername(lockedSubscriber);
@@ -518,6 +540,9 @@ export const CreateInvoiceModal: React.FC<CreateInvoiceModalProps> = ({
         throw new Error(error?.message || 'PostgreSQL invoice insert constraint failed');
       }
 
+      // 5. Generating a DUE invoice must NOT extend validity or activate MikroTik internet.
+      //    Save only the planned non-expiry monthly package profile on the subscriber record
+      //    so it activates automatically for +31 days once the invoice is marked PAID.
       if (cleanProfile) {
         syncSubscriberPackageAndRestoreIfPaid({
           username: subUsername,
@@ -554,19 +579,28 @@ export const CreateInvoiceModal: React.FC<CreateInvoiceModalProps> = ({
       // Zero-click background WhatsApp Monthly Bill notification via hierarchical Baileys sender
       void triggerAutoWhatsAppNotification({
         eventType: 'INVOICE_GENERATED',
+        manualTrigger: true,
         subscriberUsername: subUsername,
+        subscriber: matchedClient ? { ...(matchedClient as Partial<SupabasePortalUser>) } : undefined,
         messageVars: {
+          subscriberName: matchedClient?.full_name || subUsername,
           username: subUsername,
+          phone: matchedClient?.phone || undefined,
           invoiceNo: generatedInvoiceNo,
           amountDue: numAmount,
           totalAmount: numAmount,
           dueDate,
-          packageName: cleanProfile || 'Fiber Broadband',
+          expiryDate:
+            (matchedClient?.expiry_date ? String(matchedClient.expiry_date).slice(0, 10) : '') ||
+            dueDate,
+          packageName: cleanProfile || matchedClient?.package_speed || 'Fiber Broadband',
         },
       });
 
-      // 5. Success Toast & Trigger Refresh
-      setToastMessage('Invoice created successfully');
+      // 6. Success Toast & Trigger Refresh
+      setToastMessage(
+        `DUE invoice #${generatedInvoiceNo} created & sent via WhatsApp (validity recharges +31 days when marked PAID)`
+      );
 
       if (onSuccess) {
         onSuccess(data);
@@ -807,8 +841,8 @@ export const CreateInvoiceModal: React.FC<CreateInvoiceModalProps> = ({
                   className="w-full bg-slate-900 border border-slate-700 text-slate-100 font-mono pl-9 pr-3 py-2 rounded-lg text-xs focus:outline-none focus:border-cyan-500"
                 />
               </div>
-              <span className="text-[10px] text-slate-500 font-mono mt-0.5 block">
-                Monthly calendar anniversary (Day {anchorDay})
+              <span className="text-[10px] text-cyan-400/90 font-mono mt-0.5 block">
+                Default: Today + 3 days (editable) • +3-day post-due grace
               </span>
             </div>
           </div>
@@ -847,7 +881,9 @@ export const CreateInvoiceModal: React.FC<CreateInvoiceModalProps> = ({
               <span className="px-2 py-0.5 rounded text-[10px] font-mono font-bold bg-rose-950 text-rose-300 border border-rose-800">
                 Initial Status: DUE
               </span>
-              <span className="text-[10px] text-slate-500 font-mono block mt-1">Monthly (Day {anchorDay})</span>
+              <span className="text-[10px] text-amber-400 font-mono block mt-1">
+                Recharges +31 Days on PAID • Auto WA
+              </span>
             </div>
           </div>
 

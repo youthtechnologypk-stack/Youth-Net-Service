@@ -43,6 +43,10 @@ import { BillingCronEngine } from '../services/cronBillingEngine';
 import { safeResponseJson } from '../lib/safeFetch';
 import { formatCurrency } from './CurrencyContext';
 import {
+  dispatchComplaintCreatedWhatsApp,
+  dispatchComplaintResolvedWhatsApp,
+} from '../lib/whatsappRouting';
+import {
   apiClient,
   getActiveSessions,
   getProvisionedSecrets,
@@ -80,6 +84,11 @@ import {
 import { storageService } from '../services/storageService';
 import { saveUnifiedPortalUser, USERS_STORAGE_KEY } from '../lib/userRepository';
 import { supabase } from '../services/supabaseClient';
+import {
+  fetchConfiguredExpiryProfileName,
+  restoreSubscriberOnInvoicePaid,
+} from '../lib/billingAndNetwork';
+import { upsertOrigPkgComment } from '../lib/mikrotikProfileSync';
 import { sessionSyncEngine, parseRouterOsUptimeSeconds } from '../services/sessionSyncEngine';
 import {
   deleteSupabaseRouter,
@@ -1979,59 +1988,46 @@ export const ISPProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
     const cnic = (newCustomer as any).cnic || '';
 
     const now = new Date();
-    const today = now.toISOString().split('T')[0];
-    const validityDays = Number((newCustomer as any).validityDays) || 30;
-    const expDate = new Date(now);
-    expDate.setDate(expDate.getDate() + validityDays);
-    const expiryDate = expDate.toISOString().split('T')[0];
+    const nowIso = now.toISOString();
+    const today = nowIso.split('T')[0];
+    const expiryPoolProfile = await fetchConfiguredExpiryProfileName();
 
-    // 1. Structured comment JSON for MikroTik
-    const commentJson = JSON.stringify({
-      created: today,
-      expires: expiryDate,
-      days: validityDays,
-      plan: selectedProfile,
-      phone,
-      address,
-      cnic,
-      ponPort,
-      name: fullName,
-      dueDay: 5,
-      expiredPool: '16.16.16.0/24',
-    });
+    // New subscribers start on Expiry Pool (EXPIRED / PENDING_RECHARGE, expiry_date = Now).
+    // Preserve their assigned monthly paid package inside ORIG_PKG:<selectedProfile> and DB fields
+    // so marking PAID or Manual Recharge activates the exact paid profile for +31 days.
+    const commentWithOrigPkg = upsertOrigPkgComment(
+      JSON.stringify({
+        created: today,
+        expires: today,
+        status: 'PENDING_RECHARGE',
+        plan: selectedProfile,
+        phone,
+        address,
+        cnic,
+        ponPort,
+        name: fullName,
+        dueDay: 5,
+        expiredPool: expiryPoolProfile,
+      }),
+      selectedProfile
+    );
 
     const targetRouter =
       routersRef.current.find((r) => r.id === selectedRouterId) ||
       routersRef.current[0];
 
-    // 2. Dispatch to physical MikroTik REST API: POST /api/mikrotik/ppp/secret/add
+    // 2. Dispatch to physical MikroTik REST API on the Expiry Pool profile by default
     if (targetRouter) {
       try {
         await provisionPppoeSecretRest(targetRouter, {
           name: username,
           password: plainPassword,
           service: 'pppoe',
-          profile: selectedProfile,
-          comment: commentJson,
+          profile: expiryPoolProfile,
+          comment: commentWithOrigPkg,
         });
       } catch (err) {
         console.warn('REST Secret provision warning:', err);
-      }
-
-      // Step B: Create Native MikroTik Scheduler Entry for Router-Level Auto-Expiration
-      try {
-        const scheduleTimes = formatRouterOSSchedule(expDate);
-        const eventScript = `/ppp secret set [find name="${username}"] profile="expired_profile"; /ppp active remove [find name="${username}"]; /system scheduler remove [find name="exp-${username}"]`;
-        await createMikrotikSchedulerRest(targetRouter, {
-          name: `exp-${username}`,
-          startDate: scheduleTimes.startDate,
-          startTime: scheduleTimes.startTime,
-          interval: '0s',
-          onEvent: eventScript,
-          comment: `Auto-expiry for ${username}`,
-        });
-      } catch (schedErr) {
-        console.warn('RouterOS scheduler registration notice:', schedErr);
       }
     }
 
@@ -2044,12 +2040,12 @@ export const ISPProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
           username,
           password: plainPassword,
           service: 'pppoe',
-          profile: selectedProfile,
+          profile: expiryPoolProfile,
           remoteAddress: newCustomer.assignedIp || undefined,
-          comment: commentJson,
+          comment: commentWithOrigPkg,
           createdDate: today,
-          expiryDate,
-          validityDays,
+          expiryDate: today,
+          validityDays: 0,
           name: fullName,
           phone,
           address,
@@ -2059,7 +2055,7 @@ export const ISPProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
       }).catch(() => {});
     } catch {}
 
-    // 3. Concurrently trigger auto-account creation in portal user repository (youthnet_portal_users & /api/auth/users)
+    // 3. Concurrently trigger auto-account creation in portal user repository & Supabase portal_users
     const portalUserRecord: UserAccount = {
       id: `usr-${username}-${Date.now().toString().slice(-4)}`,
       username,
@@ -2071,11 +2067,57 @@ export const ISPProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
       isActive: true,
       grantClientPortal: true,
       department: 'Subscribers',
-      createdAt: now.toISOString(),
+      createdAt: nowIso,
       permissions: { view_dashboard: true, view_traffic: true },
     };
 
     addPortalUser(portalUserRecord);
+
+    const basePrice =
+      Number((newCustomer as any).priceMonthly) ||
+      profilePriceMap[selectedProfile] ||
+      (targetPkg ? targetPkg.priceMonthly : 2500);
+
+    try {
+      const sbPayload: Record<string, any> = {
+        username,
+        password: plainPassword,
+        role: 'CLIENT',
+        full_name: fullName,
+        phone,
+        address,
+        area: areaNode,
+        cnic,
+        account_status: 'EXPIRED',
+        billing_status: 'PENDING_RECHARGE',
+        is_suspended: true,
+        expiry_date: nowIso,
+        next_billing_date: today,
+        original_package_profile: selectedProfile,
+        package_name: selectedProfile,
+        package_profile_name: selectedProfile,
+        package_speed: selectedProfile,
+        monthly_fee: basePrice,
+        created_at: nowIso,
+      };
+      const working = { ...sbPayload };
+      for (let attempt = 0; attempt < 8; attempt++) {
+        const { error: sbErr } = await supabase
+          .from('portal_users')
+          .upsert([working], { onConflict: 'username' });
+        if (!sbErr) break;
+        const m =
+          String(sbErr.message || '').match(/Could not find the ['"]([a-zA-Z0-9_]+)['"] column/i) ||
+          String(sbErr.message || '').match(/column\s+["']?([a-zA-Z0-9_]+)["']?\s+/i);
+        if (m?.[1] && m[1] in working) {
+          delete working[m[1]];
+          continue;
+        }
+        break;
+      }
+    } catch (sbErr) {
+      console.warn('Supabase portal_users expiry-pool insert notice:', sbErr);
+    }
 
     try {
       await fetch('/api/auth/users', {
@@ -2092,13 +2134,11 @@ export const ISPProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
       }).catch(() => {});
     } catch {}
 
-    // 4. Register subscriber automatically into active recurring billing cycle (youthnet_billing_subscribers)
-    const basePrice = profilePriceMap[selectedProfile] || (targetPkg ? targetPkg.priceMonthly : 2500);
+    // 4. Register subscriber in billing repository as PENDING_RECHARGE / expired until paid
     const taxRate = 0.16;
     const taxAmount = Math.round(basePrice * taxRate);
     const totalAmount = basePrice + taxAmount;
-    const nextMonth = new Date(now.getFullYear(), now.getMonth() + 1, 5);
-    const nextBillingDate = nextMonth.toISOString().split('T')[0];
+    const nextBillingDate = today;
 
     // Determine assigned field agent
     const assignedAgentObj = agents.find((a) => a.id === (newCustomer as any).assignedAgentId) || agents[0];
@@ -2119,10 +2159,10 @@ export const ISPProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
       packagePriceMonthly: basePrice,
       billingDay: 5,
       nextBillingDate,
-      status: 'active',
+      status: 'expired',
       lastInvoiceNumber: '',
       balanceDue: totalAmount,
-      createdAt: now.toISOString(),
+      createdAt: nowIso,
     };
 
     setBillingSubscribers((prev) => [
@@ -2205,11 +2245,11 @@ export const ISPProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
       actor: 'admin',
       actorRole: 'ADMIN',
       actionType: 'SUBSCRIBER_PROVISION',
-      actionTitle: 'Single-Click PPPoE Provisioned',
+      actionTitle: 'PPPoE Provisioned on Expiry Pool',
       target: username,
       severity: 'SUCCESS',
-      details: `Provisioned subscriber ${fullName} (@${username}) on plan ${selectedProfile}. RouterOS auto-expiry registered.`,
-      metadata: { profile: selectedProfile, validityDays, invoice: invoiceNum, agent: assignedAgentName },
+      details: `Provisioned subscriber ${fullName} (@${username}) on Expiry Pool (${expiryPoolProfile}); assigned package ${selectedProfile} activates +31d on Paid / Manual Recharge.`,
+      metadata: { profile: selectedProfile, expiryPoolProfile, invoice: invoiceNum, agent: assignedAgentName },
     });
 
     // 6. Record into Ledger History (youthnet_billing_ledger)
@@ -2254,8 +2294,8 @@ export const ISPProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
       balanceDue: totalAmount,
       ontSignalDbm: -19.2,
       createdDate: today,
-      expiryDate,
-      validityDays,
+      expiryDate: today,
+      validityDays: 0,
     };
 
     setCustomers((prev) => {
@@ -2271,8 +2311,8 @@ export const ISPProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
       '.id': `*new_${username}`,
       name: username,
       service: 'pppoe',
-      profile: selectedProfile,
-      comment: commentJson,
+      profile: expiryPoolProfile,
+      comment: commentWithOrigPkg,
       disabled: 'false',
       'remote-address': createdCust.assignedIp,
     };
@@ -4178,61 +4218,49 @@ export const ISPProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
     return { checked, expiredCount };
   };
 
-  // Renew / Extend Subscriber Package (+30 Days or custom)
+  // Manual Recharge / Extend Subscriber Package (+31 Days prepaid default)
   const renewSubscriberPackage = async (
     username: string,
-    additionalDays: number = 30
+    additionalDays: number = 31
   ): Promise<{ success: boolean; message: string; expiryDate: string }> => {
     const targetRouter = routers.find((r) => r.id === selectedRouterId) || routers[0];
-    const now = new Date();
-
-    const cleanUsername = (username || '').toLowerCase();
+    const cleanUsername = (username || '').trim().toLowerCase();
     const cust = customers.find((c) => (c?.pppoeUsername || '').toLowerCase() === cleanUsername);
-    let baseDate = now;
-    if (cust?.expiryDate) {
-      const currentExp = new Date(cust.expiryDate);
-      if (!isNaN(currentExp.getTime()) && currentExp > now) {
-        baseDate = currentExp;
-      }
-    }
-    const newExpDate = new Date(baseDate.getTime() + additionalDays * 24 * 60 * 60 * 1000)
-      .toISOString()
-      .split('T')[0];
-    const createdDate = now.toISOString().split('T')[0];
-    const targetProfile = cust?.package?.mikrotikProfile || 'default';
+    const targetProfile = cust?.package?.mikrotikProfile || undefined;
 
-    const commentJson = JSON.stringify({
-      created: createdDate,
-      expires: newExpDate,
-      days: additionalDays,
-      plan: targetProfile,
-      phone: cust?.phone || '',
-      name: cust?.name || username,
-      expiredPool: '16.16.16.0/24',
+    const routerAuth = targetRouter
+      ? {
+          host: targetRouter.ipAddress,
+          port: targetRouter.apiPort || 80,
+          username: targetRouter.username || 'admin',
+          password: targetRouter.password || '',
+        }
+      : undefined;
+
+    // Atomic 31-day prepaid recharge:
+    // max(today, current_expiry) + additionalDays -> switch MikroTik from Expiry Pool to active package
+    // -> kick stale PPPoE session -> update Supabase -> auto-dispatch Paid Receipt & Recharge WhatsApp
+    const restoreRes = await restoreSubscriberOnInvoicePaid(cleanUsername, {
+      triggeredBy: 'ADMIN',
+      rechargeDays: additionalDays,
+      selectedProfile: targetProfile,
+      activeRouter: routerAuth,
+      paymentMethod: 'Manual Recharge',
+      notes: `Manual Recharge (+${additionalDays} days) via NOC Console`,
     });
 
-    // 1. Update RouterOS secret (restore regular profile, clear remoteAddress override, update comment)
-    if (targetRouter) {
-      try {
-        await updateMikrotikPppSecretRest(targetRouter, username, {
-          profile: targetProfile,
-          remoteAddress: '',
-          comment: commentJson,
-        });
-
-        // Terminate any active session so subscriber reconnects into restored profile immediately
-        const activeSess = activeSessions.find(
-          (s) => (s?.username || '').toLowerCase() === cleanUsername
-        );
-        if (activeSess) {
-          await disconnectMikrotikActiveSessionRest(targetRouter, activeSess.id || activeSess.username).catch(() => {});
-        }
-      } catch (err) {
-        console.warn('RouterOS renew error:', err);
-      }
+    if (!restoreRes.success && restoreRes.error) {
+      return {
+        success: false,
+        message: restoreRes.error,
+        expiryDate: restoreRes.newExpiryIso,
+      };
     }
 
-    // 2. Update state and localStorage
+    const newExpDate = restoreRes.newExpiryIso;
+    const appliedProfile = restoreRes.restoredProfile || targetProfile || 'default';
+
+    // Update local React state so UI reflects ACTIVE status & new +31 day validity immediately
     setCustomers((prev) =>
       prev.map((c) =>
         (c?.pppoeUsername || '').toLowerCase() === cleanUsername
@@ -4241,7 +4269,6 @@ export const ISPProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
               status: 'active',
               expiryDate: newExpDate,
               validityDays: additionalDays,
-              comment: commentJson,
             }
           : c
       )
@@ -4251,16 +4278,16 @@ export const ISPProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
       actor: 'admin',
       actorRole: 'ADMIN',
       actionType: 'SUBSCRIBER_RENEW',
-      actionTitle: 'PPPoE Package Extended',
+      actionTitle: `Manual Recharge (+${additionalDays} Days)`,
       target: username,
       severity: 'SUCCESS',
-      details: `Extended validity for @${username} by +${additionalDays} days until ${newExpDate}. Profile restored.`,
-      metadata: { username, additionalDays, newExpiry: newExpDate, profile: targetProfile },
+      details: `Recharged @${username} by +${additionalDays} days until ${newExpDate}. Active profile "${appliedProfile}" restored (kicked ${restoreRes.kickedSessions} session(s)).`,
+      metadata: { username, additionalDays, newExpiry: newExpDate, profile: appliedProfile },
     });
 
     return {
       success: true,
-      message: `Subscriber @${username} extended by ${additionalDays} days until ${newExpDate}. Profile restored.`,
+      message: `Subscriber @${username} recharged for +${additionalDays} days until ${newExpDate} on "${appliedProfile}". Receipt sent via WhatsApp.`,
       expiryDate: newExpDate,
     };
   };
@@ -4526,6 +4553,18 @@ export const ISPProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
       }
     }
 
+    // Automated Baileys WhatsApp: Client confirmation + Team Work Group dispatch alert
+    void dispatchComplaintCreatedWhatsApp({
+      ticketId: newTkt.ticketNumber,
+      subscriberUsername: (newTkt.pppoeUsername || newTkt.customerName || newTkt.customerId || '').trim(),
+      clientName: newTkt.customerName,
+      phone: newTkt.customerPhone,
+      area: newTkt.areaNode,
+      address: newTkt.customerAddress,
+      issue: `${newTkt.title}${newTkt.description ? `: ${newTkt.description}` : ''}`,
+      assignedAgentName: assignedAgentName || 'Field Support Team',
+    }).catch(() => {});
+
     return newTkt;
   };
 
@@ -4762,8 +4801,18 @@ export const ISPProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
       )
     );
 
-    // Dispatch automated ticket resolved alert via WhatsApp Business Cloud API
+    // Dispatch automated ticket resolved alert via Baileys WhatsApp + legacy fallback
     if (targetTkt) {
+      void dispatchComplaintResolvedWhatsApp({
+        ticketId: targetTkt.ticketNumber,
+        subscriberUsername: (targetTkt.pppoeUsername || targetTkt.customerName || targetTkt.customerId || '').trim(),
+        clientName: targetTkt.customerName,
+        phone: targetTkt.customerPhone,
+        area: targetTkt.areaNode,
+        issue: `${targetTkt.title}${resolutionNotes ? ` (${resolutionNotes})` : ''}`,
+        resolvedByName: targetTkt.assignedAgentName || 'Technical Support Team',
+      }).catch(() => {});
+
       whatsappBusinessService
         .sendTicketStatusNotification({
           customerPhone: targetTkt.customerPhone,

@@ -9,7 +9,12 @@ import {
   loadBillingSettingsFromDb,
   parseExpiryDateWithCutoffMs,
 } from '../lib/expiryUtils';
-import { resolveSubscriberAnniversaryNextDue } from '../lib/anniversaryBilling';
+import {
+  computeBillingAnchorDay,
+  extractYmdString,
+  resolvePackageRate,
+  resolveSubscriberAnniversaryNextDue,
+} from '../lib/anniversaryBilling';
 import {
   resolveExactSubscriberProfile,
   upsertOrigPkgComment,
@@ -475,7 +480,8 @@ export async function runExpirySweep(
   // Pre-warm MikroTik cache once so paid users stuck in EXPIRED-16-POOL are detected & restored
   const mkCaches = await ensureMikrotikCaches().catch(() => null);
 
-  const graceHours = Math.max(0, Number(settings.grace_hours) || 24);
+  // Enforce minimum 3-day (72h) post-due-date grace period before auto-suspension
+  const graceHours = Math.max(72, Number(settings.grace_hours) || 72);
   const threeDaysMs = 3 * 86_400_000;
   const supportWhatsapp = waConfig?.support_whatsapp || '+923234193599';
   const isDisableMode =
@@ -522,8 +528,23 @@ export async function runExpirySweep(
 
     // -----------------------------------------------------------------------
     // STAGE 0: Auto-Restore Paid Subscribers (dueAmount <= 0 yet still suspended)
+    // NEVER auto-restore newly created PENDING_RECHARGE accounts or accounts
+    // whose expiry_date is not in the future (they must remain on Expiry Pool
+    // until an invoice is marked PAID or a Manual Recharge extends +31 days).
     // -----------------------------------------------------------------------
-    if (dueAmount <= 0 && (isDbSuspended || isMkSuspended)) {
+    const isPendingInitialRecharge =
+      billingStatus === 'PENDING_RECHARGE' || accountStatus === 'PENDING_RECHARGE';
+    const rawSubExpiryMs = sub.expiry_date
+      ? parseExpiryDateWithCutoffMs(sub.expiry_date, settings.cutoff_time_pkt)
+      : null;
+    const hasValidFutureValidity = rawSubExpiryMs !== null && rawSubExpiryMs > nowMs;
+
+    if (isPendingInitialRecharge && dueAmount <= 0) {
+      skippedPaid++;
+      continue;
+    }
+
+    if (dueAmount <= 0 && (isDbSuspended || isMkSuspended) && hasValidFutureValidity) {
       try {
         const restoreProfile = resolveExactSubscriberProfile({
           liveSecret: liveSecForCheck,
@@ -677,6 +698,7 @@ export async function runExpirySweep(
                 phone: sub.phone,
                 packageName: packageLabel,
                 amountDue,
+                dueDate: expiryDateLabel,
                 expiryDate: expiryDateLabel,
                 daysRemaining,
               },
@@ -757,7 +779,7 @@ export async function runExpirySweep(
     }
 
     // -----------------------------------------------------------------------
-    // STAGE 2: Grace / Extra Grace Window (now < graceEndsMs)
+    // STAGE 2: Post-Due-Date 3-Day Grace Window (today > due_date, now < due_date + 3 days)
     // -----------------------------------------------------------------------
     const graceEndsMs = !Number.isNaN(explicitGraceMs)
       ? explicitGraceMs
@@ -773,6 +795,12 @@ export async function runExpirySweep(
       }
 
       const graceEndsIso = new Date(graceEndsMs).toISOString();
+      const dueDateYmd = expiryMs ? new Date(expiryMs).toISOString().slice(0, 10) : todayYmd;
+      const graceDateYmd = graceEndsIso.slice(0, 10);
+      const packageLabel = String(
+        sub.package_speed || sub.package_profile_name || sub.original_package_profile || 'Fiber Broadband'
+      );
+
       if (!isSynthetic && sub.id) {
         await safeUpdateSubscriber(
           supabase,
@@ -800,11 +828,33 @@ export async function runExpirySweep(
             previous_profile: sub.package_profile_name || sub.package_speed || null,
             applied_profile: sub.package_profile_name || sub.package_speed || null,
             triggered_by: triggeredBy,
-            notes: `Entered ${graceHours}h grace period after ${settings.cutoff_time_pkt} PKT cut-off; ends ${graceEndsIso}`,
+            notes: `Entered 3-day (${graceHours}h) post-due grace period (due ${dueDateYmd}); PPPoE stays active until ${graceDateYmd}.`,
             created_at: nowIso,
           },
           schemaWarningsSet
         );
+      }
+
+      // Immediately dispatch automated 3-day Grace Period Warning via Baileys WhatsApp
+      if (!options.skipExternalWhatsapp && sub.phone) {
+        baileysManager
+          .sendAutomatedMessage({
+            supabase,
+            subscriber: sub as any,
+            subscriberUsername: uname,
+            eventType: 'GRACE_PERIOD_3D',
+            messageVars: {
+              subscriberName: String(sub.full_name || sub.username),
+              username: uname,
+              phone: sub.phone,
+              packageName: packageLabel,
+              amountDue,
+              dueDate: dueDateYmd,
+              graceDate: graceDateYmd,
+              expiryDate: graceDateYmd,
+            },
+          })
+          .catch(() => {});
       }
 
       enteredGrace++;
@@ -996,6 +1046,285 @@ export async function runExpirySweep(
     errors,
     schemaWarnings: Array.from(schemaWarningsSet),
     durationMs: Date.now() - startedAt,
+    timestamp: nowIso,
+  };
+}
+
+export interface FiveDayPreExpiryAutoBillingResult {
+  success: boolean;
+  scanned: number;
+  invoicesGenerated: number;
+  sent: number;
+  whatsappSent: number;
+  skipped: number;
+  skippedExisting: number;
+  failed: number;
+  totalBilled: number;
+  errors: string[];
+  timestamp: string;
+}
+
+async function safeInsertDueInvoiceServer(
+  supabase: SupabaseClient,
+  payload: Record<string, any>
+): Promise<{ data: any; error: any }> {
+  const working: Record<string, any> = { ...payload };
+  const optionalCols = new Set([
+    'package_profile',
+    'package_name',
+    'shifted_to_next_month',
+    'sub_dealer_id',
+    'dealer_id',
+    'created_by_id',
+  ]);
+  let lastResult: { data: any; error: any } = { data: null, error: null };
+
+  for (let attempt = 0; attempt < 8; attempt++) {
+    const { data, error } = await supabase
+      .from('invoices')
+      .insert([working])
+      .select()
+      .maybeSingle();
+    if (!error) return { data, error: null };
+    lastResult = { data, error };
+
+    const msg = String(error.message || error.details || '');
+    const match =
+      msg.match(/Could not find the ['"]([a-zA-Z0-9_]+)['"] column/i) ||
+      msg.match(/column\s+["']?([a-zA-Z0-9_]+)["']?\s+(?:of relation|does not exist)/i);
+    if (match?.[1] && match[1] in working && optionalCols.has(match[1])) {
+      delete working[match[1]];
+      continue;
+    }
+    if (isMissingTableOrColumnError(error)) {
+      let stripped = false;
+      for (const col of optionalCols) {
+        if (col in working) {
+          delete working[col];
+          stripped = true;
+        }
+      }
+      if (stripped) continue;
+    }
+    break;
+  }
+  return lastResult;
+}
+
+/**
+ * 5-Day Pre-Expiry Auto-Billing & Automated Baileys WhatsApp Delivery Engine:
+ * - Scans all active subscribers whose `expiry_date` is within 5 days (`expiry_date - today <= 5 days`)
+ *   and who do not already have an open `DUE` invoice for the upcoming cycle.
+ * - Generates a monthly `DUE` invoice (`due_date = subscriber.expiry_date`, NEVER extending `expiry_date`).
+ * - Immediately auto-delivers the generated invoice via Baileys WhatsApp Gateway with tenant branding & helpline.
+ */
+export async function runFiveDayPreExpiryAutoBilling(options?: {
+  supabaseClient?: SupabaseClient | null;
+  allowedSubscriberUsernames?: Set<string> | null;
+  daysBeforeExpiry?: number;
+  nowMs?: number;
+  skipWhatsapp?: boolean;
+}): Promise<FiveDayPreExpiryAutoBillingResult> {
+  const nowMs = options?.nowMs ?? Date.now();
+  const nowDate = new Date(nowMs);
+  const nowIso = nowDate.toISOString();
+  const todayYmd =
+    extractYmdString(nowIso) ||
+    `${nowDate.getUTCFullYear()}-${String(nowDate.getUTCMonth() + 1).padStart(2, '0')}-${String(
+      nowDate.getUTCDate()
+    ).padStart(2, '0')}`;
+  const [ty, tm, td] = todayYmd.split('-').map(Number);
+  const todayUtcMs = Date.UTC(ty, (tm || 1) - 1, td || 1);
+  const daysBeforeExpiry = Math.max(1, Math.min(15, Number(options?.daysBeforeExpiry ?? 5)));
+
+  const supabase = options?.supabaseClient || getServerSupabase();
+  if (!supabase) {
+    return {
+      success: false,
+      scanned: 0,
+      invoicesGenerated: 0,
+      sent: 0,
+      whatsappSent: 0,
+      skipped: 0,
+      skippedExisting: 0,
+      failed: 0,
+      totalBilled: 0,
+      errors: ['Supabase client not initialized.'],
+      timestamp: nowIso,
+    };
+  }
+
+  const [{ data: clients, error: clientErr }, { data: existingInvoices, error: invErr }] =
+    await Promise.all([
+      supabase.from('portal_users').select('*').eq('role', 'CLIENT'),
+      supabase
+        .from('invoices')
+        .select('id, invoice_no, subscriber_username, amount, paid_amount, status, due_date, created_at'),
+    ]);
+
+  if (clientErr) {
+    return {
+      success: false,
+      scanned: 0,
+      invoicesGenerated: 0,
+      sent: 0,
+      whatsappSent: 0,
+      skipped: 0,
+      skippedExisting: 0,
+      failed: 0,
+      totalBilled: 0,
+      errors: [clientErr.message],
+      timestamp: nowIso,
+    };
+  }
+
+  const errors: string[] = [];
+  if (invErr) errors.push(`Invoices query warning: ${invErr.message}`);
+
+  const openNonMaterialByUser = new Set<string>();
+  const existingDueDateKeys = new Set<string>();
+  for (const inv of (existingInvoices || []) as Array<Record<string, any>>) {
+    const uname = String(inv.subscriber_username || '').trim().toLowerCase();
+    if (!uname) continue;
+    const invNoUpper = String(inv.invoice_no || '').trim().toUpperCase();
+    if (invNoUpper.startsWith('INV-MAT-')) continue;
+
+    const st = String(inv.status || '').toUpperCase();
+    const bal = Math.max(0, (Number(inv.amount) || 0) - (Number(inv.paid_amount) || 0));
+    if (st !== 'PAID' && st !== 'CANCELLED' && bal > 0) {
+      openNonMaterialByUser.add(uname);
+    }
+    const dueYmd = extractYmdString(inv.due_date);
+    if (dueYmd) {
+      existingDueDateKeys.add(`${uname}::${dueYmd}`);
+    }
+  }
+
+  const activeClients = ((clients || []) as Array<Record<string, any>>).filter((sub) => {
+    const acc = String(sub.account_status || 'ACTIVE').toUpperCase();
+    const bil = String(sub.billing_status || 'ACTIVE').toUpperCase();
+    if (sub.is_suspended === true) return false;
+    if (['EXPIRED', 'SUSPENDED', 'DELETED', 'PENDING_RECHARGE'].includes(acc)) return false;
+    if (['SUSPENDED_EXPIRED', 'PENDING_RECHARGE'].includes(bil)) return false;
+    const uname = String(sub.username || '').trim().toLowerCase();
+    if (!uname) return false;
+    if (options?.allowedSubscriberUsernames && !options.allowedSubscriberUsernames.has(uname)) {
+      return false;
+    }
+    return true;
+  });
+
+  let invoicesGenerated = 0;
+  let whatsappSent = 0;
+  let skippedExisting = 0;
+  let failed = 0;
+  let totalBilled = 0;
+
+  for (const sub of activeClients) {
+    const uname = String(sub.username || '').trim().toLowerCase();
+    const expiryYmd = extractYmdString(sub.expiry_date || sub.next_billing_date);
+    if (!expiryYmd) continue;
+
+    const [ey, em, ed] = expiryYmd.split('-').map(Number);
+    const expUtcMs = Date.UTC(ey, (em || 1) - 1, ed || 1);
+    const daysUntilExpiry = Math.round((expUtcMs - todayUtcMs) / 86_400_000);
+
+    // Scan active subscribers whose expiry_date is <= 5 days away (and not ancient >30d stale)
+    if (daysUntilExpiry > daysBeforeExpiry || daysUntilExpiry < -30) continue;
+
+    if (openNonMaterialByUser.has(uname) || existingDueDateKeys.has(`${uname}::${expiryYmd}`)) {
+      skippedExisting++;
+      continue;
+    }
+
+    const pkgName =
+      String(
+        sub.original_package_profile ||
+          sub.package_profile_name ||
+          sub.package_name ||
+          sub.package_speed ||
+          'Fiber Broadband'
+      ).trim() || 'Fiber Broadband';
+
+    const amount =
+      Number(sub.monthly_fee) > 0 ? Number(sub.monthly_fee) : resolvePackageRate(pkgName);
+    if (amount <= 0) continue;
+
+    const compactYm = expiryYmd.slice(0, 7).replace('-', '');
+    const invoiceNo = `INV-${compactYm}-${Math.floor(1000 + Math.random() * 9000)}`;
+    const anchorDay = computeBillingAnchorDay(sub as any);
+
+    const { error: insertErr } = await safeInsertDueInvoiceServer(supabase, {
+      invoice_no: invoiceNo,
+      subscriber_username: uname,
+      assigned_agent_id: null,
+      assigned_agent_name: null,
+      amount,
+      paid_amount: 0,
+      status: 'DUE',
+      due_date: expiryYmd,
+      cycle_day: anchorDay,
+      package_profile: pkgName,
+      package_name: pkgName,
+      dealer_id: sub.dealer_id || null,
+      sub_dealer_id: sub.sub_dealer_id || null,
+      created_at: nowIso,
+    });
+
+    if (insertErr) {
+      failed++;
+      errors.push(`Invoice insert failed for @${uname}: ${insertErr.message || 'Unknown error'}`);
+      continue;
+    }
+
+    invoicesGenerated++;
+    totalBilled += amount;
+    openNonMaterialByUser.add(uname);
+    existingDueDateKeys.add(`${uname}::${expiryYmd}`);
+
+    // Immediately auto-deliver generated monthly DUE invoice via Baileys WhatsApp Gateway
+    if (!options?.skipWhatsapp && sub.phone) {
+      try {
+        const waRes = await baileysManager.sendAutomatedMessage({
+          supabase,
+          subscriber: sub as any,
+          subscriberUsername: uname,
+          eventType: 'INVOICE_GENERATED',
+          messageVars: {
+            subscriberName: String(sub.full_name || sub.username || uname),
+            username: uname,
+            phone: String(sub.phone),
+            packageName: pkgName,
+            invoiceNo,
+            amountDue: amount,
+            totalAmount: amount,
+            dueDate: expiryYmd,
+            expiryDate: expiryYmd,
+          },
+        });
+        if (waRes.status === 'SENT') {
+          whatsappSent++;
+        } else if (waRes.status === 'FAILED') {
+          failed++;
+        }
+      } catch (waErr: any) {
+        failed++;
+        errors.push(`WhatsApp dispatch error for @${uname}: ${waErr?.message || 'Failed'}`);
+      }
+    }
+  }
+
+  return {
+    success: true,
+    scanned: activeClients.length,
+    invoicesGenerated,
+    sent: whatsappSent,
+    whatsappSent,
+    skipped: skippedExisting,
+    skippedExisting,
+    failed,
+    totalBilled,
+    errors,
     timestamp: nowIso,
   };
 }

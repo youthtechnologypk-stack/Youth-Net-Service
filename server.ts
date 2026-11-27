@@ -59,8 +59,16 @@ import {
   processIncomingWhatsAppMessage,
   verifyWebhookChallenge,
 } from './src/server/whatsappBotEngine.ts';
+import {
+  DEFAULT_TEMPLATE_MAP,
+  WHATSAPP_TEAM_GROUP_SETTINGS_KEY,
+  WHATSAPP_TEMPLATES_SETTINGS_KEY,
+} from './src/lib/whatsappTemplates.ts';
 import { syncSessionsFromMikrotik } from './src/server/sessionGeneratorEngine.ts';
-import { runExpirySweep } from './src/server/expirySweepEngine.ts';
+import {
+  runExpirySweep,
+  runFiveDayPreExpiryAutoBilling,
+} from './src/server/expirySweepEngine.ts';
 import { createClient } from '@supabase/supabase-js';
 import { supabase as defaultSupabaseClient } from './src/services/supabaseClient.ts';
 import {
@@ -3257,6 +3265,112 @@ app.post('/api/whatsapp/branding', async (req: Request, res: Response) => {
   }
 });
 
+app.get('/api/whatsapp/groups', async (req: Request, res: Response) => {
+  try {
+    const ctx = await resolveWhatsAppGatewayActor(req);
+    if (!ctx.ok || !ctx.actor) {
+      return res.status(ctx.statusCode || 401).json({ success: false, groups: [], error: ctx.error });
+    }
+    const result = await baileysManager.fetchConnectedGroups(String(ctx.actor.id));
+    return res.status(result.ok ? 200 : 400).json({
+      success: result.ok,
+      groups: result.groups,
+      error: result.error,
+    });
+  } catch (err: any) {
+    return res.status(500).json({
+      success: false,
+      groups: [],
+      error: err?.message || 'Failed to fetch WhatsApp groups',
+    });
+  }
+});
+
+app.get('/api/whatsapp/templates', async (req: Request, res: Response) => {
+  try {
+    const ctx = await resolveWhatsAppGatewayActor(req);
+    if (!ctx.ok || !ctx.actor) {
+      return res.status(ctx.statusCode || 401).json({ success: false, error: ctx.error });
+    }
+    const [templates, teamGroup] = await Promise.all([
+      baileysManager.getTemplatesForUser(serverSupabase, String(ctx.actor.id)),
+      baileysManager.getTeamGroupForUser(serverSupabase, String(ctx.actor.id)),
+    ]);
+    return res.json({
+      success: true,
+      templates: { ...DEFAULT_TEMPLATE_MAP, ...(templates || {}) },
+      teamGroup: teamGroup || { groupJid: '', groupName: '', inviteLink: '' },
+    });
+  } catch (err: any) {
+    return res.status(500).json({
+      success: false,
+      error: err?.message || 'Failed to load WhatsApp templates',
+    });
+  }
+});
+
+app.post('/api/whatsapp/templates', async (req: Request, res: Response) => {
+  try {
+    const ctx = await resolveWhatsAppGatewayActor(req);
+    if (!ctx.ok || !ctx.actor) {
+      return res.status(ctx.statusCode || 401).json({ success: false, error: ctx.error });
+    }
+    const body = req.body || {};
+    const nowIso = new Date().toISOString();
+    const rows: Array<{ key: string; value: string; updated_at: string }> = [];
+    const actorId = String(ctx.actor.id);
+    const isAdmin = ctx.effectiveTier === 'ADMIN';
+
+    if (body.templates && typeof body.templates === 'object') {
+      const sanitized: Record<string, string> = {};
+      for (const k of Object.keys(DEFAULT_TEMPLATE_MAP)) {
+        const val = body.templates[k];
+        if (typeof val === 'string' && val.trim()) {
+          sanitized[k] = val.slice(0, 3000);
+        }
+      }
+      const serialized = JSON.stringify(sanitized);
+      if (isAdmin) {
+        rows.push({ key: WHATSAPP_TEMPLATES_SETTINGS_KEY, value: serialized, updated_at: nowIso });
+      }
+      rows.push({
+        key: `${WHATSAPP_TEMPLATES_SETTINGS_KEY}:${actorId}`,
+        value: serialized,
+        updated_at: nowIso,
+      });
+    }
+
+    if (body.teamGroup && typeof body.teamGroup === 'object') {
+      const cleanGroup = {
+        groupJid: String(body.teamGroup.groupJid || '').trim().slice(0, 120),
+        groupName: String(body.teamGroup.groupName || '').trim().slice(0, 140),
+        inviteLink: String(body.teamGroup.inviteLink || '').trim().slice(0, 260),
+      };
+      const serialized = JSON.stringify(cleanGroup);
+      if (isAdmin) {
+        rows.push({ key: WHATSAPP_TEAM_GROUP_SETTINGS_KEY, value: serialized, updated_at: nowIso });
+      }
+      rows.push({
+        key: `${WHATSAPP_TEAM_GROUP_SETTINGS_KEY}:${actorId}`,
+        value: serialized,
+        updated_at: nowIso,
+      });
+    }
+
+    if (rows.length > 0) {
+      await serverSupabase.from('app_settings').upsert(rows, { onConflict: 'key' });
+      baileysManager.invalidateSettingsCache();
+    }
+
+    return res.json({ success: true });
+  } catch (err: any) {
+    return res.status(500).json({
+      success: false,
+      error: err?.message || 'Failed to save WhatsApp templates',
+    });
+  }
+});
+
 const handleWhatsAppAutoSend = async (req: Request, res: Response) => {
   try {
     const { scope, caller } = await resolveServerResellerScope(req);
@@ -3274,14 +3388,22 @@ const handleWhatsAppAutoSend = async (req: Request, res: Response) => {
       'PORTAL_CREDENTIALS',
       'INVOICE_GENERATED',
       'PRE_EXPIRY_3D',
+      'GRACE_PERIOD_3D',
       'AUTO_SUSPENSION',
       'PAYMENT_RESTORED',
+      'AGENT_PAYMENT_RECEIPT',
+      'COMPLAINT_CREATED_CLIENT',
+      'COMPLAINT_CREATED_GROUP',
+      'COMPLAINT_RESOLVED_CLIENT',
+      'CUSTOM_MESSAGE',
       'MANUAL_TEST',
     ]);
     let eventType = String(body.eventType || '').trim().toUpperCase();
     if (!eventType) {
       if (body.password || body.portalUrl || body.messageVars?.password || body.messageVars?.portalUrl) {
         eventType = 'PORTAL_CREDENTIALS';
+      } else if (body.customMessage) {
+        eventType = 'CUSTOM_MESSAGE';
       } else if (body.message || body.messageVars?.customNote) {
         eventType = 'MANUAL_TEST';
       }
@@ -3299,14 +3421,21 @@ const handleWhatsAppAutoSend = async (req: Request, res: Response) => {
     const mergedMessageVars = {
       ...(body.messageVars || {}),
       ...(body.phone && !body.messageVars?.phone ? { phone: String(body.phone).trim() } : {}),
-      ...(body.message && !body.messageVars?.customNote ? { customNote: String(body.message).slice(0, 2000) } : {}),
+      ...(body.message && !body.messageVars?.customNote ? { customNote: String(body.message).slice(0, 2500) } : {}),
+      ...(body.customMessage && !body.messageVars?.customMessage
+        ? { customMessage: String(body.customMessage).slice(0, 3000) }
+        : {}),
     };
 
     const isNewAccountEvent = eventType === 'PROVISION_WELCOME' || eventType === 'PORTAL_CREDENTIALS';
+    const isDirectBroadcast =
+      eventType === 'MANUAL_TEST' ||
+      (eventType === 'CUSTOM_MESSAGE' && !subscriberUsername) ||
+      eventType === 'COMPLAINT_CREATED_GROUP';
     let effectiveSubscriber = body.subscriber || null;
 
     // Enforce strict multi-tenant scope so a Dealer/Sub-Dealer cannot trigger messages for another tenant's subscriber
-    if (scope.isIsolated && eventType !== 'MANUAL_TEST') {
+    if (scope.isIsolated && !isDirectBroadcast) {
       const allowedSet = scope.allowedSubscriberUsernames || new Set<string>();
       const inExistingScope = Boolean(subscriberUsername && allowedSet.has(subscriberUsername));
       if (!inExistingScope) {
@@ -3347,7 +3476,9 @@ const handleWhatsAppAutoSend = async (req: Request, res: Response) => {
       subscriberUsername,
       eventType: eventType as any,
       messageVars: mergedMessageVars,
-      manualTrigger: Boolean(body.manualTrigger),
+      groupJid: body.groupJid ? String(body.groupJid).trim() : undefined,
+      customMessage: body.customMessage ? String(body.customMessage).slice(0, 3000) : undefined,
+      manualTrigger: Boolean(body.manualTrigger) || eventType === 'CUSTOM_MESSAGE',
       forceSenderPortalUserId:
         eventType === 'MANUAL_TEST' ? String(caller.id) : undefined,
     });
@@ -3391,7 +3522,7 @@ app.get('/api/whatsapp/logs', async (req: Request, res: Response) => {
   }
 });
 
-app.post('/api/whatsapp/cron/pre-expiry', async (req: Request, res: Response) => {
+const handleRunFiveDayPreExpiryBillingRoute = async (req: Request, res: Response) => {
   try {
     const ctx = await resolveWhatsAppGatewayActor(req);
     if (!ctx.ok || !ctx.actor) {
@@ -3400,19 +3531,34 @@ app.post('/api/whatsapp/cron/pre-expiry', async (req: Request, res: Response) =>
     if (ctx.effectiveTier !== 'ADMIN' && ctx.effectiveTier !== 'DEALER') {
       return res.status(403).json({
         success: false,
-        error: 'Only Master Admin or Dealers can trigger the 3-day pre-expiry reminder sweep.',
+        error: 'Only Master Admin or Dealers can trigger 5-day pre-expiry auto-billing.',
       });
     }
 
+    const daysBeforeExpiry = Math.max(
+      1,
+      Math.min(15, Number((req.body && req.body.daysBeforeExpiry) || 5))
+    );
     const scopedSet = ctx.scope.isIsolated
       ? ctx.scope.allowedSubscriberUsernames || new Set<string>()
       : null;
-    const summary = await baileysManager.runDailyPreExpiryAutoReminders(serverSupabase, scopedSet);
-    return res.json({ success: true, ...summary });
+
+    const summary = await runFiveDayPreExpiryAutoBilling({
+      supabaseClient: serverSupabase,
+      allowedSubscriberUsernames: scopedSet,
+      daysBeforeExpiry,
+    });
+    return res.json(summary);
   } catch (err: any) {
-    return res.status(500).json({ success: false, error: err?.message || 'Pre-expiry sweep failed' });
+    return res.status(500).json({
+      success: false,
+      error: err?.message || '5-day pre-expiry auto-billing failed',
+    });
   }
-});
+};
+
+app.post('/api/whatsapp/cron/pre-expiry', handleRunFiveDayPreExpiryBillingRoute);
+app.post('/api/billing/run-5day-pre-expiry-billing', handleRunFiveDayPreExpiryBillingRoute);
 
 // ============================================================================
 // SUBSCRIBER INVENTORY LOGS & INVOICES EDIT / DELETE API (RBAC + TENANT SCOPED)
@@ -3990,11 +4136,18 @@ async function startServer() {
 
   app.listen(PORT, '0.0.0.0', () => {
     console.log(`[NetPulse NOC Server] Ready on http://0.0.0.0:${PORT}`);
-    // Auto-restore persisted multi-tenant Baileys WhatsApp sessions & start daily 3-day pre-expiry scheduler
+    // Auto-restore persisted multi-tenant Baileys WhatsApp sessions & start hourly 5-day pre-expiry auto-billing
     baileysManager.restorePersistedSessions(serverSupabase).catch((err) => {
       console.warn('[Baileys] Startup session restore warning:', err?.message);
     });
     baileysManager.startPreExpiryScheduler(serverSupabase);
+
+    // Hourly automated expiry & grace-period enforcement (moves unpaid post-grace subscribers to Expiry Pool)
+    setInterval(() => {
+      runExpirySweep({ triggeredBy: 'CRON_2PM' }).catch((err) => {
+        console.warn('[Expiry Sweep] Scheduled check notice:', err?.message || err);
+      });
+    }, 60 * 60 * 1000);
   });
 }
 

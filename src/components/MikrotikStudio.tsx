@@ -935,20 +935,23 @@ export const MikrotikStudio: React.FC<MikrotikStudioProps> = ({
                                 onClick={async () => {
                                   setIsRenewing(username);
                                   try {
-                                    const res = await renewSubscriberPackage(username, 30);
-                                    setSyncToast({ type: 'success', message: res.message });
+                                    const res = await renewSubscriberPackage(username, 31);
+                                    setSyncToast({
+                                      type: res.success ? 'success' : 'error',
+                                      message: res.message,
+                                    });
                                   } catch (err: any) {
-                                    setSyncToast({ type: 'error', message: err.message || 'Renewal failed' });
+                                    setSyncToast({ type: 'error', message: err.message || 'Recharge failed' });
                                   } finally {
                                     setIsRenewing(null);
                                   }
                                 }}
                                 disabled={isRenewing === username}
                                 className="bg-cyan-950/90 hover:bg-cyan-900 border border-cyan-700 text-cyan-300 px-2 py-1 rounded text-[11px] transition flex items-center gap-1 cursor-pointer font-bold shadow-sm disabled:opacity-50"
-                                title="Extend package validity by +30 Days"
+                                title="Manual Recharge: Extend validity by +31 Days, activate package & send WhatsApp receipt"
                               >
                                 <RefreshCw className={`w-3 h-3 text-cyan-400 ${isRenewing === username ? 'animate-spin' : ''}`} />
-                                <span>+ Renew</span>
+                                <span>+ Recharge 31d</span>
                               </button>
 
                               <button

@@ -233,38 +233,14 @@ export const ProvisionSecretModal: React.FC<ProvisionSecretModalProps> = ({ isOp
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!name || !pppoeUsername) return;
-    if (walletGateStatus?.blocked) {
-      setWalletError(
-        walletGateStatus.error || 'Prepaid reseller wallet gate blocked this package assignment.'
-      );
-      return;
-    }
 
     setIsSubmitting(true);
     setWalletError(null);
 
-    let chargedAmount = 0;
-    let chargedResellerId = '';
-
-    // Strict Reseller Prepaid Wallet Deduction Gate BEFORE calling MikroTik API
-    if (effectiveDealerId) {
-      const walletCheck = await checkAndDeductResellerWallet({
-        resellerId: effectiveDealerId,
-        profileName: packageId,
-        subscriberUsername: pppoeUsername,
-        txType: 'USER_ACTIVATION',
-        performedBy: activeLoggedInUser?.fullName || activeLoggedInUser?.username || 'Reseller',
-        notes: `New PPPoE activation for @${pppoeUsername.trim().toLowerCase()} (${packageId})`,
-      });
-
-      if (!walletCheck.ok) {
-        setWalletError(walletCheck.error || 'Insufficient Dealer Wallet Balance');
-        setIsSubmitting(false);
-        return;
-      }
-      chargedAmount = Number(walletCheck.chargedAmount || 0);
-      chargedResellerId = effectiveDealerId;
-    }
+    // New subscribers start on the Expiry Pool (PENDING_RECHARGE) by default.
+    // Reseller wallet deduction runs atomically when an invoice is marked PAID or Manual Recharge is executed.
+    const chargedAmount = 0;
+    const chargedResellerId = '';
 
     const selectedAgent = portalAgents.find((a) => a.id === assignedAgentId) || null;
 
@@ -411,6 +387,9 @@ export const ProvisionSecretModal: React.FC<ProvisionSecretModalProps> = ({ isOp
 
         {/* Form */}
         <form onSubmit={handleSubmit} className="p-5 space-y-4 text-xs">
+          <div className="rounded-xl border border-amber-500/40 bg-amber-950/35 px-3.5 py-2.5 text-[11px] text-amber-200 leading-relaxed">
+            New subscribers are provisioned onto the <span className="font-bold text-amber-300">Expiry Pool</span> (<span className="font-mono">PENDING_RECHARGE</span>) by default. Their selected monthly package activates for <span className="font-bold text-emerald-300">+31 days</span> once their invoice is marked <span className="font-bold">PAID</span> or manually recharged.
+          </div>
           {walletError && (
             <div className="rounded-xl border border-rose-500/60 bg-rose-950/80 px-3.5 py-3 text-rose-200 flex items-start gap-2.5">
               <ShieldCheck className="w-4 h-4 text-rose-400 shrink-0 mt-0.5" />

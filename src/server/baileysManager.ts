@@ -13,11 +13,18 @@ import type {
 import {
   buildAutomatedWhatsAppMessage,
   DEFAULT_MASTER_COMPANY_NAME,
+  formatWhatsAppGroupJid,
   formatWhatsAppJid,
   resolveWhatsAppSender,
   type AutomatedMessageTemplateVars,
   type SubscriberOwnershipRef,
 } from '../lib/whatsappRouting';
+import {
+  WHATSAPP_TEAM_GROUP_SETTINGS_KEY,
+  WHATSAPP_TEMPLATES_SETTINGS_KEY,
+  type EditableWhatsAppTemplateKey,
+  type TeamWorkGroupConfig,
+} from '../lib/whatsappTemplates';
 
 const makeWASocket: any =
   (baileys as any).default?.default ??
@@ -81,8 +88,156 @@ class MultiTenantBaileysManager {
   private reconnectTimers = new Map<string, ReturnType<typeof setTimeout>>();
   private inMemoryLogs: SupabaseWhatsappLog[] = [];
   private sentPreExpiryToday = new Set<string>();
+  private sentGraceNoticeCycles = new Set<string>();
+  private settingsCache: {
+    loadedAt: number;
+    globalTemplates: Partial<Record<EditableWhatsAppTemplateKey, string>>;
+    scopedTemplates: Map<string, Partial<Record<EditableWhatsAppTemplateKey, string>>>;
+    globalTeamGroup: TeamWorkGroupConfig | null;
+    scopedTeamGroups: Map<string, TeamWorkGroupConfig>;
+  } = {
+    loadedAt: 0,
+    globalTemplates: {},
+    scopedTemplates: new Map(),
+    globalTeamGroup: null,
+    scopedTeamGroups: new Map(),
+  };
   private preExpirySweepTimer: ReturnType<typeof setInterval> | null = null;
   private isSweepingPreExpiry = false;
+
+  public invalidateSettingsCache(): void {
+    this.settingsCache.loadedAt = 0;
+  }
+
+  private async loadSettingsFromSupabase(supabase: SupabaseClient | null): Promise<void> {
+    if (!supabase) return;
+    if (Date.now() - this.settingsCache.loadedAt < 30_000) return;
+    try {
+      const { data, error } = await supabase
+        .from('app_settings')
+        .select('key, value')
+        .or(`key.like.${WHATSAPP_TEMPLATES_SETTINGS_KEY}%,key.like.${WHATSAPP_TEAM_GROUP_SETTINGS_KEY}%`);
+
+      if (error || !Array.isArray(data)) {
+        this.settingsCache.loadedAt = Date.now();
+        return;
+      }
+
+      const globalTemplates: Partial<Record<EditableWhatsAppTemplateKey, string>> = {};
+      const scopedTemplates = new Map<string, Partial<Record<EditableWhatsAppTemplateKey, string>>>();
+      let globalTeamGroup: TeamWorkGroupConfig | null = null;
+      const scopedTeamGroups = new Map<string, TeamWorkGroupConfig>();
+
+      for (const row of data as Array<{ key?: string; value?: string }>) {
+        const key = String(row.key || '').trim();
+        if (!key || !row.value) continue;
+        let parsed: any = null;
+        try {
+          parsed = typeof row.value === 'string' ? JSON.parse(row.value) : row.value;
+        } catch {
+          continue;
+        }
+        if (!parsed || typeof parsed !== 'object') continue;
+
+        if (key === WHATSAPP_TEMPLATES_SETTINGS_KEY) {
+          Object.assign(globalTemplates, parsed);
+        } else if (key.startsWith(`${WHATSAPP_TEMPLATES_SETTINGS_KEY}:`)) {
+          const uid = key.slice(`${WHATSAPP_TEMPLATES_SETTINGS_KEY}:`.length);
+          if (uid) scopedTemplates.set(uid, parsed);
+        } else if (key === WHATSAPP_TEAM_GROUP_SETTINGS_KEY) {
+          globalTeamGroup = {
+            groupJid: String(parsed.groupJid || '').trim(),
+            groupName: String(parsed.groupName || '').trim(),
+            inviteLink: String(parsed.inviteLink || '').trim(),
+          };
+        } else if (key.startsWith(`${WHATSAPP_TEAM_GROUP_SETTINGS_KEY}:`)) {
+          const uid = key.slice(`${WHATSAPP_TEAM_GROUP_SETTINGS_KEY}:`.length);
+          if (uid) {
+            scopedTeamGroups.set(uid, {
+              groupJid: String(parsed.groupJid || '').trim(),
+              groupName: String(parsed.groupName || '').trim(),
+              inviteLink: String(parsed.inviteLink || '').trim(),
+            });
+          }
+        }
+      }
+
+      this.settingsCache = {
+        loadedAt: Date.now(),
+        globalTemplates,
+        scopedTemplates,
+        globalTeamGroup,
+        scopedTeamGroups,
+      };
+    } catch {
+      this.settingsCache.loadedAt = Date.now();
+    }
+  }
+
+  public async getTemplatesForUser(
+    supabase: SupabaseClient | null,
+    portalUserId?: string | null
+  ): Promise<Partial<Record<EditableWhatsAppTemplateKey, string>>> {
+    await this.loadSettingsFromSupabase(supabase);
+    const scoped = portalUserId ? this.settingsCache.scopedTemplates.get(String(portalUserId)) : undefined;
+    return {
+      ...this.settingsCache.globalTemplates,
+      ...(scoped || {}),
+    };
+  }
+
+  public async getTeamGroupForUser(
+    supabase: SupabaseClient | null,
+    portalUserId?: string | null
+  ): Promise<TeamWorkGroupConfig | null> {
+    await this.loadSettingsFromSupabase(supabase);
+    if (portalUserId) {
+      const scoped = this.settingsCache.scopedTeamGroups.get(String(portalUserId));
+      if (scoped && (scoped.groupJid || scoped.groupName)) return scoped;
+    }
+    return this.settingsCache.globalTeamGroup;
+  }
+
+  public async fetchConnectedGroups(
+    portalUserId: string
+  ): Promise<{
+    ok: boolean;
+    groups: Array<{ id: string; subject: string; participantsCount: number }>;
+    error?: string;
+  }> {
+    const safeId = sanitizePortalUserIdForSession(portalUserId);
+    if (!safeId) {
+      return { ok: false, groups: [], error: 'Invalid session ID.' };
+    }
+    const sessionKey = `session_${safeId}`;
+    const sock = this.sessions.get(sessionKey);
+    const meta = this.sessionMeta.get(safeId);
+    if (!sock || meta?.status !== 'CONNECTED') {
+      return {
+        ok: false,
+        groups: [],
+        error: 'WhatsApp session is not connected. Pair your WhatsApp via QR first to fetch groups.',
+      };
+    }
+    try {
+      const participating = await sock.groupFetchAllParticipating();
+      const list = Object.values(participating || {})
+        .map((g: any) => ({
+          id: String(g?.id || '').trim(),
+          subject: String(g?.subject || 'Unnamed Group').trim(),
+          participantsCount: Array.isArray(g?.participants) ? g.participants.length : 0,
+        }))
+        .filter((g) => Boolean(formatWhatsAppGroupJid(g.id)))
+        .sort((a, b) => a.subject.localeCompare(b.subject));
+      return { ok: true, groups: list };
+    } catch (err: any) {
+      return {
+        ok: false,
+        groups: [],
+        error: err?.message || 'Failed to fetch WhatsApp groups from connected session.',
+      };
+    }
+  }
 
   private ensureRootDir(): void {
     if (!fs.existsSync(BAILEYS_AUTH_ROOT)) {
@@ -533,12 +688,46 @@ class MultiTenantBaileysManager {
     return false;
   }
 
+  private async hasAlreadySentGraceNotice(
+    supabase: SupabaseClient | null,
+    username: string,
+    graceCycleTag: string
+  ): Promise<boolean> {
+    const clean = String(username || '').trim().toLowerCase();
+    if (!clean) return false;
+    const key = `${clean}::${graceCycleTag}`;
+    if (this.sentGraceNoticeCycles.has(key)) return true;
+
+    if (supabase) {
+      try {
+        const sinceIso = new Date(Date.now() - 4 * 86_400_000).toISOString();
+        const { data, error } = await supabase
+          .from('whatsapp_logs')
+          .select('id')
+          .eq('event_type', 'GRACE_PERIOD_3D')
+          .eq('status', 'SENT')
+          .ilike('subscriber_username', clean)
+          .gte('created_at', sinceIso)
+          .limit(1);
+        if (!error && Array.isArray(data) && data.length > 0) {
+          this.sentGraceNoticeCycles.add(key);
+          return true;
+        }
+      } catch {
+        // ignore if whatsapp_logs table not ready
+      }
+    }
+    return false;
+  }
+
   public async sendAutomatedMessage(params: {
     supabase: SupabaseClient | null;
     subscriber?: SubscriberOwnershipRef | null;
     subscriberUsername?: string | null;
     eventType: WhatsAppEventType;
     messageVars?: Partial<AutomatedMessageTemplateVars> & { phone?: string | null };
+    groupJid?: string | null;
+    customMessage?: string | null;
     forceSenderPortalUserId?: string | null;
     manualTrigger?: boolean;
   }): Promise<{
@@ -602,7 +791,7 @@ class MultiTenantBaileysManager {
       }
     }
 
-    // 3. Duplicate same-day protection for automated 3-day pre-expiry reminders (bypassed on explicit manual clicks)
+    // 3. Duplicate protection for automated 3-day pre-expiry & 3-day grace notices (bypassed on explicit manual clicks)
     if (eventType === 'PRE_EXPIRY_3D' && cleanSubUsername && !params.manualTrigger) {
       const alreadySent = await this.hasAlreadySentPreExpiryToday(supabase, cleanSubUsername);
       if (alreadySent) {
@@ -613,6 +802,21 @@ class MultiTenantBaileysManager {
           senderPhone: null,
           senderPortalUserId: null,
           skippedReason: `Pre-expiry reminder already sent today for @${cleanSubUsername}`,
+        };
+      }
+    }
+
+    if (eventType === 'GRACE_PERIOD_3D' && cleanSubUsername && !params.manualTrigger) {
+      const graceTag = String(params.messageVars?.graceDate || params.messageVars?.dueDate || getTodayYmdUtc()).slice(0, 10);
+      const alreadySent = await this.hasAlreadySentGraceNotice(supabase, cleanSubUsername, graceTag);
+      if (alreadySent) {
+        return {
+          ok: true,
+          status: 'SKIPPED',
+          senderCompanyName: DEFAULT_MASTER_COMPANY_NAME,
+          senderPhone: null,
+          senderPortalUserId: null,
+          skippedReason: `3-day grace notice already sent for @${cleanSubUsername} (${graceTag})`,
         };
       }
     }
@@ -656,14 +860,36 @@ class MultiTenantBaileysManager {
         senderPhone: forcedMeta.phone || forcedUser?.whatsapp_phone || null,
         isConnected: connectedIds.has(forcedId),
         autoSendEnabled: forcedUser ? forcedUser.whatsapp_auto_send !== false : true,
-        resolutionNote: 'Direct test send from active session',
+        resolutionNote: 'Direct send from active session',
       };
     }
+
+    // Load saved custom templates & team group config for resolved sender
+    const [customTemplates, teamGroupConfig] = await Promise.all([
+      this.getTemplatesForUser(supabase, senderResolution.senderPortalUserId),
+      eventType === 'COMPLAINT_CREATED_GROUP'
+        ? this.getTeamGroupForUser(supabase, senderResolution.senderPortalUserId)
+        : Promise.resolve(null),
+    ]);
 
     const recipientPhoneRaw = String(
       params.messageVars?.phone || resolvedSubscriber?.phone || ''
     ).trim();
-    const jid = formatWhatsAppJid(recipientPhoneRaw);
+
+    let jid: string | null = null;
+    let loggedRecipient = recipientPhoneRaw || 'MISSING_PHONE';
+
+    if (params.groupJid || eventType === 'COMPLAINT_CREATED_GROUP') {
+      const candidateGroupJid = params.groupJid || teamGroupConfig?.groupJid || '';
+      jid = formatWhatsAppGroupJid(candidateGroupJid);
+      loggedRecipient = jid
+        ? teamGroupConfig?.groupName
+          ? `${teamGroupConfig.groupName} (${jid})`
+          : jid
+        : candidateGroupJid || 'UNCONFIGURED_TEAM_GROUP';
+    } else {
+      jid = formatWhatsAppJid(recipientPhoneRaw);
+    }
 
     const messageBody = buildAutomatedWhatsAppMessage({
       eventType,
@@ -685,20 +911,30 @@ class MultiTenantBaileysManager {
       totalAmount: params.messageVars?.totalAmount,
       remainingBalance: params.messageVars?.remainingBalance,
       dueDate: params.messageVars?.dueDate,
+      graceDate: params.messageVars?.graceDate,
       expiryDate: params.messageVars?.expiryDate,
       daysRemaining: params.messageVars?.daysRemaining,
       invoiceNo: params.messageVars?.invoiceNo,
       paymentMethod: params.messageVars?.paymentMethod,
+      ticketId: params.messageVars?.ticketId,
+      issue: params.messageVars?.issue,
+      agentName: params.messageVars?.agentName,
+      agentBalance: params.messageVars?.agentBalance,
+      area: params.messageVars?.area,
+      address: params.messageVars?.address,
+      phone: recipientPhoneRaw,
       paymentAccounts:
         params.messageVars?.paymentAccounts?.length
           ? params.messageVars.paymentAccounts
           : paymentAccounts,
       customNote: params.messageVars?.customNote,
+      customMessage: params.customMessage || params.messageVars?.customMessage,
+      customTemplates,
     });
 
     const loggedMessageBody =
       eventType === 'PORTAL_CREDENTIALS' || eventType === 'PROVISION_WELCOME'
-        ? messageBody.replace(/(\*Password:\*\s*)(.+)/gi, '$1••••••••')
+        ? messageBody.replace(/(\*(?:PPPoE\s+)?Password:\*\s*)(.+)/gi, '$1••••••••')
         : messageBody;
 
     const baseLog = {
@@ -708,7 +944,7 @@ class MultiTenantBaileysManager {
       sender_tier: senderResolution.senderTier,
       subscriber_id: resolvedSubscriber?.id ? String(resolvedSubscriber.id) : null,
       subscriber_username: cleanSubUsername || null,
-      recipient_phone: recipientPhoneRaw || 'MISSING_PHONE',
+      recipient_phone: loggedRecipient,
       dealer_id: resolvedSubscriber?.dealer_id ? String(resolvedSubscriber.dealer_id) : null,
       sub_dealer_id: resolvedSubscriber?.sub_dealer_id
         ? String(resolvedSubscriber.sub_dealer_id)
@@ -717,10 +953,11 @@ class MultiTenantBaileysManager {
       message_body: loggedMessageBody,
     };
 
-    // Respect sender's Auto-Send master toggle (except explicit manual clicks, manual test, or credential dispatch)
+    // Respect sender's Auto-Send master toggle (except explicit manual clicks, manual test, custom broadcast, or credential dispatch)
     if (
       !params.manualTrigger &&
       eventType !== 'MANUAL_TEST' &&
+      eventType !== 'CUSTOM_MESSAGE' &&
       eventType !== 'PORTAL_CREDENTIALS' &&
       !senderResolution.autoSendEnabled
     ) {
@@ -741,7 +978,10 @@ class MultiTenantBaileysManager {
     }
 
     if (!jid) {
-      const errMsg = `Invalid or missing recipient phone number ("${recipientPhoneRaw || 'empty'}")`;
+      const errMsg =
+        eventType === 'COMPLAINT_CREATED_GROUP' || params.groupJid
+          ? 'Team WhatsApp Work Group JID is not configured. Select your Team Group in WhatsApp & Branding.'
+          : `Invalid or missing recipient phone number ("${recipientPhoneRaw || 'empty'}")`;
       const log = await this.persistWhatsappLog(supabase, {
         ...baseLog,
         status: 'FAILED',
@@ -787,6 +1027,10 @@ class MultiTenantBaileysManager {
 
       if (eventType === 'PRE_EXPIRY_3D' && cleanSubUsername) {
         this.sentPreExpiryToday.add(`${cleanSubUsername}::${getTodayYmdUtc()}`);
+      }
+      if (eventType === 'GRACE_PERIOD_3D' && cleanSubUsername) {
+        const graceTag = String(params.messageVars?.graceDate || params.messageVars?.dueDate || getTodayYmdUtc()).slice(0, 10);
+        this.sentGraceNoticeCycles.add(`${cleanSubUsername}::${graceTag}`);
       }
 
       const log = await this.persistWhatsappLog(supabase, {
@@ -894,99 +1138,55 @@ class MultiTenantBaileysManager {
   }
 
   /**
-   * Daily / Periodic 3-Day Pre-Expiry Automated Reminder Sweep:
-   * Scans active subscribers expiring within 0-3 days with unpaid dues and automatically
-   * dispatches PRE_EXPIRY_3D via the hierarchical Baileys sender without sending same-day duplicates.
+   * Hourly / Manual 5-Day Pre-Expiry Auto-Billing & Automated WhatsApp Invoice Delivery:
+   * Scans active subscribers whose expiry_date is <= 5 days away with no open DUE invoice,
+   * generates their monthly DUE invoice (`due_date = subscriber.expiry_date`) in Supabase,
+   * and immediately delivers it via the hierarchical Baileys sender.
    */
   public async runDailyPreExpiryAutoReminders(
     supabase: SupabaseClient | null,
     allowedSubscriberUsernames?: Set<string> | null
   ): Promise<{
     scanned: number;
+    invoicesGenerated: number;
     sent: number;
+    whatsappSent: number;
     skipped: number;
+    skippedExisting: number;
     failed: number;
+    totalBilled: number;
   }> {
     if (!supabase || this.isSweepingPreExpiry) {
-      return { scanned: 0, sent: 0, skipped: 0, failed: 0 };
-    }
-    if (this.getConnectedPortalUserIds().size === 0) {
-      return { scanned: 0, sent: 0, skipped: 0, failed: 0 };
+      return {
+        scanned: 0,
+        invoicesGenerated: 0,
+        sent: 0,
+        whatsappSent: 0,
+        skipped: 0,
+        skippedExisting: 0,
+        failed: 0,
+        totalBilled: 0,
+      };
     }
 
     this.isSweepingPreExpiry = true;
     try {
-      const [{ data: clients }, { data: invoices }] = await Promise.all([
-        supabase.from('portal_users').select('*').eq('role', 'CLIENT'),
-        supabase.from('invoices').select('*').neq('status', 'PAID'),
-      ]);
-
-      const unpaidByUser = new Map<string, { totalDue: number; earliestDueDate: string | null }>();
-      for (const inv of invoices || []) {
-        const st = String(inv.status || '').toUpperCase();
-        const bal = Math.max(0, (Number(inv.amount) || 0) - (Number(inv.paid_amount) || 0));
-        if (st === 'PAID' || st === 'CANCELLED' || bal <= 0) continue;
-        const uname = String(inv.subscriber_username || '').trim().toLowerCase();
-        if (!uname) continue;
-        const prev = unpaidByUser.get(uname) || { totalDue: 0, earliestDueDate: null };
-        prev.totalDue += bal;
-        if (inv.due_date && (!prev.earliestDueDate || inv.due_date < prev.earliestDueDate)) {
-          prev.earliestDueDate = inv.due_date;
-        }
-        unpaidByUser.set(uname, prev);
-      }
-
-      const nowMs = Date.now();
-      const threeDaysMs = 3 * 86_400_000;
-      let scanned = 0;
-      let sent = 0;
-      let skipped = 0;
-      let failed = 0;
-
-      for (const sub of (clients || []) as SupabasePortalUser[]) {
-        const acct = String(sub.account_status || 'ACTIVE').toUpperCase();
-        if (acct === 'SUSPENDED' || acct === 'EXPIRED' || acct === 'DELETED') continue;
-        const uname = String(sub.username || '').trim().toLowerCase();
-        if (!uname || !sub.phone) continue;
-        if (allowedSubscriberUsernames && !allowedSubscriberUsernames.has(uname)) continue;
-
-        const unpaid = unpaidByUser.get(uname);
-        const dueDateRaw = unpaid?.earliestDueDate || sub.next_billing_date || sub.expiry_date;
-        if (!dueDateRaw) continue;
-
-        const dueMs = Date.parse(`${String(dueDateRaw).slice(0, 10)}T23:59:59Z`);
-        if (Number.isNaN(dueMs)) continue;
-
-        const diffMs = dueMs - nowMs;
-        if (diffMs < 0 || diffMs > threeDaysMs) continue;
-
-        const amountDue = unpaid?.totalDue || Number(sub.monthly_fee) || 0;
-        if (amountDue <= 0) continue;
-
-        scanned++;
-        const daysRemaining = Math.max(0, Math.ceil(diffMs / 86_400_000));
-        const res = await this.sendAutomatedMessage({
-          supabase,
-          subscriber: sub,
-          subscriberUsername: uname,
-          eventType: 'PRE_EXPIRY_3D',
-          messageVars: {
-            subscriberName: sub.full_name,
-            username: uname,
-            phone: sub.phone,
-            packageName: sub.package_profile_name || sub.package_speed || 'Fiber Broadband',
-            amountDue,
-            expiryDate: String(dueDateRaw).slice(0, 10),
-            daysRemaining,
-          },
-        });
-
-        if (res.status === 'SENT') sent++;
-        else if (res.status === 'SKIPPED') skipped++;
-        else failed++;
-      }
-
-      return { scanned, sent, skipped, failed };
+      const { runFiveDayPreExpiryAutoBilling } = await import('./expirySweepEngine');
+      const result = await runFiveDayPreExpiryAutoBilling({
+        supabaseClient: supabase,
+        allowedSubscriberUsernames,
+        daysBeforeExpiry: 5,
+      });
+      return {
+        scanned: result.scanned,
+        invoicesGenerated: result.invoicesGenerated,
+        sent: result.whatsappSent,
+        whatsappSent: result.whatsappSent,
+        skipped: result.skippedExisting,
+        skippedExisting: result.skippedExisting,
+        failed: result.failed,
+        totalBilled: result.totalBilled,
+      };
     } finally {
       this.isSweepingPreExpiry = false;
     }
@@ -994,7 +1194,7 @@ class MultiTenantBaileysManager {
 
   public startPreExpiryScheduler(supabase: SupabaseClient | null): void {
     if (this.preExpirySweepTimer) return;
-    // Run every 60 minutes (same-day dedupe ensures each subscriber gets at most 1 reminder per day)
+    // Run every 60 minutes to auto-generate & auto-deliver monthly DUE invoices 5 days before expiry
     this.preExpirySweepTimer = setInterval(() => {
       this.runDailyPreExpiryAutoReminders(supabase).catch(() => {});
     }, 60 * 60 * 1000);

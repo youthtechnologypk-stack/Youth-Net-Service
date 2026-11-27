@@ -65,6 +65,7 @@ import {
   syncSubscriberPackageAndRestoreIfPaid,
   shiftBillToNextMonth,
   computeGuardedShiftNextMonthDate,
+  runFiveDayPreExpiryAutoBillingClient,
 } from '../lib/billingAndNetwork';
 import {
   buildLiveMikrotikPlanOptions,
@@ -82,6 +83,7 @@ import {
   getDefaultWhatsappConfig,
 } from '../lib/whatsappBilling';
 import {
+  dispatchDualPaymentReceiptWhatsApp,
   formatWhatsAppDisplayPhone,
   isValidWhatsAppPhone,
   loadPersistedWhatsAppGatewayUrl,
@@ -344,15 +346,26 @@ export const BillingView: React.FC<BillingViewProps> = ({
   const handleRunAnniversaryCron = async () => {
     setIsRunningCron(true);
     try {
-      const summary = await runAnniversaryInvoicingCron(supabase, { force: true });
+      const userTier = String(currentUser?.tier_level || currentUser?.role || '').toUpperCase();
+      const summary = await runFiveDayPreExpiryAutoBillingClient({
+        daysBeforeExpiry: 5,
+        dealerId: userTier === 'DEALER' ? String(currentUser?.id || '') : undefined,
+        subDealerId: userTier === 'SUB_DEALER' ? String(currentUser?.id || '') : undefined,
+      });
       setActionNotice(
-        summary.generatedCount > 0
-          ? `Anniversary Invoicing CRON (${summary.cycleMonth}): Generated ${summary.generatedCount} invoice${summary.generatedCount === 1 ? '' : 's'} totaling ${formatCurrency(summary.totalBilled)}.`
-          : `Anniversary Invoicing CRON (${summary.cycleMonth}): Checked ${summary.scanned} active subscribers — all due anniversary bills (${summary.skippedExisting}) already generated, ${summary.skippedUpcomingAnchor} upcoming.`
+        summary.invoicesGenerated > 0
+          ? `5-Day Pre-Expiry Auto-Billing: Generated ${summary.invoicesGenerated} DUE invoice${
+              summary.invoicesGenerated === 1 ? '' : 's'
+            } (${formatCurrency(summary.totalBilled)}) • WhatsApp Delivered: ${summary.whatsappSent} • Skipped: ${summary.skippedExisting}${
+              summary.failed > 0 ? ` • Failed: ${summary.failed}` : ''
+            }.`
+          : `5-Day Pre-Expiry Auto-Billing: Scanned ${summary.scanned} active subscriber${
+              summary.scanned === 1 ? '' : 's'
+            } — 0 new invoices needed (${summary.skippedExisting} already billed).`
       );
       await fetchInvoices();
     } catch (err: any) {
-      setActionNotice(`Invoicing CRON notice: ${err?.message || 'Unable to generate invoices'}`);
+      setActionNotice(`5-Day Pre-Expiry Auto-Billing notice: ${err?.message || 'Unable to run auto-billing'}`);
     } finally {
       setIsRunningCron(false);
     }
@@ -539,7 +552,9 @@ export const BillingView: React.FC<BillingViewProps> = ({
           ? selectedInvoice.due_date
           : new Date();
 
-      // STRICT PREPAID WALLET PAYMENT GATE BEFORE MARKING INVOICE PAID OR RESTORING MIKROTIK
+      // STRICT PREPAID WALLET PAYMENT GATE + 31-DAY RECHARGE BEFORE MARKING INVOICE PAID
+      let rechargedExpiryYmd: string | null = null;
+      let restoredProfileName: string | null = null;
       if (newStatus === 'PAID') {
         if (markPaidWalletStatus?.blocked) {
           const msg =
@@ -554,6 +569,8 @@ export const BillingView: React.FC<BillingViewProps> = ({
           performedBy: currentUser?.fullName || currentUser?.username || 'Billing Desk',
           notes: `Payment recorded on Invoice #${selectedInvoice.invoice_no} (${paidPaymentMethod})`,
           activeRouter: activeRouterRef.current,
+          selectedProfile:
+            selectedInvoice.package_profile || selectedInvoice.package_name || undefined,
           amountPaid: enteredVal,
           invoiceNo: selectedInvoice.invoice_no,
           paymentMethod: paidPaymentMethod,
@@ -566,9 +583,11 @@ export const BillingView: React.FC<BillingViewProps> = ({
           setIsSubmitting(false);
           return;
         }
+        rechargedExpiryYmd = restoreRes.newExpiryIso || null;
+        restoredProfileName = restoreRes.restoredProfile || null;
       }
 
-      // 1. Update invoice in Supabase ONLY AFTER prepaid wallet & MikroTik restore succeed
+      // 1. Update invoice in Supabase (preserve historical due_date; +31d validity lives on portal_users)
       const invoiceUpdateData: Partial<SupabaseInvoice> = {
         status: newStatus,
         paid_amount: finalPaidAmount,
@@ -576,7 +595,6 @@ export const BillingView: React.FC<BillingViewProps> = ({
         cycle_day: renewalAnchorDay,
       };
       if (newStatus === 'PAID') {
-        invoiceUpdateData.due_date = addCalendarMonthDateString(renewalBase, renewalAnchorDay);
         invoiceUpdateData.shifted_to_next_month = false;
       }
 
@@ -592,18 +610,22 @@ export const BillingView: React.FC<BillingViewProps> = ({
       // 2. Update collecting agent's cash_in_hand in portal_users by ONLY enteredVal
       const targetAgentId = collectingAgentId || selectedInvoice.assigned_agent_id;
       let targetAgentName = selectedInvoice.assigned_agent_name || 'Field Agent';
+      let targetAgentPhone = '';
+      let targetAgentUpdatedCash: number | null = null;
 
       if (targetAgentId) {
         const { data: agentRecord } = await supabase
           .from('portal_users')
-          .select('id, cash_in_hand, full_name')
+          .select('id, cash_in_hand, full_name, phone')
           .eq('id', targetAgentId)
           .maybeSingle();
 
         if (agentRecord) {
           targetAgentName = agentRecord.full_name;
+          targetAgentPhone = String((agentRecord as any).phone || '').trim();
           const currentCash = Number(agentRecord.cash_in_hand) || 0;
           const updatedCash = currentCash + enteredVal;
+          targetAgentUpdatedCash = updatedCash;
 
           await supabase
             .from('portal_users')
@@ -639,7 +661,7 @@ export const BillingView: React.FC<BillingViewProps> = ({
           (selectedInvoice.subscriber_username || '').trim().toLowerCase()
       );
       const nextExpiryStr =
-        invoiceUpdateData.due_date ||
+        rechargedExpiryYmd ||
         selectedInvoice.due_date ||
         addCalendarMonthDateString(new Date(), renewalAnchorDay);
       const remainingAfterPay = Math.max(0, totalAmount - finalPaidAmount);
@@ -660,8 +682,12 @@ export const BillingView: React.FC<BillingViewProps> = ({
 
       setActionNotice(
         `Recorded ${formatCurrency(enteredVal)} for Invoice #${invoiceSnapshot.invoice_no}! Status: ${newStatus}.${
-          targetAgentId ? ` Credited to ${targetAgentName}'s Cash-in-Hand.` : ''
-        }`
+          newStatus === 'PAID' && rechargedExpiryYmd
+            ? ` Recharged +31 days (valid until ${rechargedExpiryYmd}${
+                restoredProfileName ? ` on ${restoredProfileName}` : ''
+              }).`
+            : ''
+        }${targetAgentId ? ` Credited to ${targetAgentName}'s Cash-in-Hand.` : ''}`
       );
 
       setTimeout(() => setActionNotice(null), 10000);
@@ -669,82 +695,57 @@ export const BillingView: React.FC<BillingViewProps> = ({
       setSelectedInvoice(null);
       await fetchInvoices();
 
-      // Auto-dispatch Paid Receipt via Baileys Gateway in the background (zero manual popup, zero wa.me tab)
+      // Dual Payment Receipt Automation via Baileys Gateway (Client Paid Receipt + Recovery Agent Collection Confirmation)
       void (async () => {
-        let resolvedSub: Partial<SupabasePortalUser> | null = clientMatch ? { ...clientMatch } : null;
-        if (!isValidWhatsAppPhone(resolvedSub?.phone)) {
-          try {
-            const { data: freshSub } = await supabase
-              .from('portal_users')
-              .select('id, username, full_name, phone, package_speed, dealer_id, sub_dealer_id')
-              .ilike('username', invoiceSnapshot.subscriber_username)
-              .maybeSingle();
-            if (freshSub) {
-              resolvedSub = { ...(resolvedSub || {}), ...(freshSub as Partial<SupabasePortalUser>) };
-            }
-          } catch {
-            // keep existing match
-          }
-        }
-
-        const displayName = resolvedSub?.full_name || invoiceSnapshot.subscriber_username;
-        const resolvedPhone = resolvedSub?.phone || '';
-
-        if (!isValidWhatsAppPhone(resolvedPhone)) {
-          showWaToast(
-            {
-              status: 'error',
-              title: 'Subscriber phone number missing. Please update contact number first.',
-              subtitle: `Payment recorded for Invoice #${invoiceSnapshot.invoice_no}, but WhatsApp receipt could not be sent.`,
-            },
-            9000
-          );
-          return;
-        }
-
-        const formattedPhone = formatWhatsAppDisplayPhone(resolvedPhone);
+        const displayName = clientMatch?.full_name || invoiceSnapshot.subscriber_username;
         showWaToast({
           status: 'sending',
-          title: `Sending WhatsApp receipt to ${displayName}...`,
-          subtitle: `Invoice #${invoiceSnapshot.invoice_no} (${formattedPhone})`,
+          title: `Sending WhatsApp receipt to ${displayName}${targetAgentId ? ` & Agent ${targetAgentName}` : ''}...`,
+          subtitle: `Invoice #${invoiceSnapshot.invoice_no}`,
         });
 
-        const waRes = await triggerAutoWhatsAppNotification({
-          eventType: 'PAYMENT_RESTORED',
-          manualTrigger: true,
+        const { clientResult, agentResult } = await dispatchDualPaymentReceiptWhatsApp({
+          invoiceNo: invoiceSnapshot.invoice_no,
           subscriberUsername: invoiceSnapshot.subscriber_username,
-          subscriber: {
-            ...(resolvedSub || {}),
-            username: invoiceSnapshot.subscriber_username,
-            full_name: displayName,
-            phone: resolvedPhone,
-            dealer_id: resolvedSub?.dealer_id ?? invoiceSnapshot.dealer_id ?? null,
-            sub_dealer_id: resolvedSub?.sub_dealer_id ?? invoiceSnapshot.sub_dealer_id ?? null,
-          },
-          messageVars: {
-            subscriberName: displayName,
-            username: invoiceSnapshot.subscriber_username,
-            phone: resolvedPhone,
-            packageName:
-              invoiceSnapshot.package_name ||
-              invoiceSnapshot.package_profile ||
-              resolvedSub?.package_speed ||
-              'Fiber Broadband',
-            invoiceNo: invoiceSnapshot.invoice_no,
-            amountPaid: enteredVal,
-            totalAmount,
-            remainingBalance: remainingAfterPay,
-            paymentMethod: paidPaymentMethod,
-            expiryDate: nextExpiryStr,
-          },
+          subscriber: clientMatch
+            ? {
+                ...clientMatch,
+                dealer_id: clientMatch.dealer_id ?? invoiceSnapshot.dealer_id ?? null,
+                sub_dealer_id: clientMatch.sub_dealer_id ?? invoiceSnapshot.sub_dealer_id ?? null,
+              }
+            : {
+                username: invoiceSnapshot.subscriber_username,
+                dealer_id: invoiceSnapshot.dealer_id ?? null,
+                sub_dealer_id: invoiceSnapshot.sub_dealer_id ?? null,
+              },
+          clientName: displayName,
+          clientPhone: clientMatch?.phone || '',
+          packageName:
+            invoiceSnapshot.package_name ||
+            invoiceSnapshot.package_profile ||
+            clientMatch?.package_speed ||
+            'Fiber Broadband',
+          amountPaid: enteredVal,
+          totalAmount,
+          remainingBalance: remainingAfterPay,
+          paymentMethod: paidPaymentMethod,
+          expiryDate: nextExpiryStr,
+          agentId: targetAgentId || null,
+          agentName: targetAgentName,
+          agentPhone: targetAgentPhone,
+          agentUpdatedCashBalance: targetAgentUpdatedCash,
         });
 
-        if (waRes.ok && waRes.status === 'SENT') {
+        if (clientResult.ok && clientResult.status === 'SENT') {
+          const agentNote =
+            agentResult.ok && agentResult.status === 'SENT'
+              ? ` • Agent ${targetAgentName} confirmed`
+              : '';
           showWaToast(
             {
               status: 'sent',
-              title: `WhatsApp sent to ${waRes.formattedPhone || formattedPhone}`,
-              subtitle: `Paid receipt for Invoice #${invoiceSnapshot.invoice_no} via ${waRes.senderCompanyName || 'WhatsApp Gateway'}`,
+              title: `WhatsApp receipt sent to ${clientResult.formattedPhone || displayName}${agentNote}`,
+              subtitle: `Invoice #${invoiceSnapshot.invoice_no} via ${clientResult.senderCompanyName || 'WhatsApp Gateway'}`,
             },
             7000
           );
@@ -754,8 +755,8 @@ export const BillingView: React.FC<BillingViewProps> = ({
               status: 'error',
               title: `WhatsApp receipt failed for ${displayName}`,
               subtitle:
-                waRes.error ||
-                waRes.skippedReason ||
+                clientResult.error ||
+                clientResult.skippedReason ||
                 'WhatsApp session is disconnected. Connect your session in WhatsApp & Branding.',
             },
             10000
@@ -1638,10 +1639,10 @@ export const BillingView: React.FC<BillingViewProps> = ({
             onClick={handleRunAnniversaryCron}
             disabled={isRunningCron}
             className="px-3.5 py-2.5 rounded-xl border border-cyan-700/60 bg-cyan-950/50 hover:bg-cyan-900/60 text-cyan-300 font-semibold text-xs flex items-center gap-2 transition cursor-pointer whitespace-nowrap shrink-0 disabled:opacity-50"
-            title="Generate anniversary-date monthly invoices for active subscribers"
+            title="Scan active subscribers expiring within 5 days, generate DUE invoices, and auto-deliver via Baileys WhatsApp"
           >
             <RefreshCw className={`w-4 h-4 text-cyan-400 shrink-0 ${isRunningCron ? 'animate-spin' : ''}`} />
-            <span>{isRunningCron ? 'Running CRON...' : 'Run Invoicing CRON'}</span>
+            <span>{isRunningCron ? 'Running Auto-Billing...' : 'Run 5-Day Pre-Expiry Auto-Billing'}</span>
           </button>
 
           <button

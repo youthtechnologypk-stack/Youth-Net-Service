@@ -3,6 +3,7 @@ import type { FieldAgent } from '../types/isp';
 import type { SupabaseInvoice, SupabasePortalUser } from '../services/supabaseClient';
 import { isMissingTableOrColumnError, parseExpiryDateWithCutoffMs } from './expiryUtils';
 import { resolvePackageRate } from '../components/CreateInvoiceModal';
+export { resolvePackageRate };
 import { triggerAutoWhatsAppNotification } from './whatsappRouting';
 
 export type NormalizedTicketPriority = 'LOW' | 'MEDIUM' | 'HIGH' | 'CRITICAL';
@@ -605,7 +606,15 @@ export async function runAnniversaryInvoicingCron(
 
   const activeClients = ((clients || []) as SupabasePortalUser[]).filter((c) => {
     const st = String(c.account_status || 'ACTIVE').toUpperCase();
-    return st !== 'SUSPENDED' && st !== 'DELETED';
+    const bil = String(c.billing_status || 'ACTIVE').toUpperCase();
+    if ((c as any).is_suspended === true) return false;
+    if (st === 'SUSPENDED' || st === 'DELETED' || st === 'EXPIRED' || st === 'PENDING_RECHARGE') {
+      return false;
+    }
+    if (bil === 'PENDING_RECHARGE' || bil === 'SUSPENDED_EXPIRED') {
+      return false;
+    }
+    return true;
   });
 
   const allInvoices = (existingInvoices || []) as SupabaseInvoice[];
@@ -1167,9 +1176,17 @@ export function evaluateSubscribersExpiryBuckets(params: {
       isMkExpiredProfile ||
       isMkDisabled;
 
-    // 0. Paid Users Guard: NEVER show paid users (unpaidInvoiceTotal <= 0) in Suspended or Grace.
-    // Flag any paid user that still has DB/MikroTik suspension markers for auto-restore.
-    if (!hasUnpaidDue && hasSuspensionMarker) {
+    // 0. Paid Users Guard: NEVER show paid users with valid future expiry in Suspended or Grace.
+    // Flag ONLY truly active paid users (NOT new PENDING_RECHARGE accounts with expired/now expiry_date)
+    // that still have DB/MikroTik suspension markers for auto-restore.
+    const isPendingInitialRecharge =
+      billingStatus === 'PENDING_RECHARGE' || accountStatus === 'PENDING_RECHARGE';
+    const rawSubExpiryMs = sub.expiry_date
+      ? parseExpiryDateWithCutoffMs(sub.expiry_date, cutoffPkt)
+      : null;
+    const hasValidFutureValidity = rawSubExpiryMs !== null && rawSubExpiryMs > nowMs;
+
+    if (!hasUnpaidDue && hasSuspensionMarker && !isPendingInitialRecharge && hasValidFutureValidity) {
       paidSuspendedToRestore.push({
         subscriber: sub,
         username: uname,

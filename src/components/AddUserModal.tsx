@@ -359,43 +359,17 @@ export const AddUserModal: React.FC<AddUserModalProps> = ({ isOpen, onClose, onS
       return;
     }
 
-    if (activeResellerOwnerId && walletGateStatus?.blocked) {
-      setSubmissionError(
-        walletGateStatus.error || 'Prepaid reseller wallet gate blocked this package assignment.'
-      );
-      return;
-    }
-
     setIsSubmitting(true);
     setSubmissionError(null);
     setSchedulerWarning(null);
 
-    let chargedAmount = 0;
-    let chargedResellerId: string | null = null;
+    // New subscribers start on the Expiry Pool (PENDING_RECHARGE) by default.
+    // Reseller wallet deduction runs atomically on Mark Paid or Manual Recharge (+31 days).
+    const chargedAmount = 0;
+    const chargedResellerId: string | null = null;
     const loggedInUser = getStoredUser();
 
     try {
-      const resellerOwnerId = resolveActiveResellerIdForSubscriber(null, loggedInUser);
-
-      if (resellerOwnerId) {
-        const walletCheck = await checkAndDeductResellerWallet({
-          resellerId: resellerOwnerId,
-          profileName: profile || 'default',
-          subscriberUsername: username.trim(),
-          txType: 'USER_ACTIVATION',
-          performedBy: loggedInUser?.fullName || loggedInUser?.username || 'Reseller',
-          notes: `PPPoE provisioning for @${username.trim().toLowerCase()} (${profile || 'default'})`,
-        });
-
-        if (!walletCheck.ok) {
-          setSubmissionError(walletCheck.error || 'Insufficient Dealer Wallet Balance');
-          setIsSubmitting(false);
-          return;
-        }
-        chargedAmount = Number(walletCheck.chargedAmount || 0);
-        chargedResellerId = resellerOwnerId;
-      }
-
       const selectedAgent = portalAgents.find((a) => a.id === assignedAgentId) || null;
       const res = await provisionSubscriber({
         username: username.trim(),

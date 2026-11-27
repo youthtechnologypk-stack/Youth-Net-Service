@@ -28,6 +28,9 @@ import {
   calculateRemainingTime,
 } from '../services/mikrotikSubscriberSync';
 import { safeResponseJson } from '../lib/safeFetch';
+import { supabase } from '../services/supabaseClient';
+import { fetchConfiguredExpiryProfileName } from '../lib/billingAndNetwork';
+import { upsertOrigPkgComment } from '../lib/mikrotikProfileSync';
 
 export const STORAGE_KEY_PORTAL_USERS = 'youthnet_portal_users';
 export const STORAGE_KEY_BILLING_SUBSCRIBERS = 'youthnet_billing_subscribers';
@@ -418,20 +421,12 @@ export const useSubscribers = () => {
         targetExpiryDateObj = new Date(Date.now() + 30 * 24 * 60 * 60 * 1000);
       }
 
-      const scheduleTimes = formatRouterOSSchedule(targetExpiryDateObj);
-      const targetExpiryIso = targetExpiryDateObj.toISOString();
-      const expiryDate = targetExpiryIso.split('T')[0];
-      const selectedValidityLabel =
-        params.validityLabel ||
-        (params.validityPreset === '2_hours'
-          ? '2 Hours'
-          : params.validityPreset === '1_day'
-          ? '1 Day'
-          : params.validityPreset === '3_days'
-          ? '3 Days'
-          : params.validityPreset === '7_days'
-          ? '7 Days'
-          : `${validityDays} Days`);
+      const now = new Date();
+      const nowIso = now.toISOString();
+      const expiryDate = today;
+      const targetExpiryIso = nowIso;
+      const scheduleTimes = formatRouterOSSchedule(now);
+      const selectedValidityLabel = 'Pending Recharge (Expiry Pool)';
 
       const matchedPackage =
         packages.find((p) => p.mikrotikProfile === profile || p.name === profile) ||
@@ -442,24 +437,37 @@ export const useSubscribers = () => {
       const targetRouter =
         routers.find((r) => r.id === targetRouterId) || routers[0];
 
-      // Step A: Structured Comment JSON with ISO timestamps and validity label
-      const commentJson = JSON.stringify({
-        created: new Date().toISOString(),
-        expires: targetExpiryIso,
-        validityLabel: selectedValidityLabel,
-        phone: phone || '',
-        address: address || '',
-        cnic,
-        ponPort,
-        feederLine,
-        name: fullName,
-        plan: profile,
-        days: validityDays,
-        dueDay: 5,
-        expiredPool: params.expiredPool || '16.16.16.0/24',
-      });
+      // Resolve Expiry Pool PPPoE profile name (ignore CIDR string like 16.16.16.0/24)
+      const configuredExpiryProfile = await fetchConfiguredExpiryProfileName();
+      const expiryPoolProfile =
+        params.expiredPool &&
+        !params.expiredPool.includes('/') &&
+        params.expiredPool.trim().length > 0
+          ? params.expiredPool.trim()
+          : configuredExpiryProfile;
 
-      // 1. Dispatch POST /api/mikrotik/ppp/secret/add directly to RouterOS REST API
+      // Step A: Structured Comment with ORIG_PKG:<paid_profile> so Mark Paid / Manual Recharge restores exact speed
+      const commentJson = upsertOrigPkgComment(
+        JSON.stringify({
+          created: nowIso,
+          expires: nowIso,
+          status: 'PENDING_RECHARGE',
+          validityLabel: selectedValidityLabel,
+          phone: phone || '',
+          address: address || '',
+          cnic,
+          ponPort,
+          feederLine,
+          name: fullName,
+          plan: profile,
+          days: 0,
+          dueDay: 5,
+          expiredPool: expiryPoolProfile,
+        }),
+        profile
+      );
+
+      // 1. Dispatch POST /api/mikrotik/ppp/secret/add directly to RouterOS REST API on Expiry Pool
       let restProvisioned = false;
       if (targetRouter) {
         try {
@@ -467,7 +475,7 @@ export const useSubscribers = () => {
             name: cleanUsername,
             password: plainPassword,
             service,
-            profile,
+            profile: expiryPoolProfile,
             comment: commentJson,
           }, targetRouter);
           if (restResult.success) {
@@ -478,31 +486,9 @@ export const useSubscribers = () => {
         }
       }
 
-      // Step B: Create Native MikroTik Scheduler Entry for Router-Level Auto-Expiration
-      let schedulerRegistered = false;
-      let schedulerWarning: string | null = null;
-      if (targetRouter) {
-        const eventScript = `/ppp secret set [find name="${cleanUsername}"] profile="expired_profile"; /ppp active remove [find name="${cleanUsername}"]; /system scheduler remove [find name="exp-${cleanUsername}"]`;
-        try {
-          const schedResult = await createScheduler({
-            name: `exp-${cleanUsername}`,
-            startDate: scheduleTimes.startDate,
-            startTime: scheduleTimes.startTime,
-            interval: '0s',
-            onEvent: eventScript,
-            comment: `Auto-expiry for ${cleanUsername}`,
-          }, targetRouter);
-          if (schedResult.success) {
-            schedulerRegistered = true;
-          } else {
-            schedulerWarning = 'User created, but on-router schedule failed to register';
-            console.warn('RouterOS scheduler registration warning:', schedResult.error);
-          }
-        } catch (schedErr: any) {
-          schedulerWarning = 'User created, but on-router schedule failed to register';
-          console.warn('RouterOS scheduler exception:', schedErr);
-        }
-      }
+      // New accounts start on Expiry Pool (PENDING_RECHARGE) — do NOT schedule premature active expiry
+      const schedulerRegistered = false;
+      const schedulerWarning: string | null = null;
 
       // Refresh /api/mikrotik/ppp/secret immediately so user displays in tables
       if (targetRouter) {
@@ -524,12 +510,12 @@ export const useSubscribers = () => {
             username: cleanUsername,
             password: plainPassword,
             service,
-            profile,
+            profile: expiryPoolProfile,
             remoteAddress: params.remoteIp || undefined,
             comment: commentJson,
             createdDate: today,
-            expiryDate,
-            validityDays,
+            expiryDate: today,
+            validityDays: 0,
             name: fullName,
             phone,
             address,
@@ -539,7 +525,7 @@ export const useSubscribers = () => {
         }).catch(() => {});
       } catch {}
 
-      // 2. Concurrently auto-create account in portal user repository (youthnet_portal_users & /api/auth/users)
+      // 2. Concurrently auto-create account in portal user repository & Supabase portal_users
       const portalUserRecord: UserAccount = {
         id: `usr-${cleanUsername}-${Date.now().toString().slice(-4)}`,
         username: cleanUsername,
@@ -551,7 +537,7 @@ export const useSubscribers = () => {
         isActive: true,
         grantClientPortal: true,
         department: 'Subscribers',
-        createdAt: new Date().toISOString(),
+        createdAt: nowIso,
         permissions: { view_dashboard: true, view_traffic: true },
       };
 
@@ -559,6 +545,48 @@ export const useSubscribers = () => {
         addPortalUser(portalUserRecord);
       } catch (err) {
         console.warn('Portal user add warning:', err);
+      }
+
+      // Persist new subscriber to Supabase with EXPIRED / PENDING_RECHARGE & expiry_date = Now
+      try {
+        const sbPayload: Record<string, any> = {
+          username: cleanUsername,
+          password: plainPassword,
+          role: 'CLIENT',
+          full_name: fullName,
+          phone,
+          address,
+          area: areaNode,
+          cnic,
+          account_status: 'EXPIRED',
+          billing_status: 'PENDING_RECHARGE',
+          is_suspended: true,
+          expiry_date: nowIso,
+          next_billing_date: today,
+          original_package_profile: profile,
+          package_name: profile,
+          package_profile_name: profile,
+          package_speed: profile,
+          monthly_fee: packagePrice,
+          created_at: nowIso,
+        };
+        const working = { ...sbPayload };
+        for (let attempt = 0; attempt < 8; attempt++) {
+          const { error: sbErr } = await supabase
+            .from('portal_users')
+            .upsert([working], { onConflict: 'username' });
+          if (!sbErr) break;
+          const m =
+            String(sbErr.message || '').match(/Could not find the ['"]([a-zA-Z0-9_]+)['"] column/i) ||
+            String(sbErr.message || '').match(/column\s+["']?([a-zA-Z0-9_]+)["']?\s+/i);
+          if (m?.[1] && m[1] in working) {
+            delete working[m[1]];
+            continue;
+          }
+          break;
+        }
+      } catch (sbErr) {
+        console.warn('Supabase portal_users expiry-pool insert notice:', sbErr);
       }
 
       try {
@@ -576,11 +604,9 @@ export const useSubscribers = () => {
         }).catch(() => {});
       } catch {}
 
-      // 3. Register subscriber automatically into active recurring billing cycle (youthnet_billing_subscribers)
-      const now = new Date();
+      // 3. Register subscriber in billing repository as PENDING_RECHARGE / expired until paid
       const billingDay = 5;
-      const nextMonth = new Date(now.getFullYear(), now.getMonth() + 1, 5);
-      const nextBillingDate = nextMonth.toISOString().split('T')[0];
+      const nextBillingDate = today;
 
       // Determine assigned field agent
       const assignedAgentObj = agents.find((a) => a.id === params.assignedAgentId) || agents[0];
@@ -601,10 +627,10 @@ export const useSubscribers = () => {
         packagePriceMonthly: packagePrice,
         billingDay,
         nextBillingDate,
-        status: 'active',
+        status: 'expired',
         lastInvoiceNumber: '',
         balanceDue: packagePrice,
-        createdAt: new Date().toISOString(),
+        createdAt: nowIso,
       };
 
       try {
@@ -781,8 +807,8 @@ export const useSubscribers = () => {
         targetExpiryDate: targetExpiryIso,
         scheduleTimes,
         message: schedulerWarning
-          ? `Subscriber ${cleanUsername} provisioned on MikroTik, portal account created, initial invoice ${initialInvoiceNumber} issued. (${schedulerWarning})`
-          : `Subscriber ${cleanUsername} provisioned on MikroTik, portal account created, initial invoice ${initialInvoiceNumber} issued, and auto-expiry scheduled for ${scheduleTimes.readable}.`,
+          ? `Subscriber ${cleanUsername} provisioned on Expiry Pool (${expiryPoolProfile}), portal account created, initial invoice ${initialInvoiceNumber} issued. (${schedulerWarning})`
+          : `Subscriber ${cleanUsername} provisioned on Expiry Pool (${expiryPoolProfile}) awaiting payment/recharge, portal account created, and initial invoice ${initialInvoiceNumber} issued.`,
       };
     },
     [

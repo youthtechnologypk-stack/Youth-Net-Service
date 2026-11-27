@@ -5,6 +5,12 @@ import {
   type WhatsAppEventType,
 } from '../services/supabaseClient';
 import { getStoredToken, getStoredUser } from './auth';
+import {
+  DEFAULT_TEMPLATE_MAP,
+  mapEventTypeToTemplateKey,
+  renderWhatsAppTemplate,
+  type EditableWhatsAppTemplateKey,
+} from './whatsappTemplates';
 
 export const DEFAULT_MASTER_COMPANY_NAME = 'Youth Net Service';
 export const WHATSAPP_GATEWAY_URL_STORAGE_KEY = 'youthnet_baileys_gateway_url';
@@ -65,6 +71,25 @@ BEGIN
   END IF;
 END $$;
 GRANT ALL ON public.whatsapp_logs TO anon, authenticated, service_role;
+
+CREATE TABLE IF NOT EXISTS public.whatsapp_auth_sessions (
+  tenant_id TEXT NOT NULL,
+  key_id TEXT NOT NULL,
+  key_data JSONB NOT NULL,
+  updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  PRIMARY KEY (tenant_id, key_id)
+);
+
+CREATE INDEX IF NOT EXISTS idx_whatsapp_auth_sessions_tenant_id
+  ON public.whatsapp_auth_sessions (tenant_id);
+
+CREATE INDEX IF NOT EXISTS idx_whatsapp_auth_sessions_creds_lookup
+  ON public.whatsapp_auth_sessions (key_id, tenant_id);
+
+ALTER TABLE public.whatsapp_auth_sessions ENABLE ROW LEVEL SECURITY;
+REVOKE ALL ON public.whatsapp_auth_sessions FROM PUBLIC, anon, authenticated;
+GRANT ALL ON public.whatsapp_auth_sessions TO service_role;
+
 NOTIFY pgrst, 'reload schema';`;
 
 export interface WhatsAppSenderCandidate {
@@ -134,6 +159,22 @@ export function formatWhatsAppJid(phone?: string | null): string | null {
   const digits = formatWhatsAppDigits(phone);
   if (!digits) return null;
   return `${digits}@s.whatsapp.net`;
+}
+
+/**
+ * Validates and normalizes a WhatsApp Group JID (`120363012345678901@g.us`).
+ */
+export function formatWhatsAppGroupJid(raw?: string | null): string | null {
+  const clean = String(raw || '').trim();
+  if (!clean) return null;
+  if (/^[0-9-]{6,36}@g\.us$/i.test(clean)) {
+    return clean.toLowerCase();
+  }
+  return null;
+}
+
+export function isValidWhatsAppGroupJid(raw?: string | null): boolean {
+  return Boolean(formatWhatsAppGroupJid(raw));
 }
 
 /**
@@ -301,12 +342,22 @@ export interface AutomatedMessageTemplateVars {
   totalAmount?: number | null;
   remainingBalance?: number | null;
   dueDate?: string | null;
+  graceDate?: string | null;
   expiryDate?: string | null;
   daysRemaining?: number | null;
   invoiceNo?: string | null;
   paymentMethod?: string | null;
   paymentAccounts?: SupabasePaymentAccount[];
+  ticketId?: string | null;
+  issue?: string | null;
+  agentName?: string | null;
+  agentBalance?: number | null;
+  area?: string | null;
+  address?: string | null;
+  phone?: string | null;
   customNote?: string | null;
+  customMessage?: string | null;
+  customTemplates?: Partial<Record<EditableWhatsAppTemplateKey, string>> | null;
 }
 
 function formatPaymentAccountLines(accounts?: SupabasePaymentAccount[]): string {
@@ -322,133 +373,70 @@ export function buildAutomatedWhatsAppMessage(vars: AutomatedMessageTemplateVars
   const company = String(vars.companyName || DEFAULT_MASTER_COMPANY_NAME).trim();
   const clientName = String(vars.subscriberName || vars.username || 'Valued Subscriber').trim();
   const uname = String(vars.username || '').trim();
+  const supportPhone = String(vars.supportPhone || '+923234193599').trim();
   const supportLine = vars.supportPhone ? `\nSupport Helpline: ${vars.supportPhone}` : '';
   const paymentBlock = formatPaymentAccountLines(vars.paymentAccounts);
 
-  switch (vars.eventType) {
-    case 'PROVISION_WELCOME': {
-      const feeText =
-        Number(vars.monthlyFee) > 0
-          ? `\n• *Monthly Package Fee:* Rs. ${Math.round(Number(vars.monthlyFee)).toLocaleString()}`
-          : '';
-      const expText = vars.expiryDate ? `\n• *Next Renewal Date:* ${vars.expiryDate}` : '';
-      return (
-        `*Welcome to ${company}!*\n\n` +
-        `Dear *${clientName}*,\n` +
-        `Your high-speed Fiber Broadband connection is now *ACTIVE*.\n\n` +
-        `• *PPPoE Username:* ${uname || 'N/A'}\n` +
-        `• *Password:* ${vars.password || 'As configured'}\n` +
-        `• *Internet Package:* ${vars.packageName || 'Fiber Broadband'}` +
-        feeText +
-        expText +
-        `\n\nThank you for choosing *${company}*.` +
-        supportLine
-      );
-    }
+  const primaryAmount =
+    vars.eventType === 'PAYMENT_RESTORED' || vars.eventType === 'AGENT_PAYMENT_RECEIPT'
+      ? Math.round(Number(vars.amountPaid ?? vars.totalAmount ?? vars.amountDue ?? 0))
+      : Math.round(Number(vars.amountDue ?? vars.totalAmount ?? vars.monthlyFee ?? 0));
 
-    case 'PORTAL_CREDENTIALS': {
-      const roleText = vars.accountRole ? `\n• *Account Role:* ${vars.accountRole}` : '';
-      const portalLink = vars.portalUrl ? `\n• *Portal Link:* ${vars.portalUrl}` : '';
-      return (
-        `*Welcome to ${company}!*\n\n` +
-        `Dear *${clientName}*,\n` +
-        `Your portal login account has been created and is now active.\n\n` +
-        `• *Username:* ${uname || 'N/A'}\n` +
-        `• *Password:* ${vars.password || 'As configured'}` +
-        roleText +
-        portalLink +
-        `\n\nPlease keep your login details secure.\n— *${company}*` +
-        supportLine
-      );
-    }
+  const renderValues = {
+    client_name: clientName,
+    username: uname || 'N/A',
+    password: vars.password || 'As configured',
+    package: vars.packageName || vars.accountRole || 'Fiber Broadband',
+    amount: primaryAmount,
+    due_date: vars.dueDate || vars.expiryDate || 'Current Cycle',
+    grace_date: vars.graceDate || vars.dueDate || 'Within 3 days',
+    expiry_date: vars.expiryDate || vars.dueDate || 'Active',
+    ticket_id: vars.ticketId || 'TKT-NEW',
+    issue: vars.issue || vars.customNote || 'Technical / Connectivity Support',
+    agent_name: vars.agentName || 'Field Support Team',
+    company_name: company,
+    helpline: supportPhone,
+    invoice_no: vars.invoiceNo || 'N/A',
+    area: vars.area || 'Main Service Area',
+    phone: vars.phone || 'N/A',
+    address: vars.address || 'On file',
+    agent_balance: vars.agentBalance ?? 0,
+    payment_method: vars.paymentMethod || 'Cash',
+    remaining_balance: Math.max(0, Math.round(Number(vars.remainingBalance ?? 0))),
+    portal_url: vars.portalUrl || '',
+  };
 
-    case 'INVOICE_GENERATED': {
-      const amt = Math.round(Number(vars.amountDue ?? vars.totalAmount ?? vars.monthlyFee ?? 0));
-      const invLine = vars.invoiceNo ? `\n• *Invoice #:* ${vars.invoiceNo}` : '';
-      return (
-        `*${company} — Monthly Bill Issued*\n\n` +
-        `Dear *${clientName}* (${uname}),\n` +
-        `Your monthly broadband invoice has been generated.` +
-        invLine +
-        `\n• *Package:* ${vars.packageName || 'Fiber Broadband'}` +
-        `\n• *Amount Due:* Rs. ${amt.toLocaleString()}` +
-        `\n• *Due Date:* ${vars.dueDate || vars.expiryDate || 'Within 3 days'}` +
-        paymentBlock +
-        `\n\nPlease pay on time to enjoy uninterrupted service.\n— *${company}*` +
-        supportLine
-      );
-    }
-
-    case 'PRE_EXPIRY_3D': {
-      const amt = Math.round(Number(vars.amountDue ?? vars.monthlyFee ?? 0));
-      const daysText =
-        vars.daysRemaining !== undefined && vars.daysRemaining !== null
-          ? vars.daysRemaining <= 0
-            ? 'TODAY'
-            : `in ${vars.daysRemaining} day(s)`
-          : 'within 3 days';
-      return (
-        `*${company} — Renewal Reminder*\n\n` +
-        `Dear *${clientName}* (${uname}),\n` +
-        `Your internet package (${vars.packageName || 'Fiber Broadband'}) is due to expire *${daysText}* (${vars.expiryDate || vars.dueDate || 'Upcoming'}).\n\n` +
-        `• *Amount Due:* Rs. ${amt.toLocaleString()}` +
-        paymentBlock +
-        `\n\nKindly clear your bill before the due date to avoid automatic disconnection.\n— *${company}*` +
-        supportLine
-      );
-    }
-
-    case 'AUTO_SUSPENSION': {
-      const amt = Math.round(Number(vars.amountDue ?? vars.monthlyFee ?? 0));
-      return (
-        `*${company} — Service Temporarily Suspended*\n\n` +
-        `Dear *${clientName}* (${uname}),\n` +
-        `Your broadband internet connection has been automatically isolated (Expired Pool) due to unpaid dues.\n\n` +
-        `• *Outstanding Due:* Rs. ${amt.toLocaleString()}\n` +
-        `• *Package:* ${vars.packageName || 'Fiber Broadband'}` +
-        paymentBlock +
-        `\n\nYour connection will be *instantly restored* as soon as payment is received.\n— *${company}*` +
-        supportLine
-      );
-    }
-
-    case 'PAYMENT_RESTORED': {
-      const paid = Math.round(Number(vars.amountPaid ?? vars.totalAmount ?? 0));
-      const remaining = Math.max(0, Math.round(Number(vars.remainingBalance ?? 0)));
-      const invLine = vars.invoiceNo ? `\n• *Receipt / Invoice #:* ${vars.invoiceNo}` : '';
-      const methodLine = vars.paymentMethod ? `\n• *Method:* ${vars.paymentMethod}` : '';
-      const nextLine = vars.expiryDate || vars.dueDate
-        ? `\n• *Next Renewal Date:* ${vars.expiryDate || vars.dueDate}`
-        : '';
-      const statusText =
-        remaining <= 0
-          ? 'PAID IN FULL & INTERNET ACTIVE'
-          : `PARTIAL PAYMENT RECEIVED (Remaining: Rs. ${remaining.toLocaleString()})`;
-      return (
-        `*${company} — Payment Receipt & Service Confirmation*\n\n` +
-        `Dear *${clientName}* (${uname}),\n` +
-        `Thank you! Your payment has been confirmed.` +
-        invLine +
-        `\n• *Amount Paid:* Rs. ${paid.toLocaleString()}` +
-        `\n• *Remaining Balance:* Rs. ${remaining.toLocaleString()}` +
-        methodLine +
-        `\n• *Account Status:* ${statusText}` +
-        nextLine +
-        `\n\nThank you for staying connected with *${company}*!` +
-        supportLine
-      );
-    }
-
-    case 'MANUAL_TEST':
-    default: {
-      return (
-        `*${company} — WhatsApp Gateway Active*\n\n` +
-        `${vars.customNote || 'Automated multi-tenant WhatsApp notifications are connected and ready for zero-click delivery.'}\n\n` +
-        `— *${company}*` +
-        supportLine
-      );
+  if (vars.eventType === 'CUSTOM_MESSAGE') {
+    const rawCustom = String(vars.customMessage || vars.customNote || '').trim();
+    if (rawCustom) {
+      return renderWhatsAppTemplate(rawCustom, renderValues);
     }
   }
+
+  const templateKey = mapEventTypeToTemplateKey(vars.eventType);
+  if (templateKey) {
+    const customText = vars.customTemplates?.[templateKey];
+    const templateBody =
+      typeof customText === 'string' && customText.trim()
+        ? customText
+        : DEFAULT_TEMPLATE_MAP[templateKey];
+    const rendered = renderWhatsAppTemplate(templateBody, renderValues);
+    const shouldAppendPaymentBlock =
+      (vars.eventType === 'INVOICE_GENERATED' ||
+        vars.eventType === 'PRE_EXPIRY_3D' ||
+        vars.eventType === 'GRACE_PERIOD_3D' ||
+        vars.eventType === 'AUTO_SUSPENSION') &&
+      Boolean(paymentBlock) &&
+      !rendered.includes('*Payment Methods:*');
+    return shouldAppendPaymentBlock ? `${rendered}${paymentBlock}` : rendered;
+  }
+
+  return (
+    `*${company} — WhatsApp Gateway Active*\n\n` +
+    `${vars.customNote || vars.customMessage || 'Automated multi-tenant WhatsApp notifications are connected and ready for zero-click delivery.'}\n\n` +
+    `— *${company}*` +
+    supportLine
+  );
 }
 
 export function buildPortalAuthHeaders(): Record<string, string> {
@@ -757,10 +745,14 @@ export async function triggerAutoWhatsAppNotification(payload: {
   subscriberUsername?: string | null;
   subscriber?: Partial<SupabasePortalUser> | null;
   messageVars?: Partial<AutomatedMessageTemplateVars> & { phone?: string | null };
+  groupJid?: string | null;
+  customMessage?: string | null;
   manualTrigger?: boolean;
 }): Promise<AutoWhatsAppTriggerResponse> {
   const rawPhone = payload.messageVars?.phone || payload.subscriber?.phone || '';
-  const formattedPhone = formatWhatsAppDisplayPhone(rawPhone);
+  const formattedPhone = payload.groupJid
+    ? payload.groupJid
+    : formatWhatsAppDisplayPhone(rawPhone);
   if (typeof window === 'undefined') {
     return { ok: false, status: 'SKIPPED', formattedPhone, skippedReason: 'Non-browser environment' };
   }
@@ -770,6 +762,8 @@ export async function triggerAutoWhatsAppNotification(payload: {
     body: JSON.stringify({
       ...payload,
       phone: rawPhone || undefined,
+      groupJid: payload.groupJid || undefined,
+      customMessage: payload.customMessage || undefined,
     }),
   });
 
@@ -851,6 +845,7 @@ export async function sendWhatsAppCredentialsViaGateway(payload: {
         username: payload.username,
         password: payload.password,
         accountRole: payload.role,
+        packageName: payload.role,
         portalUrl: payload.portalUrl,
         phone: payload.phone,
       },
@@ -887,4 +882,300 @@ export async function sendWhatsAppCredentialsViaGateway(payload: {
     error: data?.error,
     skippedReason: data?.skippedReason,
   };
+}
+
+/**
+ * Automated Complaint Creation WhatsApp Dispatch:
+ * Sends BOTH:
+ *  a) Confirmation message to the client's phone number (`COMPLAINT_CREATED_CLIENT`)
+ *  b) Dispatch alert to the configured Team WhatsApp Work Group (`COMPLAINT_CREATED_GROUP`)
+ */
+export async function dispatchComplaintCreatedWhatsApp(payload: {
+  ticketId: string;
+  subscriberUsername: string;
+  clientName?: string | null;
+  phone?: string | null;
+  area?: string | null;
+  address?: string | null;
+  issue: string;
+  assignedAgentName?: string | null;
+  subscriber?: Partial<SupabasePortalUser> | null;
+  groupJid?: string | null;
+}): Promise<{
+  clientResult: AutoWhatsAppTriggerResponse;
+  groupResult: AutoWhatsAppTriggerResponse;
+}> {
+  const cleanUser = String(payload.subscriberUsername || '').trim();
+  let subData: Partial<SupabasePortalUser> | null = payload.subscriber ? { ...payload.subscriber } : null;
+
+  if (cleanUser && (!subData?.phone || !subData?.address || !subData?.area)) {
+    try {
+      const { data: freshSub } = await supabase
+        .from('portal_users')
+        .select('id, username, full_name, phone, area, address, dealer_id, sub_dealer_id')
+        .ilike('username', cleanUser)
+        .maybeSingle();
+      if (freshSub) {
+        subData = { ...(freshSub as Partial<SupabasePortalUser>), ...(subData || {}) };
+      }
+    } catch {
+      // keep provided fields
+    }
+  }
+
+  const clientName = payload.clientName || subData?.full_name || cleanUser || 'Subscriber';
+  const clientPhone = payload.phone || subData?.phone || '';
+  const area = payload.area || subData?.area || 'Main Service Area';
+  const address = payload.address || subData?.address || 'On file';
+  const agentName = payload.assignedAgentName || 'Field Support Team';
+
+  const baseVars = {
+    subscriberName: clientName,
+    username: cleanUser,
+    phone: clientPhone,
+    area,
+    address,
+    ticketId: payload.ticketId,
+    issue: payload.issue,
+    agentName,
+  };
+
+  const clientPromise: Promise<AutoWhatsAppTriggerResponse> = isValidWhatsAppPhone(clientPhone)
+    ? triggerAutoWhatsAppNotification({
+        eventType: 'COMPLAINT_CREATED_CLIENT',
+        manualTrigger: true,
+        subscriberUsername: cleanUser,
+        subscriber: {
+          ...(subData || {}),
+          username: cleanUser,
+          full_name: clientName,
+          phone: clientPhone,
+        },
+        messageVars: baseVars,
+      })
+    : Promise.resolve({
+        ok: false,
+        status: 'SKIPPED',
+        skippedReason: 'Subscriber phone missing for complaint confirmation',
+      });
+
+  const groupPromise: Promise<AutoWhatsAppTriggerResponse> = triggerAutoWhatsAppNotification({
+    eventType: 'COMPLAINT_CREATED_GROUP',
+    manualTrigger: true,
+    subscriberUsername: cleanUser,
+    subscriber: {
+      ...(subData || {}),
+      username: cleanUser,
+      full_name: clientName,
+      phone: clientPhone,
+    },
+    groupJid: payload.groupJid || undefined,
+    messageVars: baseVars,
+  });
+
+  const [clientResult, groupResult] = await Promise.all([clientPromise, groupPromise]);
+  return { clientResult, groupResult };
+}
+
+/**
+ * Automated Complaint Resolved WhatsApp Dispatch:
+ * Sends `COMPLAINT_RESOLVED_CLIENT` to the client's phone via Baileys.
+ */
+export async function dispatchComplaintResolvedWhatsApp(payload: {
+  ticketId: string;
+  subscriberUsername: string;
+  clientName?: string | null;
+  phone?: string | null;
+  area?: string | null;
+  issue?: string | null;
+  resolvedByName?: string | null;
+  subscriber?: Partial<SupabasePortalUser> | null;
+}): Promise<AutoWhatsAppTriggerResponse> {
+  const cleanUser = String(payload.subscriberUsername || '').trim();
+  let subData: Partial<SupabasePortalUser> | null = payload.subscriber ? { ...payload.subscriber } : null;
+
+  if (cleanUser && !isValidWhatsAppPhone(payload.phone || subData?.phone)) {
+    try {
+      const { data: freshSub } = await supabase
+        .from('portal_users')
+        .select('id, username, full_name, phone, area, dealer_id, sub_dealer_id')
+        .ilike('username', cleanUser)
+        .maybeSingle();
+      if (freshSub) {
+        subData = { ...(freshSub as Partial<SupabasePortalUser>), ...(subData || {}) };
+      }
+    } catch {
+      // keep existing
+    }
+  }
+
+  const clientPhone = payload.phone || subData?.phone || '';
+  if (!isValidWhatsAppPhone(clientPhone)) {
+    return {
+      ok: false,
+      status: 'SKIPPED',
+      skippedReason: 'Subscriber phone missing for complaint resolved notice',
+    };
+  }
+
+  return triggerAutoWhatsAppNotification({
+    eventType: 'COMPLAINT_RESOLVED_CLIENT',
+    manualTrigger: true,
+    subscriberUsername: cleanUser,
+    subscriber: {
+      ...(subData || {}),
+      username: cleanUser,
+      full_name: payload.clientName || subData?.full_name || cleanUser,
+      phone: clientPhone,
+    },
+    messageVars: {
+      subscriberName: payload.clientName || subData?.full_name || cleanUser,
+      username: cleanUser,
+      phone: clientPhone,
+      area: payload.area || subData?.area || 'Main Service Area',
+      ticketId: payload.ticketId,
+      issue: payload.issue || 'Internet Service Fault',
+      agentName: payload.resolvedByName || 'Technical Support Team',
+    },
+  });
+}
+
+/**
+ * Dual Payment Receipt Automation:
+ * Simultaneously dispatches:
+ *  a) Paid Receipt (`PAYMENT_RESTORED`) to the Client
+ *  b) Cash Collection Confirmation (`AGENT_PAYMENT_RECEIPT`) to the Recovery Agent's phone
+ */
+export async function dispatchDualPaymentReceiptWhatsApp(payload: {
+  invoiceNo: string;
+  subscriberUsername: string;
+  subscriber?: Partial<SupabasePortalUser> | null;
+  clientName?: string | null;
+  clientPhone?: string | null;
+  packageName?: string | null;
+  amountPaid: number;
+  totalAmount?: number;
+  remainingBalance?: number;
+  paymentMethod?: string | null;
+  expiryDate?: string | null;
+  agentId?: string | null;
+  agentName?: string | null;
+  agentPhone?: string | null;
+  agentUpdatedCashBalance?: number | null;
+}): Promise<{
+  clientResult: AutoWhatsAppTriggerResponse;
+  agentResult: AutoWhatsAppTriggerResponse;
+}> {
+  const cleanUser = String(payload.subscriberUsername || '').trim();
+  let resolvedSub: Partial<SupabasePortalUser> | null = payload.subscriber
+    ? { ...payload.subscriber }
+    : null;
+
+  if (cleanUser && !isValidWhatsAppPhone(payload.clientPhone || resolvedSub?.phone)) {
+    try {
+      const { data: freshSub } = await supabase
+        .from('portal_users')
+        .select('id, username, full_name, phone, package_speed, dealer_id, sub_dealer_id')
+        .ilike('username', cleanUser)
+        .maybeSingle();
+      if (freshSub) {
+        resolvedSub = { ...(freshSub as Partial<SupabasePortalUser>), ...(resolvedSub || {}) };
+      }
+    } catch {
+      // keep fallback
+    }
+  }
+
+  let resolvedAgentPhone = String(payload.agentPhone || '').trim();
+  let resolvedAgentName = String(payload.agentName || '').trim() || 'Recovery Agent';
+  let resolvedAgentBalance = payload.agentUpdatedCashBalance;
+
+  if (payload.agentId && (!isValidWhatsAppPhone(resolvedAgentPhone) || resolvedAgentBalance === undefined || resolvedAgentBalance === null)) {
+    try {
+      const { data: agentRow } = await supabase
+        .from('portal_users')
+        .select('id, full_name, phone, cash_in_hand')
+        .eq('id', payload.agentId)
+        .maybeSingle();
+      if (agentRow) {
+        if (!isValidWhatsAppPhone(resolvedAgentPhone) && agentRow.phone) {
+          resolvedAgentPhone = String(agentRow.phone);
+        }
+        if (agentRow.full_name) resolvedAgentName = String(agentRow.full_name);
+        if (resolvedAgentBalance === undefined || resolvedAgentBalance === null) {
+          resolvedAgentBalance = Number(agentRow.cash_in_hand) || 0;
+        }
+      }
+    } catch {
+      // keep existing
+    }
+  }
+
+  const clientPhone = payload.clientPhone || resolvedSub?.phone || '';
+  const clientName = payload.clientName || resolvedSub?.full_name || cleanUser || 'Subscriber';
+  const pkgName = payload.packageName || resolvedSub?.package_speed || 'Fiber Broadband';
+
+  const clientPromise: Promise<AutoWhatsAppTriggerResponse> = isValidWhatsAppPhone(clientPhone)
+    ? triggerAutoWhatsAppNotification({
+        eventType: 'PAYMENT_RESTORED',
+        manualTrigger: true,
+        subscriberUsername: cleanUser,
+        subscriber: {
+          ...(resolvedSub || {}),
+          username: cleanUser,
+          full_name: clientName,
+          phone: clientPhone,
+        },
+        messageVars: {
+          subscriberName: clientName,
+          username: cleanUser,
+          phone: clientPhone,
+          packageName: pkgName,
+          invoiceNo: payload.invoiceNo,
+          amountPaid: payload.amountPaid,
+          totalAmount: payload.totalAmount ?? payload.amountPaid,
+          remainingBalance: payload.remainingBalance ?? 0,
+          paymentMethod: payload.paymentMethod || 'Cash',
+          expiryDate: payload.expiryDate || undefined,
+          agentName: resolvedAgentName,
+        },
+      })
+    : Promise.resolve({
+        ok: false,
+        status: 'FAILED',
+        formattedPhone: formatWhatsAppDisplayPhone(clientPhone),
+        error: 'Subscriber phone number missing. Please update contact number first.',
+      });
+
+  const agentPromise: Promise<AutoWhatsAppTriggerResponse> = isValidWhatsAppPhone(resolvedAgentPhone)
+    ? triggerAutoWhatsAppNotification({
+        eventType: 'AGENT_PAYMENT_RECEIPT',
+        manualTrigger: true,
+        subscriberUsername: cleanUser,
+        subscriber: {
+          ...(resolvedSub || {}),
+          username: cleanUser,
+          full_name: clientName,
+          phone: resolvedAgentPhone,
+        },
+        messageVars: {
+          subscriberName: clientName,
+          username: cleanUser,
+          phone: resolvedAgentPhone,
+          packageName: pkgName,
+          invoiceNo: payload.invoiceNo,
+          amountPaid: payload.amountPaid,
+          paymentMethod: payload.paymentMethod || 'Cash',
+          agentName: resolvedAgentName,
+          agentBalance: resolvedAgentBalance ?? 0,
+        },
+      })
+    : Promise.resolve({
+        ok: false,
+        status: 'SKIPPED',
+        skippedReason: 'Collecting recovery agent phone number not set',
+      });
+
+  const [clientResult, agentResult] = await Promise.all([clientPromise, agentPromise]);
+  return { clientResult, agentResult };
 }

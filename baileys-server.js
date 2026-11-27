@@ -1,18 +1,20 @@
 /**
  * Standalone Multi-Session (Multi-Tenant) Baileys WhatsApp Gateway Server
  *
+ * Persists all Admin, Dealer, and Sub-Dealer WhatsApp auth credentials and
+ * Signal keys directly in Supabase PostgreSQL (`whatsapp_auth_sessions`) so
+ * ephemeral deployments (Railway, Render, Docker) never lose linked sessions.
+ *
  * Run with:
  *   node baileys-server.js
  *
  * Environment variables (.env):
  *   WA_GATEWAY_PORT=3001           (or PORT=3001)
  *   SUPABASE_URL=https://xxx.supabase.co
- *   SUPABASE_SERVICE_ROLE_KEY=xxx  (or SUPABASE_KEY / VITE_SUPABASE_ANON_KEY)
+ *   SUPABASE_SERVICE_ROLE_KEY=xxx  (required for backend persistence & RLS bypass)
  *   ALLOWED_ORIGINS=*              (optional comma-separated origins, defaults to *)
  */
 
-import fs from 'node:fs';
-import path from 'node:path';
 import dotenv from 'dotenv';
 import express from 'express';
 import cors from 'cors';
@@ -25,23 +27,46 @@ dotenv.config();
 
 const makeWASocket =
   baileys.default?.default ?? baileys.default ?? baileys.makeWASocket;
-const useMultiFileAuthState = baileys.useMultiFileAuthState;
-const DisconnectReason = baileys.DisconnectReason ?? { loggedOut: 401 };
+const initAuthCreds = baileys.initAuthCreds;
+const BufferJSON = baileys.BufferJSON;
+const proto = baileys.proto;
+const DisconnectReason = baileys.DisconnectReason ?? {
+  loggedOut: 401,
+  restartRequired: 515,
+};
 const fetchLatestBaileysVersion = baileys.fetchLatestBaileysVersion;
 const Browsers = baileys.Browsers;
 
 const PORT = Number(process.env.WA_GATEWAY_PORT || process.env.PORT || 3001);
 const DEFAULT_MASTER_COMPANY_NAME = 'Youth Net Service';
-const BAILEYS_AUTH_ROOT = path.resolve(process.cwd(), 'baileys_auth');
+const WHATSAPP_AUTH_SESSIONS_TABLE = 'whatsapp_auth_sessions';
 const SESSION_ID_PATTERN = /^[a-zA-Z0-9_-]{1,80}$/;
+
+const WHATSAPP_AUTH_SESSIONS_DDL = `CREATE TABLE IF NOT EXISTS public.whatsapp_auth_sessions (
+  tenant_id TEXT NOT NULL,
+  key_id TEXT NOT NULL,
+  key_data JSONB NOT NULL,
+  updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  PRIMARY KEY (tenant_id, key_id)
+);
+CREATE INDEX IF NOT EXISTS idx_whatsapp_auth_sessions_tenant_id
+  ON public.whatsapp_auth_sessions (tenant_id);
+CREATE INDEX IF NOT EXISTS idx_whatsapp_auth_sessions_creds_lookup
+  ON public.whatsapp_auth_sessions (key_id, tenant_id);
+ALTER TABLE public.whatsapp_auth_sessions ENABLE ROW LEVEL SECURITY;
+REVOKE ALL ON public.whatsapp_auth_sessions FROM PUBLIC, anon, authenticated;
+GRANT ALL ON public.whatsapp_auth_sessions TO service_role;`;
 
 const SUPABASE_URL =
   process.env.SUPABASE_URL ||
   process.env.VITE_SUPABASE_URL ||
   'https://qstqegwpibztpirncpga.supabase.co';
-const SUPABASE_KEY =
+const SUPABASE_SERVICE_ROLE_KEY =
   process.env.SUPABASE_SERVICE_ROLE_KEY ||
   process.env.SUPABASE_KEY ||
+  '';
+const SUPABASE_KEY =
+  SUPABASE_SERVICE_ROLE_KEY ||
   process.env.VITE_SUPABASE_ANON_KEY ||
   '';
 
@@ -54,29 +79,22 @@ const supabase =
 
 if (!supabase) {
   console.warn(
-    `[Baileys-Gateway] SUPABASE_URL is set to ${SUPABASE_URL}, but SUPABASE_SERVICE_ROLE_KEY (or SUPABASE_KEY) is not set in .env. Set SUPABASE_SERVICE_ROLE_KEY in .env to enable multi-tenant database lookups & WhatsApp logs.`
+    `[Baileys-Gateway] SUPABASE_URL is set to ${SUPABASE_URL}, but SUPABASE_SERVICE_ROLE_KEY is not set in environment. Set SUPABASE_SERVICE_ROLE_KEY to enable persistent PostgreSQL WhatsApp sessions, multi-tenant lookups, and delivery logs.`
+  );
+} else if (!SUPABASE_SERVICE_ROLE_KEY) {
+  console.warn(
+    '[Baileys-Gateway] WARNING: SUPABASE_SERVICE_ROLE_KEY is not set (falling back to anon key). Set SUPABASE_SERVICE_ROLE_KEY on Railway so backend writes to whatsapp_auth_sessions succeed under RLS.'
   );
 }
 
 // ============================================================================
-// PATH CONFINEMENT & PHONE FORMATTING HELPERS
+// TENANT ID VALIDATION & PHONE FORMATTING HELPERS
 // ============================================================================
 
 function sanitizePortalUserId(rawId) {
   const clean = String(rawId || '').trim();
   if (!clean || !SESSION_ID_PATTERN.test(clean)) return null;
   return clean;
-}
-
-function resolveSafeAuthDir(portalUserId) {
-  const safeId = sanitizePortalUserId(portalUserId);
-  if (!safeId) throw new Error('Invalid session identifier.');
-  const resolvedRoot = path.resolve(BAILEYS_AUTH_ROOT);
-  const resolvedTarget = path.resolve(resolvedRoot, `session_${safeId}`);
-  if (!resolvedTarget.startsWith(`${resolvedRoot}${path.sep}`)) {
-    throw new Error('Session directory escapes baileys_auth root.');
-  }
-  return resolvedTarget;
 }
 
 function formatWhatsAppDigits(rawPhone) {
@@ -121,10 +139,141 @@ function resolveDisplayCompanyName(u, fallback = DEFAULT_MASTER_COMPANY_NAME) {
   return String(u?.full_name || '').trim() || fallback;
 }
 
+const WHATSAPP_TEMPLATES_SETTINGS_KEY = 'whatsapp_message_templates';
+const WHATSAPP_TEAM_GROUP_SETTINGS_KEY = 'whatsapp_team_group_config';
+
+const DEFAULT_TEMPLATE_MAP = {
+  WELCOME_CREDENTIALS: `*Welcome to {company_name}!*\n\nDear *{client_name}*,\nYour account is now *ACTIVE*.\n\n• *Username:* {username}\n• *Password:* {password}\n• *Package / Role:* {package}\n• *Portal Link:* {portal_url}\n• *Valid Until:* {expiry_date}\n\nPlease keep your credentials secure.\n— *{company_name}*\nSupport Helpline: {helpline}`,
+  INVOICE_GENERATED: `*{company_name} — Monthly Bill Issued*\n\nDear *{client_name}* ({username}),\nYour monthly broadband invoice has been generated.\n\n• *Invoice #:* {invoice_no}\n• *Package:* {package}\n• *Amount Due:* {amount}\n• *Due Date:* {due_date}\n\nKindly settle your bill on or before *{due_date}* to recharge your connection for *31 days* and avoid automatic movement to the Expiry Pool.\n— *{company_name}*\nSupport Helpline: {helpline}`,
+  PRE_EXPIRY_3D: `*{company_name} — Renewal Reminder*\n\nDear *{client_name}* ({username}),\nYour internet package (*{package}*) is due for renewal soon.\n\n• *Amount Due:* {amount}\n• *Due / Expiry Date:* {due_date}\n\nKindly clear your bill before the due date to avoid automatic disconnection.\n— *{company_name}*\nSupport Helpline: {helpline}`,
+  GRACE_PERIOD_3D: `*{company_name} — 3-Day Grace Period Notice*\n\nDear *{client_name}* ({username}),\nYour monthly bill due date (*{due_date}*) has passed and your invoice is still unpaid.\n\nTo prevent sudden disruption, we have granted you a *3-day extra grace period*.\n• *Package:* {package}\n• *Amount Due:* {amount}\n• *Grace Period Ends:* {grace_date}\n\nPlease clear your dues before *{grace_date}* to avoid automatic service suspension.\n— *{company_name}*\nSupport Helpline: {helpline}`,
+  AUTO_SUSPENSION: `*{company_name} — Service Temporarily Suspended*\n\nDear *{client_name}* ({username}),\nYour broadband internet connection has been automatically suspended after the 3-day grace period due to unpaid dues.\n\n• *Package:* {package}\n• *Outstanding Due:* {amount}\n\nYour connection will be *instantly restored* as soon as payment is received.\n— *{company_name}*\nSupport Helpline: {helpline}`,
+  PAYMENT_RECEIPT_CLIENT: `*{company_name} — Paid Receipt & 31-Day Recharge Confirmed ✅*\n\nDear *{client_name}* ({username}),\nThank you! Your payment has been verified and your broadband package has been recharged for *31 days* on your active speed profile.\n\n• *Receipt / Invoice #:* {invoice_no}\n• *Active Package:* {package}\n• *Amount Paid:* {amount}\n• *Payment Method:* {payment_method}\n• *Remaining Balance:* {remaining_balance}\n• *Valid Until (+31 Days):* {expiry_date}\n\nThank you for staying connected with *{company_name}*!\nSupport Helpline: {helpline}`,
+  AGENT_PAYMENT_RECEIPT: `*{company_name} — Agent Collection Confirmed*\n\nDear *{agent_name}*,\nYour payment collection has been recorded in the billing ledger.\n\n• *Subscriber:* {client_name} ({username})\n• *Invoice #:* {invoice_no}\n• *Amount Collected:* {amount}\n• *Payment Mode:* {payment_method}\n• *Updated Cash-in-Hand Balance:* {agent_balance}\n\n— *{company_name}* Accounts Desk`,
+  COMPLAINT_CREATED_CLIENT: `*{company_name} — Support Ticket Registered*\n\nDear *{client_name}* ({username}),\nWe have received your complaint and assigned our technical support team to resolve it promptly.\n\n• *Ticket ID:* {ticket_id}\n• *Issue Reported:* {issue}\n• *Area / Node:* {area}\n\nWe will notify you as soon as your connection is restored.\n— *{company_name}*\nSupport Helpline: {helpline}`,
+  COMPLAINT_CREATED_GROUP: `🚨 *NEW COMPLAINT DISPATCH — {ticket_id}*\n\n• *Client Name:* {client_name}\n• *PPPoE Username:* {username}\n• *Coverage Area / Node:* {area}\n• *Phone Number:* {phone}\n• *Address:* {address}\n• *Assigned Tech:* {agent_name}\n• *Issue Details:* {issue}\n\nPlease attend urgently and mark Solved in the Field Portal once fixed.\n— *{company_name}* NOC`,
+  COMPLAINT_RESOLVED_CLIENT: `*{company_name} — Complaint Resolved ✅*\n\nDear *{client_name}* ({username}),\nYour support complaint has been marked *RESOLVED* by our technical team.\n\n• *Ticket ID:* {ticket_id}\n• *Issue:* {issue}\n• *Resolved By:* {agent_name}\n\nIf you still experience any issue, please reply or call our support helpline.\n— *{company_name}*\nSupport Helpline: {helpline}`,
+};
+
+function mapEventTypeToTemplateKey(eventType) {
+  switch (String(eventType || '').toUpperCase()) {
+    case 'PROVISION_WELCOME':
+    case 'PORTAL_CREDENTIALS':
+      return 'WELCOME_CREDENTIALS';
+    case 'INVOICE_GENERATED':
+      return 'INVOICE_GENERATED';
+    case 'PRE_EXPIRY_3D':
+      return 'PRE_EXPIRY_3D';
+    case 'GRACE_PERIOD_3D':
+      return 'GRACE_PERIOD_3D';
+    case 'AUTO_SUSPENSION':
+      return 'AUTO_SUSPENSION';
+    case 'PAYMENT_RESTORED':
+      return 'PAYMENT_RECEIPT_CLIENT';
+    case 'AGENT_PAYMENT_RECEIPT':
+      return 'AGENT_PAYMENT_RECEIPT';
+    case 'COMPLAINT_CREATED_CLIENT':
+      return 'COMPLAINT_CREATED_CLIENT';
+    case 'COMPLAINT_CREATED_GROUP':
+      return 'COMPLAINT_CREATED_GROUP';
+    case 'COMPLAINT_RESOLVED_CLIENT':
+      return 'COMPLAINT_RESOLVED_CLIENT';
+    default:
+      return null;
+  }
+}
+
+function formatWhatsAppGroupJid(raw) {
+  const clean = String(raw || '').trim();
+  if (!clean) return null;
+  if (/^[0-9-]{6,36}@g\.us$/i.test(clean)) return clean.toLowerCase();
+  return null;
+}
+
+function formatMoneyValue(val) {
+  if (val === undefined || val === null || val === '') return 'Rs. 0';
+  if (typeof val === 'number') return `Rs. ${Math.round(val).toLocaleString()}`;
+  const s = String(val).trim();
+  if (!s) return 'Rs. 0';
+  if (/^rs\.?/i.test(s)) return s;
+  const num = Number(s.replace(/,/g, ''));
+  return Number.isFinite(num) ? `Rs. ${Math.round(num).toLocaleString()}` : s;
+}
+
+function renderTemplateText(templateText, values) {
+  return String(templateText || '').replace(/\{([a-z_]+)\}/gi, (match, rawKey) => {
+    const k = String(rawKey || '').toLowerCase();
+    return k in values ? values[k] : match;
+  });
+}
+
+const settingsCache = {
+  loadedAt: 0,
+  globalTemplates: {},
+  scopedTemplates: new Map(),
+  globalTeamGroup: null,
+  scopedTeamGroups: new Map(),
+};
+
+async function loadAppSettingsCache() {
+  if (!supabase) return;
+  if (Date.now() - settingsCache.loadedAt < 30_000) return;
+  try {
+    const { data, error } = await supabase
+      .from('app_settings')
+      .select('key, value')
+      .or(`key.like.${WHATSAPP_TEMPLATES_SETTINGS_KEY}%,key.like.${WHATSAPP_TEAM_GROUP_SETTINGS_KEY}%`);
+    if (error || !Array.isArray(data)) {
+      settingsCache.loadedAt = Date.now();
+      return;
+    }
+    const globalTemplates = {};
+    const scopedTemplates = new Map();
+    let globalTeamGroup = null;
+    const scopedTeamGroups = new Map();
+    for (const row of data) {
+      const key = String(row.key || '').trim();
+      if (!key || !row.value) continue;
+      let parsed;
+      try {
+        parsed = typeof row.value === 'string' ? JSON.parse(row.value) : row.value;
+      } catch {
+        continue;
+      }
+      if (!parsed || typeof parsed !== 'object') continue;
+      if (key === WHATSAPP_TEMPLATES_SETTINGS_KEY) {
+        Object.assign(globalTemplates, parsed);
+      } else if (key.startsWith(`${WHATSAPP_TEMPLATES_SETTINGS_KEY}:`)) {
+        scopedTemplates.set(key.slice(`${WHATSAPP_TEMPLATES_SETTINGS_KEY}:`.length), parsed);
+      } else if (key === WHATSAPP_TEAM_GROUP_SETTINGS_KEY) {
+        globalTeamGroup = {
+          groupJid: String(parsed.groupJid || '').trim(),
+          groupName: String(parsed.groupName || '').trim(),
+          inviteLink: String(parsed.inviteLink || '').trim(),
+        };
+      } else if (key.startsWith(`${WHATSAPP_TEAM_GROUP_SETTINGS_KEY}:`)) {
+        scopedTeamGroups.set(key.slice(`${WHATSAPP_TEAM_GROUP_SETTINGS_KEY}:`.length), {
+          groupJid: String(parsed.groupJid || '').trim(),
+          groupName: String(parsed.groupName || '').trim(),
+          inviteLink: String(parsed.inviteLink || '').trim(),
+        });
+      }
+    }
+    settingsCache.loadedAt = Date.now();
+    settingsCache.globalTemplates = globalTemplates;
+    settingsCache.scopedTemplates = scopedTemplates;
+    settingsCache.globalTeamGroup = globalTeamGroup;
+    settingsCache.scopedTeamGroups = scopedTeamGroups;
+  } catch {
+    settingsCache.loadedAt = Date.now();
+  }
+}
+
 function buildAutomatedMessage(eventType, vars = {}) {
   const company = String(vars.companyName || DEFAULT_MASTER_COMPANY_NAME).trim();
   const clientName = String(vars.subscriberName || vars.username || 'Valued Subscriber').trim();
   const uname = String(vars.username || '').trim();
+  const supportPhone = String(vars.supportPhone || '+923234193599').trim();
   const supportLine = vars.supportPhone ? `\nSupport Helpline: ${vars.supportPhone}` : '';
   const activeAccounts = Array.isArray(vars.paymentAccounts)
     ? vars.paymentAccounts.filter((a) => a && a.is_active !== false)
@@ -136,103 +285,383 @@ function buildAutomatedMessage(eventType, vars = {}) {
           .join('\n')}`
       : '';
 
-  switch (eventType) {
-    case 'PROVISION_WELCOME':
-      return (
-        `*Welcome to ${company}!*\n\n` +
-        `Dear *${clientName}*,\n` +
-        `Your fiber broadband connection is now *ACTIVE*.\n\n` +
-        `• *PPPoE Username:* \`${uname}\`\n` +
-        (vars.password ? `• *PPPoE Password:* \`${vars.password}\`\n` : '') +
-        `• *Package:* ${vars.packageName || 'Fiber Broadband'}` +
-        (Number(vars.monthlyFee) > 0
-          ? `\n• *Monthly Fee:* Rs. ${Math.round(Number(vars.monthlyFee)).toLocaleString()}`
-          : '') +
-        `\n\nThank you for choosing *${company}*!` +
-        supportLine
-      );
+  const primaryAmount =
+    eventType === 'PAYMENT_RESTORED' || eventType === 'AGENT_PAYMENT_RECEIPT'
+      ? Math.round(Number(vars.amountPaid ?? vars.totalAmount ?? vars.amountDue ?? 0))
+      : Math.round(Number(vars.amountDue ?? vars.totalAmount ?? vars.monthlyFee ?? 0));
 
-    case 'PORTAL_CREDENTIALS': {
-      const roleText = vars.accountRole ? `\n• *Account Role:* ${vars.accountRole}` : '';
-      const portalLink = vars.portalUrl ? `\n• *Portal Link:* ${vars.portalUrl}` : '';
-      return (
-        `*Welcome to ${company}!*\n\n` +
-        `Dear *${clientName}*,\n` +
-        `Your portal login account has been created and is now active.\n\n` +
-        `• *Username:* ${uname || 'N/A'}\n` +
-        `• *Password:* ${vars.password || 'As configured'}` +
-        roleText +
-        portalLink +
-        `\n\nPlease keep your login details secure.\n— *${company}*` +
-        supportLine
-      );
-    }
+  const renderValues = {
+    client_name: clientName,
+    username: uname || 'N/A',
+    password: vars.password || 'As configured',
+    package: vars.packageName || vars.accountRole || 'Fiber Broadband',
+    amount: formatMoneyValue(primaryAmount),
+    due_date: vars.dueDate || vars.expiryDate || 'Current Cycle',
+    grace_date: vars.graceDate || vars.dueDate || 'Within 3 days',
+    expiry_date: vars.expiryDate || vars.dueDate || 'Active',
+    ticket_id: vars.ticketId || 'TKT-NEW',
+    issue: vars.issue || vars.customNote || 'Technical / Connectivity Support',
+    agent_name: vars.agentName || 'Field Support Team',
+    company_name: company,
+    helpline: supportPhone,
+    invoice_no: vars.invoiceNo || 'N/A',
+    area: vars.area || 'Main Service Area',
+    phone: vars.phone || 'N/A',
+    address: vars.address || 'On file',
+    agent_balance: formatMoneyValue(vars.agentBalance ?? 0),
+    payment_method: vars.paymentMethod || 'Cash',
+    remaining_balance: formatMoneyValue(Math.max(0, Math.round(Number(vars.remainingBalance ?? 0)))),
+    portal_url: vars.portalUrl || 'Portal Login',
+  };
 
-    case 'INVOICE_GENERATED':
-      return (
-        `*${company} — Monthly Broadband Bill*\n\n` +
-        `Dear *${clientName}* (${uname}),\n` +
-        `Your monthly broadband invoice has been generated.\n\n` +
-        (vars.invoiceNo ? `• *Invoice #:* ${vars.invoiceNo}\n` : '') +
-        `• *Package:* ${vars.packageName || 'Fiber Broadband'}\n` +
-        `• *Amount Due:* Rs. ${Math.round(Number(vars.amountDue ?? vars.totalAmount ?? 0)).toLocaleString()}\n` +
-        `• *Due Date:* ${vars.dueDate || vars.expiryDate || 'Current Cycle'}` +
-        paymentBlock +
-        `\n\nPlease settle your bill before the due date to enjoy uninterrupted internet.\n— *${company}*` +
-        supportLine
-      );
-
-    case 'PRE_EXPIRY_3D':
-      return (
-        `*${company} — Renewal Reminder*\n\n` +
-        `Dear *${clientName}* (${uname}),\n` +
-        `Your internet package is scheduled to expire soon.\n\n` +
-        `• *Package:* ${vars.packageName || 'Fiber Broadband'}\n` +
-        `• *Amount Due:* Rs. ${Math.round(Number(vars.amountDue ?? vars.totalAmount ?? 0)).toLocaleString()}\n` +
-        `• *Expiry Date:* ${vars.expiryDate || vars.dueDate || 'Upcoming'}` +
-        paymentBlock +
-        `\n\nPlease pay before expiry to prevent automatic service suspension.\n— *${company}*` +
-        supportLine
-      );
-
-    case 'AUTO_SUSPENSION':
-      return (
-        `*${company} — Service Temporarily Suspended*\n\n` +
-        `Dear *${clientName}* (${uname}),\n` +
-        `Your broadband connection has been automatically isolated due to unpaid dues.\n\n` +
-        `• *Outstanding Due:* Rs. ${Math.round(Number(vars.amountDue ?? vars.totalAmount ?? 0)).toLocaleString()}\n` +
-        `• *Package:* ${vars.packageName || 'Fiber Broadband'}` +
-        paymentBlock +
-        `\n\nYour connection will be *instantly restored* as soon as payment is received.\n— *${company}*` +
-        supportLine
-      );
-
-    case 'PAYMENT_RESTORED': {
-      const paid = Math.round(Number(vars.amountPaid ?? vars.totalAmount ?? 0));
-      const remaining = Math.max(0, Math.round(Number(vars.remainingBalance ?? 0)));
-      return (
-        `*${company} — Payment Receipt & Service Confirmation*\n\n` +
-        `Dear *${clientName}* (${uname}),\n` +
-        `Thank you! Your payment has been confirmed.\n` +
-        (vars.invoiceNo ? `• *Receipt / Invoice #:* ${vars.invoiceNo}\n` : '') +
-        `• *Amount Paid:* Rs. ${paid.toLocaleString()}\n` +
-        `• *Remaining Balance:* Rs. ${remaining.toLocaleString()}\n` +
-        `• *Account Status:* ${remaining <= 0 ? 'PAID IN FULL & INTERNET ACTIVE' : 'PARTIAL PAYMENT RECEIVED'}\n` +
-        (vars.expiryDate || vars.dueDate ? `• *Next Renewal Date:* ${vars.expiryDate || vars.dueDate}\n` : '') +
-        `\nThank you for staying connected with *${company}*!` +
-        supportLine
-      );
-    }
-
-    case 'MANUAL_TEST':
-    default:
-      return (
-        `*${company} — WhatsApp Gateway Active*\n\n` +
-        `${vars.customNote || 'Automated multi-tenant Baileys WhatsApp Gateway is connected and ready.'}\n\n` +
-        `— *${company}*` +
-        supportLine
-      );
+  if (eventType === 'CUSTOM_MESSAGE') {
+    const rawCustom = String(vars.customMessage || vars.customNote || '').trim();
+    if (rawCustom) return renderTemplateText(rawCustom, renderValues);
   }
+
+  const tplKey = mapEventTypeToTemplateKey(eventType);
+  if (tplKey) {
+    const customText = vars.customTemplates?.[tplKey];
+    const tplBody =
+      typeof customText === 'string' && customText.trim()
+        ? customText
+        : DEFAULT_TEMPLATE_MAP[tplKey];
+    const rendered = renderTemplateText(tplBody, renderValues);
+    const shouldAppendPaymentBlock =
+      (eventType === 'INVOICE_GENERATED' ||
+        eventType === 'PRE_EXPIRY_3D' ||
+        eventType === 'GRACE_PERIOD_3D' ||
+        eventType === 'AUTO_SUSPENSION') &&
+      Boolean(paymentBlock) &&
+      !rendered.includes('*Payment Methods:*');
+    return shouldAppendPaymentBlock ? `${rendered}${paymentBlock}` : rendered;
+  }
+
+  return (
+    `*${company} — WhatsApp Gateway Active*\n\n` +
+    `${vars.customNote || vars.customMessage || 'Automated multi-tenant Baileys WhatsApp Gateway is connected and ready.'}\n\n` +
+    `— *${company}*` +
+    supportLine
+  );
+}
+
+// ============================================================================
+// SUPABASE POSTGRESQL AUTH STATE PERSISTENCE (whatsapp_auth_sessions)
+// ============================================================================
+
+function serializeAuthData(value) {
+  return JSON.parse(JSON.stringify(value, BufferJSON.replacer));
+}
+
+function deserializeAuthData(raw) {
+  if (raw === null || raw === undefined) return null;
+  const serialized = typeof raw === 'string' ? raw : JSON.stringify(raw);
+  return JSON.parse(serialized, BufferJSON.reviver);
+}
+
+/**
+ * Persists Baileys `creds` and Signal `keys` in Supabase PostgreSQL
+ * (`whatsapp_auth_sessions` with PK `(tenant_id, key_id)`).
+ */
+async function useSupabaseAuthState(supabaseClient, tenantId) {
+  if (!supabaseClient) {
+    throw new Error(
+      'Supabase client is not configured. Set SUPABASE_URL and SUPABASE_SERVICE_ROLE_KEY.'
+    );
+  }
+  const safeTenantId = sanitizePortalUserId(tenantId);
+  if (!safeTenantId) {
+    throw new Error('Invalid tenantId for WhatsApp auth state.');
+  }
+
+  let writeQueue = Promise.resolve();
+  const enqueueWrite = (task) => {
+    writeQueue = writeQueue
+      .catch(() => {})
+      .then(task);
+    return writeQueue;
+  };
+
+  const readData = async (keyId) => {
+    const { data, error } = await supabaseClient
+      .from(WHATSAPP_AUTH_SESSIONS_TABLE)
+      .select('key_data')
+      .eq('tenant_id', safeTenantId)
+      .eq('key_id', keyId)
+      .maybeSingle();
+
+    if (error) {
+      console.error(
+        `[Baileys-Auth] Failed reading key "${keyId}" for tenant ${safeTenantId}:`,
+        error.message
+      );
+      return null;
+    }
+    if (!data || data.key_data === null || data.key_data === undefined) {
+      return null;
+    }
+    try {
+      return deserializeAuthData(data.key_data);
+    } catch (err) {
+      console.error(
+        `[Baileys-Auth] Failed deserializing key "${keyId}" for tenant ${safeTenantId}:`,
+        err?.message
+      );
+      return null;
+    }
+  };
+
+  const writeBatch = async (rows) => {
+    if (!rows.length) return;
+    const chunkSize = 100;
+    for (let i = 0; i < rows.length; i += chunkSize) {
+      const chunk = rows.slice(i, i + chunkSize);
+      const { error } = await supabaseClient
+        .from(WHATSAPP_AUTH_SESSIONS_TABLE)
+        .upsert(chunk, { onConflict: 'tenant_id,key_id' });
+      if (error) {
+        console.error(
+          `[Baileys-Auth] Failed upserting ${chunk.length} auth key(s) for tenant ${safeTenantId}:`,
+          error.message
+        );
+        throw new Error(`Supabase auth write failed: ${error.message}`);
+      }
+    }
+  };
+
+  const removeBatch = async (keyIds) => {
+    if (!keyIds.length) return;
+    const chunkSize = 100;
+    for (let i = 0; i < keyIds.length; i += chunkSize) {
+      const chunk = keyIds.slice(i, i + chunkSize);
+      const { error } = await supabaseClient
+        .from(WHATSAPP_AUTH_SESSIONS_TABLE)
+        .delete()
+        .eq('tenant_id', safeTenantId)
+        .in('key_id', chunk);
+      if (error) {
+        console.error(
+          `[Baileys-Auth] Failed deleting ${chunk.length} auth key(s) for tenant ${safeTenantId}:`,
+          error.message
+        );
+      }
+    }
+  };
+
+  const existingCreds = await readData('creds');
+  const creds = existingCreds || initAuthCreds();
+
+  return {
+    state: {
+      creds,
+      keys: {
+        get: async (type, ids) => {
+          const result = {};
+          if (!Array.isArray(ids) || ids.length === 0) return result;
+
+          const keyIdToRawId = new Map();
+          const keyIds = [];
+          for (const id of ids) {
+            const keyId = `${type}-${id}`;
+            keyIdToRawId.set(keyId, id);
+            keyIds.push(keyId);
+          }
+
+          const chunkSize = 200;
+          for (let i = 0; i < keyIds.length; i += chunkSize) {
+            const chunk = keyIds.slice(i, i + chunkSize);
+            const { data, error } = await supabaseClient
+              .from(WHATSAPP_AUTH_SESSIONS_TABLE)
+              .select('key_id, key_data')
+              .eq('tenant_id', safeTenantId)
+              .in('key_id', chunk);
+
+            if (error) {
+              console.error(
+                `[Baileys-Auth] Failed reading "${type}" keys for tenant ${safeTenantId}:`,
+                error.message
+              );
+              continue;
+            }
+
+            if (Array.isArray(data)) {
+              for (const row of data) {
+                const rawId = keyIdToRawId.get(row.key_id);
+                if (rawId === undefined) continue;
+                try {
+                  let value = deserializeAuthData(row.key_data);
+                  if (
+                    type === 'app-state-sync-key' &&
+                    value &&
+                    proto?.Message?.AppStateSyncKeyData?.fromObject
+                  ) {
+                    value = proto.Message.AppStateSyncKeyData.fromObject(value);
+                  }
+                  if (value !== null && value !== undefined) {
+                    result[rawId] = value;
+                  }
+                } catch (err) {
+                  console.error(
+                    `[Baileys-Auth] Corrupt key "${row.key_id}" for tenant ${safeTenantId}:`,
+                    err?.message
+                  );
+                }
+              }
+            }
+          }
+
+          return result;
+        },
+        set: async (data) => {
+          const nowIso = new Date().toISOString();
+          const rowsToUpsert = [];
+          const keysToDelete = [];
+
+          for (const category of Object.keys(data || {})) {
+            const entries = data[category] || {};
+            for (const id of Object.keys(entries)) {
+              const value = entries[id];
+              const keyId = `${category}-${id}`;
+              if (value !== null && value !== undefined) {
+                rowsToUpsert.push({
+                  tenant_id: safeTenantId,
+                  key_id: keyId,
+                  key_data: serializeAuthData(value),
+                  updated_at: nowIso,
+                });
+              } else {
+                keysToDelete.push(keyId);
+              }
+            }
+          }
+
+          await enqueueWrite(async () => {
+            if (rowsToUpsert.length > 0) {
+              await writeBatch(rowsToUpsert);
+            }
+            if (keysToDelete.length > 0) {
+              await removeBatch(keysToDelete);
+            }
+          });
+        },
+      },
+    },
+    saveCreds: async () => {
+      const nowIso = new Date().toISOString();
+      const row = {
+        tenant_id: safeTenantId,
+        key_id: 'creds',
+        key_data: serializeAuthData(creds),
+        updated_at: nowIso,
+      };
+      await enqueueWrite(() => writeBatch([row]));
+    },
+  };
+}
+
+async function deleteTenantAuthState(supabaseClient, tenantId) {
+  if (!supabaseClient) return;
+  const safeTenantId = sanitizePortalUserId(tenantId);
+  if (!safeTenantId) return;
+  const { error } = await supabaseClient
+    .from(WHATSAPP_AUTH_SESSIONS_TABLE)
+    .delete()
+    .eq('tenant_id', safeTenantId);
+  if (error) {
+    console.error(
+      `[Baileys-Auth] Failed clearing auth rows for tenant ${safeTenantId}:`,
+      error.message
+    );
+  }
+}
+
+async function hasPersistedTenantCreds(supabaseClient, tenantId) {
+  if (!supabaseClient) return false;
+  const safeTenantId = sanitizePortalUserId(tenantId);
+  if (!safeTenantId) return false;
+  const { data, error } = await supabaseClient
+    .from(WHATSAPP_AUTH_SESSIONS_TABLE)
+    .select('tenant_id')
+    .eq('tenant_id', safeTenantId)
+    .eq('key_id', 'creds')
+    .maybeSingle();
+  if (error) return false;
+  return Boolean(data?.tenant_id);
+}
+
+async function listPersistedTenantIds(supabaseClient) {
+  if (!supabaseClient) return [];
+  const tenantSet = new Set();
+
+  // Primary query: every linked tenant has a 'creds' row (fast, avoids hitting 1000-row cap on Signal keys)
+  const { data: credsRows, error: credsErr } = await supabaseClient
+    .from(WHATSAPP_AUTH_SESSIONS_TABLE)
+    .select('tenant_id')
+    .eq('key_id', 'creds');
+
+  if (credsErr) {
+    console.error(
+      `[Baileys-Gateway] Unable to query ${WHATSAPP_AUTH_SESSIONS_TABLE}: ${credsErr.message}`
+    );
+    if (/relation .* does not exist|does not exist|schema cache/i.test(credsErr.message)) {
+      console.warn(
+        `[Baileys-Gateway] Run this SQL once in Supabase SQL Editor to create the session table:\n${WHATSAPP_AUTH_SESSIONS_DDL}`
+      );
+    }
+    return [];
+  }
+
+  for (const row of credsRows || []) {
+    const safeId = sanitizePortalUserId(row?.tenant_id);
+    if (safeId) tenantSet.add(safeId);
+  }
+
+  return Array.from(tenantSet);
+}
+
+async function ensureAuthSessionsTable() {
+  if (!supabase) return false;
+  const { error } = await supabase
+    .from(WHATSAPP_AUTH_SESSIONS_TABLE)
+    .select('tenant_id')
+    .limit(1);
+
+  if (!error) return true;
+
+  // If direct PostgreSQL DATABASE_URL is also provided (e.g. Railway / Supabase Pooler), auto-bootstrap the table
+  if (
+    process.env.DATABASE_URL &&
+    /relation .* does not exist|does not exist|schema cache/i.test(error.message)
+  ) {
+    try {
+      const pgMod = await import('pg');
+      const Pool = pgMod.default?.Pool ?? pgMod.Pool;
+      const pool = new Pool({
+        connectionString: process.env.DATABASE_URL,
+        ssl: { rejectUnauthorized: false },
+      });
+      await pool.query(WHATSAPP_AUTH_SESSIONS_DDL);
+      await pool.end();
+      console.log(
+        `[Baileys-Gateway] Auto-created PostgreSQL table public.${WHATSAPP_AUTH_SESSIONS_TABLE}.`
+      );
+      return true;
+    } catch (pgErr) {
+      console.warn(
+        `[Baileys-Gateway] Auto-DDL via DATABASE_URL failed: ${pgErr?.message}`
+      );
+    }
+  }
+
+  console.warn(
+    `[Baileys-Gateway] Table public.${WHATSAPP_AUTH_SESSIONS_TABLE} check returned: ${error.message}`
+  );
+  if (/relation .* does not exist|does not exist|schema cache/i.test(error.message)) {
+    console.warn(
+      `[Baileys-Gateway] Please run the migration SQL once in Supabase SQL Editor:\n${WHATSAPP_AUTH_SESSIONS_DDL}`
+    );
+  }
+  return false;
 }
 
 // ============================================================================
@@ -240,8 +669,10 @@ function buildAutomatedMessage(eventType, vars = {}) {
 // ============================================================================
 
 const sockets = new Map(); // sessionKey -> WASocket
-const states = new Map(); // sessionKey -> { portalUserId, sessionKey, status, qrDataUrl, phone, lastError, updatedAt, reconnectAttempts }
+const states = new Map(); // sessionKey -> { portalUserId, sessionKey, status, qrDataUrl, phone, lastError, updatedAt, reconnectAttempts, restart515Attempts }
 const pendingQrWaiters = new Map(); // sessionKey -> Array<() => void>
+const reconnectTimers = new Map(); // sessionKey -> Timeout
+const manualLogoutInProgress = new Set(); // sessionKey
 const memoryLogs = [];
 const dedupeKeys = new Set();
 
@@ -259,9 +690,18 @@ function getOrCreateState(portalUserId) {
       lastError: null,
       updatedAt: new Date().toISOString(),
       reconnectAttempts: 0,
+      restart515Attempts: 0,
     });
   }
   return states.get(sessionKey);
+}
+
+function clearPendingReconnect(sessionKey) {
+  const timer = reconnectTimers.get(sessionKey);
+  if (timer) {
+    clearTimeout(timer);
+    reconnectTimers.delete(sessionKey);
+  }
 }
 
 function notifyQrWaiters(sessionKey) {
@@ -289,38 +729,47 @@ async function syncUserStatusInSupabase(portalUserId, status, phone) {
   }
 }
 
-async function startBaileysSession(portalUserId, waitMs = 12000) {
+async function startBaileysSession(portalUserId, waitMs = 12000, options = {}) {
   const safeId = sanitizePortalUserId(portalUserId);
   if (!safeId) throw new Error('Invalid portalUserId.');
+  if (!supabase) {
+    throw new Error(
+      'Supabase PostgreSQL is not configured. Set SUPABASE_URL and SUPABASE_SERVICE_ROLE_KEY to persist WhatsApp sessions.'
+    );
+  }
+
   const sessionKey = `session_${safeId}`;
   const state = getOrCreateState(safeId);
+  const { forceReconnect = false } = options;
 
-  if (state.status === 'CONNECTED' && sockets.has(sessionKey)) {
+  if (!forceReconnect && state.status === 'CONNECTED' && sockets.has(sessionKey)) {
     return { ...state };
   }
-  if (state.status === 'QR_READY' && state.qrDataUrl && sockets.has(sessionKey)) {
+  if (!forceReconnect && state.status === 'QR_READY' && state.qrDataUrl && sockets.has(sessionKey)) {
     return { ...state };
   }
 
-  const authDir = resolveSafeAuthDir(safeId);
-  fs.mkdirSync(authDir, { recursive: true });
+  manualLogoutInProgress.delete(sessionKey);
+  clearPendingReconnect(sessionKey);
 
-  // Clean up any stale socket
+  // Clean up any stale socket before opening a new one
   const existingSock = sockets.get(sessionKey);
   if (existingSock) {
+    sockets.delete(sessionKey);
     try {
+      existingSock.ev.removeAllListeners('connection.update');
+      existingSock.ev.removeAllListeners('creds.update');
       existingSock.end(undefined);
     } catch {
       // ignore
     }
-    sockets.delete(sessionKey);
   }
 
   state.status = 'CONNECTING';
   state.lastError = null;
   state.updatedAt = new Date().toISOString();
 
-  const { state: authState, saveCreds } = await useMultiFileAuthState(authDir);
+  const { state: authState, saveCreds } = await useSupabaseAuthState(supabase, safeId);
   let version;
   try {
     const fetched = await fetchLatestBaileysVersion();
@@ -334,16 +783,39 @@ async function startBaileysSession(portalUserId, waitMs = 12000) {
     auth: authState,
     logger: pino({ level: 'silent' }),
     printQRInTerminal: false,
-    browser: Browsers?.ubuntu ? Browsers.ubuntu('ISP WhatsApp Gateway') : ['ISP Gateway', 'Chrome', '120.0.0'],
+    browser: Browsers?.ubuntu
+      ? Browsers.ubuntu('ISP WhatsApp Gateway')
+      : ['ISP Gateway', 'Chrome', '120.0.0'],
     markOnlineOnConnect: false,
     syncFullHistory: false,
   });
 
+  // Close any socket that may have raced while awaiting Supabase auth state
+  const racedSock = sockets.get(sessionKey);
+  if (racedSock && racedSock !== sock) {
+    try {
+      racedSock.ev.removeAllListeners('connection.update');
+      racedSock.ev.removeAllListeners('creds.update');
+      racedSock.end(undefined);
+    } catch {
+      // ignore
+    }
+  }
   sockets.set(sessionKey, sock);
 
-  sock.ev.on('creds.update', saveCreds);
+  sock.ev.on('creds.update', () => {
+    saveCreds().catch((err) => {
+      console.error(
+        `[Baileys-Gateway] Failed saving creds to PostgreSQL for tenant ${safeId}:`,
+        err?.message
+      );
+    });
+  });
 
   sock.ev.on('connection.update', async (update) => {
+    // Ignore events from superseded sockets
+    if (sockets.get(sessionKey) !== sock) return;
+
     const { connection, lastDisconnect, qr } = update;
 
     if (qr) {
@@ -367,46 +839,113 @@ async function startBaileysSession(portalUserId, waitMs = 12000) {
       state.phone = phoneDigits ? `+${phoneDigits}` : null;
       state.lastError = null;
       state.reconnectAttempts = 0;
+      state.restart515Attempts = 0;
       state.updatedAt = new Date().toISOString();
       await syncUserStatusInSupabase(safeId, 'CONNECTED', state.phone);
       notifyQrWaiters(sessionKey);
-      console.log(`[Baileys-Gateway] Connected ${sessionKey} (${state.phone || 'active'})`);
+      console.log(
+        `[Baileys-Gateway] Connected tenant ${safeId} (${state.phone || 'active'}) [PostgreSQL auth]`
+      );
     }
 
     if (connection === 'close') {
-      const statusCode = lastDisconnect?.error?.output?.statusCode;
-      const loggedOut = statusCode === DisconnectReason.loggedOut || statusCode === 401;
+      const statusCode =
+        lastDisconnect?.error?.output?.statusCode ??
+        lastDisconnect?.error?.statusCode;
+      const loggedOut =
+        statusCode === DisconnectReason.loggedOut || statusCode === 401;
+      const restartRequired =
+        statusCode === DisconnectReason.restartRequired || statusCode === 515;
+
       sockets.delete(sessionKey);
 
+      // If this close was triggered by an explicit logout call, do not reconnect
+      if (manualLogoutInProgress.has(sessionKey)) {
+        manualLogoutInProgress.delete(sessionKey);
+        return;
+      }
+
       if (loggedOut) {
+        clearPendingReconnect(sessionKey);
         state.status = 'DISCONNECTED';
         state.qrDataUrl = null;
         state.phone = null;
-        state.lastError = 'Device unlinked / logged out from WhatsApp.';
+        state.reconnectAttempts = 0;
+        state.restart515Attempts = 0;
+        state.lastError =
+          'Device unlinked / logged out from WhatsApp (401). Scan a fresh QR code to pair again.';
         state.updatedAt = new Date().toISOString();
-        try {
-          fs.rmSync(authDir, { recursive: true, force: true });
-        } catch {
-          // ignore
-        }
+        console.log(
+          `[Baileys-Gateway] Tenant ${safeId} logged out (401) — purging ${WHATSAPP_AUTH_SESSIONS_TABLE} rows...`
+        );
+        await deleteTenantAuthState(supabase, safeId);
         await syncUserStatusInSupabase(safeId, 'DISCONNECTED', null);
         notifyQrWaiters(sessionKey);
-      } else {
-        state.status = 'DISCONNECTED';
-        state.qrDataUrl = null;
-        state.lastError = lastDisconnect?.error?.message || `Connection closed (${statusCode || 'network'})`;
-        state.updatedAt = new Date().toISOString();
-        notifyQrWaiters(sessionKey);
+        return;
+      }
 
-        if (state.reconnectAttempts < 4) {
-          state.reconnectAttempts += 1;
-          const delay = Math.min(15000, 2500 * state.reconnectAttempts);
-          setTimeout(() => {
-            if (!sockets.has(sessionKey) && fs.existsSync(authDir)) {
-              startBaileysSession(safeId, 0).catch(() => {});
+      if (restartRequired) {
+        state.qrDataUrl = null;
+        state.status = 'CONNECTING';
+        state.lastError = null;
+        state.updatedAt = new Date().toISOString();
+        state.restart515Attempts = (state.restart515Attempts || 0) + 1;
+
+        if (state.restart515Attempts <= 5) {
+          const delayMs = Math.min(4000, 600 * state.restart515Attempts);
+          console.log(
+            `[Baileys-Gateway] Restart required (515) for tenant ${safeId} (attempt ${state.restart515Attempts}/5) — triggering clean socket reconnect in ${delayMs}ms...`
+          );
+          clearPendingReconnect(sessionKey);
+          const timer = setTimeout(() => {
+            reconnectTimers.delete(sessionKey);
+            if (!sockets.has(sessionKey) && !manualLogoutInProgress.has(sessionKey)) {
+              startBaileysSession(safeId, 0, { forceReconnect: true }).catch((err) => {
+                console.warn(
+                  `[Baileys-Gateway] 515 reconnect failed for tenant ${safeId}:`,
+                  err?.message
+                );
+              });
             }
-          }, delay);
+          }, delayMs);
+          reconnectTimers.set(sessionKey, timer);
+        } else {
+          state.status = 'DISCONNECTED';
+          state.lastError =
+            'WhatsApp stream restart limit reached (515). Click Generate QR to reconnect.';
+          state.updatedAt = new Date().toISOString();
+          notifyQrWaiters(sessionKey);
         }
+        return;
+      }
+
+      // Transient network / stream disconnect — attempt clean backoff reconnect if persisted creds exist
+      state.status = 'DISCONNECTED';
+      state.qrDataUrl = null;
+      state.lastError =
+        lastDisconnect?.error?.message ||
+        `Connection closed (${statusCode || 'network'})`;
+      state.updatedAt = new Date().toISOString();
+      notifyQrWaiters(sessionKey);
+
+      if (state.reconnectAttempts < 5) {
+        state.reconnectAttempts += 1;
+        const delay = Math.min(20000, 2500 * state.reconnectAttempts);
+        clearPendingReconnect(sessionKey);
+        const timer = setTimeout(async () => {
+          reconnectTimers.delete(sessionKey);
+          if (sockets.has(sessionKey) || manualLogoutInProgress.has(sessionKey)) return;
+          const stillHasCreds = await hasPersistedTenantCreds(supabase, safeId);
+          if (stillHasCreds) {
+            startBaileysSession(safeId, 0, { forceReconnect: true }).catch((err) => {
+              console.warn(
+                `[Baileys-Gateway] Auto-reconnect failed for tenant ${safeId}:`,
+                err?.message
+              );
+            });
+          }
+        }, delay);
+        reconnectTimers.set(sessionKey, timer);
       }
     }
   });
@@ -431,26 +970,34 @@ async function logoutBaileysSession(portalUserId) {
   if (!safeId) throw new Error('Invalid portalUserId.');
   const sessionKey = `session_${safeId}`;
   const state = getOrCreateState(safeId);
-  const authDir = resolveSafeAuthDir(safeId);
 
-  const sock = sockets.get(sessionKey);
-  if (sock) {
-    try {
-      await sock.logout();
-    } catch {
+  manualLogoutInProgress.add(sessionKey);
+  clearPendingReconnect(sessionKey);
+
+  try {
+    const sock = sockets.get(sessionKey);
+    if (sock) {
+      sockets.delete(sessionKey);
       try {
-        sock.end(undefined);
+        sock.ev.removeAllListeners('connection.update');
+        sock.ev.removeAllListeners('creds.update');
       } catch {
         // ignore
       }
+      try {
+        await sock.logout();
+      } catch {
+        try {
+          sock.end(undefined);
+        } catch {
+          // ignore
+        }
+      }
     }
-    sockets.delete(sessionKey);
-  }
 
-  try {
-    fs.rmSync(authDir, { recursive: true, force: true });
-  } catch {
-    // ignore
+    await deleteTenantAuthState(supabase, safeId);
+  } finally {
+    manualLogoutInProgress.delete(sessionKey);
   }
 
   state.status = 'DISCONNECTED';
@@ -458,8 +1005,10 @@ async function logoutBaileysSession(portalUserId) {
   state.phone = null;
   state.lastError = null;
   state.reconnectAttempts = 0;
+  state.restart515Attempts = 0;
   state.updatedAt = new Date().toISOString();
   await syncUserStatusInSupabase(safeId, 'DISCONNECTED', null);
+  notifyQrWaiters(sessionKey);
   return { ...state };
 }
 
@@ -543,7 +1092,16 @@ async function logDelivery(entry) {
   }
 }
 
-async function sendAutomatedMessage({ subscriber, subscriberUsername, eventType, messageVars = {}, forceSenderPortalUserId, manualTrigger = false }) {
+async function sendAutomatedMessage({
+  subscriber,
+  subscriberUsername,
+  eventType,
+  messageVars = {},
+  groupJid = null,
+  customMessage = null,
+  forceSenderPortalUserId,
+  manualTrigger = false,
+}) {
   let allUsers = [];
   let paymentAccounts = [];
   if (supabase) {
@@ -592,15 +1150,41 @@ async function sendAutomatedMessage({ subscriber, subscriberUsername, eventType,
     sender = resolveSenderHierarchy(resolvedSub, allUsers);
   }
 
+  await loadAppSettingsCache();
+  const customTemplates = {
+    ...settingsCache.globalTemplates,
+    ...(sender.senderPortalUserId ? settingsCache.scopedTemplates.get(String(sender.senderPortalUserId)) || {} : {}),
+  };
+  const teamGroupCfg =
+    (sender.senderPortalUserId && settingsCache.scopedTeamGroups.get(String(sender.senderPortalUserId))) ||
+    settingsCache.globalTeamGroup ||
+    null;
+
   const rawPhone = messageVars.phone || resolvedSub?.phone || '';
-  const jid = formatWhatsAppJid(rawPhone);
-  const recipientDigits = formatWhatsAppDigits(rawPhone) || String(rawPhone || 'unknown');
+  let jid = null;
+  let recipientDigits = formatWhatsAppDigits(rawPhone) || String(rawPhone || 'unknown');
+
+  if (groupJid || eventType === 'COMPLAINT_CREATED_GROUP') {
+    const candidateGroup = groupJid || teamGroupCfg?.groupJid || '';
+    jid = formatWhatsAppGroupJid(candidateGroup);
+    recipientDigits = jid
+      ? teamGroupCfg?.groupName
+        ? `${teamGroupCfg.groupName} (${jid})`
+        : jid
+      : candidateGroup || 'UNCONFIGURED_TEAM_GROUP';
+  } else {
+    jid = formatWhatsAppJid(rawPhone);
+  }
+
   const messageBody = buildAutomatedMessage(eventType, {
     ...messageVars,
     companyName: sender.companyName,
     supportPhone: messageVars.supportPhone || sender.supportPhone,
     subscriberName: messageVars.subscriberName || resolvedSub?.full_name || subscriberUsername,
     username: messageVars.username || resolvedSub?.username || subscriberUsername,
+    phone: rawPhone,
+    customMessage: customMessage || messageVars.customMessage,
+    customTemplates,
     paymentAccounts:
       Array.isArray(messageVars.paymentAccounts) && messageVars.paymentAccounts.length > 0
         ? messageVars.paymentAccounts
@@ -612,7 +1196,13 @@ async function sendAutomatedMessage({ subscriber, subscriberUsername, eventType,
       ? messageBody.replace(/(\*(?:PPPoE\s+)?Password:\*\s*)(.+)/gi, '$1••••••••')
       : messageBody;
 
-  if (!manualTrigger && !sender.autoSendEnabled && eventType !== 'MANUAL_TEST' && eventType !== 'PORTAL_CREDENTIALS') {
+  if (
+    !manualTrigger &&
+    !sender.autoSendEnabled &&
+    eventType !== 'MANUAL_TEST' &&
+    eventType !== 'CUSTOM_MESSAGE' &&
+    eventType !== 'PORTAL_CREDENTIALS'
+  ) {
     await logDelivery({
       sender_portal_user_id: sender.senderPortalUserId,
       sender_company_name: sender.companyName,
@@ -632,6 +1222,10 @@ async function sendAutomatedMessage({ subscriber, subscriberUsername, eventType,
   }
 
   if (!jid) {
+    const errMsg =
+      eventType === 'COMPLAINT_CREATED_GROUP' || groupJid
+        ? 'Team WhatsApp Work Group JID is not configured. Select your Team Group in WhatsApp & Branding.'
+        : 'Missing or invalid subscriber WhatsApp phone number.';
     await logDelivery({
       sender_portal_user_id: sender.senderPortalUserId,
       sender_company_name: sender.companyName,
@@ -645,9 +1239,9 @@ async function sendAutomatedMessage({ subscriber, subscriberUsername, eventType,
       event_type: eventType,
       message_body: loggedMessageBody,
       status: 'FAILED',
-      error_message: 'Missing or invalid subscriber WhatsApp phone number.',
+      error_message: errMsg,
     });
-    return { ok: false, status: 'FAILED', senderCompanyName: sender.companyName, error: 'Invalid recipient phone number.' };
+    return { ok: false, status: 'FAILED', senderCompanyName: sender.companyName, error: errMsg };
   }
 
   const sock = sender.senderPortalUserId ? sockets.get(`session_${sender.senderPortalUserId}`) : null;
@@ -799,9 +1393,12 @@ app.get('/api/whatsapp/health', (_req, res) => {
     success: true,
     status: 'online',
     engine: 'baileys-standalone-multi-session',
+    authStorage: supabase ? 'supabase-postgresql' : 'unconfigured',
+    authTable: WHATSAPP_AUTH_SESSIONS_TABLE,
     activeSessionsCount: states.size,
     connectedSessionsCount: connectedCount,
     supabaseConfigured: Boolean(supabase),
+    serviceRoleConfigured: Boolean(SUPABASE_SERVICE_ROLE_KEY),
     timestamp: new Date().toISOString(),
   });
 });
@@ -997,6 +1594,107 @@ app.post('/api/whatsapp/branding', async (req, res) => {
   }
 });
 
+// 5B. Fetch Connected WhatsApp Groups (for Team Work Group selector)
+app.get('/api/whatsapp/groups', async (req, res) => {
+  try {
+    const ctx = await resolveActor(req);
+    if (!ctx.ok || !ctx.actor) {
+      return res.status(ctx.statusCode || 401).json({ success: false, groups: [], error: ctx.error });
+    }
+    const safeId = sanitizePortalUserId(ctx.actor.id);
+    const sessionKey = `session_${safeId}`;
+    const sock = sockets.get(sessionKey);
+    const st = states.get(sessionKey);
+    if (!sock || st?.status !== 'CONNECTED') {
+      return res.status(400).json({
+        success: false,
+        groups: [],
+        error: 'WhatsApp session is not connected. Pair your WhatsApp via QR first to fetch groups.',
+      });
+    }
+    const participating = await sock.groupFetchAllParticipating();
+    const groups = Object.values(participating || {})
+      .map((g) => ({
+        id: String(g?.id || '').trim(),
+        subject: String(g?.subject || 'Unnamed Group').trim(),
+        participantsCount: Array.isArray(g?.participants) ? g.participants.length : 0,
+      }))
+      .filter((g) => Boolean(formatWhatsAppGroupJid(g.id)))
+      .sort((a, b) => a.subject.localeCompare(b.subject));
+    return res.json({ success: true, groups });
+  } catch (err) {
+    return res.status(500).json({ success: false, groups: [], error: err?.message || 'Failed to fetch WhatsApp groups.' });
+  }
+});
+
+// 5C. Load & Save Editable Message Templates + Team Work Group Config
+app.get('/api/whatsapp/templates', async (req, res) => {
+  try {
+    const ctx = await resolveActor(req);
+    if (!ctx.ok || !ctx.actor) {
+      return res.status(ctx.statusCode || 401).json({ success: false, error: ctx.error });
+    }
+    await loadAppSettingsCache();
+    const actorId = String(ctx.actor.id);
+    const templates = {
+      ...DEFAULT_TEMPLATE_MAP,
+      ...settingsCache.globalTemplates,
+      ...(settingsCache.scopedTemplates.get(actorId) || {}),
+    };
+    const teamGroup =
+      settingsCache.scopedTeamGroups.get(actorId) ||
+      settingsCache.globalTeamGroup || { groupJid: '', groupName: '', inviteLink: '' };
+    return res.json({ success: true, templates, teamGroup });
+  } catch (err) {
+    return res.status(500).json({ success: false, error: err?.message || 'Failed to load templates.' });
+  }
+});
+
+app.post('/api/whatsapp/templates', async (req, res) => {
+  try {
+    const ctx = await resolveActor(req);
+    if (!ctx.ok || !ctx.actor) {
+      return res.status(ctx.statusCode || 401).json({ success: false, error: ctx.error });
+    }
+    const body = req.body || {};
+    const nowIso = new Date().toISOString();
+    const rows = [];
+    const actorId = String(ctx.actor.id);
+    const isAdmin = ctx.effectiveTier === 'ADMIN';
+
+    if (body.templates && typeof body.templates === 'object') {
+      const sanitized = {};
+      for (const k of Object.keys(DEFAULT_TEMPLATE_MAP)) {
+        const val = body.templates[k];
+        if (typeof val === 'string' && val.trim()) sanitized[k] = val.slice(0, 3000);
+      }
+      const serialized = JSON.stringify(sanitized);
+      if (isAdmin) rows.push({ key: WHATSAPP_TEMPLATES_SETTINGS_KEY, value: serialized, updated_at: nowIso });
+      rows.push({ key: `${WHATSAPP_TEMPLATES_SETTINGS_KEY}:${actorId}`, value: serialized, updated_at: nowIso });
+    }
+
+    if (body.teamGroup && typeof body.teamGroup === 'object') {
+      const cleanGroup = {
+        groupJid: String(body.teamGroup.groupJid || '').trim().slice(0, 120),
+        groupName: String(body.teamGroup.groupName || '').trim().slice(0, 140),
+        inviteLink: String(body.teamGroup.inviteLink || '').trim().slice(0, 260),
+      };
+      const serialized = JSON.stringify(cleanGroup);
+      if (isAdmin) rows.push({ key: WHATSAPP_TEAM_GROUP_SETTINGS_KEY, value: serialized, updated_at: nowIso });
+      rows.push({ key: `${WHATSAPP_TEAM_GROUP_SETTINGS_KEY}:${actorId}`, value: serialized, updated_at: nowIso });
+    }
+
+    if (supabase && rows.length > 0) {
+      await supabase.from('app_settings').upsert(rows, { onConflict: 'key' });
+      settingsCache.loadedAt = 0;
+    }
+
+    return res.json({ success: true });
+  } catch (err) {
+    return res.status(500).json({ success: false, error: err?.message || 'Failed to save templates.' });
+  }
+});
+
 // 6. Zero-Click Automated Send (Sub-Dealer -> Dealer -> Master Admin Routing)
 async function handleWhatsAppSend(req, res) {
   try {
@@ -1011,14 +1709,22 @@ async function handleWhatsAppSend(req, res) {
       'PORTAL_CREDENTIALS',
       'INVOICE_GENERATED',
       'PRE_EXPIRY_3D',
+      'GRACE_PERIOD_3D',
       'AUTO_SUSPENSION',
       'PAYMENT_RESTORED',
+      'AGENT_PAYMENT_RECEIPT',
+      'COMPLAINT_CREATED_CLIENT',
+      'COMPLAINT_CREATED_GROUP',
+      'COMPLAINT_RESOLVED_CLIENT',
+      'CUSTOM_MESSAGE',
       'MANUAL_TEST',
     ]);
     let eventType = String(body.eventType || '').trim().toUpperCase();
     if (!eventType) {
       if (body.password || body.portalUrl || body.messageVars?.password || body.messageVars?.portalUrl) {
         eventType = 'PORTAL_CREDENTIALS';
+      } else if (body.customMessage) {
+        eventType = 'CUSTOM_MESSAGE';
       } else if (body.message || body.messageVars?.customNote) {
         eventType = 'MANUAL_TEST';
       }
@@ -1036,15 +1742,22 @@ async function handleWhatsAppSend(req, res) {
     const mergedMessageVars = {
       ...(body.messageVars || {}),
       ...(body.phone && !body.messageVars?.phone ? { phone: String(body.phone).trim() } : {}),
-      ...(body.message && !body.messageVars?.customNote ? { customNote: String(body.message).slice(0, 2000) } : {}),
+      ...(body.message && !body.messageVars?.customNote ? { customNote: String(body.message).slice(0, 2500) } : {}),
+      ...(body.customMessage && !body.messageVars?.customMessage
+        ? { customMessage: String(body.customMessage).slice(0, 3000) }
+        : {}),
     };
 
     const isNewAccountEvent = eventType === 'PROVISION_WELCOME' || eventType === 'PORTAL_CREDENTIALS';
+    const isDirectBroadcast =
+      eventType === 'MANUAL_TEST' ||
+      (eventType === 'CUSTOM_MESSAGE' && !subscriberUsername) ||
+      eventType === 'COMPLAINT_CREATED_GROUP';
     let effectiveSubscriber = body.subscriber || null;
 
     // Enforce multi-tenant scope for Dealers & Sub-Dealers
     if (ctx.effectiveTier === 'DEALER' || ctx.effectiveTier === 'SUB_DEALER') {
-      if (eventType !== 'MANUAL_TEST') {
+      if (!isDirectBroadcast) {
         const subRow =
           ctx.allUsers.find(
             (u) => subscriberUsername && String(u.username || '').trim().toLowerCase() === subscriberUsername
@@ -1087,7 +1800,9 @@ async function handleWhatsAppSend(req, res) {
       subscriberUsername,
       eventType,
       messageVars: mergedMessageVars,
-      manualTrigger: Boolean(body.manualTrigger),
+      groupJid: body.groupJid ? String(body.groupJid).trim() : null,
+      customMessage: body.customMessage ? String(body.customMessage).slice(0, 3000) : null,
+      manualTrigger: Boolean(body.manualTrigger) || eventType === 'CUSTOM_MESSAGE',
       forceSenderPortalUserId: eventType === 'MANUAL_TEST' ? String(ctx.actor.id) : undefined,
     });
 
@@ -1151,108 +1866,225 @@ app.get('/api/whatsapp/logs', async (req, res) => {
   }
 });
 
-// 8. 3-Day Pre-Expiry Auto-Reminder Sweep
-async function runPreExpirySweep(actorCtx = null) {
-  if (!supabase || getConnectedUserIds().size === 0) {
-    return { scanned: 0, sent: 0, skipped: 0, failed: 0 };
+// 8. 5-Day Pre-Expiry Auto-Billing & Automated WhatsApp Invoice Delivery
+function resolveStandalonePackageRate(pkgName) {
+  const s = String(pkgName || '').toUpperCase();
+  if (s.includes('100')) return 5000;
+  if (s.includes('50')) return 3500;
+  if (s.includes('30')) return 3000;
+  if (s.includes('20')) return 2500;
+  if (s.includes('15')) return 2000;
+  if (s.includes('10')) return 1500;
+  return 2000;
+}
+
+async function safeInsertDueInvoiceStandalone(payload) {
+  const working = { ...payload };
+  const optionalCols = new Set([
+    'package_profile',
+    'package_name',
+    'shifted_to_next_month',
+    'sub_dealer_id',
+    'dealer_id',
+    'created_by_id',
+  ]);
+  for (let attempt = 0; attempt < 8; attempt++) {
+    const { data, error } = await supabase.from('invoices').insert([working]).select().maybeSingle();
+    if (!error) return { data, error: null };
+    const msg = String(error.message || error.details || '');
+    const m =
+      msg.match(/Could not find the ['"]([a-zA-Z0-9_]+)['"] column/i) ||
+      msg.match(/column\s+["']?([a-zA-Z0-9_]+)["']?\s+(?:of relation|does not exist)/i);
+    if (m?.[1] && m[1] in working && optionalCols.has(m[1])) {
+      delete working[m[1]];
+      continue;
+    }
+    return { data, error };
+  }
+  return { data: null, error: new Error('Failed to insert invoice') };
+}
+
+async function runPreExpirySweep(actorCtx = null, daysBeforeExpiry = 5) {
+  if (!supabase) {
+    return {
+      scanned: 0,
+      invoicesGenerated: 0,
+      sent: 0,
+      whatsappSent: 0,
+      skipped: 0,
+      skippedExisting: 0,
+      failed: 0,
+      totalBilled: 0,
+    };
   }
   const [{ data: clients }, { data: invoices }] = await Promise.all([
     supabase.from('portal_users').select('*').eq('role', 'CLIENT'),
-    supabase.from('invoices').select('*').neq('status', 'PAID'),
+    supabase
+      .from('invoices')
+      .select('id, invoice_no, subscriber_username, amount, paid_amount, status, due_date, created_at'),
   ]);
 
-  const unpaidByUser = new Map();
+  const openNonMaterialByUser = new Set();
+  const existingDueKeys = new Set();
   for (const inv of invoices || []) {
-    const st = String(inv.status || '').toUpperCase();
-    const bal = Math.max(0, (Number(inv.amount) || 0) - (Number(inv.paid_amount) || 0));
-    if (st === 'PAID' || st === 'CANCELLED' || bal <= 0) continue;
     const uname = String(inv.subscriber_username || '').trim().toLowerCase();
     if (!uname) continue;
-    const prev = unpaidByUser.get(uname) || { totalDue: 0, earliestDueDate: null };
-    prev.totalDue += bal;
-    if (inv.due_date && (!prev.earliestDueDate || inv.due_date < prev.earliestDueDate)) {
-      prev.earliestDueDate = inv.due_date;
+    if (String(inv.invoice_no || '').trim().toUpperCase().startsWith('INV-MAT-')) continue;
+    const st = String(inv.status || '').toUpperCase();
+    const bal = Math.max(0, (Number(inv.amount) || 0) - (Number(inv.paid_amount) || 0));
+    if (st !== 'PAID' && st !== 'CANCELLED' && bal > 0) {
+      openNonMaterialByUser.add(uname);
     }
-    unpaidByUser.set(uname, prev);
+    const dueYmd = String(inv.due_date || '').trim().slice(0, 10);
+    if (/^\d{4}-\d{2}-\d{2}$/.test(dueYmd)) {
+      existingDueKeys.add(`${uname}::${dueYmd}`);
+    }
   }
 
-  const nowMs = Date.now();
-  const threeDaysMs = 3 * 86_400_000;
-  const todayKey = new Date().toISOString().slice(0, 10);
+  const now = new Date();
+  const nowIso = now.toISOString();
+  const todayYmd = nowIso.slice(0, 10);
+  const [ty, tm, td] = todayYmd.split('-').map(Number);
+  const todayUtcMs = Date.UTC(ty, (tm || 1) - 1, td || 1);
+  const leadDays = Math.max(1, Math.min(15, Number(daysBeforeExpiry || 5)));
+
   let scanned = 0;
-  let sent = 0;
-  let skipped = 0;
+  let invoicesGenerated = 0;
+  let whatsappSent = 0;
+  let skippedExisting = 0;
   let failed = 0;
+  let totalBilled = 0;
 
   for (const sub of clients || []) {
     const acct = String(sub.account_status || 'ACTIVE').toUpperCase();
-    if (acct === 'SUSPENDED' || acct === 'EXPIRED' || acct === 'DELETED') continue;
+    const bil = String(sub.billing_status || 'ACTIVE').toUpperCase();
+    if (sub.is_suspended === true) continue;
+    if (['SUSPENDED', 'EXPIRED', 'DELETED', 'PENDING_RECHARGE'].includes(acct)) continue;
+    if (['SUSPENDED_EXPIRED', 'PENDING_RECHARGE'].includes(bil)) continue;
     if (actorCtx && actorCtx.effectiveTier === 'DEALER') {
       if (String(sub.dealer_id || '') !== String(actorCtx.actor.id)) continue;
     }
+
     const uname = String(sub.username || '').trim().toLowerCase();
-    if (!uname || !sub.phone) continue;
-
-    const unpaid = unpaidByUser.get(uname);
-    const dueDateRaw = unpaid?.earliestDueDate || sub.next_billing_date || sub.expiry_date;
-    if (!dueDateRaw) continue;
-    const dueMs = Date.parse(`${String(dueDateRaw).slice(0, 10)}T23:59:59Z`);
-    if (Number.isNaN(dueMs)) continue;
-
-    const diffMs = dueMs - nowMs;
-    if (diffMs < 0 || diffMs > threeDaysMs) continue;
-    const amountDue = unpaid?.totalDue || Number(sub.monthly_fee) || 0;
-    if (amountDue <= 0) continue;
-
+    if (!uname) continue;
     scanned++;
-    const dedupe = `${todayKey}:PRE_EXPIRY_3D:${uname}`;
-    if (dedupeKeys.has(dedupe)) {
-      skipped++;
+
+    const expiryRaw = String(sub.expiry_date || sub.next_billing_date || '').trim().slice(0, 10);
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(expiryRaw)) continue;
+
+    const [ey, em, ed] = expiryRaw.split('-').map(Number);
+    const expUtcMs = Date.UTC(ey, (em || 1) - 1, ed || 1);
+    const daysUntilExpiry = Math.round((expUtcMs - todayUtcMs) / 86_400_000);
+    if (daysUntilExpiry > leadDays || daysUntilExpiry < -30) continue;
+
+    if (openNonMaterialByUser.has(uname) || existingDueKeys.has(`${uname}::${expiryRaw}`)) {
+      skippedExisting++;
       continue;
     }
 
-    const res = await sendAutomatedMessage({
-      subscriber: sub,
-      subscriberUsername: uname,
-      eventType: 'PRE_EXPIRY_3D',
-      messageVars: {
-        subscriberName: sub.full_name || sub.username,
-        username: uname,
-        phone: sub.phone,
-        packageName: sub.package_speed || sub.package_profile_name || 'Fiber Broadband',
-        amountDue,
-        expiryDate: String(dueDateRaw).slice(0, 10),
-      },
+    const pkgName =
+      String(
+        sub.original_package_profile ||
+          sub.package_profile_name ||
+          sub.package_name ||
+          sub.package_speed ||
+          'Fiber Broadband'
+      ).trim() || 'Fiber Broadband';
+
+    const amount =
+      Number(sub.monthly_fee) > 0 ? Number(sub.monthly_fee) : resolveStandalonePackageRate(pkgName);
+    if (amount <= 0) continue;
+
+    const compactYm = expiryRaw.slice(0, 7).replace('-', '');
+    const invoiceNo = `INV-${compactYm}-${Math.floor(1000 + Math.random() * 9000)}`;
+    const anchorDay = Number(sub.billing_anchor_day) || ed || now.getUTCDate();
+
+    const { error: insertErr } = await safeInsertDueInvoiceStandalone({
+      invoice_no: invoiceNo,
+      subscriber_username: uname,
+      assigned_agent_id: null,
+      assigned_agent_name: null,
+      amount,
+      paid_amount: 0,
+      status: 'DUE',
+      due_date: expiryRaw,
+      cycle_day: anchorDay,
+      package_profile: pkgName,
+      package_name: pkgName,
+      dealer_id: sub.dealer_id || null,
+      sub_dealer_id: sub.sub_dealer_id || null,
+      created_at: nowIso,
     });
 
-    if (res.ok && res.status === 'SENT') {
-      dedupeKeys.add(dedupe);
-      sent++;
-    } else if (res.status === 'SKIPPED') {
-      skipped++;
-    } else {
+    if (insertErr) {
       failed++;
+      continue;
+    }
+
+    invoicesGenerated++;
+    totalBilled += amount;
+    openNonMaterialByUser.add(uname);
+    existingDueKeys.add(`${uname}::${expiryRaw}`);
+
+    if (sub.phone) {
+      const res = await sendAutomatedMessage({
+        subscriber: sub,
+        subscriberUsername: uname,
+        eventType: 'INVOICE_GENERATED',
+        messageVars: {
+          subscriberName: sub.full_name || sub.username || uname,
+          username: uname,
+          phone: sub.phone,
+          packageName: pkgName,
+          invoiceNo,
+          amountDue: amount,
+          totalAmount: amount,
+          dueDate: expiryRaw,
+          expiryDate: expiryRaw,
+        },
+      });
+
+      if (res.ok && res.status === 'SENT') {
+        whatsappSent++;
+      } else if (res.status === 'FAILED') {
+        failed++;
+      }
     }
   }
 
-  return { scanned, sent, skipped, failed };
+  return {
+    scanned,
+    invoicesGenerated,
+    sent: whatsappSent,
+    whatsappSent,
+    skipped: skippedExisting,
+    skippedExisting,
+    failed,
+    totalBilled,
+  };
 }
 
-app.post('/api/whatsapp/cron/pre-expiry', async (req, res) => {
+const handlePreExpiryAutoBilling = async (req, res) => {
   try {
     const ctx = await resolveActor(req);
     if (!ctx.ok || !ctx.actor) {
       return res.status(ctx.statusCode || 401).json({ success: false, error: ctx.error });
     }
     if (ctx.effectiveTier !== 'ADMIN' && ctx.effectiveTier !== 'DEALER') {
-      return res.status(403).json({ success: false, error: 'Only Master Admin or Dealers can trigger pre-expiry sweep.' });
+      return res
+        .status(403)
+        .json({ success: false, error: 'Only Master Admin or Dealers can trigger 5-day pre-expiry auto-billing.' });
     }
-    const summary = await runPreExpirySweep(ctx);
+    const daysBeforeExpiry = Number(req.body?.daysBeforeExpiry || 5);
+    const summary = await runPreExpirySweep(ctx, daysBeforeExpiry);
     return res.json({ success: true, ...summary });
   } catch (err) {
-    return res.status(500).json({ success: false, error: err?.message || 'Pre-expiry sweep failed.' });
+    return res.status(500).json({ success: false, error: err?.message || '5-day pre-expiry auto-billing failed.' });
   }
-});
+};
+
+app.post('/api/whatsapp/cron/pre-expiry', handlePreExpiryAutoBilling);
+app.post('/api/billing/run-5day-pre-expiry-billing', handlePreExpiryAutoBilling);
 
 // JSON catch-all so clients NEVER receive HTML <!doctype html>
 app.use((req, res) => {
@@ -1270,31 +2102,56 @@ app.use((err, _req, res, _next) => {
 });
 
 // ============================================================================
-// BOOT & AUTO-RESTORE PERSISTED MULTI-TENANT SESSIONS
+// BOOT & AUTO-RESTORE PERSISTED MULTI-TENANT SESSIONS FROM SUPABASE POSTGRESQL
 // ============================================================================
 
 async function restorePersistedSessions() {
-  if (!fs.existsSync(BAILEYS_AUTH_ROOT)) return;
-  const entries = fs.readdirSync(BAILEYS_AUTH_ROOT, { withFileTypes: true });
-  for (const entry of entries) {
-    if (!entry.isDirectory() || !entry.name.startsWith('session_')) continue;
-    const portalUserId = sanitizePortalUserId(entry.name.slice('session_'.length));
-    if (!portalUserId) continue;
-    const credsPath = path.join(BAILEYS_AUTH_ROOT, entry.name, 'creds.json');
-    if (fs.existsSync(credsPath)) {
-      console.log(`[Baileys-Gateway] Restoring persisted session_${portalUserId}...`);
-      startBaileysSession(portalUserId, 0).catch((err) => {
-        console.warn(`[Baileys-Gateway] Restore skipped for ${portalUserId}:`, err?.message);
-      });
+  if (!supabase) {
+    console.warn(
+      '[Baileys-Gateway] Skipping session auto-restore: SUPABASE_URL / SUPABASE_SERVICE_ROLE_KEY not configured.'
+    );
+    return;
+  }
+
+  const ready = await ensureAuthSessionsTable();
+  if (!ready) return;
+
+  const tenantIds = await listPersistedTenantIds(supabase);
+  if (tenantIds.length === 0) {
+    console.log(
+      `[Baileys-Gateway] No persisted WhatsApp sessions found in ${WHATSAPP_AUTH_SESSIONS_TABLE}. Ready for QR pairing.`
+    );
+    return;
+  }
+
+  console.log(
+    `[Baileys-Gateway] Found ${tenantIds.length} persisted tenant session(s) in ${WHATSAPP_AUTH_SESSIONS_TABLE} — restoring in background...`
+  );
+
+  for (let i = 0; i < tenantIds.length; i++) {
+    const tenantId = tenantIds[i];
+    // Stagger reconnects slightly so Railway startup stays smooth under many tenants
+    if (i > 0) {
+      await new Promise((resolve) => setTimeout(resolve, 350));
     }
+    console.log(`[Baileys-Gateway] Auto-restoring WhatsApp session for tenant ${tenantId}...`);
+    startBaileysSession(tenantId, 0, { forceReconnect: true }).catch((err) => {
+      console.warn(
+        `[Baileys-Gateway] Restore skipped for tenant ${tenantId}:`,
+        err?.message
+      );
+    });
   }
 }
 
 function startGatewayServer(targetPort, allowFallbackTo3001 = true) {
   const server = app.listen(targetPort, '0.0.0.0', () => {
     console.log(`[Baileys-Gateway] Multi-Session WhatsApp Gateway listening on http://0.0.0.0:${targetPort}`);
+    console.log(`[Baileys-Gateway] Auth persistence: Supabase PostgreSQL (${WHATSAPP_AUTH_SESSIONS_TABLE})`);
     console.log(`[Baileys-Gateway] Health check: http://localhost:${targetPort}/api/whatsapp/health`);
-    restorePersistedSessions().catch(() => {});
+    restorePersistedSessions().catch((err) => {
+      console.warn('[Baileys-Gateway] Startup restore error:', err?.message);
+    });
     setInterval(() => {
       runPreExpirySweep().catch(() => {});
     }, 60 * 60 * 1000);

@@ -79,6 +79,10 @@ import {
 import { isExpiryOrBlockedProfile } from '../lib/mikrotikProfileSync';
 import { buildWhatsAppUrl } from '../lib/whatsappBilling';
 import {
+  dispatchComplaintCreatedWhatsApp,
+  dispatchDualPaymentReceiptWhatsApp,
+} from '../lib/whatsappRouting';
+import {
   computeBillingAnchorDay,
   computeNextBillingDateFromInstall,
   extractYmdString,
@@ -226,6 +230,7 @@ export const SubscriberProfileView: React.FC<SubscriberProfileViewProps> = ({
     assignedOwnerId: '',
   });
   const [isSavingEdit, setIsSavingEdit] = useState<boolean>(false);
+  const [isManualRecharging, setIsManualRecharging] = useState<boolean>(false);
   const [editWalletStatus, setEditWalletStatus] = useState<WalletGatePreviewResult | null>(null);
   const [editWalletError, setEditWalletError] = useState<string | null>(null);
   const [paymentWalletStatus, setPaymentWalletStatus] = useState<WalletGatePreviewResult | null>(null);
@@ -1253,6 +1258,18 @@ export const SubscriberProfileView: React.FC<SubscriberProfileViewProps> = ({
 
       if (error) throw new Error(error.message);
 
+      void dispatchComplaintCreatedWhatsApp({
+        ticketId: ticketNo,
+        subscriberUsername: cleanUsername,
+        clientName: user?.full_name || cleanUsername,
+        phone: user?.phone || '',
+        area: user?.area || 'Main Service Area',
+        address: user?.address || 'On file',
+        issue: ticketForm.issue.trim(),
+        assignedAgentName: resolvedAgentName,
+        subscriber: user || undefined,
+      }).catch(() => {});
+
       showToast(`Ticket #${ticketNo} logged successfully! Assigned to ${resolvedAgentName}.`);
       setIsNewTicketModalOpen(false);
       setTicketForm({
@@ -1265,6 +1282,48 @@ export const SubscriberProfileView: React.FC<SubscriberProfileViewProps> = ({
       showToast(`Error logging ticket: ${err.message}`, 'error');
     } finally {
       setIsSavingTicket(false);
+    }
+  };
+
+  // Action 5b: Manual 31-Day Prepaid Recharge (Expiry Pool -> Active Package + Session Kick + Baileys Receipt)
+  const handleManualRecharge31Days = async () => {
+    if (!perms.collect_fee) {
+      showToast('Permission required: Receive Cash / Manual Recharge is disabled for your account.', 'error');
+      return;
+    }
+    if (!cleanUsername) return;
+    setIsManualRecharging(true);
+    try {
+      const targetPkg =
+        user?.original_package_profile ||
+        user?.package_profile_name ||
+        user?.package_name ||
+        user?.package_speed ||
+        undefined;
+      const res = await restoreSubscriberOnInvoicePaid(cleanUsername, {
+        triggeredBy: 'ADMIN',
+        rechargeDays: 31,
+        selectedProfile: targetPkg,
+        performedBy: getStoredUser()?.fullName || getStoredUser()?.username || 'Subscriber 360 Desk',
+        notes: `Manual +31-day Recharge via Subscriber 360 Profile`,
+        activeRouter,
+        paymentMethod: 'Manual Recharge',
+        amountPaid: Number(user?.monthly_fee || 0),
+      });
+
+      if (!res.success) {
+        showToast(res.error || 'Manual recharge failed (check dealer wallet / MikroTik connection).', 'error');
+        return;
+      }
+
+      showToast(
+        `Recharged +31 days! Valid until ${res.newExpiryIso} on "${res.restoredProfile}" (${res.kickedSessions} session kicked) • WhatsApp receipt dispatched.`
+      );
+      await fetchAllProfileData();
+    } catch (err: any) {
+      showToast(`Manual recharge error: ${err?.message || 'Failed'}`, 'error');
+    } finally {
+      setIsManualRecharging(false);
     }
   };
 
@@ -1293,7 +1352,7 @@ export const SubscriberProfileView: React.FC<SubscriberProfileViewProps> = ({
       const finalPaidAmount = remaining <= 0 ? totalAmount : newPaidTotal;
       const nowIso = new Date().toISOString();
 
-      // 1. Update invoice with calendar-month anniversary renewal on PAID
+      // 1. Recharge +31 days & switch MikroTik from Expiry Pool to active package ONLY on PAID
       const anchorDay = user ? computeBillingAnchorDay(user) : (inv.cycle_day || new Date().getDate());
       const invUpdate: Partial<SupabaseInvoice> = {
         status: newStatus,
@@ -1301,15 +1360,9 @@ export const SubscriberProfileView: React.FC<SubscriberProfileViewProps> = ({
         paid_at: newStatus === 'PAID' ? nowIso : (inv.paid_at || null),
         cycle_day: anchorDay,
       };
-      if (newStatus === 'PAID') {
-        invUpdate.due_date = addCalendarMonthDateString(
-          inv.due_date && inv.due_date >= new Date().toISOString().slice(0, 10)
-            ? inv.due_date
-            : new Date(),
-          anchorDay
-        );
-      }
       setPaymentWalletError(null);
+      let rechargedExpiryYmd: string | null = null;
+      let restoredProfileName: string | null = null;
       if (newStatus === 'PAID') {
         if (paymentWalletStatus?.blocked) {
           const msg =
@@ -1323,6 +1376,11 @@ export const SubscriberProfileView: React.FC<SubscriberProfileViewProps> = ({
           performedBy: getStoredUser()?.fullName || getStoredUser()?.username || 'Subscriber 360 Desk',
           notes: `Payment recorded via 360 Profile on Invoice #${inv.invoice_no}`,
           activeRouter,
+          selectedProfile: inv.package_profile || inv.package_name || undefined,
+          amountPaid: enteredVal,
+          invoiceNo: inv.invoice_no,
+          paymentMethod: paymentModeInput,
+          skipAutoWhatsapp: true,
         });
         if (restoreRes.insufficientWalletFunds || !restoreRes.success) {
           const msg =
@@ -1331,16 +1389,26 @@ export const SubscriberProfileView: React.FC<SubscriberProfileViewProps> = ({
           showToast(msg, 'error');
           return;
         }
+        rechargedExpiryYmd = restoreRes.newExpiryIso || null;
+        restoredProfileName = restoreRes.restoredProfile || null;
       }
 
       await supabase.from('invoices').update(invUpdate).eq('id', inv.id);
 
       // 2. Increment collecting agent cash
+      let updatedAgentCash: number | null = null;
+      let agentPhone = '';
       if (collectingAgentInput) {
-        const { data: agentRec } = await supabase.from('portal_users').select('id, cash_in_hand').eq('id', collectingAgentInput).maybeSingle();
+        const { data: agentRec } = await supabase
+          .from('portal_users')
+          .select('id, cash_in_hand, phone, full_name')
+          .eq('id', collectingAgentInput)
+          .maybeSingle();
         if (agentRec) {
           const cur = Number(agentRec.cash_in_hand) || 0;
-          await supabase.from('portal_users').update({ cash_in_hand: cur + enteredVal }).eq('id', agentRec.id);
+          updatedAgentCash = cur + enteredVal;
+          agentPhone = String((agentRec as any).phone || '').trim();
+          await supabase.from('portal_users').update({ cash_in_hand: updatedAgentCash }).eq('id', agentRec.id);
         }
       }
 
@@ -1356,7 +1424,35 @@ export const SubscriberProfileView: React.FC<SubscriberProfileViewProps> = ({
         notes: `Recorded via Subscriber 360 Profile (${newStatus})`,
       }]);
 
-      showToast(`Payment of ${formatCurrency(enteredVal)} recorded! Status: ${newStatus}`);
+      // 4. Dual Payment Receipt Automation (Client + Recovery Agent via Baileys)
+      void dispatchDualPaymentReceiptWhatsApp({
+        invoiceNo: inv.invoice_no,
+        subscriberUsername: cleanUsername,
+        subscriber: user || undefined,
+        clientName: user?.full_name || cleanUsername,
+        clientPhone: user?.phone || '',
+        packageName:
+          restoredProfileName ||
+          inv.package_name ||
+          inv.package_profile ||
+          user?.package_speed ||
+          'Fiber Broadband',
+        amountPaid: enteredVal,
+        totalAmount,
+        remainingBalance: Math.max(0, remaining),
+        paymentMethod: paymentModeInput,
+        expiryDate: rechargedExpiryYmd || inv.due_date,
+        agentId: collectingAgentInput || null,
+        agentName: agentObj?.full_name || 'Recovery Agent',
+        agentPhone: agentPhone || agentObj?.phone || '',
+        agentUpdatedCashBalance: updatedAgentCash,
+      }).catch(() => {});
+
+      showToast(
+        `Payment of ${formatCurrency(enteredVal)} recorded (${newStatus})${
+          rechargedExpiryYmd ? ` • Recharged +31d until ${rechargedExpiryYmd}` : ''
+        }`
+      );
       setIsRecordPaymentModalOpen(false);
       setSelectedInvoiceForPayment(null);
       await fetchAllProfileData();
@@ -1919,6 +2015,24 @@ export const SubscriberProfileView: React.FC<SubscriberProfileViewProps> = ({
               </div>
             </div>
           </div>
+
+          {/* MANUAL +31 DAY RECHARGE BUTTON */}
+          {perms.collect_fee && (
+            <button
+              type="button"
+              onClick={handleManualRecharge31Days}
+              disabled={isManualRecharging}
+              className="w-full px-3 py-2.5 rounded-xl bg-emerald-600/90 hover:bg-emerald-500 text-slate-950 font-bold text-xs transition flex items-center justify-center gap-2 cursor-pointer shadow-md shadow-emerald-950/40 active:scale-[0.99] disabled:opacity-50"
+              title="Extend validity +31 days, switch MikroTik from Expiry Pool to active monthly package, kick stale session & send WhatsApp receipt"
+            >
+              <Zap className={`w-3.5 h-3.5 ${isManualRecharging ? 'animate-spin' : ''}`} />
+              <span>
+                {isManualRecharging
+                  ? 'Recharging +31 Days & Activating...'
+                  : 'Manual Recharge (+31 Days & Activate)'}
+              </span>
+            </button>
+          )}
 
           {/* THREE ACTION BUTTONS */}
           <div className={`grid gap-2 pt-1 ${perms.view_passwords ? 'grid-cols-3' : 'grid-cols-2'}`}>
