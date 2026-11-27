@@ -50,7 +50,7 @@ import {
   SupabaseSubscriberInventoryLog,
   SupabaseSubscriberSessionLog,
 } from '../services/supabaseClient';
-import { safeMikrotikFetch } from '../services/mikrotikRestClient';
+import { safeMikrotikFetch, provisionPppoeSecretRest } from '../services/mikrotikRestClient';
 import {
   sessionSyncEngine,
   formatBytesTransfer,
@@ -76,8 +76,15 @@ import {
   safeInsertInvoiceInSupabase,
   syncMikrotikSecretProfile,
   kickMikrotikActiveSessionForUser,
+  fetchConfiguredExpiryProfileName,
+  fetchLiveMikrotikProfilesAndSecrets,
 } from '../lib/billingAndNetwork';
-import { isExpiryOrBlockedProfile } from '../lib/mikrotikProfileSync';
+import {
+  buildLiveMikrotikPlanOptions,
+  isExpiryOrBlockedProfile,
+  resolvePkrTariffForProfile,
+  upsertOrigPkgComment,
+} from '../lib/mikrotikProfileSync';
 import { buildWhatsAppUrl } from '../lib/whatsappBilling';
 import {
   dispatchComplaintCreatedWhatsApp,
@@ -141,7 +148,7 @@ export const SubscriberProfileView: React.FC<SubscriberProfileViewProps> = ({
     [staffPermissions]
   );
   const { formatCurrency, currencySymbol } = useCurrency();
-  const { routers, selectedRouterId, kickSession, resolveTicket } = useISP();
+  const { routers, selectedRouterId, kickSession, resolveTicket, packages, profilePriceMap, dynamicPppProfiles } = useISP();
 
   const cleanUsername = useMemo(() => (username || '').replace(/^@+/, '').trim(), [username]);
   const activeRouter = useMemo(
@@ -238,6 +245,8 @@ export const SubscriberProfileView: React.FC<SubscriberProfileViewProps> = ({
     assignedOwnerId: '',
   });
   const [isSavingEdit, setIsSavingEdit] = useState<boolean>(false);
+  const [isPushingToMikrotik, setIsPushingToMikrotik] = useState<boolean>(false);
+  const [liveMkProfiles, setLiveMkProfiles] = useState<Array<{ name: string; rateLimit?: string }>>([]);
   const [isManualRecharging, setIsManualRecharging] = useState<boolean>(false);
   const [isManualRechargeModalOpen, setIsManualRechargeModalOpen] = useState<boolean>(false);
   const [manualRechargeCustomDate, setManualRechargeCustomDate] = useState<string>('');
@@ -584,8 +593,14 @@ export const SubscriberProfileView: React.FC<SubscriberProfileViewProps> = ({
         setGisFdbLocation('');
       }
 
-      // 1.7b Query MikroTik /ppp/secret strictly for this subscriber's actual PPPoE profile
+      // 1.7b Query MikroTik /ppp/secret & /ppp/profile strictly for this subscriber's actual PPPoE profile
       try {
+        fetchLiveMikrotikProfilesAndSecrets(activeRouter)
+          .then((mk) => {
+            if (mk.profiles.length > 0) setLiveMkProfiles(mk.profiles);
+          })
+          .catch(() => {});
+
         let secRes = await safeMikrotikFetch(
           `/api/mikrotik/ppp/secret?name=${encodeURIComponent(cleanUsername)}`,
           {},
@@ -1099,7 +1114,7 @@ export const SubscriberProfileView: React.FC<SubscriberProfileViewProps> = ({
         billing_cycle_day: anchorDay,
       };
 
-      const baseUpdatePayload: Partial<SupabasePortalUser> = {
+      const baseUpdatePayload: Record<string, any> = {
         full_name: editForm.fullName,
         phone: editForm.phone,
         cnic: perms.view_passwords ? editForm.cnic : (user?.cnic || ''),
@@ -1116,43 +1131,56 @@ export const SubscriberProfileView: React.FC<SubscriberProfileViewProps> = ({
         drop_wire_meters: Number(editForm.dropWireMeters),
         fiber_box_location: editForm.fiberBoxLocation,
         patch_cord_qty: Number(editForm.patchCordQty),
+        ...(targetPackageProfile && !isExpiryOrBlockedProfile(targetPackageProfile)
+          ? {
+              assigned_package_profile: targetPackageProfile,
+              original_package_profile: targetPackageProfile,
+              package_name: targetPackageProfile,
+              package_profile_name: targetPackageProfile,
+            }
+          : {}),
         ...(editRequiresWalletGate && targetPackageProfile
           ? {
-              original_package_profile: targetPackageProfile,
-              package_profile_name: targetPackageProfile,
               is_suspended: false,
             }
           : {}),
       };
 
-      const extendedPayload: Partial<SupabasePortalUser> = {
+      const extendedPayload: Record<string, any> = {
         ...baseUpdatePayload,
+        net_balance: Number(editForm.monthlyFee),
         billing_cycle_mode: selectedCycleMode,
         billing_anchor_day: selectedCycleMode === 'rolling_31' ? 0 : anchorDay,
         next_billing_date: nextBillingDate,
         permissions: updatedPerms as any,
       };
 
-      const fallbackCyclePayload: Partial<SupabasePortalUser> = {
-        ...baseUpdatePayload,
-        billing_anchor_day: selectedCycleMode === 'rolling_31' ? 0 : anchorDay,
-        next_billing_date: nextBillingDate,
-        permissions: updatedPerms as any,
-      };
-
-      const runUpdate = (payload: Partial<SupabasePortalUser>) =>
+      const runUpdate = (payload: Record<string, any>) =>
         user?.id
           ? supabase.from('portal_users').update(payload as any).eq('id', user.id)
           : supabase.from('portal_users').update(payload as any).ilike('username', cleanUsername);
 
-      let { error } = await runUpdate(extendedPayload);
-      if (error && isMissingTableOrColumnError(error)) {
-        const retry1 = await runUpdate(fallbackCyclePayload);
-        error = retry1.error;
-      }
-      if (error && isMissingTableOrColumnError(error)) {
-        const retry2 = await runUpdate(baseUpdatePayload);
-        error = retry2.error;
+      const workingPayload = { ...extendedPayload };
+      let error: any = null;
+      for (let attempt = 0; attempt < 10; attempt++) {
+        const res = await runUpdate(workingPayload);
+        error = res.error;
+        if (!error) break;
+        const msg = String(error.message || '');
+        const colMatch =
+          msg.match(/Could not find the ['"]([a-zA-Z0-9_]+)['"] column/i) ||
+          msg.match(/column\s+["']?([a-zA-Z0-9_]+)["']?\s+/i);
+        if (colMatch?.[1] && colMatch[1] in workingPayload) {
+          delete workingPayload[colMatch[1]];
+          continue;
+        }
+        if (isMissingTableOrColumnError(error)) {
+          delete workingPayload.billing_cycle_mode;
+          delete workingPayload.assigned_package_profile;
+          delete workingPayload.net_balance;
+          continue;
+        }
+        break;
       }
 
       if (error) throw new Error(error.message);
@@ -2139,6 +2167,129 @@ export const SubscriberProfileView: React.FC<SubscriberProfileViewProps> = ({
               </span>
             </button>
           )}
+
+          {/* SYNC / PUSH DB-ONLY OR EXISTING SUBSCRIBER DIRECTLY TO MIKROTIK /ppp/secret */}
+          <button
+            type="button"
+            onClick={async () => {
+              if (!activeRouter) {
+                showToast('No active MikroTik NAS router configured.', 'error');
+                return;
+              }
+              setIsPushingToMikrotik(true);
+              try {
+                const expiryPoolProfile = await fetchConfiguredExpiryProfileName();
+                const storedPaidPkg = String(
+                  (user as any)?.assigned_package_profile ||
+                    user?.original_package_profile ||
+                    user?.package_name ||
+                    user?.package_profile_name ||
+                    user?.package_speed ||
+                    editForm.packageSpeed ||
+                    '4 MB - Local'
+                ).trim();
+                const isAccountActive =
+                  String(user?.account_status || '').toUpperCase() === 'ACTIVE' &&
+                  String((user as any)?.billing_status || '').toUpperCase() !== 'PENDING_RECHARGE' &&
+                  !user?.is_suspended;
+                const routerTargetProfile =
+                  isAccountActive && storedPaidPkg && !isExpiryOrBlockedProfile(storedPaidPkg)
+                    ? storedPaidPkg
+                    : expiryPoolProfile;
+                const humanComment = [
+                  user?.full_name || cleanUsername,
+                  user?.phone || '',
+                  user?.area || '',
+                ]
+                  .filter(Boolean)
+                  .join(' | ');
+                const fullComment =
+                  storedPaidPkg && !isExpiryOrBlockedProfile(storedPaidPkg)
+                    ? upsertOrigPkgComment(humanComment, storedPaidPkg)
+                    : humanComment;
+                const pushPassword = String(
+                  user?.password || mikrotikSecret?.password || 'fiber1234'
+                ).trim();
+
+                // Check if secret already exists on MikroTik
+                const checkRes = await safeMikrotikFetch(
+                  `/api/mikrotik/ppp/secret?name=${encodeURIComponent(cleanUsername)}`,
+                  {},
+                  activeRouter
+                );
+                const existingArr = checkRes.ok ? await checkRes.json().catch(() => []) : [];
+                const existingSecret = Array.isArray(existingArr)
+                  ? existingArr.find(
+                      (s: any) => String(s?.name || '').trim().toLowerCase() === cleanUsername.toLowerCase()
+                    )
+                  : null;
+
+                if (existingSecret) {
+                  const syncRes = await syncMikrotikSecretProfile(
+                    cleanUsername,
+                    routerTargetProfile,
+                    { disabled: 'false', comment: fullComment, preloadedSecret: existingSecret },
+                    activeRouter
+                  );
+                  if (!syncRes.ok) {
+                    throw new Error('MikroTik failed to update existing PPPoE secret.');
+                  }
+                  showToast(
+                    `Synced existing secret "@${cleanUsername}" on MikroTik (${activeRouter.name}) -> Profile: ${routerTargetProfile}.`,
+                    'success'
+                  );
+                } else {
+                  const addRes = await provisionPppoeSecretRest(activeRouter, {
+                    name: cleanUsername,
+                    password: pushPassword,
+                    service: 'pppoe',
+                    profile: routerTargetProfile,
+                    comment: fullComment,
+                  });
+                  if (!addRes.success) {
+                    throw new Error(addRes.error || 'MikroTik rejected PPPoE secret creation.');
+                  }
+                  showToast(
+                    `Pushed new PPPoE secret "@${cleanUsername}" to MikroTik (${activeRouter.name}) -> Profile: ${routerTargetProfile}.`,
+                    'success'
+                  );
+                }
+
+                // Mark mikrotik_synced in Supabase if column exists
+                try {
+                  await supabase
+                    .from('portal_users')
+                    .update({ mikrotik_synced: true } as any)
+                    .ilike('username', cleanUsername);
+                } catch {}
+
+                await fetchAllProfileData();
+              } catch (pushErr: any) {
+                showToast(
+                  `MikroTik Push Failed for "@${cleanUsername}": ${pushErr?.message || 'Router error'}`,
+                  'error'
+                );
+              } finally {
+                setIsPushingToMikrotik(false);
+              }
+            }}
+            disabled={isPushingToMikrotik}
+            className={`w-full px-3 py-2 rounded-xl border font-bold text-xs transition flex items-center justify-center gap-2 cursor-pointer shadow-sm active:scale-[0.99] disabled:opacity-50 ${
+              mikrotikSecret
+                ? 'bg-indigo-950/70 hover:bg-indigo-900/80 text-indigo-200 border-indigo-700/70'
+                : 'bg-amber-600/90 hover:bg-amber-500 text-slate-950 border-amber-400'
+            }`}
+            title="Create or update this subscriber's real PPPoE secret directly on the active MikroTik NAS router (/ppp/secret)"
+          >
+            <Server className={`w-3.5 h-3.5 ${isPushingToMikrotik ? 'animate-spin' : ''}`} />
+            <span>
+              {isPushingToMikrotik
+                ? 'Pushing to MikroTik...'
+                : mikrotikSecret
+                ? `Sync / Push to MikroTik (${activeRouter?.name || 'NAS'})`
+                : `Push DB-Only User to MikroTik (${activeRouter?.name || 'NAS'})`}
+            </span>
+          </button>
 
           {/* THREE ACTION BUTTONS */}
           <div className={`grid gap-2 pt-1 ${perms.view_passwords ? 'grid-cols-3' : 'grid-cols-2'}`}>
@@ -3445,15 +3596,54 @@ export const SubscriberProfileView: React.FC<SubscriberProfileViewProps> = ({
                 />
               </div>
 
-              <div className="grid grid-cols-3 gap-3">
+              <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
                 <div>
-                  <label className="block font-medium text-slate-300 mb-1">Package Speed</label>
-                  <input
-                    type="text"
-                    value={editForm.packageSpeed}
-                    onChange={(e) => setEditForm({ ...editForm, packageSpeed: e.target.value })}
-                    className="w-full px-3 py-2 bg-slate-900 border border-slate-700 rounded-lg text-white font-mono focus:outline-none focus:border-cyan-500"
-                  />
+                  <label className="block font-medium text-slate-300 mb-1">
+                    Package Plan / PPPoE Profile
+                  </label>
+                  {(() => {
+                    const mkSrc =
+                      liveMkProfiles.length > 0
+                        ? liveMkProfiles
+                        : (dynamicPppProfiles || []).map((p: any) => ({
+                            name: p.name,
+                            rateLimit: p.rateLimit || p['rate-limit'],
+                          }));
+                    const editPlanOpts = buildLiveMikrotikPlanOptions({
+                      mikrotikProfiles: mkSrc,
+                      assignedProfileName: editForm.packageSpeed || null,
+                      profilePriceMap,
+                      packages,
+                    });
+                    return (
+                      <select
+                        value={editForm.packageSpeed}
+                        onChange={(e) => {
+                          const nextProf = e.target.value;
+                          const matchedOpt = editPlanOpts.find((o) => o.profileName === nextProf);
+                          const nextPrice =
+                            matchedOpt && matchedOpt.pricePkr > 0
+                              ? matchedOpt.pricePkr
+                              : resolvePkrTariffForProfile(nextProf, {
+                                  profilePriceMap,
+                                  packages,
+                                }).pricePkr;
+                          setEditForm({
+                            ...editForm,
+                            packageSpeed: nextProf,
+                            monthlyFee: nextPrice > 0 ? nextPrice : editForm.monthlyFee,
+                          });
+                        }}
+                        className="w-full px-3 py-2 bg-slate-900 border border-slate-700 rounded-lg text-cyan-200 font-mono focus:outline-none focus:border-cyan-500 cursor-pointer"
+                      >
+                        {editPlanOpts.map((opt) => (
+                          <option key={opt.profileName} value={opt.profileName}>
+                            {opt.profileName} (Rs. {opt.pricePkr.toLocaleString()}/mo)
+                          </option>
+                        ))}
+                      </select>
+                    );
+                  })()}
                 </div>
                 <div>
                   <label className="block font-medium text-slate-300 mb-1">Monthly Fee (Rs.)</label>
@@ -3461,7 +3651,7 @@ export const SubscriberProfileView: React.FC<SubscriberProfileViewProps> = ({
                     type="number"
                     value={editForm.monthlyFee}
                     onChange={(e) => setEditForm({ ...editForm, monthlyFee: Number(e.target.value) })}
-                    className="w-full px-3 py-2 bg-slate-900 border border-slate-700 rounded-lg text-white font-mono focus:outline-none focus:border-cyan-500"
+                    className="w-full px-3 py-2 bg-slate-900 border border-slate-700 rounded-lg text-emerald-300 font-mono font-bold focus:outline-none focus:border-cyan-500"
                   />
                 </div>
                 <div>

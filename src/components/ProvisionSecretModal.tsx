@@ -9,7 +9,13 @@ import {
   resolveAreaFromUsername,
   NetworkAreaNode,
   NETWORK_AREAS_UPDATED_EVENT,
+  fetchLiveMikrotikProfilesAndSecrets,
 } from '../lib/billingAndNetwork';
+import {
+  buildLiveMikrotikPlanOptions,
+  resolvePkrTariffForProfile,
+} from '../lib/mikrotikProfileSync';
+import { lookupPackageTariffPrice } from '../lib/packageTariffs';
 import { supabase, SupabasePortalUser, SupabaseResellerTariff } from '../services/supabaseClient';
 import { createAgentCommission } from '../services/erpInventoryService';
 import { addCalendarMonthsYmd, extractYmdString } from '../lib/anniversaryBilling';
@@ -44,11 +50,13 @@ export const ProvisionSecretModal: React.FC<ProvisionSecretModalProps> = ({ isOp
     provisionPppoeSecret,
     dynamicPppProfiles,
     bandwidthProfiles: contextProfiles,
+    profilePriceMap,
   } = useISP();
 
   const [storedProfiles, setStoredProfiles] = useState<BandwidthProfile[]>(() =>
     storageService.getBandwidthProfiles()
   );
+  const [liveMkProfiles, setLiveMkProfiles] = useState<Array<{ name: string; rateLimit?: string }>>([]);
 
   useEffect(() => {
     const handleUpdate = () => {
@@ -58,17 +66,60 @@ export const ProvisionSecretModal: React.FC<ProvisionSecretModalProps> = ({ isOp
     return () => window.removeEventListener('youthnet_storage_updated', handleUpdate);
   }, []);
 
-  const availableProfiles = useMemo(() => {
-    if (storedProfiles.length > 0) return storedProfiles;
-    if (contextProfiles && contextProfiles.length > 0) return contextProfiles;
-    if (dynamicPppProfiles && dynamicPppProfiles.length > 0) return dynamicPppProfiles;
-    return [];
-  }, [storedProfiles, contextProfiles, dynamicPppProfiles]);
+  const activeRouterForModal = useMemo(
+    () => routers.find((r) => r.id === selectedRouterId) || routers[0],
+    [routers, selectedRouterId]
+  );
 
-  const defaultProfileName =
-    availableProfiles.find((p) => p.name === '20M_Ultra' || p.name === '10M_Standard' || p.name === 'default')?.name ||
-    availableProfiles[0]?.name ||
-    'default';
+  useEffect(() => {
+    if (!isOpen) return;
+    let cancelled = false;
+    fetchLiveMikrotikProfilesAndSecrets(activeRouterForModal)
+      .then((mk) => {
+        if (!cancelled && mk.profiles.length > 0) {
+          setLiveMkProfiles(mk.profiles);
+        }
+      })
+      .catch(() => {});
+    return () => {
+      cancelled = true;
+    };
+  }, [isOpen, activeRouterForModal]);
+
+  const rawMikrotikProfileList = useMemo(() => {
+    if (liveMkProfiles.length > 0) return liveMkProfiles;
+    if (dynamicPppProfiles && dynamicPppProfiles.length > 0) {
+      return dynamicPppProfiles.map((p: any) => ({
+        name: p.name,
+        rateLimit: p.rateLimit || p['rate-limit'],
+      }));
+    }
+    if (contextProfiles && contextProfiles.length > 0) {
+      return contextProfiles.map((p: any) => ({
+        name: p.name,
+        rateLimit: p.rateLimit || p['rate-limit'],
+      }));
+    }
+    if (storedProfiles.length > 0) {
+      return storedProfiles.map((p: any) => ({
+        name: p.name,
+        rateLimit: p.rateLimit || p['rate-limit'],
+      }));
+    }
+    return [];
+  }, [liveMkProfiles, dynamicPppProfiles, contextProfiles, storedProfiles]);
+
+  const planOptions = useMemo(
+    () =>
+      buildLiveMikrotikPlanOptions({
+        mikrotikProfiles: rawMikrotikProfileList,
+        profilePriceMap,
+        packages,
+      }),
+    [rawMikrotikProfileList, profilePriceMap, packages]
+  );
+
+  const defaultProfileName = planOptions[0]?.profileName || '4 MB - Local';
 
   const [name, setName] = useState('');
   const [phone, setPhone] = useState('+92 ');
@@ -78,6 +129,9 @@ export const ProvisionSecretModal: React.FC<ProvisionSecretModalProps> = ({ isOp
   const [pppoeUsername, setPppoeUsername] = useState('');
   const [pppoePassword, setPppoePassword] = useState('fiber1234');
   const [packageId, setPackageId] = useState(defaultProfileName);
+  const [monthlyFee, setMonthlyFee] = useState<number>(() =>
+    lookupPackageTariffPrice(defaultProfileName, profilePriceMap).pricePkr
+  );
   const [assignedAgentId, setAssignedAgentId] = useState('');
   const [ponPort, setPonPort] = useState('PON-01');
   const [cnic, setCnic] = useState('');
@@ -195,19 +249,39 @@ export const ProvisionSecretModal: React.FC<ProvisionSecretModalProps> = ({ isOp
     };
   }, [targetExpiryDate]);
 
-  // Dynamic price calculation
+  // Dynamic price calculation from authoritative Supabase package tariffs
   const selectedProfilePrice = useMemo(() => {
-    const matched = storageService.getProfileByName(packageId);
-    if (matched && matched.pricePkr !== undefined) return matched.pricePkr;
-    const pkg = packages.find((p) => p.mikrotikProfile === packageId || p.id === packageId);
-    return pkg?.priceMonthly || 2000;
-  }, [packageId, packages]);
+    const opt = planOptions.find((o) => o.profileName === packageId);
+    if (opt && opt.pricePkr > 0) return opt.pricePkr;
+    return resolvePkrTariffForProfile(packageId, {
+      profilePriceMap,
+      packages,
+    }).pricePkr;
+  }, [packageId, planOptions, profilePriceMap, packages]);
+
+  const handlePackageProfileChange = (nextProf: string) => {
+    setPackageId(nextProf);
+    const opt = planOptions.find((o) => o.profileName === nextProf);
+    const nextPrice =
+      opt && opt.pricePkr > 0
+        ? opt.pricePkr
+        : resolvePkrTariffForProfile(nextProf, { profilePriceMap, packages }).pricePkr;
+    setMonthlyFee(nextPrice);
+  };
 
   useEffect(() => {
-    if (availableProfiles.length > 0 && (!packageId || packageId === 'default')) {
-      setPackageId(defaultProfileName);
+    if (planOptions.length > 0 && (!packageId || packageId === 'default' || !planOptions.some((o) => o.profileName === packageId))) {
+      const next = planOptions[0].profileName;
+      setPackageId(next);
+      setMonthlyFee(planOptions[0].pricePkr);
     }
-  }, [availableProfiles, defaultProfileName]);
+  }, [planOptions]);
+
+  useEffect(() => {
+    if (isOpen && packageId) {
+      setMonthlyFee(selectedProfilePrice);
+    }
+  }, [isOpen, selectedProfilePrice]);
 
   useEffect(() => {
     if (portalAgents.length === 0) {
@@ -268,7 +342,7 @@ export const ProvisionSecretModal: React.FC<ProvisionSecretModalProps> = ({ isOp
           validityDays: diffDays,
           validityPreset,
           targetExpiryDate: targetExpiryDate.toISOString(),
-          priceMonthly: resolvedResellerTariff?.retailPrice || selectedProfilePrice,
+          priceMonthly: Number(monthlyFee) || resolvedResellerTariff?.retailPrice || selectedProfilePrice,
           dealerId: effectiveDealerId || null,
         } as any),
       });
@@ -394,7 +468,7 @@ export const ProvisionSecretModal: React.FC<ProvisionSecretModalProps> = ({ isOp
             <div className="rounded-xl border border-rose-500/60 bg-rose-950/80 px-3.5 py-3 text-rose-200 flex items-start gap-2.5">
               <ShieldCheck className="w-4 h-4 text-rose-400 shrink-0 mt-0.5" />
               <div>
-                <div className="font-bold text-rose-100">Prepaid Wallet Payment Gate Blocked</div>
+                <div className="font-bold text-rose-100">MikroTik Provisioning / Router Error</div>
                 <div className="text-[11px] mt-0.5 text-rose-200/95">{walletError}</div>
               </div>
             </div>
@@ -517,20 +591,22 @@ export const ProvisionSecretModal: React.FC<ProvisionSecretModalProps> = ({ isOp
             </div>
           </div>
 
-          {/* Profile & Dynamic Price Card */}
-          <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+          {/* Profile & Auto-Populated Monthly Fee Card */}
+          <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
             <div>
-              <label className="block text-slate-400 mb-1 font-medium">Bandwidth Profile</label>
+              <label className="block text-slate-400 mb-1 font-medium">
+                Package Plan (MikroTik Profile)
+              </label>
               <select
                 value={packageId}
-                onChange={(e) => setPackageId(e.target.value)}
-                className="w-full bg-slate-950 border border-slate-700 text-slate-100 p-2.5 rounded-lg focus:outline-none focus:border-cyan-500 font-mono"
+                onChange={(e) => handlePackageProfileChange(e.target.value)}
+                className="w-full bg-slate-950 border border-slate-700 text-cyan-200 p-2.5 rounded-lg focus:outline-none focus:border-cyan-500 font-mono"
               >
-                {availableProfiles.length > 0 ? (
-                  availableProfiles.map((p: any) => (
-                    <option key={p.id || p.name} value={p.name}>
-                      {p.name} {p.rateLimit || p['rate-limit'] ? `(${p.rateLimit || p['rate-limit']})` : ''}
-                      {p.pricePkr ? ` · Rs. ${p.pricePkr.toLocaleString()}` : ''}
+                {planOptions.length > 0 ? (
+                  planOptions.map((opt) => (
+                    <option key={opt.profileName} value={opt.profileName}>
+                      {opt.profileName} · Rs. {opt.pricePkr.toLocaleString()}/mo
+                      {opt.rateLimit ? ` (${opt.rateLimit})` : ''}
                     </option>
                   ))
                 ) : (
@@ -541,6 +617,20 @@ export const ProvisionSecretModal: React.FC<ProvisionSecretModalProps> = ({ isOp
                   ))
                 )}
               </select>
+            </div>
+
+            <div>
+              <label className="block text-slate-400 mb-1 font-medium">
+                Monthly Fee (Rs.) *
+              </label>
+              <input
+                type="number"
+                min="1"
+                required
+                value={monthlyFee}
+                onChange={(e) => setMonthlyFee(Number(e.target.value) || 0)}
+                className="w-full bg-slate-950 border border-slate-700 text-emerald-300 font-mono font-bold tabular-nums p-2.5 rounded-lg focus:outline-none focus:border-cyan-500"
+              />
             </div>
 
             <div>
@@ -615,7 +705,7 @@ export const ProvisionSecretModal: React.FC<ProvisionSecretModalProps> = ({ isOp
                 Package Validity &amp; On-Router Auto-Expiration
               </span>
               <span className="text-[11px] font-mono text-cyan-400">
-                Monthly Rate: Rs. {selectedProfilePrice.toLocaleString()}
+                Monthly Rate: Rs. {(Number(monthlyFee) || selectedProfilePrice).toLocaleString()}
               </span>
             </div>
 

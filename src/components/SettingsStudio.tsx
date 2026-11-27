@@ -18,6 +18,7 @@ import {
   Users,
   PlugZap,
   RefreshCw,
+  DollarSign,
 } from 'lucide-react';
 import { useISP } from '../context/ISPContext';
 import { useCurrency } from '../context/CurrencyContext';
@@ -32,6 +33,14 @@ import {
   SYSTEM_SETTINGS_MIGRATION_SQL,
 } from '../lib/systemSettings';
 import {
+  DEFAULT_PACKAGE_TARIFFS,
+  lookupPackageTariffPrice,
+  sanitizePackageTariffs,
+  savePackageTariffsToSupabase,
+} from '../lib/packageTariffs';
+import { fetchLiveMikrotikProfilesAndSecrets } from '../lib/billingAndNetwork';
+import { isInternalSystemMikrotikProfile } from '../lib/mikrotikProfileSync';
+import {
   buildPortalAuthHeaders,
   getDisplayWhatsAppGatewayUrl,
   normalizeWhatsAppGatewayUrl,
@@ -39,7 +48,7 @@ import {
 } from '../lib/whatsappRouting';
 
 export const SettingsStudio: React.FC = () => {
-  const { routers, olts, deleteMikrotikRouter } = useISP();
+  const { routers, selectedRouterId, olts, deleteMikrotikRouter } = useISP();
   const {
     currencyCode,
     currencySymbol: globalCurrencySymbol,
@@ -82,6 +91,13 @@ export const SettingsStudio: React.FC = () => {
   );
   const [fiberCutSlaHours, setFiberCutSlaHours] = useState(initialCached.fiberCutSlaHours);
   const [autoWalledGarden, setAutoWalledGarden] = useState(initialCached.autoWalledGarden);
+  const [packageTariffs, setPackageTariffs] = useState<Record<string, number>>(
+    () => initialCached.packageTariffs || { ...DEFAULT_PACKAGE_TARIFFS }
+  );
+  const [newTariffProfile, setNewTariffProfile] = useState('');
+  const [newTariffPrice, setNewTariffPrice] = useState('');
+  const [isFetchingMkProfiles, setIsFetchingMkProfiles] = useState(false);
+  const [isSavingTariffs, setIsSavingTariffs] = useState(false);
 
   const [isLoadingSettings, setIsLoadingSettings] = useState(true);
   const [isSaving, setIsSaving] = useState(false);
@@ -138,6 +154,7 @@ export const SettingsStudio: React.FC = () => {
       setDefaultSnmpCommunity(s.defaultSnmpCommunity);
       setSlaAutoAssignMinutes(s.slaAutoAssignMinutes);
       setFiberCutSlaHours(s.fiberCutSlaHours);
+      setPackageTariffs(s.packageTariffs || { ...DEFAULT_PACKAGE_TARIFFS });
       setLastSyncedAt(res.updatedAt);
 
       if (res.tableMissing) {
@@ -230,6 +247,7 @@ export const SettingsStudio: React.FC = () => {
         defaultSnmpCommunity: defaultSnmpCommunity.trim() || 'public',
         slaAutoAssignMinutes,
         fiberCutSlaHours,
+        packageTariffs: sanitizePackageTariffs(packageTariffs, false),
       });
 
       if (!result.ok) {
@@ -836,6 +854,190 @@ export const SettingsStudio: React.FC = () => {
                 className="w-4 h-4 accent-cyan-500 cursor-pointer"
               />
             </div>
+          </div>
+        </div>
+
+        {/* Section 2.5: Package Profile Tariffs (MikroTik PPPoE Pricing) */}
+        <div className="bg-slate-900 border border-slate-800 rounded-xl p-5 shadow-lg space-y-4">
+          <div className="flex flex-wrap items-center justify-between gap-2 pb-2 border-b border-slate-800">
+            <div className="flex items-center gap-2">
+              <DollarSign className="w-4 h-4 text-emerald-400" />
+              <h4 className="font-bold text-white text-xs uppercase tracking-wider font-mono">
+                Package Profile Tariffs (Auto-Fetch Monthly Rates)
+              </h4>
+            </div>
+            <div className="flex items-center gap-2">
+              <button
+                type="button"
+                disabled={isFetchingMkProfiles}
+                onClick={async () => {
+                  const targetRouter =
+                    routers.find((r) => r.id === selectedRouterId) || routers[0];
+                  if (!targetRouter) {
+                    showToast('error', 'No active MikroTik router configured.');
+                    return;
+                  }
+                  setIsFetchingMkProfiles(true);
+                  try {
+                    const mk = await fetchLiveMikrotikProfilesAndSecrets(targetRouter);
+                    const validNames = mk.profiles
+                      .map((p) => String(p.name || '').trim())
+                      .filter(
+                        (n) => n && !isInternalSystemMikrotikProfile(n, expiryPppProfile)
+                      );
+                    if (validNames.length === 0) {
+                      showToast(
+                        'error',
+                        `No live PPPoE profiles returned from ${targetRouter.name}. Verify router connectivity.`
+                      );
+                      return;
+                    }
+                    let addedCount = 0;
+                    setPackageTariffs((prev) => {
+                      const next = { ...prev };
+                      for (const profName of validNames) {
+                        if (!next[profName]) {
+                          next[profName] = lookupPackageTariffPrice(profName, prev).pricePkr;
+                          addedCount += 1;
+                        }
+                      }
+                      return next;
+                    });
+                    showToast(
+                      'success',
+                      `Loaded ${validNames.length} live MikroTik profiles from ${targetRouter.name}${addedCount > 0 ? ` (${addedCount} newly added)` : ''}. Click Save Tariffs to persist.`
+                    );
+                  } catch (err: any) {
+                    showToast(
+                      'error',
+                      `Failed fetching live MikroTik profiles: ${err?.message || 'Router unreachable'}`
+                    );
+                  } finally {
+                    setIsFetchingMkProfiles(false);
+                  }
+                }}
+                className="px-3 py-1.5 rounded-lg bg-cyan-950/70 hover:bg-cyan-900 border border-cyan-700/70 text-cyan-200 text-[11px] font-mono font-bold flex items-center gap-1.5 transition cursor-pointer disabled:opacity-50"
+              >
+                <RefreshCw className={`w-3.5 h-3.5 ${isFetchingMkProfiles ? 'animate-spin' : ''}`} />
+                <span>{isFetchingMkProfiles ? 'Fetching...' : 'Fetch Live MikroTik Profiles'}</span>
+              </button>
+
+              <button
+                type="button"
+                disabled={isSavingTariffs}
+                onClick={async () => {
+                  setIsSavingTariffs(true);
+                  try {
+                    const res = await savePackageTariffsToSupabase(packageTariffs);
+                    if (res.ok) {
+                      setPackageTariffs(res.tariffs);
+                      showToast(
+                        'success',
+                        `Saved ${Object.keys(res.tariffs).length} package tariffs to Supabase. All provisioning & invoice forms updated.`
+                      );
+                    } else {
+                      showToast('error', res.error || 'Failed to save package tariffs.');
+                    }
+                  } finally {
+                    setIsSavingTariffs(false);
+                  }
+                }}
+                className="px-3 py-1.5 rounded-lg bg-emerald-600 hover:bg-emerald-500 text-slate-950 text-[11px] font-mono font-bold flex items-center gap-1.5 transition cursor-pointer disabled:opacity-50"
+              >
+                {isSavingTariffs ? (
+                  <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                ) : (
+                  <Save className="w-3.5 h-3.5" />
+                )}
+                <span>{isSavingTariffs ? 'Saving...' : 'Save Tariffs'}</span>
+              </button>
+            </div>
+          </div>
+
+          <p className="text-[11px] text-slate-400">
+            Selecting any PPPoE profile in <strong className="text-slate-200">Provision PPPoE</strong>,{' '}
+            <strong className="text-slate-200">Create New Portal Account</strong>,{' '}
+            <strong className="text-slate-200">Generate Subscriber Invoice</strong>, or{' '}
+            <strong className="text-slate-200">Subscriber Profile Edit</strong> immediately auto-populates the monthly rate below.
+          </p>
+
+          <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-2.5 max-h-72 overflow-y-auto pr-1">
+            {Object.entries(packageTariffs)
+              .sort(([a], [b]) => a.localeCompare(b, undefined, { numeric: true }))
+              .map(([profName, price]) => (
+                <div
+                  key={profName}
+                  className="flex items-center justify-between gap-2 bg-slate-950 border border-slate-800 rounded-lg px-3 py-2 font-mono text-xs"
+                >
+                  <span className="text-cyan-300 font-bold truncate" title={profName}>
+                    {profName}
+                  </span>
+                  <div className="flex items-center gap-1.5 shrink-0">
+                    <span className="text-slate-500 text-[10px]">{globalCurrencySymbol}</span>
+                    <input
+                      type="number"
+                      min="1"
+                      value={price}
+                      onChange={(e) => {
+                        const val = Math.max(0, Math.round(Number(e.target.value) || 0));
+                        setPackageTariffs((prev) => ({ ...prev, [profName]: val }));
+                      }}
+                      className="w-20 bg-slate-900 border border-slate-700 rounded px-2 py-1 text-right text-emerald-300 font-bold text-xs focus:outline-none focus:border-cyan-500"
+                    />
+                    <button
+                      type="button"
+                      onClick={() =>
+                        setPackageTariffs((prev) => {
+                          const next = { ...prev };
+                          delete next[profName];
+                          return next;
+                        })
+                      }
+                      title={`Remove ${profName}`}
+                      className="p-1 text-slate-500 hover:text-rose-400 transition cursor-pointer"
+                    >
+                      <Trash2 className="w-3.5 h-3.5" />
+                    </button>
+                  </div>
+                </div>
+              ))}
+          </div>
+
+          {/* Add new custom MikroTik profile tariff row */}
+          <div className="grid grid-cols-1 sm:grid-cols-3 gap-2.5 pt-2 border-t border-slate-800 font-mono">
+            <input
+              type="text"
+              placeholder="Profile Name (e.g. 4 MB - TW)"
+              value={newTariffProfile}
+              onChange={(e) => setNewTariffProfile(e.target.value)}
+              className="bg-slate-950 border border-slate-700 rounded-lg px-3 py-2 text-white text-xs focus:outline-none focus:border-cyan-500"
+            />
+            <input
+              type="number"
+              min="1"
+              placeholder="Monthly Price (Rs. e.g. 1800)"
+              value={newTariffPrice}
+              onChange={(e) => setNewTariffPrice(e.target.value)}
+              className="bg-slate-950 border border-slate-700 rounded-lg px-3 py-2 text-emerald-300 text-xs focus:outline-none focus:border-cyan-500"
+            />
+            <button
+              type="button"
+              onClick={() => {
+                const cleanName = newTariffProfile.trim();
+                const cleanPrice = Math.round(Number(newTariffPrice));
+                if (!cleanName || !Number.isFinite(cleanPrice) || cleanPrice <= 0) {
+                  showToast('error', 'Enter both a valid MikroTik profile name and a positive monthly price.');
+                  return;
+                }
+                setPackageTariffs((prev) => ({ ...prev, [cleanName]: cleanPrice }));
+                setNewTariffProfile('');
+                setNewTariffPrice('');
+              }}
+              className="px-3 py-2 rounded-lg bg-slate-800 hover:bg-slate-700 text-cyan-300 border border-slate-700 text-xs font-bold flex items-center justify-center gap-1.5 transition cursor-pointer"
+            >
+              <Plus className="w-3.5 h-3.5" />
+              <span>Add Profile Tariff</span>
+            </button>
           </div>
         </div>
 

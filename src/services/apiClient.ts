@@ -186,13 +186,17 @@ function parseErrorMessage(status: number, rawText: string): string {
     return `Router returned HTTP ${status}`;
   }
 
-  // 1. Try parsing JSON error body
+  // 1. Try parsing JSON error body (RouterOS v7 returns { error: 400, message: "Bad Request", detail: "failure: ..." })
   try {
     const parsed = JSON.parse(rawText);
     if (typeof parsed === 'string') return parsed;
+    if (parsed.detail && parsed.message) {
+      return `${String(parsed.detail)} (${String(parsed.message)})`;
+    }
     if (parsed.detail) return String(parsed.detail);
-    if (parsed.error) return String(parsed.error);
+    if (parsed.error && typeof parsed.error === 'string') return parsed.error;
     if (parsed.message) return String(parsed.message);
+    if (parsed.error !== undefined) return `RouterOS error ${String(parsed.error)}`;
   } catch {}
 
   // 2. If HTML error response (e.g. Netlify 502/504 Bad Gateway), extract title
@@ -664,8 +668,8 @@ export async function kickSession(
 }
 
 /**
- * 5. createSecret(payload) -> POST /ppp/secret/add
- * Provisions new subscriber secret on RouterOS
+ * 5. createSecret(payload) -> PUT /ppp/secret (RouterOS v7 REST standard) with POST /ppp/secret/add fallback
+ * Provisions a real PPPoE subscriber secret on MikroTik RouterOS.
  */
 export async function createSecret(
   payload: {
@@ -677,10 +681,19 @@ export async function createSecret(
     remoteAddress?: string;
   },
   router?: RouterAuthInfo
-): Promise<{ success: boolean; data?: any; error?: string }> {
+): Promise<{ success: boolean; data?: any; error?: string; status?: number }> {
+  const cleanName = payload.name.trim();
+  const cleanPass = String(payload.password || '').trim();
+  if (!cleanName) {
+    return { success: false, error: 'PPPoE username is required.' };
+  }
+  if (!cleanPass) {
+    return { success: false, error: 'PPPoE password is required.' };
+  }
+
   const body: Record<string, any> = {
-    name: payload.name.trim(),
-    password: payload.password,
+    name: cleanName,
+    password: cleanPass,
     service: payload.service || 'pppoe',
     profile: payload.profile || 'default',
   };
@@ -688,13 +701,39 @@ export async function createSecret(
   if (payload.comment) body.comment = payload.comment;
   if (payload.remoteAddress) body['remote-address'] = payload.remoteAddress;
 
-  const res = await apiClient.post('/ppp/secret/add', body, { router });
-
-  if (res.success) {
-    return { success: true, data: res.data };
+  // 1. Official RouterOS v7 REST endpoint: PUT /rest/ppp/secret
+  const putRes = await apiClient.put('/ppp/secret', body, { router });
+  if (putRes.success) {
+    return { success: true, data: putRes.data, status: putRes.status };
   }
 
-  return { success: false, error: res.error || res.message };
+  const putErrText = String(putRes.error || putRes.message || '');
+  const isHardRejection =
+    putRes.status === 401 ||
+    putRes.status === 402 ||
+    putRes.status === 409 ||
+    /already\s+(have|exists)|duplicate|same\s+name|input does not match any value of profile|no such item/i.test(
+      putErrText
+    );
+  if (isHardRejection) {
+    return {
+      success: false,
+      error: putErrText || 'MikroTik router rejected PPPoE secret creation.',
+      status: putRes.status,
+    };
+  }
+
+  // 2. Fallback for RouterOS variants expecting CLI-style POST /rest/ppp/secret/add
+  const addRes = await apiClient.post('/ppp/secret/add', body, { router });
+  if (addRes.success) {
+    return { success: true, data: addRes.data, status: addRes.status };
+  }
+
+  return {
+    success: false,
+    error: addRes.error || putErrText || addRes.message || 'MikroTik router rejected PPPoE secret creation.',
+    status: addRes.status || putRes.status,
+  };
 }
 
 /**

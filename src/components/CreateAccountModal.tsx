@@ -37,13 +37,18 @@ import {
   NetworkAreaNode,
   NETWORK_AREAS_UPDATED_EVENT,
   fetchConfiguredExpiryProfileName,
+  fetchLiveMikrotikProfilesAndSecrets,
   syncMikrotikSecretProfile,
   kickMikrotikActiveSessionForUser,
 } from '../lib/billingAndNetwork';
 import {
+  buildLiveMikrotikPlanOptions,
   isExpiryOrBlockedProfile,
+  resolvePkrTariffForProfile,
   upsertOrigPkgComment,
 } from '../lib/mikrotikProfileSync';
+import { lookupPackageTariffPrice } from '../lib/packageTariffs';
+import { emitGlobalToast } from '../lib/whatsappRouting';
 import { provisionPppoeSecretRest } from '../services/mikrotikRestClient';
 import {
   ADMIN_FULL_PERMISSIONS,
@@ -68,7 +73,7 @@ export const CreateAccountModal: React.FC<CreateAccountModalProps> = ({
   onSuccess,
   subscribers: propSubscribers,
 }) => {
-  const { routers, selectedRouterId, agents } = useISP();
+  const { routers, selectedRouterId, agents, packages, profilePriceMap, dynamicPppProfiles } = useISP();
 
   const [role, setRole] = useState<SystemRole>('CLIENT');
   const [fullName, setFullName] = useState('');
@@ -77,19 +82,26 @@ export const CreateAccountModal: React.FC<CreateAccountModalProps> = ({
   const [password, setPassword] = useState(() => generateRandomPassword());
   const [showPassword, setShowPassword] = useState(false);
 
-  // Live real MikroTik PPPoE subscribers state
+  // Live real MikroTik PPPoE subscribers & profiles state
   const [liveSubscribers, setLiveSubscribers] = useState<RealMikrotikSubscriber[]>(() => {
     if (propSubscribers && propSubscribers.length > 0) return propSubscribers;
     return getCachedSubscribers();
   });
+  const [liveMikrotikProfiles, setLiveMikrotikProfiles] = useState<
+    Array<{ name: string; rateLimit?: string }>
+  >([]);
   const [isLoadingSubscribers, setIsLoadingSubscribers] = useState(false);
   const [selectedSubscriber, setSelectedSubscriber] = useState<RealMikrotikSubscriber | null>(null);
 
-  // Client specific fields
+  // Client specific fields (Package Plan + Auto-fetched Monthly Fee)
   const [linkedCustomerId, setLinkedCustomerId] = useState('');
   const [grantClientPortal, setGrantClientPortal] = useState(true);
   const [subscriberSearchQuery, setSubscriberSearchQuery] = useState('');
   const [isSubscriberSearchOpen, setIsSubscriberSearchOpen] = useState(false);
+  const [selectedPackageProfile, setSelectedPackageProfile] = useState<string>('4 MB - Local');
+  const [monthlyFee, setMonthlyFee] = useState<number>(() =>
+    lookupPackageTariffPrice('4 MB - Local', profilePriceMap).pricePkr
+  );
 
   // Agent & Area specific fields
   const [networkAreas, setNetworkAreas] = useState<NetworkAreaNode[]>([]);
@@ -156,21 +168,58 @@ export const CreateAccountModal: React.FC<CreateAccountModalProps> = ({
       setLiveSubscribers(propSubscribers);
     }
 
-    // Always fetch fresh real MikroTik subscribers from /api/mikrotik/ppp/active & /api/mikrotik/ppp/secret
+    // Always fetch fresh real MikroTik subscribers & live /ppp/profile list
     setIsLoadingSubscribers(true);
-    fetchLiveMikrotikSubscribers(currentRouter)
-      .then((subs) => {
+    Promise.all([
+      fetchLiveMikrotikSubscribers(currentRouter).catch(() => []),
+      fetchLiveMikrotikProfilesAndSecrets(currentRouter).catch(() => ({ profiles: [], secrets: [] })),
+    ])
+      .then(([subs, mk]) => {
         if (subs && subs.length > 0) {
           setLiveSubscribers(subs);
         }
-      })
-      .catch((err) => {
-        console.warn('Live subscriber fetch notice:', err);
+        if (mk.profiles && mk.profiles.length > 0) {
+          setLiveMikrotikProfiles(mk.profiles);
+        }
       })
       .finally(() => {
         setIsLoadingSubscribers(false);
       });
   }, [isOpen, propSubscribers, currentRouter]);
+
+  const planOptions = useMemo(() => {
+    const mkSource =
+      liveMikrotikProfiles.length > 0
+        ? liveMikrotikProfiles
+        : (dynamicPppProfiles || []).map((p: any) => ({
+            name: p.name,
+            rateLimit: p.rateLimit || p['rate-limit'],
+          }));
+    return buildLiveMikrotikPlanOptions({
+      mikrotikProfiles: mkSource,
+      assignedProfileName: selectedPackageProfile || null,
+      profilePriceMap,
+      packages,
+    });
+  }, [liveMikrotikProfiles, dynamicPppProfiles, selectedPackageProfile, profilePriceMap, packages]);
+
+  const handlePackageProfileChange = (nextProf: string) => {
+    setSelectedPackageProfile(nextProf);
+    const opt = planOptions.find((o) => o.profileName === nextProf);
+    const nextPrice =
+      opt && opt.pricePkr > 0
+        ? opt.pricePkr
+        : resolvePkrTariffForProfile(nextProf, { profilePriceMap, packages }).pricePkr;
+    setMonthlyFee(nextPrice);
+  };
+
+  useEffect(() => {
+    if (!isOpen || selectedSubscriber) return;
+    if (planOptions.length > 0 && !planOptions.some((o) => o.profileName === selectedPackageProfile)) {
+      setSelectedPackageProfile(planOptions[0].profileName);
+      setMonthlyFee(planOptions[0].pricePkr);
+    }
+  }, [isOpen, planOptions, selectedSubscriber]);
 
   // Filtered subscribers for dynamic search
   const filteredSubscribers = useMemo(() => {
@@ -212,6 +261,14 @@ export const CreateAccountModal: React.FC<CreateAccountModalProps> = ({
       setFullName(sub.fullName);
     } else {
       setFullName(sub.username);
+    }
+
+    // 4. Auto-fill Package Profile & Monthly Fee from linked MikroTik profile
+    if (sub.profile && !isExpiryOrBlockedProfile(sub.profile)) {
+      const cleanProf = String(sub.profile).trim();
+      setSelectedPackageProfile(cleanProf);
+      const tariff = resolvePkrTariffForProfile(cleanProf, { profilePriceMap, packages });
+      setMonthlyFee(tariff.pricePkr);
     }
   };
 
@@ -282,7 +339,87 @@ export const CreateAccountModal: React.FC<CreateAccountModalProps> = ({
       createdAt: new Date().toISOString(),
     };
 
-    // 1. Save the created portal user into standardized USERS_STORAGE_KEY (youthnet_portal_users)
+    const nowIso = new Date().toISOString();
+    const todayYmd = nowIso.slice(0, 10);
+    const chosenPaidPkg = String(
+      selectedPackageProfile ||
+        (selectedSubscriber?.profile && !isExpiryOrBlockedProfile(selectedSubscriber.profile)
+          ? selectedSubscriber.profile
+          : '')
+    ).trim();
+    const resolvedMonthlyFee =
+      Number(monthlyFee) > 0
+        ? Math.round(Number(monthlyFee))
+        : resolvePkrTariffForProfile(chosenPaidPkg, { profilePriceMap, packages }).pricePkr;
+
+    // 1. REAL MIKROTIK PROVISIONING FIRST FOR NEW CLIENT ACCOUNTS (when NOT linking an existing MikroTik secret)
+    let mikrotikSynced = false;
+    if (role === 'CLIENT') {
+      const expiryPoolProfile = await fetchConfiguredExpiryProfileName();
+      const targetRouter = routers.find((r) => r.id === selectedRouterId) || routers[0];
+      const routerAuth = targetRouter
+        ? {
+            host: targetRouter.ipAddress,
+            port: targetRouter.apiPort || 80,
+            username: targetRouter.username || 'admin',
+            password: targetRouter.password || '',
+          }
+        : undefined;
+
+      const humanCommentBase = [fullName.trim(), cleanPhone, assignedArea || 'Central']
+        .filter(Boolean)
+        .join(' | ');
+      const commentWithOrigPkg = chosenPaidPkg
+        ? upsertOrigPkgComment(humanCommentBase, chosenPaidPkg)
+        : humanCommentBase;
+
+      if (!selectedSubscriber) {
+        if (!targetRouter) {
+          const noRouterErr =
+            'No active MikroTik NAS router configured. Please add/select a router before creating a new client account.';
+          setErrorMessage(noRouterErr);
+          emitGlobalToast(noRouterErr, 'error');
+          setIsSubmitting(false);
+          return;
+        }
+
+        // Create real PPPoE secret directly on active MikroTik router (PUT /rest/ppp/secret -> /ppp/secret/add fallback)
+        const mkCreateRes = await provisionPppoeSecretRest(targetRouter, {
+          name: cleanUsername,
+          password: plainPass,
+          service: 'pppoe',
+          profile: expiryPoolProfile,
+          comment: commentWithOrigPkg,
+        });
+
+        if (!mkCreateRes.success) {
+          const exactErr =
+            mkCreateRes.error || 'MikroTik router rejected PPPoE secret creation.';
+          const fullErr = `MikroTik (${targetRouter.name || targetRouter.ipAddress}) failed for "@${cleanUsername}": ${exactErr}`;
+          setErrorMessage(fullErr);
+          emitGlobalToast(fullErr, 'error');
+          setIsSubmitting(false);
+          return;
+        }
+        mikrotikSynced = true;
+      } else {
+        // Linking an already-existing MikroTik secret: move to Expiry Pool & preserve ORIG_PKG
+        try {
+          const syncRes = await syncMikrotikSecretProfile(
+            cleanUsername,
+            expiryPoolProfile,
+            { disabled: 'false', comment: commentWithOrigPkg },
+            routerAuth
+          );
+          mikrotikSynced = Boolean(syncRes.ok);
+          await kickMikrotikActiveSessionForUser(cleanUsername, routerAuth).catch(() => {});
+        } catch (mkErr) {
+          console.warn('Linked MikroTik secret sync notice:', mkErr);
+        }
+      }
+    }
+
+    // 2. Save the created portal user into standardized USERS_STORAGE_KEY (youthnet_portal_users)
     try {
       saveUnifiedPortalUser({
         username: cleanUsername,
@@ -299,14 +436,7 @@ export const CreateAccountModal: React.FC<CreateAccountModalProps> = ({
       console.warn('Failed saving to youthnet_portal_users:', storageErr);
     }
 
-    // 2. Persist directly to Supabase PostgreSQL portal_users table
-    const nowIso = new Date().toISOString();
-    const todayYmd = nowIso.slice(0, 10);
-    const assignedPaidPkg =
-      selectedSubscriber?.profile && !isExpiryOrBlockedProfile(selectedSubscriber.profile)
-        ? String(selectedSubscriber.profile).trim()
-        : '';
-
+    // 3. Persist directly to Supabase PostgreSQL portal_users table (ONLY after MikroTik succeeded for new clients)
     try {
       const effectivePerms: StaffPermissions =
         role === 'ADMIN'
@@ -344,12 +474,16 @@ export const CreateAccountModal: React.FC<CreateAccountModalProps> = ({
               is_suspended: true,
               expiry_date: nowIso,
               next_billing_date: todayYmd,
-              ...(assignedPaidPkg
+              monthly_fee: resolvedMonthlyFee,
+              net_balance: resolvedMonthlyFee,
+              mikrotik_synced: mikrotikSynced,
+              ...(chosenPaidPkg
                 ? {
-                    original_package_profile: assignedPaidPkg,
-                    package_name: assignedPaidPkg,
-                    package_profile_name: assignedPaidPkg,
-                    package_speed: assignedPaidPkg,
+                    assigned_package_profile: chosenPaidPkg,
+                    original_package_profile: chosenPaidPkg,
+                    package_name: chosenPaidPkg,
+                    package_profile_name: chosenPaidPkg,
+                    package_speed: chosenPaidPkg,
                   }
                 : {}),
             }
@@ -362,7 +496,7 @@ export const CreateAccountModal: React.FC<CreateAccountModalProps> = ({
 
       const workingPayload: Record<string, any> = { ...newUserPayload };
       let inserted = false;
-      for (let attempt = 0; attempt < 8; attempt++) {
+      for (let attempt = 0; attempt < 12; attempt++) {
         const { error: insertErr } = await supabase.from('portal_users').insert([workingPayload]);
         if (!insertErr) {
           inserted = true;
@@ -396,52 +530,11 @@ export const CreateAccountModal: React.FC<CreateAccountModalProps> = ({
       console.warn('Failed inserting to Supabase portal_users:', sbErr);
     }
 
-    // 2b. New Client Account -> Default MikroTik PPPoE Secret to Expiry Pool (never activate paid speed on creation)
-    if (role === 'CLIENT') {
-      try {
-        const expiryPoolProfile = await fetchConfiguredExpiryProfileName();
-        const targetRouter =
-          routers.find((r) => r.id === selectedRouterId) || routers[0];
-        const routerAuth = targetRouter
-          ? {
-              host: targetRouter.ipAddress,
-              port: targetRouter.apiPort || 80,
-              username: targetRouter.username || 'admin',
-              password: targetRouter.password || '',
-            }
-          : undefined;
-
-        const commentWithOrigPkg = assignedPaidPkg
-          ? upsertOrigPkgComment(
-              `PENDING_RECHARGE | Created: ${todayYmd}`,
-              assignedPaidPkg
-            )
-          : `PENDING_RECHARGE | Created: ${todayYmd}`;
-
-        // Try updating existing PPPoE secret onto Expiry Pool first
-        const syncRes = await syncMikrotikSecretProfile(
-          cleanUsername,
-          expiryPoolProfile,
-          { disabled: 'false', comment: commentWithOrigPkg },
-          routerAuth
-        );
-
-        // If secret doesn't exist yet on MikroTik, create it directly on Expiry Pool
-        if (!syncRes.ok && targetRouter) {
-          await provisionPppoeSecretRest(targetRouter, {
-            name: cleanUsername,
-            password: plainPass,
-            service: 'pppoe',
-            profile: expiryPoolProfile,
-            comment: commentWithOrigPkg,
-          }).catch(() => {});
-        }
-
-        // Disconnect any stale active session so Expiry Pool applies immediately
-        await kickMikrotikActiveSessionForUser(cleanUsername, routerAuth).catch(() => {});
-      } catch (mkErr) {
-        console.warn('Expiry Pool default MikroTik assignment notice:', mkErr);
-      }
+    if (role === 'CLIENT' && mikrotikSynced && !selectedSubscriber) {
+      emitGlobalToast(
+        `PPPoE secret "@${cleanUsername}" created on MikroTik (${currentRouter?.name || 'NAS'}) in Expiry Pool (Assigned Plan: ${chosenPaidPkg || 'Default'} · Rs. ${resolvedMonthlyFee.toLocaleString()}/mo).`,
+        'success'
+      );
     }
 
     // 3. Persist to server backend API
@@ -757,6 +850,47 @@ export const CreateAccountModal: React.FC<CreateAccountModalProps> = ({
                   >
                     <span className="w-4 h-4 rounded-full bg-white shadow-md transform transition" />
                   </button>
+                </div>
+
+                {/* Package Plan (Live MikroTik Profile) & Auto-Fetched Monthly Fee */}
+                <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 pt-2 border-t border-slate-800/80">
+                  <div>
+                    <label className="text-slate-300 font-medium block mb-1 text-xs">
+                      Package Plan (MikroTik PPPoE Profile) *
+                    </label>
+                    <select
+                      value={selectedPackageProfile}
+                      onChange={(e) => handlePackageProfileChange(e.target.value)}
+                      className="w-full bg-slate-900 border border-slate-700 rounded-xl px-3 py-2 text-cyan-200 font-mono text-xs focus:outline-none focus:border-cyan-500 cursor-pointer"
+                    >
+                      {planOptions.map((opt) => (
+                        <option key={opt.profileName} value={opt.profileName}>
+                          {opt.profileName} (Rs. {opt.pricePkr.toLocaleString()}/mo)
+                          {opt.rateLimit ? ` • ${opt.rateLimit}` : ''}
+                        </option>
+                      ))}
+                    </select>
+                    <span className="text-[10px] text-slate-500 font-mono block mt-1">
+                      Saved as <code className="text-cyan-400">assigned_package_profile</code> &bull; NAS: {currentRouter?.name || 'Default Router'}
+                    </span>
+                  </div>
+
+                  <div>
+                    <label className="text-slate-300 font-medium block mb-1 text-xs">
+                      Monthly Fee (Rs.) *
+                    </label>
+                    <input
+                      type="number"
+                      min="1"
+                      required
+                      value={monthlyFee}
+                      onChange={(e) => setMonthlyFee(Number(e.target.value) || 0)}
+                      className="w-full bg-slate-900 border border-slate-700 rounded-xl px-3 py-2 text-emerald-300 font-mono font-bold tabular-nums text-xs focus:outline-none focus:border-cyan-500"
+                    />
+                    <span className="text-[10px] text-emerald-400/80 font-mono block mt-1">
+                      Auto-fetched from Package Tariffs (editable)
+                    </span>
+                  </div>
                 </div>
 
                 <AreaNodeSelector

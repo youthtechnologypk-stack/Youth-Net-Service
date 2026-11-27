@@ -791,9 +791,17 @@ export const GenerateInvoiceModal: React.FC<GenerateInvoiceModalProps> = ({
                   const nextProf = e.target.value;
                   setPackageName(nextProf);
                   const opt = planOptions.find((o) => o.profileName === nextProf);
-                  if (opt && opt.pricePkr > 0) {
-                    setBaseAmount(opt.pricePkr);
-                    setTaxAmount(applyGst ? Math.round(opt.pricePkr * 0.16) : 0);
+                  const resolvedPrice =
+                    opt && opt.pricePkr > 0
+                      ? opt.pricePkr
+                      : resolvePkrTariffForProfile(nextProf, {
+                          profilePriceMap,
+                          packages,
+                          portalClients,
+                        }).pricePkr;
+                  if (resolvedPrice > 0) {
+                    setBaseAmount(resolvedPrice);
+                    setTaxAmount(applyGst ? Math.round(resolvedPrice * 0.16) : 0);
                   }
                 }}
                 className="w-full bg-slate-950 border border-slate-700 text-cyan-200 font-mono p-2 rounded-lg text-xs focus:outline-none focus:border-cyan-500 cursor-pointer"

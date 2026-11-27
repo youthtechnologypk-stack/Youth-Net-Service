@@ -31,6 +31,7 @@ import {
   resolvePreselectedInvoiceProfile,
   resolvePkrTariffForProfile,
 } from '../lib/mikrotikProfileSync';
+import { lookupPackageTariffPrice } from '../lib/packageTariffs';
 import { getStoredUser } from '../lib/auth';
 import { triggerAutoWhatsAppNotification } from '../lib/whatsappRouting';
 import {
@@ -69,16 +70,7 @@ export const PACKAGE_RATE_MAP: Record<string, number> = {
 export const resolvePackageRate = (profileOrSpeed?: string, monthlyFee?: number): number => {
   if (monthlyFee && Number(monthlyFee) > 0) return Number(monthlyFee);
   if (!profileOrSpeed) return 2000;
-  const p = profileOrSpeed.toUpperCase();
-  for (const [key, rate] of Object.entries(PACKAGE_RATE_MAP)) {
-    if (p.includes(key)) return rate;
-  }
-  if (p.includes('10')) return 1500;
-  if (p.includes('15')) return 2000;
-  if (p.includes('20')) return 2500;
-  if (p.includes('30')) return 3000;
-  if (p.includes('50')) return 3500;
-  return 2000;
+  return lookupPackageTariffPrice(profileOrSpeed).pricePkr;
 };
 
 function addDaysYmd(base: Date | string, days: number): string {
@@ -541,7 +533,7 @@ export const CreateInvoiceModal: React.FC<CreateInvoiceModalProps> = ({
       }
 
       // 5. Generating a DUE invoice must NOT extend validity or activate MikroTik internet.
-      //    Save only the planned non-expiry monthly package profile on the subscriber record
+      //    Save only the planned non-expiry monthly package profile, monthly_fee & net_balance on the subscriber record
       //    so it activates automatically for +31 days once the invoice is marked PAID.
       if (cleanProfile) {
         syncSubscriberPackageAndRestoreIfPaid({
@@ -554,6 +546,32 @@ export const CreateInvoiceModal: React.FC<CreateInvoiceModalProps> = ({
           preloadedSecrets: liveMikrotikSecrets,
         }).catch(() => {});
       }
+
+      // Sync subscriber monthly_fee, assigned_package_profile & net_balance in Supabase (adaptive fallback)
+      try {
+        const subPatch: Record<string, any> = {
+          monthly_fee: numAmount,
+          net_balance: numAmount,
+          ...(cleanProfile ? { assigned_package_profile: cleanProfile } : {}),
+        };
+        const workingPatch = { ...subPatch };
+        for (let attempt = 0; attempt < 5; attempt++) {
+          const { error: patchErr } = await supabase
+            .from('portal_users')
+            .update(workingPatch)
+            .ilike('username', subUsername);
+          if (!patchErr) break;
+          const m =
+            String(patchErr.message || '').match(/Could not find the ['"]([a-zA-Z0-9_]+)['"] column/i) ||
+            String(patchErr.message || '').match(/column\s+["']?([a-zA-Z0-9_]+)["']?\s+/i);
+          if (m?.[1] && m[1] in workingPatch) {
+            delete workingPatch[m[1]];
+            if (Object.keys(workingPatch).length === 0) break;
+            continue;
+          }
+          break;
+        }
+      } catch {}
 
       // Also persist to localStorage for offline cache
       try {
@@ -778,8 +796,16 @@ export const CreateInvoiceModal: React.FC<CreateInvoiceModalProps> = ({
                 const nextProf = e.target.value;
                 setSelectedPackageProfile(nextProf);
                 const opt = planOptions.find((o) => o.profileName === nextProf);
-                if (opt && opt.pricePkr > 0) {
-                  setAmount(opt.pricePkr);
+                const resolvedPrice =
+                  opt && opt.pricePkr > 0
+                    ? opt.pricePkr
+                    : resolvePkrTariffForProfile(nextProf, {
+                        profilePriceMap,
+                        packages,
+                        portalClients,
+                      }).pricePkr;
+                if (resolvedPrice > 0) {
+                  setAmount(resolvedPrice);
                 }
               }}
               className="w-full bg-slate-900 border border-slate-700 text-cyan-200 font-mono p-2 rounded-lg text-xs focus:outline-none focus:border-cyan-500 cursor-pointer"

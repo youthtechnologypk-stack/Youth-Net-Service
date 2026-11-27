@@ -2144,20 +2144,24 @@ app.post('/api/mikrotik/users', async (req: Request, res: Response) => {
     }
 
     // 0. MANDATORY SERVER-SIDE PREPAID WALLET PAYMENT GATE FOR DEALERS & SUB-DEALERS
-    const serverWalletGate = await enforceServerPrepaidWalletGate(req, {
-      subscriberUsername: finalUsername,
-      targetProfile: finalProfile,
-      txType: 'USER_ACTIVATION',
-      explicitResellerId: req.body?.subDealerId || req.body?.dealerId || null,
-      isActivatingSecret: true,
-    });
-
-    if (!serverWalletGate.allowed) {
-      return res.status(serverWalletGate.statusCode || 402).json({
-        success: false,
-        walletGateBlocked: true,
-        error: serverWalletGate.error || 'Prepaid wallet payment gate blocked activation.',
+    // Creating a new subscriber onto the Expiry Pool (EXPIRED / PENDING_RECHARGE) does NOT activate paid bandwidth and must NOT deduct wallet.
+    let serverWalletGate: ServerWalletGateResult = { allowed: true, serverDeducted: false };
+    if (!isExpiryOrBlockedProfile(finalProfile)) {
+      serverWalletGate = await enforceServerPrepaidWalletGate(req, {
+        subscriberUsername: finalUsername,
+        targetProfile: finalProfile,
+        txType: 'USER_ACTIVATION',
+        explicitResellerId: req.body?.subDealerId || req.body?.dealerId || null,
+        isActivatingSecret: true,
       });
+
+      if (!serverWalletGate.allowed) {
+        return res.status(serverWalletGate.statusCode || 402).json({
+          success: false,
+          walletGateBlocked: true,
+          error: serverWalletGate.error || 'Prepaid wallet payment gate blocked activation.',
+        });
+      }
     }
 
     // 1. Try Provisioning on Physical MikroTik Router via RouterOS API (/ppp/secret/add) with 3s timeout
@@ -2574,6 +2578,26 @@ app.all('/api/mikrotik/*', async (req: Request, res: Response) => {
     targetHost = targetHost.split(':')[0].trim();
   }
 
+  // Validate targetHost to block loopback / cloud metadata SSRF and malformed host strings
+  const normalizedHostLower = targetHost.toLowerCase();
+  const isBlockedMetadataOrLoopback =
+    !targetHost ||
+    !/^[a-zA-Z0-9.-]+$/.test(targetHost) ||
+    normalizedHostLower === 'localhost' ||
+    normalizedHostLower === '0.0.0.0' ||
+    normalizedHostLower === '::1' ||
+    normalizedHostLower.startsWith('127.') ||
+    normalizedHostLower.startsWith('169.254.') ||
+    normalizedHostLower.endsWith('.internal') ||
+    normalizedHostLower.endsWith('.local');
+  if (isBlockedMetadataOrLoopback) {
+    res.status(400).json({
+      success: false,
+      error: 'Invalid or disallowed MikroTik router host address.',
+    });
+    return;
+  }
+
   let isSsl = sslHeader === 'true' || portHeader === '443';
   let targetPort = parseInt(portHeader, 10);
 
@@ -2607,6 +2631,7 @@ app.all('/api/mikrotik/*', async (req: Request, res: Response) => {
   if (isPppSecretMutation && !cleanSubpath.endsWith('/print') && !cleanSubpath.endsWith('/remove')) {
     const bodyObj = req.body && typeof req.body === 'object' ? req.body : {};
     const targetProfile = String(bodyObj.profile || '').trim();
+    const isTargetExpiryPool = Boolean(targetProfile && isExpiryOrBlockedProfile(targetProfile));
     const isEnabling = bodyObj.disabled === 'false' || bodyObj.disabled === false;
     const isCreatingSecret =
       cleanSubpath === 'ppp/secret/add' ||
@@ -2617,8 +2642,15 @@ app.all('/api/mikrotik/*', async (req: Request, res: Response) => {
       subscriberHeader ||
       (subscriberFromBody && !subscriberFromBody.startsWith('*') ? subscriberFromBody : '');
 
-    // Enforce gate whenever assigning a non-expiry profile, creating a secret, or re-enabling a secret
-    if ((targetProfile && !isExpiryOrBlockedProfile(targetProfile)) || isCreatingSecret || isEnabling) {
+    // Enforce gate only when assigning a paid (non-expiry) profile or re-enabling a non-expiry secret.
+    // Creating or moving a subscriber onto the Expiry Pool (PENDING_RECHARGE) must NEVER deduct or block wallet.
+    const requiresWalletGate =
+      !isTargetExpiryPool &&
+      ((targetProfile && !isExpiryOrBlockedProfile(targetProfile)) ||
+        (isCreatingSecret && !isTargetExpiryPool) ||
+        isEnabling);
+
+    if (requiresWalletGate) {
       proxyWalletGate = await enforceServerPrepaidWalletGate(req, {
         subscriberUsername: candidateUsername,
         targetProfile: targetProfile || undefined,

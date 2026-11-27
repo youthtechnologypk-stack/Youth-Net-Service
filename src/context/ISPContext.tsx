@@ -91,6 +91,13 @@ import {
   restoreSubscriberOnInvoicePaid,
 } from '../lib/billingAndNetwork';
 import { upsertOrigPkgComment } from '../lib/mikrotikProfileSync';
+import {
+  getCachedPackageTariffs,
+  loadPackageTariffsFromSupabase,
+  lookupPackageTariffPrice,
+  PACKAGE_TARIFFS_UPDATED_EVENT,
+  savePackageTariffsToSupabase,
+} from '../lib/packageTariffs';
 import { sessionSyncEngine, parseRouterOsUptimeSeconds } from '../services/sessionSyncEngine';
 import {
   deleteSupabaseRouter,
@@ -588,15 +595,9 @@ export const ISPProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
   const [complaints, setComplaints] = useState<ComplaintTicket[]>(getInitialTickets);
   const [agents, setAgents] = useState<FieldAgent[]>(getInitialAgents);
   const [portalUsers, setPortalUsers] = useState<UserAccount[]>(getInitialPortalUsers);
-  const [profilePriceMap, setProfilePriceMap] = useState<Record<string, number>>(() => {
-    if (typeof window === 'undefined') return {};
-    try {
-      const raw = localStorage.getItem(STORAGE_KEY_PROFILE_PRICING);
-      return raw ? JSON.parse(raw) : {};
-    } catch {
-      return {};
-    }
-  });
+  const [profilePriceMap, setProfilePriceMap] = useState<Record<string, number>>(() =>
+    getCachedPackageTariffs()
+  );
   const [sessionHistory, setSessionHistory] = useState<HistoricalSessionRecord[]>(() => {
     if (typeof window === 'undefined') return [];
     try {
@@ -650,6 +651,30 @@ export const ISPProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
       localStorage.setItem(STORAGE_KEY_PROFILE_PRICING, JSON.stringify(profilePriceMap));
     } catch {}
   }, [profilePriceMap]);
+
+  // Hydrate authoritative Package Tariffs from Supabase `system_settings` / `package_tariffs`
+  useEffect(() => {
+    let active = true;
+    loadPackageTariffsFromSupabase()
+      .then((loaded) => {
+        if (active && loaded && Object.keys(loaded).length > 0) {
+          setProfilePriceMap(loaded);
+        }
+      })
+      .catch(() => {});
+
+    const onTariffsUpdated = (evt: Event) => {
+      const detail = (evt as CustomEvent<Record<string, number>>).detail;
+      if (detail && typeof detail === 'object' && Object.keys(detail).length > 0) {
+        setProfilePriceMap(detail);
+      }
+    };
+    window.addEventListener(PACKAGE_TARIFFS_UPDATED_EVENT, onTariffsUpdated as EventListener);
+    return () => {
+      active = false;
+      window.removeEventListener(PACKAGE_TARIFFS_UPDATED_EVENT, onTariffsUpdated as EventListener);
+    };
+  }, []);
 
   useEffect(() => {
     try {
@@ -2000,67 +2025,36 @@ export const ISPProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
     const expiryPoolProfile = await fetchConfiguredExpiryProfileName();
 
     // New subscribers start on Expiry Pool (EXPIRED / PENDING_RECHARGE, expiry_date = Now).
-    // Preserve their assigned monthly paid package inside ORIG_PKG:<selectedProfile> and DB fields
-    // so marking PAID or Manual Recharge activates the exact paid profile for +31 days.
-    const commentWithOrigPkg = upsertOrigPkgComment(
-      JSON.stringify({
-        created: today,
-        expires: today,
-        status: 'PENDING_RECHARGE',
-        plan: selectedProfile,
-        phone,
-        address,
-        cnic,
-        ponPort,
-        name: fullName,
-        dueDay: 5,
-        expiredPool: expiryPoolProfile,
-      }),
-      selectedProfile
-    );
+    // Comment format: `Full Name | Phone | Coverage Area | ORIG_PKG:<selectedProfile>`
+    // so marking PAID or Manual Recharge automatically switches MikroTik to their paid profile.
+    const humanCommentBase = [fullName, phone, areaNode].filter(Boolean).join(' | ');
+    const commentWithOrigPkg = upsertOrigPkgComment(humanCommentBase, selectedProfile);
 
     const targetRouter =
       routersRef.current.find((r) => r.id === selectedRouterId) ||
       routersRef.current[0];
 
-    // 2. Dispatch to physical MikroTik REST API on the Expiry Pool profile by default
-    if (targetRouter) {
-      try {
-        await provisionPppoeSecretRest(targetRouter, {
-          name: username,
-          password: plainPassword,
-          service: 'pppoe',
-          profile: expiryPoolProfile,
-          comment: commentWithOrigPkg,
-        });
-      } catch (err) {
-        console.warn('REST Secret provision warning:', err);
-      }
+    if (!targetRouter) {
+      const noRouterMsg = 'No active MikroTik NAS router configured. Please add/select a router before provisioning.';
+      emitGlobalToast(noRouterMsg, 'error');
+      throw new Error(noRouterMsg);
     }
 
-    // Also persist to backend DB endpoint (/api/mikrotik/users)
-    try {
-      await safeMikrotikFetch('/api/mikrotik/users', {
-        method: 'POST',
-        body: JSON.stringify({
-          routerId: selectedRouterId,
-          username,
-          password: plainPassword,
-          service: 'pppoe',
-          profile: expiryPoolProfile,
-          remoteAddress: newCustomer.assignedIp || undefined,
-          comment: commentWithOrigPkg,
-          createdDate: today,
-          expiryDate: today,
-          validityDays: 0,
-          name: fullName,
-          phone,
-          address,
-          areaNode,
-          packageId: targetPkg.id,
-        }),
-      }).catch(() => {});
-    } catch {}
+    // 2. Dispatch real live PPPoE secret creation to physical MikroTik Router (PUT /rest/ppp/secret -> /ppp/secret/add fallback)
+    const mkRes = await provisionPppoeSecretRest(targetRouter, {
+      name: username,
+      password: plainPassword,
+      service: 'pppoe',
+      profile: expiryPoolProfile,
+      comment: commentWithOrigPkg,
+    });
+
+    if (!mkRes.success) {
+      const exactRouterErr = mkRes.error || 'MikroTik router rejected PPPoE secret creation.';
+      const errMsg = `MikroTik (${targetRouter.name || targetRouter.ipAddress}) failed to create PPPoE secret "@${username}": ${exactRouterErr}`;
+      emitGlobalToast(errMsg, 'error');
+      throw new Error(errMsg);
+    }
 
     // 3. Concurrently trigger auto-account creation in portal user repository & Supabase portal_users
     const portalUserRecord: UserAccount = {
@@ -2082,8 +2076,8 @@ export const ISPProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
 
     const basePrice =
       Number((newCustomer as any).priceMonthly) ||
-      profilePriceMap[selectedProfile] ||
-      (targetPkg ? targetPkg.priceMonthly : 2500);
+      lookupPackageTariffPrice(selectedProfile, profilePriceMap).pricePkr ||
+      (targetPkg ? targetPkg.priceMonthly : 2000);
 
     try {
       const sbPayload: Record<string, any> = {
@@ -2100,15 +2094,18 @@ export const ISPProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
         is_suspended: true,
         expiry_date: nowIso,
         next_billing_date: today,
+        assigned_package_profile: selectedProfile,
         original_package_profile: selectedProfile,
         package_name: selectedProfile,
         package_profile_name: selectedProfile,
         package_speed: selectedProfile,
         monthly_fee: basePrice,
+        net_balance: basePrice,
+        mikrotik_synced: true,
         created_at: nowIso,
       };
       const working = { ...sbPayload };
-      for (let attempt = 0; attempt < 8; attempt++) {
+      for (let attempt = 0; attempt < 10; attempt++) {
         const { error: sbErr } = await supabase
           .from('portal_users')
           .upsert([working], { onConflict: 'username' });
@@ -2125,6 +2122,11 @@ export const ISPProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
     } catch (sbErr) {
       console.warn('Supabase portal_users expiry-pool insert notice:', sbErr);
     }
+
+    emitGlobalToast(
+      `PPPoE secret "@${username}" created on MikroTik (${targetRouter.name}) in ${expiryPoolProfile} (Paid Plan: ${selectedProfile} · Rs. ${basePrice.toLocaleString()}/mo).`,
+      'success'
+    );
 
     try {
       await fetch('/api/auth/users', {
@@ -4050,14 +4052,19 @@ export const ISPProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
       return updated;
     });
 
-    // 2. Update in profilePriceMap
+    // 2. Update in profilePriceMap and persist durably to Supabase system_settings
+    let nextTariffsSnapshot: Record<string, number> = {};
     setProfilePriceMap((prev) => {
       const nextMap = { ...prev, [cleanKey]: numPrice };
+      nextTariffsSnapshot = nextMap;
       try {
         localStorage.setItem(STORAGE_KEY_PROFILE_PRICING, JSON.stringify(nextMap));
       } catch {}
       return nextMap;
     });
+    if (Object.keys(nextTariffsSnapshot).length > 0) {
+      void savePackageTariffsToSupabase(nextTariffsSnapshot);
+    }
   };
 
   // Run Automated Monthly Anniversary Billing CRON Job

@@ -7,6 +7,11 @@ import {
 } from './whatsappRouting';
 import { WHATSAPP_TEAM_GROUP_SETTINGS_KEY } from './whatsappTemplates';
 import { getStoredUser } from './auth';
+import {
+  DEFAULT_PACKAGE_TARIFFS,
+  mirrorPackageTariffsLocally,
+  sanitizePackageTariffs,
+} from './packageTariffs';
 
 export const SYSTEM_SETTINGS_STORAGE_KEY = 'youthnet_global_system_settings';
 export const SYSTEM_SETTINGS_UPDATED_EVENT = 'youthnet:system-settings-updated';
@@ -32,6 +37,7 @@ export interface GlobalSystemSettings {
   defaultSnmpCommunity: string;
   slaAutoAssignMinutes: number;
   fiberCutSlaHours: number;
+  packageTariffs: Record<string, number>;
 }
 
 export const DEFAULT_GLOBAL_SYSTEM_SETTINGS: GlobalSystemSettings = {
@@ -55,6 +61,7 @@ export const DEFAULT_GLOBAL_SYSTEM_SETTINGS: GlobalSystemSettings = {
   defaultSnmpCommunity: 'public',
   slaAutoAssignMinutes: 5,
   fiberCutSlaHours: 2,
+  packageTariffs: { ...DEFAULT_PACKAGE_TARIFFS },
 };
 
 export const SYSTEM_SETTINGS_MIGRATION_SQL = `CREATE TABLE IF NOT EXISTS public.system_settings (
@@ -236,6 +243,10 @@ export function sanitizeSystemSettings(
       1,
       72
     ),
+    packageTariffs: sanitizePackageTariffs(
+      src.packageTariffs ?? src.package_tariffs,
+      true
+    ),
   };
 }
 
@@ -262,6 +273,9 @@ function mirrorSettingsLocally(config: GlobalSystemSettings): void {
     }
     window.localStorage.setItem('isp_currency_code', config.currencyCode);
     window.localStorage.setItem('isp_currency_symbol', config.currencySymbol);
+    if (config.packageTariffs && Object.keys(config.packageTariffs).length > 0) {
+      mirrorPackageTariffsLocally(config.packageTariffs);
+    }
     window.dispatchEvent(
       new CustomEvent<GlobalSystemSettings>(SYSTEM_SETTINGS_UPDATED_EVENT, { detail: config })
     );
@@ -464,6 +478,7 @@ export async function saveGlobalSystemSettings(
           ...sanitized,
           team_work_group_jid: sanitized.teamWhatsAppGroupJid,
           team_work_group_name: sanitized.teamWhatsAppGroupName,
+          package_tariffs: sanitized.packageTariffs,
         },
         updated_at: nowIso,
       },

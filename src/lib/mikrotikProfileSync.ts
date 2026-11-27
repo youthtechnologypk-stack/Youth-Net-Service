@@ -1,3 +1,5 @@
+import { lookupPackageTariffPrice, DEFAULT_PACKAGE_TARIFFS } from './packageTariffs';
+
 /**
  * Single-Source-of-Truth helpers for adopting exact MikroTik RouterOS PPPoE profiles
  * (e.g. "8 MB - Local", "6 MB - Local", "10 MB - TW") and preserving ORIG_PKG:<profile>
@@ -139,6 +141,7 @@ export function matchExactMikrotikProfileName(
 export function resolveExactSubscriberProfile(params: {
   liveSecret?: Record<string, any> | null;
   subscriber?: {
+    assigned_package_profile?: string | null;
     original_package_profile?: string | null;
     package_name?: string | null;
     package_profile_name?: string | null;
@@ -169,6 +172,7 @@ export function resolveExactSubscriberProfile(params: {
 
   // 3. Supabase subscriber backup/package fields
   const dbCandidates = [
+    subscriber?.assigned_package_profile,
     subscriber?.original_package_profile,
     subscriber?.package_name,
     subscriber?.package_profile_name,
@@ -319,21 +323,12 @@ export function resolvePkrTariffForProfile(
     return { pricePkr: bestFee, tariffSource: 'subscriber' };
   }
 
-  // 4. Speed-based PKR fallback
-  const speedMatch = clean.match(/(\d+)\s*(?:m|mb|mbps)?/i);
-  const mbps = speedMatch ? parseInt(speedMatch[1], 10) : 0;
-  let rateFallback = 2000;
-  if (mbps >= 100) rateFallback = 5000;
-  else if (mbps >= 50) rateFallback = 3500;
-  else if (mbps >= 30) rateFallback = 3000;
-  else if (mbps >= 20) rateFallback = 2500;
-  else if (mbps >= 15) rateFallback = 2000;
-  else if (mbps >= 12) rateFallback = 2000;
-  else if (mbps >= 10) rateFallback = 1800;
-  else if (mbps >= 8) rateFallback = 1500;
-  else if (mbps > 0) rateFallback = 1200;
-
-  return { pricePkr: rateFallback, tariffSource: 'rate_fallback' };
+  // 4. Configured / Default Package Tariff table & speed-tier fallback
+  const tariffLookup = lookupPackageTariffPrice(clean, priceMap);
+  return {
+    pricePkr: tariffLookup.pricePkr,
+    tariffSource: tariffLookup.source === 'configured' ? 'profilePriceMap' : 'rate_fallback',
+  };
 }
 
 /**
@@ -412,7 +407,7 @@ export function buildLiveMikrotikPlanOptions(params: {
     }
   }
 
-  // 2. If RouterOS /ppp/profile is temporarily unreachable, adopt real profiles seen on live secrets & Supabase subscribers
+  // 2. If RouterOS /ppp/profile is temporarily unreachable, adopt real profiles seen on live secrets, Supabase subscribers & configured tariffs
   if (options.length === 0) {
     for (const sec of secrets) {
       if (sec?.profile) pushProfile(String(sec.profile));
@@ -421,10 +416,19 @@ export function buildLiveMikrotikPlanOptions(params: {
     }
     for (const client of portalClients) {
       const cand =
+        (client as any).assigned_package_profile ||
         client.original_package_profile ||
         client.package_name ||
         client.package_profile_name;
       if (cand) pushProfile(cand);
+    }
+    const tariffFallbackKeys = Object.keys(
+      profilePriceMap && Object.keys(profilePriceMap).length > 0
+        ? profilePriceMap
+        : DEFAULT_PACKAGE_TARIFFS
+    );
+    for (const profKey of tariffFallbackKeys) {
+      pushProfile(profKey);
     }
   }
 
@@ -510,8 +514,9 @@ export function resolvePreselectedInvoiceProfile(params: {
     return { selectedProfile: matched, liveSecretProfile, origPkgFromComment };
   }
 
-  // 4. Subscriber's original_package_profile / package_name / package_profile_name / package_speed
+  // 4. Subscriber's assigned_package_profile / original_package_profile / package_name / package_profile_name / package_speed
   const dbCands = [
+    (subscriber as any)?.assigned_package_profile,
     subscriber?.original_package_profile,
     subscriber?.package_name,
     subscriber?.package_profile_name,
