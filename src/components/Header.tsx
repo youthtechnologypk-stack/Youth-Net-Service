@@ -72,6 +72,7 @@ interface HeaderProps {
   setActiveTab: (tab: ActiveTab) => void;
   onOpenProvisionModal: () => void;
   onOpenBulkCsvModal?: () => void;
+  onOpenMikrotikAutoImportModal?: () => void;
   onOpenOutageModal: () => void;
   onOpenTicketModal: () => void;
   onOpenAddRouterModal?: () => void;
@@ -98,6 +99,7 @@ export const Header: React.FC<HeaderProps> = ({
   setActiveTab,
   onOpenProvisionModal,
   onOpenBulkCsvModal,
+  onOpenMikrotikAutoImportModal,
   onOpenOutageModal,
   onOpenTicketModal,
   onOpenAddRouterModal,
@@ -553,6 +555,18 @@ export const Header: React.FC<HeaderProps> = ({
                     <Upload className="w-3.5 h-3.5 shrink-0" />
                     <span className="hidden sm:inline">Bulk CSV Import</span>
                     <span className="sm:hidden">CSV</span>
+                  </button>
+                )}
+
+                {onOpenMikrotikAutoImportModal && !isResellerSession && (
+                  <button
+                    onClick={() => onOpenMikrotikAutoImportModal()}
+                    className="flex items-center gap-1 bg-emerald-600/15 hover:bg-emerald-600/25 text-emerald-700 dark:text-emerald-300 border border-emerald-500/40 font-bold px-2.5 py-1.5 rounded text-xs transition shadow-sm shrink-0 cursor-pointer"
+                    title="Sync & Auto-Create Missing Portal Accounts from Live MikroTik PPPoE Secrets"
+                  >
+                    <RotateCw className="w-3.5 h-3.5 shrink-0" />
+                    <span className="hidden xl:inline">Sync &amp; Auto-Create from MikroTik</span>
+                    <span className="xl:hidden">Sync MikroTik</span>
                   </button>
                 )}
               </>

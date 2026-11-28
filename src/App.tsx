@@ -15,6 +15,7 @@ import { FieldMaterialLogView } from './components/FieldMaterialLogView';
 import { BillingStudio } from './components/BillingStudio';
 import { DailyCashReportView } from './components/DailyCashReportView';
 import { BulkCsvImportModal } from './components/BulkCsvImportModal';
+import { MikrotikAutoImportModal } from './components/MikrotikAutoImportModal';
 import { DealersManagementView } from './components/DealersManagementView';
 import { WhatsAppGatewayView } from './components/WhatsAppGatewayView';
 import { ProfitLossLedgerView } from './components/ProfitLossLedgerView';
@@ -406,6 +407,7 @@ function ISPAppContent() {
   // Modals state
   const [isProvisionOpen, setIsProvisionOpen] = useState(false);
   const [isBulkCsvOpen, setIsBulkCsvOpen] = useState(false);
+  const [isMikrotikAutoImportOpen, setIsMikrotikAutoImportOpen] = useState(false);
   const [isOutageOpen, setIsOutageOpen] = useState(false);
   const [isTicketOpen, setIsTicketOpen] = useState(false);
   const [isAddRouterOpen, setIsAddRouterOpen] = useState(false);
@@ -797,6 +799,10 @@ function ISPAppContent() {
           onOpenBulkCsvModal={() => {
             if (!staffPerms.provision_pppoe) return;
             setIsBulkCsvOpen(true);
+          }}
+          onOpenMikrotikAutoImportModal={() => {
+            if (!staffPerms.provision_pppoe || isResellerUser(currentUser)) return;
+            setIsMikrotikAutoImportOpen(true);
           }}
           onOpenOutageModal={handleGuardedOpenOutage}
           onOpenTicketModal={() => setIsTicketOpen(true)}
@@ -1275,6 +1281,12 @@ function ISPAppContent() {
       <BulkCsvImportModal
         isOpen={isBulkCsvOpen && staffPerms.provision_pppoe}
         onClose={() => setIsBulkCsvOpen(false)}
+        currentUser={currentUser}
+      />
+
+      <MikrotikAutoImportModal
+        isOpen={isMikrotikAutoImportOpen && staffPerms.provision_pppoe && !isResellerUser(currentUser)}
+        onClose={() => setIsMikrotikAutoImportOpen(false)}
         currentUser={currentUser}
       />
 

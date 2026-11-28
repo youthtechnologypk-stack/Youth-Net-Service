@@ -19,6 +19,7 @@ import {
   Loader2,
   MessageCircle,
   Upload,
+  RefreshCw,
 } from 'lucide-react';
 import { useISP } from '../context/ISPContext';
 import { UserAccount, SystemRole } from '../types/auth';
@@ -35,6 +36,10 @@ import { AgentProfileView } from './AgentProfileView';
 import { EditStaffModal } from './EditStaffModal';
 import { AddScopedFieldAgentModal } from './AddScopedFieldAgentModal';
 import { BulkCsvImportModal } from './BulkCsvImportModal';
+import {
+  MikrotikAutoImportModal,
+  MIKROTIK_AUTO_IMPORT_COMPLETED_EVENT,
+} from './MikrotikAutoImportModal';
 import { buildStandardWhatsAppCredentialText, getPortalUrlForRole } from '../services/authUtils';
 import { buildWhatsAppUrl } from '../lib/whatsappBilling';
 import {
@@ -136,6 +141,7 @@ export const UserAccountsView: React.FC<UserAccountsViewProps> = ({
   const [isAddPppoeModalOpen, setIsAddPppoeModalOpen] = useState(false);
   const [isAddScopedAgentModalOpen, setIsAddScopedAgentModalOpen] = useState(false);
   const [isBulkCsvModalOpen, setIsBulkCsvModalOpen] = useState(false);
+  const [isMikrotikAutoImportOpen, setIsMikrotikAutoImportOpen] = useState(false);
 
   // Selected user for modals
   const [selectedUser, setSelectedUser] = useState<UserAccount | null>(null);
@@ -224,6 +230,17 @@ export const UserAccountsView: React.FC<UserAccountsViewProps> = ({
       suspendedExpired,
     };
   }, [isResellerView, activeUser, allPortalUsers, activeSessions]);
+
+  useEffect(() => {
+    const onAutoImportDone = () => {
+      setRefreshTrigger((prev) => prev + 1);
+      void refreshMetrics();
+    };
+    window.addEventListener(MIKROTIK_AUTO_IMPORT_COMPLETED_EVENT, onAutoImportDone);
+    return () => {
+      window.removeEventListener(MIKROTIK_AUTO_IMPORT_COMPLETED_EVENT, onAutoImportDone);
+    };
+  }, [refreshMetrics]);
 
   useEffect(() => {
     refreshMetrics();
@@ -644,6 +661,17 @@ export const UserAccountsView: React.FC<UserAccountsViewProps> = ({
               <Upload className="w-3.5 h-3.5 text-cyan-400" />
               <span>Bulk CSV Import</span>
             </button>
+            {!isResellerView && (
+              <button
+                type="button"
+                onClick={() => setIsMikrotikAutoImportOpen(true)}
+                className="flex items-center gap-1.5 bg-emerald-950/70 hover:bg-emerald-900/80 text-emerald-300 border border-emerald-700/70 font-bold text-xs px-4 py-2 rounded-xl transition shadow-sm cursor-pointer active:scale-95"
+                title="1-Click Scan Live MikroTik PPPoE Secrets & Auto-Create Missing Portal Accounts"
+              >
+                <RefreshCw className="w-3.5 h-3.5 text-emerald-400" />
+                <span>Sync &amp; Auto-Create from MikroTik</span>
+              </button>
+            )}
             {isResellerView ? (
               <button
                 type="button"
@@ -987,6 +1015,16 @@ export const UserAccountsView: React.FC<UserAccountsViewProps> = ({
       <BulkCsvImportModal
         isOpen={isBulkCsvModalOpen}
         onClose={() => setIsBulkCsvModalOpen(false)}
+        currentUser={activeUser}
+        onImportComplete={() => {
+          setRefreshTrigger((prev) => prev + 1);
+          void refreshMetrics();
+        }}
+      />
+
+      <MikrotikAutoImportModal
+        isOpen={isMikrotikAutoImportOpen && !isResellerView}
+        onClose={() => setIsMikrotikAutoImportOpen(false)}
         currentUser={activeUser}
         onImportComplete={() => {
           setRefreshTrigger((prev) => prev + 1);
