@@ -18,6 +18,7 @@ export interface DateFilterToolbarProps {
   recordLabel?: string;
   compact?: boolean;
   className?: string;
+  extraActions?: React.ReactNode;
 }
 
 export const DateFilterToolbar: React.FC<DateFilterToolbarProps> = ({
@@ -28,6 +29,7 @@ export const DateFilterToolbar: React.FC<DateFilterToolbarProps> = ({
   recordLabel = 'records',
   compact = false,
   className = '',
+  extraActions,
 }) => {
   const handleModeChange = (mode: DateFilterMode) => {
     const currentMonth = value.month || getCurrentMonthInputValue();
@@ -178,6 +180,8 @@ export const DateFilterToolbar: React.FC<DateFilterToolbarProps> = ({
           <RotateCcw className="w-3.5 h-3.5 text-cyan-400" />
           <span>Clear Filter</span>
         </button>
+
+        {extraActions}
       </div>
     </div>
   );

@@ -255,20 +255,26 @@ export const ReceivingVsDuesChart: React.FC<ReceivingVsDuesChartProps> = ({
     if (!row) return null;
 
     return (
-      <div className="bg-slate-950 border border-slate-700 rounded-xl p-3 shadow-2xl text-xs font-mono tabular-nums space-y-1.5 min-w-[220px]">
-        <div className="text-white font-bold border-b border-slate-800 pb-1 flex items-center justify-between gap-3">
+      <div className="bg-slate-950/90 backdrop-blur-xl border border-emerald-500/30 rounded-xl p-3 shadow-[0_8px_30px_rgba(16,185,129,0.16)] text-xs font-mono tabular-nums space-y-1.5 min-w-[230px]">
+        <div className="text-white font-bold border-b border-slate-800/90 pb-1.5 flex items-center justify-between gap-3">
           <span>{row.label}</span>
           <span className="text-cyan-400">{row.collectionPct.toFixed(1)}% Collected</span>
         </div>
         <div className="flex items-center justify-between gap-4 text-emerald-400">
-          <span>Amount Received:</span>
+          <span className="flex items-center gap-1.5">
+            <span className="w-2 h-2 rounded-full bg-emerald-400 shadow-[0_0_6px_#10b981]" />
+            Amount Received:
+          </span>
           <span className="font-bold">{formatCurrency(row.received)}</span>
         </div>
         <div className="flex items-center justify-between gap-4 text-rose-400">
-          <span>Pending Dues:</span>
+          <span className="flex items-center gap-1.5">
+            <span className="w-2 h-2 rounded-full bg-rose-400 shadow-[0_0_6px_#f43f5e]" />
+            Pending Dues:
+          </span>
           <span className="font-bold">{formatCurrency(row.dues)}</span>
         </div>
-        <div className="pt-1 border-t border-slate-800 flex items-center justify-between gap-4 text-slate-300">
+        <div className="pt-1.5 border-t border-slate-800/90 flex items-center justify-between gap-4 text-slate-300">
           <span>Period Volume:</span>
           <span className="font-bold text-white">{formatCurrency(row.received + row.dues)}</span>
         </div>
@@ -277,7 +283,7 @@ export const ReceivingVsDuesChart: React.FC<ReceivingVsDuesChartProps> = ({
   };
 
   return (
-    <div className="bg-[#111A2E] border border-slate-800 rounded-xl p-5 space-y-4">
+    <div className="bg-[#0F172A]/90 backdrop-blur-xl border border-slate-800/90 rounded-2xl p-5 shadow-[0_12px_40px_rgba(2,6,23,0.45)] space-y-4">
       <div className="flex flex-col lg:flex-row lg:items-center justify-between gap-3 pb-3 border-b border-slate-800">
         <div>
           <h3 className="text-sm font-bold text-white flex items-center gap-2">
@@ -329,49 +335,62 @@ export const ReceivingVsDuesChart: React.FC<ReceivingVsDuesChartProps> = ({
           </p>
         </div>
       ) : (
-        <div className="bg-slate-950/80 border border-slate-800/80 rounded-xl p-4 h-[290px]">
+        <div className="bg-slate-950/85 border border-slate-800/80 rounded-xl p-4 h-[295px]">
           <ResponsiveContainer width="100%" height="100%">
             <BarChart
               data={chartData}
               margin={{ top: 10, right: 16, left: 4, bottom: 4 }}
-              barGap={4}
+              barGap={6}
             >
-              <CartesianGrid stroke="#1e293b" strokeDasharray="3 3" opacity={0.65} />
+              <defs>
+                <linearGradient id="rcvEmeraldGrad" x1="0" y1="0" x2="0" y2="1">
+                  <stop offset="0%" stopColor="#34d399" stopOpacity={0.95} />
+                  <stop offset="100%" stopColor="#059669" stopOpacity={0.45} />
+                </linearGradient>
+                <linearGradient id="duesRoseGrad" x1="0" y1="0" x2="0" y2="1">
+                  <stop offset="0%" stopColor="#fb7185" stopOpacity={0.95} />
+                  <stop offset="100%" stopColor="#e11d48" stopOpacity={0.45} />
+                </linearGradient>
+              </defs>
+              <CartesianGrid stroke="#1e293b" strokeDasharray="3 3" opacity={0.5} vertical={false} />
               <XAxis
                 dataKey="label"
                 stroke="#64748b"
                 fontSize={11}
                 tickLine={false}
+                axisLine={false}
                 fontFamily="monospace"
               />
               <YAxis
                 stroke="#64748b"
                 fontSize={11}
                 tickLine={false}
+                axisLine={false}
                 fontFamily="monospace"
                 tickFormatter={(val: number) =>
                   val >= 1000 ? `${(val / 1000).toFixed(val % 1000 === 0 ? 0 : 1)}k` : `${val}`
                 }
               />
-              <Tooltip content={<CustomTooltip />} cursor={{ fill: 'rgba(148, 163, 184, 0.08)' }} />
+              <Tooltip content={<CustomTooltip />} cursor={{ fill: 'rgba(56, 189, 248, 0.06)' }} />
               <Legend
                 verticalAlign="top"
                 align="right"
+                iconType="circle"
                 wrapperStyle={{ fontSize: '11px', fontFamily: 'monospace', paddingBottom: '8px' }}
               />
               <Bar
                 dataKey="received"
-                name="Amount Received (PKR)"
-                fill="#10b981"
-                radius={[4, 4, 0, 0]}
-                maxBarSize={44}
+                name="Amount Received (Rs.)"
+                fill="url(#rcvEmeraldGrad)"
+                radius={[6, 6, 0, 0]}
+                maxBarSize={42}
               />
               <Bar
                 dataKey="dues"
-                name="Pending Dues (PKR)"
-                fill="#ef4444"
-                radius={[4, 4, 0, 0]}
-                maxBarSize={44}
+                name="Pending Dues (Rs.)"
+                fill="url(#duesRoseGrad)"
+                radius={[6, 6, 0, 0]}
+                maxBarSize={42}
               />
             </BarChart>
           </ResponsiveContainer>

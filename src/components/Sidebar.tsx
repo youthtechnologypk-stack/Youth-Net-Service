@@ -25,6 +25,8 @@ import {
   Package,
   Building2,
   MessageSquare,
+  Wrench,
+  Receipt,
 } from 'lucide-react';
 import { ActiveTab } from './Header';
 import { SystemRole, UserAccount } from '../types/auth';
@@ -138,6 +140,15 @@ export const Sidebar: React.FC<SidebarProps> = ({
       roles: ['ADMIN', 'MANAGER', 'DEALER', 'SUB_DEALER'],
     },
     {
+      id: 'daily_cash_report' as ActiveTab,
+      label: 'Daily Cash & Expense Report',
+      subtitle: 'Daily Collections vs. Expenses',
+      icon: Receipt,
+      badge: 'Daily Sheet',
+      badgeColor: 'bg-cyan-950 text-cyan-300 border-cyan-800',
+      roles: ['ADMIN', 'MANAGER'],
+    },
+    {
       id: 'profit_expenses' as ActiveTab,
       label: 'Profit & Expenses',
       subtitle: 'Net P&L, Upstream & Salaries',
@@ -181,6 +192,15 @@ export const Sidebar: React.FC<SidebarProps> = ({
       badge: 'FTTH GIS',
       badgeColor: 'bg-sky-950 text-sky-300 border-sky-800',
       roles: ['ADMIN', 'MANAGER', 'AGENT', 'DEALER'],
+    },
+    {
+      id: 'field_materials' as ActiveTab,
+      label: 'Field Material & Pole Log',
+      subtitle: 'FTTH Splitters, Wire & Poles',
+      icon: Wrench,
+      badge: 'FTTH Log',
+      badgeColor: 'bg-emerald-950 text-emerald-300 border-emerald-800',
+      roles: ['ADMIN', 'MANAGER', 'AGENT'],
     },
     {
       id: 'complaints' as ActiveTab,

@@ -24,6 +24,8 @@ import {
   Trash2,
   Copy,
   Database,
+  FileSpreadsheet,
+  FileDown,
 } from 'lucide-react';
 import {
   supabase,
@@ -44,7 +46,12 @@ import { useCurrency } from '../context/CurrencyContext';
 import { useAuth } from '../context/AuthContext';
 import { EditStaffModal } from './EditStaffModal';
 import { EditLedgerEntryModal } from './EditLedgerEntryModal';
-import { FieldAuditLedgerRow } from '../lib/ledgerAuditPersistence';
+import { DeleteLedgerEntryModal } from './DeleteLedgerEntryModal';
+import {
+  FieldAuditLedgerRow,
+  VerifiedLedgerDeleteResult,
+  VerifiedLedgerUpdateResult,
+} from '../lib/ledgerAuditPersistence';
 import { DateFilterToolbar } from './DateFilterToolbar';
 import {
   DateFilterState,
@@ -52,6 +59,13 @@ import {
   describeDateFilter,
   matchesDateFilter,
 } from '../lib/dateFilter';
+import { getCachedGlobalSystemSettings } from '../lib/systemSettings';
+import {
+  exportSettlementLedgerToExcel,
+  exportSettlementLedgerToPdf,
+  SettlementExportPayload,
+  SettlementExportRow,
+} from '../lib/settlementLedgerExport';
 
 export interface AgentProfileViewProps {
   username?: string;
@@ -80,8 +94,11 @@ export const AgentProfileView: React.FC<AgentProfileViewProps> = ({
   const [dateFilter, setDateFilter] = useState<DateFilterState>(() => createDefaultDateFilter('month'));
   const [toastMessage, setToastMessage] = useState<{ text: string; type: 'success' | 'error' } | null>(null);
 
+  const isMasterAdmin = String(currentUser?.role || '').trim().toUpperCase() === 'ADMIN';
+
   // Modals
   const [editingLedgerEntry, setEditingLedgerEntry] = useState<FieldAuditLedgerRow | null>(null);
+  const [deletingLedgerEntry, setDeletingLedgerEntry] = useState<FieldAuditLedgerRow | null>(null);
   const [isEditStaffModalOpen, setIsEditStaffModalOpen] = useState(false);
   const [isHandoverModalOpen, setIsHandoverModalOpen] = useState(false);
   const [isAdvanceModalOpen, setIsAdvanceModalOpen] = useState(false);
@@ -322,9 +339,47 @@ export const AgentProfileView: React.FC<AgentProfileViewProps> = ({
     );
   }, [cashTransactions, dateFilter]);
 
-  // Derived KPI metrics (cumulative cash/advance balances + period-filtered recovery)
-  const cashInHand = Number(agent?.cash_in_hand ?? 0);
-  const advanceBalance = Number(agent?.advance_balance ?? 0);
+  const filteredCommissions = useMemo(() => {
+    return (commissions || []).filter((c) =>
+      matchesDateFilter([c.paid_at, c.created_at], dateFilter)
+    );
+  }, [commissions, dateFilter]);
+
+  // Live cumulative accounting totals derived directly from current ledger rows
+  const liveLedgerTotals = useMemo(() => {
+    const totalCollectedAll = (collections || []).reduce(
+      (sum, item) => sum + (Number(item.amount_paid) || 0),
+      0
+    );
+    const totalHandedOverAll = (cashTransactions || [])
+      .filter((t) => {
+        const type = (t.transaction_type || '').toUpperCase();
+        return type === 'CASH_HANDOVER' || type === 'HANDOVER';
+      })
+      .reduce((sum, item) => sum + (Number(item.amount) || 0), 0);
+    const totalAdvanceTakenAll = (cashTransactions || [])
+      .filter((t) => (t.transaction_type || '').toUpperCase() === 'ADVANCE_TAKEN')
+      .reduce((sum, item) => sum + (Number(item.amount) || 0), 0);
+    const totalAdvanceReturnedAll = (cashTransactions || [])
+      .filter((t) => {
+        const type = (t.transaction_type || '').toUpperCase();
+        return type === 'ADVANCE_RETURN' || type === 'ADVANCE_DEDUCTION';
+      })
+      .reduce((sum, item) => sum + (Number(item.amount) || 0), 0);
+
+    return {
+      totalCollectedAll,
+      totalHandedOverAll,
+      totalAdvanceTakenAll,
+      totalAdvanceReturnedAll,
+      netCashInHand: Math.max(0, totalCollectedAll - totalHandedOverAll),
+      netAdvanceBalance: Math.max(0, totalAdvanceTakenAll - totalAdvanceReturnedAll),
+    };
+  }, [collections, cashTransactions]);
+
+  // Derived KPI metrics (live cumulative cash/advance balances + period-filtered recovery)
+  const cashInHand = isLoading && !agent ? 0 : liveLedgerTotals.netCashInHand;
+  const advanceBalance = isLoading && !agent ? 0 : liveLedgerTotals.netAdvanceBalance;
   const baseSalary = Number(agent?.base_salary ?? 0);
   const totalCollections = useMemo(() => {
     return filteredCollections.reduce((sum, item) => sum + (Number(item.amount_paid) || 0), 0);
@@ -337,23 +392,123 @@ export const AgentProfileView: React.FC<AgentProfileViewProps> = ({
       })
       .reduce((sum, item) => sum + (Number(item.amount) || 0), 0);
   }, [filteredCashTransactions]);
+  const periodAdvanceTakenTotal = useMemo(() => {
+    return filteredCashTransactions
+      .filter((t) => (t.transaction_type || '').toUpperCase() === 'ADVANCE_TAKEN')
+      .reduce((sum, item) => sum + (Number(item.amount) || 0), 0);
+  }, [filteredCashTransactions]);
 
   const commissionStats = useMemo(() => {
-    const totalEarned = commissions.reduce((sum, c) => sum + (Number(c.commission_amount) || 0), 0);
-    const paidTotal = commissions
+    const totalEarned = filteredCommissions.reduce((sum, c) => sum + (Number(c.commission_amount) || 0), 0);
+    const paidTotal = filteredCommissions
       .filter((c) => c.status === 'PAID')
       .reduce((sum, c) => sum + (Number(c.commission_amount) || 0), 0);
-    const unpaidTotal = commissions
+    const unpaidTotal = filteredCommissions
       .filter((c) => c.status !== 'PAID')
       .reduce((sum, c) => sum + (Number(c.commission_amount) || 0), 0);
     return {
       totalEarned,
       paidTotal,
       unpaidTotal,
-      paidCount: commissions.filter((c) => c.status === 'PAID').length,
-      unpaidCount: commissions.filter((c) => c.status !== 'PAID').length,
+      paidCount: filteredCommissions.filter((c) => c.status === 'PAID').length,
+      unpaidCount: filteredCommissions.filter((c) => c.status !== 'PAID').length,
     };
-  }, [commissions]);
+  }, [filteredCommissions]);
+
+  const buildExportPayload = useCallback((): SettlementExportPayload | null => {
+    if (!agent) return null;
+    const settings = getCachedGlobalSystemSettings();
+    const companyName = settings.companyDisplayName || settings.ispName || 'Youth Net Service';
+
+    let rows: SettlementExportRow[] = [];
+    let tabTitle = 'Handover & Settlement Audit Ledger';
+
+    if (activeTab === 'collections') {
+      tabTitle = 'Client Collections Breakdown';
+      rows = filteredCollections.map((tx) => ({
+        timestamp: tx.payment_date || tx.created_at || '',
+        transactionType: 'CLIENT COLLECTION',
+        amount: Number(tx.amount_paid) || 0,
+        receivedByOrParty: `@${tx.subscriber_username || 'subscriber'} (${tx.payment_mode || tx.payment_method || 'CASH'})`,
+        auditNotes: [tx.invoice_id ? `Invoice: ${tx.invoice_id}` : '', tx.notes || 'Verified field collection']
+          .filter(Boolean)
+          .join(' | '),
+      }));
+    } else if (activeTab === 'commissions') {
+      tabTitle = 'Commissions';
+      rows = filteredCommissions.map((c) => ({
+        timestamp: c.paid_at || c.created_at || '',
+        transactionType: c.status === 'PAID' ? 'COMMISSION (PAID)' : 'COMMISSION (UNPAID)',
+        amount: Number(c.commission_amount) || 0,
+        receivedByOrParty: `@${c.subscriber_username || 'subscriber'} — ${c.client_name || ''} (${c.package_name || 'Standard Fiber'})`.trim(),
+        auditNotes: c.notes || (c.status === 'PAID' ? 'Posted to Expense Ledger' : 'Awaiting payout'),
+      }));
+    } else {
+      tabTitle = 'Handover & Settlement Audit Ledger';
+      rows = filteredCashTransactions.map((tx) => ({
+        timestamp: tx.created_at || '',
+        transactionType: tx.transaction_type || 'CASH_HANDOVER',
+        amount: Number(tx.amount) || 0,
+        receivedByOrParty: tx.received_by || 'Admin',
+        auditNotes: tx.notes || '—',
+      }));
+    }
+
+    return {
+      companyName,
+      supportHelpline: settings.supportHelpline,
+      tab: activeTab,
+      tabTitle,
+      agentName: agent.full_name || agent.username,
+      agentUsername: agent.username,
+      agentPhone: agent.phone || undefined,
+      agentArea: agent.area || undefined,
+      dateFilter,
+      generatedAt: new Date(),
+      summary: {
+        totalCollections,
+        totalCashHandedOver: periodHandedOverTotal,
+        totalAdvanceTaken: periodAdvanceTakenTotal,
+        totalCommissions: commissionStats.totalEarned,
+        netCashInHand: cashInHand,
+      },
+      rows,
+    };
+  }, [
+    agent,
+    activeTab,
+    filteredCollections,
+    filteredCashTransactions,
+    filteredCommissions,
+    dateFilter,
+    totalCollections,
+    periodHandedOverTotal,
+    periodAdvanceTakenTotal,
+    commissionStats.totalEarned,
+    cashInHand,
+  ]);
+
+  const handleExportExcel = () => {
+    const payload = buildExportPayload();
+    if (!payload) return;
+    try {
+      const filename = exportSettlementLedgerToExcel(payload);
+      showToast(`Exported Excel spreadsheet: ${filename}`, 'success');
+    } catch (err: any) {
+      showToast(`Excel export failed: ${err?.message || 'Unexpected error'}`, 'error');
+    }
+  };
+
+  const handleExportPdf = () => {
+    const payload = buildExportPayload();
+    if (!payload) return;
+    try {
+      const filename = exportSettlementLedgerToPdf(payload);
+      showToast(`Exported PDF audit statement: ${filename}`, 'success');
+    } catch (err: any) {
+      showToast(`PDF export failed: ${err?.message || 'Unexpected error'}`, 'error');
+    }
+  };
 
   const handleCopyErpSql = async () => {
     try {
@@ -816,17 +971,17 @@ export const AgentProfileView: React.FC<AgentProfileViewProps> = ({
 
         {/* 4 Financial KPI Summary Cards */}
         <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
-          {/* 1. Cash In Hand (Recovery Pending Handover) */}
+          {/* 1. Net Cash-in-Hand Balance (Recovery Pending Handover) */}
           <div className="p-4 rounded-xl bg-slate-950 border border-slate-800 space-y-1">
             <span className="text-[10px] text-slate-400 font-mono uppercase block flex items-center justify-between">
-              <span>Cash in Hand (Pending)</span>
+              <span>Net Cash-in-Hand Balance</span>
               <Wallet className="w-3.5 h-3.5 text-emerald-400" />
             </span>
-            <div className="text-2xl font-bold font-mono text-emerald-400">
+            <div className="text-2xl font-bold font-mono tabular-nums text-emerald-400">
               {formatCurrency(cashInHand)}
             </div>
-            <span className="text-[10px] text-slate-500 font-mono block">
-              Physical cash collected from subscribers
+            <span className="text-[10px] text-slate-500 font-mono tabular-nums block">
+              Total Cash Handover: {formatCurrency(liveLedgerTotals.totalHandedOverAll)}
             </span>
           </div>
 
@@ -836,11 +991,11 @@ export const AgentProfileView: React.FC<AgentProfileViewProps> = ({
               <span>Advance Balance</span>
               <DollarSign className="w-3.5 h-3.5 text-amber-400" />
             </span>
-            <div className="text-2xl font-bold font-mono text-amber-400">
+            <div className="text-2xl font-bold font-mono tabular-nums text-amber-400">
               {formatCurrency(advanceBalance)}
             </div>
-            <span className="text-[10px] text-slate-500 font-mono block">
-              Outstanding advance pending settlement
+            <span className="text-[10px] text-slate-500 font-mono tabular-nums block">
+              Advance Taken: {formatCurrency(liveLedgerTotals.totalAdvanceTakenAll)}
             </span>
           </div>
 
@@ -878,9 +1033,31 @@ export const AgentProfileView: React.FC<AgentProfileViewProps> = ({
       <DateFilterToolbar
         value={dateFilter}
         onChange={setDateFilter}
-        totalCount={collections.length + cashTransactions.length}
-        filteredCount={filteredCollections.length + filteredCashTransactions.length}
+        totalCount={collections.length + cashTransactions.length + commissions.length}
+        filteredCount={filteredCollections.length + filteredCashTransactions.length + filteredCommissions.length}
         recordLabel="ledger entries"
+        extraActions={
+          <>
+            <button
+              type="button"
+              onClick={handleExportExcel}
+              className="px-3 py-1.5 rounded-lg bg-emerald-950/60 hover:bg-emerald-900/75 text-emerald-300 border border-emerald-700/80 font-semibold text-xs flex items-center gap-1.5 transition cursor-pointer whitespace-nowrap shrink-0"
+              title="Download filtered report as Excel (.xlsx)"
+            >
+              <FileSpreadsheet className="w-3.5 h-3.5 text-emerald-400" />
+              <span>Export Excel</span>
+            </button>
+            <button
+              type="button"
+              onClick={handleExportPdf}
+              className="px-3 py-1.5 rounded-lg bg-rose-950/60 hover:bg-rose-900/75 text-rose-300 border border-rose-700/80 font-semibold text-xs flex items-center gap-1.5 transition cursor-pointer whitespace-nowrap shrink-0"
+              title="Download printable A4 PDF audit statement"
+            >
+              <FileDown className="w-3.5 h-3.5 text-rose-400" />
+              <span>Export PDF</span>
+            </button>
+          </>
+        }
       />
 
       {/* Financial Navigation Tabs */}
@@ -918,7 +1095,7 @@ export const AgentProfileView: React.FC<AgentProfileViewProps> = ({
           }`}
         >
           <Award className="w-3.5 h-3.5 shrink-0" />
-          <span>Commissions ({commissions.length})</span>
+          <span>Commissions ({filteredCommissions.length})</span>
           {commissionStats.unpaidCount > 0 && (
             <span className="px-1.5 py-0.5 rounded-full bg-amber-500/20 text-amber-300 border border-amber-500/40 text-[10px]">
               {commissionStats.unpaidCount} Unpaid
@@ -940,7 +1117,7 @@ export const AgentProfileView: React.FC<AgentProfileViewProps> = ({
                   <th className="py-3.5 px-4">Amount Collected</th>
                   <th className="py-3.5 px-4">Payment Mode</th>
                   <th className="py-3.5 px-4">Notes</th>
-                  <th className="py-3.5 px-4 text-right">Edit</th>
+                  <th className="py-3.5 px-4 text-right">Actions</th>
                 </tr>
               </thead>
               <tbody className="divide-y divide-slate-800/80 font-mono">
@@ -956,9 +1133,27 @@ export const AgentProfileView: React.FC<AgentProfileViewProps> = ({
                     const actualRecordId = isSyntheticInvRow
                       ? String(tx.id || '').replace(/^inv-tx-/, '')
                       : String(tx.id || '');
+                    const rowPayload: FieldAuditLedgerRow = {
+                      uid: String(tx.id || actualRecordId),
+                      recordId: actualRecordId,
+                      sourceTable: isSyntheticInvRow ? 'invoices' : 'payment_transactions',
+                      invoiceId: tx.invoice_id || null,
+                      subscriberUsername: tx.subscriber_username,
+                      agentId: tx.collected_by_id || agent.id,
+                      agentName: tx.collected_by_name || agent.full_name,
+                      entryType: 'COLLECTION',
+                      amount: Number(tx.amount_paid) || 0,
+                      previousAmount: tx.previous_amount ?? null,
+                      paymentMethod: tx.payment_mode || tx.payment_method || 'Cash Handover',
+                      collectedAt: tx.payment_date || tx.created_at || new Date().toISOString(),
+                      remarks: tx.notes || '',
+                      editedBy: tx.edited_by || null,
+                      editedAt: tx.edited_at || null,
+                      editReason: tx.edit_reason || null,
+                    };
                     return (
                       <tr key={tx.id || Math.random()} className="hover:bg-slate-950/50 transition">
-                        <td className="py-3.5 px-4 text-slate-400">
+                        <td className="py-3.5 px-4 text-slate-400 whitespace-nowrap">
                           {tx.payment_date || tx.created_at
                             ? new Date(tx.payment_date || tx.created_at || '').toLocaleString()
                             : 'Recent'}
@@ -977,38 +1172,33 @@ export const AgentProfileView: React.FC<AgentProfileViewProps> = ({
                             {tx.payment_mode || tx.payment_method || 'CASH'}
                           </span>
                         </td>
-                        <td className="py-3.5 px-4 text-slate-400 truncate max-w-xs">
+                        <td className="py-3.5 px-4 text-slate-400 max-w-xs truncate" title={tx.notes || 'Verified field collection'}>
                           {tx.notes || 'Verified field collection'}
                         </td>
-                        <td className="py-3.5 px-4 text-right">
+                        <td className="py-3.5 px-4 text-right whitespace-nowrap">
                           {actualRecordId && (
-                            <button
-                              type="button"
-                              onClick={() =>
-                                setEditingLedgerEntry({
-                                  uid: String(tx.id || actualRecordId),
-                                  recordId: actualRecordId,
-                                  sourceTable: isSyntheticInvRow ? 'invoices' : 'payment_transactions',
-                                  invoiceId: tx.invoice_id || null,
-                                  subscriberUsername: tx.subscriber_username,
-                                  agentId: tx.collected_by_id || agent.id,
-                                  agentName: tx.collected_by_name || agent.full_name,
-                                  entryType: 'COLLECTION',
-                                  amount: Number(tx.amount_paid) || 0,
-                                  previousAmount: tx.previous_amount ?? null,
-                                  paymentMethod: tx.payment_mode || tx.payment_method || 'Cash Handover',
-                                  collectedAt: tx.payment_date || tx.created_at || new Date().toISOString(),
-                                  remarks: tx.notes || '',
-                                  editedBy: tx.edited_by || null,
-                                  editedAt: tx.edited_at || null,
-                                  editReason: tx.edit_reason || null,
-                                })
-                              }
-                              className="px-2.5 py-1 rounded-lg bg-slate-800 hover:bg-slate-700 text-cyan-300 border border-slate-700 font-semibold text-xs inline-flex items-center gap-1 transition cursor-pointer"
-                            >
-                              <Edit className="w-3 h-3" />
-                              <span>Edit</span>
-                            </button>
+                            <div className="inline-flex items-center justify-end gap-1.5">
+                              <button
+                                type="button"
+                                onClick={() => setEditingLedgerEntry(rowPayload)}
+                                className="px-2.5 py-1 rounded-lg bg-blue-950/70 hover:bg-blue-900/80 text-blue-300 border border-blue-800/80 font-semibold text-xs inline-flex items-center gap-1 transition cursor-pointer"
+                                title="Edit collection entry"
+                              >
+                                <Edit className="w-3 h-3" />
+                                <span>Edit</span>
+                              </button>
+                              {isMasterAdmin && (
+                                <button
+                                  type="button"
+                                  onClick={() => setDeletingLedgerEntry(rowPayload)}
+                                  className="px-2.5 py-1 rounded-lg bg-rose-950/70 hover:bg-rose-900/80 text-rose-300 border border-rose-800/80 font-semibold text-xs inline-flex items-center gap-1 transition cursor-pointer"
+                                  title="Delete collection entry (Master Admin)"
+                                >
+                                  <Trash2 className="w-3 h-3" />
+                                  <span>Delete</span>
+                                </button>
+                              )}
+                            </div>
                           )}
                         </td>
                       </tr>
@@ -1033,7 +1223,7 @@ export const AgentProfileView: React.FC<AgentProfileViewProps> = ({
                   <th className="py-3.5 px-4">Amount</th>
                   <th className="py-3.5 px-4">Handed Over To / Received By</th>
                   <th className="py-3.5 px-4">Audit Notes</th>
-                  <th className="py-3.5 px-4 text-right">Edit</th>
+                  <th className="py-3.5 px-4 text-right">Actions</th>
                 </tr>
               </thead>
               <tbody className="divide-y divide-slate-800/80 font-mono">
@@ -1045,16 +1235,33 @@ export const AgentProfileView: React.FC<AgentProfileViewProps> = ({
                   </tr>
                 ) : (
                   filteredCashTransactions.map((tx) => {
-                    const isHandover = tx.transaction_type === 'CASH_HANDOVER';
-                    const isAdvanceTaken = tx.transaction_type === 'ADVANCE_TAKEN';
-                    const isAdvanceReturn = tx.transaction_type === 'ADVANCE_RETURN';
+                    const txTypeUpper = (tx.transaction_type || '').toUpperCase();
+                    const isHandover = txTypeUpper === 'CASH_HANDOVER' || txTypeUpper === 'HANDOVER';
+                    const isAdvanceTaken = txTypeUpper === 'ADVANCE_TAKEN';
+                    const isAdvanceReturn = txTypeUpper === 'ADVANCE_RETURN' || txTypeUpper === 'ADVANCE_DEDUCTION';
+                    const rowPayload: FieldAuditLedgerRow = {
+                      uid: `act-${tx.id}`,
+                      recordId: String(tx.id || ''),
+                      sourceTable: 'agent_cash_transactions',
+                      agentId: tx.agent_id || agent.id,
+                      agentName: tx.agent_name || agent.full_name,
+                      entryType: tx.transaction_type || 'CASH_HANDOVER',
+                      amount: Number(tx.amount) || 0,
+                      previousAmount: tx.previous_amount ?? null,
+                      paymentMethod: tx.received_by || 'Admin',
+                      collectedAt: tx.created_at || new Date().toISOString(),
+                      remarks: tx.notes || '',
+                      editedBy: tx.edited_by || null,
+                      editedAt: tx.edited_at || null,
+                      editReason: tx.edit_reason || null,
+                    };
 
                     return (
                       <tr key={tx.id || Math.random()} className="hover:bg-slate-950/50 transition">
-                        <td className="py-3.5 px-4 text-slate-400">
+                        <td className="py-3.5 px-4 text-slate-400 whitespace-nowrap">
                           {tx.created_at ? new Date(tx.created_at).toLocaleString() : 'Recent'}
                         </td>
-                        <td className="py-3.5 px-4">
+                        <td className="py-3.5 px-4 whitespace-nowrap">
                           <span
                             className={`px-2 py-0.5 rounded text-[10px] font-bold uppercase tracking-wider ${
                               isHandover
@@ -1069,42 +1276,39 @@ export const AgentProfileView: React.FC<AgentProfileViewProps> = ({
                             {tx.transaction_type?.replace(/_/g, ' ')}
                           </span>
                         </td>
-                        <td className="py-3.5 px-4 font-bold text-white">
+                        <td className="py-3.5 px-4 font-bold text-white tabular-nums whitespace-nowrap">
                           {formatCurrency(Number(tx.amount) || 0)}
                         </td>
                         <td className="py-3.5 px-4 text-slate-300">
                           {tx.received_by || 'Admin'}
                         </td>
-                        <td className="py-3.5 px-4 text-slate-400 truncate max-w-sm">
+                        <td className="py-3.5 px-4 text-slate-400 max-w-md break-words" title={tx.notes || ''}>
                           {tx.notes || '—'}
                         </td>
-                        <td className="py-3.5 px-4 text-right">
+                        <td className="py-3.5 px-4 text-right whitespace-nowrap">
                           {tx.id && (
-                            <button
-                              type="button"
-                              onClick={() =>
-                                setEditingLedgerEntry({
-                                  uid: `act-${tx.id}`,
-                                  recordId: String(tx.id),
-                                  sourceTable: 'agent_cash_transactions',
-                                  agentId: tx.agent_id || agent.id,
-                                  agentName: tx.agent_name || agent.full_name,
-                                  entryType: tx.transaction_type || 'CASH_HANDOVER',
-                                  amount: Number(tx.amount) || 0,
-                                  previousAmount: tx.previous_amount ?? null,
-                                  paymentMethod: tx.received_by || 'Admin',
-                                  collectedAt: tx.created_at || new Date().toISOString(),
-                                  remarks: tx.notes || '',
-                                  editedBy: tx.edited_by || null,
-                                  editedAt: tx.edited_at || null,
-                                  editReason: tx.edit_reason || null,
-                                })
-                              }
-                              className="px-2.5 py-1 rounded-lg bg-slate-800 hover:bg-slate-700 text-cyan-300 border border-slate-700 font-semibold text-xs inline-flex items-center gap-1 transition cursor-pointer"
-                            >
-                              <Edit className="w-3 h-3" />
-                              <span>Edit</span>
-                            </button>
+                            <div className="inline-flex items-center justify-end gap-1.5">
+                              <button
+                                type="button"
+                                onClick={() => setEditingLedgerEntry(rowPayload)}
+                                className="px-2.5 py-1 rounded-lg bg-blue-950/70 hover:bg-blue-900/80 text-blue-300 border border-blue-800/80 font-semibold text-xs inline-flex items-center gap-1 transition cursor-pointer"
+                                title="Edit handover / settlement entry"
+                              >
+                                <Edit className="w-3 h-3" />
+                                <span>Edit</span>
+                              </button>
+                              {isMasterAdmin && (
+                                <button
+                                  type="button"
+                                  onClick={() => setDeletingLedgerEntry(rowPayload)}
+                                  className="px-2.5 py-1 rounded-lg bg-rose-950/70 hover:bg-rose-900/80 text-rose-300 border border-rose-800/80 font-semibold text-xs inline-flex items-center gap-1 transition cursor-pointer"
+                                  title="Delete ledger entry (Master Admin)"
+                                >
+                                  <Trash2 className="w-3 h-3" />
+                                  <span>Delete</span>
+                                </button>
+                              )}
+                            </div>
                           )}
                         </td>
                       </tr>
@@ -1210,14 +1414,14 @@ export const AgentProfileView: React.FC<AgentProfileViewProps> = ({
                   </tr>
                 </thead>
                 <tbody className="divide-y divide-slate-800/80 font-mono">
-                  {commissions.length === 0 ? (
+                  {filteredCommissions.length === 0 ? (
                     <tr>
                       <td colSpan={7} className="py-12 text-center text-slate-400 font-mono">
-                        No new-connection commissions recorded yet for @{agent.username}.
+                        No new-connection commissions recorded in {describeDateFilter(dateFilter)} for @{agent.username}.
                       </td>
                     </tr>
                   ) : (
-                    commissions.map((c) => {
+                    filteredCommissions.map((c) => {
                       const isPaid = c.status === 'PAID';
                       const dateLabel = c.created_at
                         ? new Date(c.created_at).toLocaleDateString()
@@ -1284,19 +1488,23 @@ export const AgentProfileView: React.FC<AgentProfileViewProps> = ({
                               <button
                                 type="button"
                                 onClick={() => openEditCommissionModal(c)}
-                                className="p-1.5 rounded-lg bg-slate-800 hover:bg-slate-700 text-cyan-300 border border-slate-700 transition cursor-pointer"
+                                className="px-2.5 py-1 rounded-lg bg-blue-950/70 hover:bg-blue-900/80 text-blue-300 border border-blue-800/80 font-semibold text-xs inline-flex items-center gap-1 transition cursor-pointer"
                                 title="Edit Commission"
                               >
-                                <Edit className="w-3.5 h-3.5" />
+                                <Edit className="w-3 h-3" />
+                                <span>Edit</span>
                               </button>
-                              <button
-                                type="button"
-                                onClick={() => setDeletingCommission(c)}
-                                className="p-1.5 rounded-lg bg-slate-800 hover:bg-rose-950 text-rose-400 border border-slate-700 hover:border-rose-800 transition cursor-pointer"
-                                title="Delete Commission"
-                              >
-                                <Trash2 className="w-3.5 h-3.5" />
-                              </button>
+                              {isMasterAdmin && (
+                                <button
+                                  type="button"
+                                  onClick={() => setDeletingCommission(c)}
+                                  className="px-2.5 py-1 rounded-lg bg-rose-950/70 hover:bg-rose-900/80 text-rose-300 border border-rose-800/80 font-semibold text-xs inline-flex items-center gap-1 transition cursor-pointer"
+                                  title="Delete Commission (Master Admin)"
+                                >
+                                  <Trash2 className="w-3 h-3" />
+                                  <span>Delete</span>
+                                </button>
+                              )}
                             </div>
                           </td>
                         </tr>
@@ -1607,9 +1815,55 @@ export const AgentProfileView: React.FC<AgentProfileViewProps> = ({
         editedBy={currentUser?.fullName ? `${currentUser.fullName} (@${currentUser.username})` : 'NOC Admin'}
         onClose={() => setEditingLedgerEntry(null)}
         onErrorToast={(errMsg) => showToast(`❌ ${errMsg}`, 'error')}
-        onVerifiedSuccess={async () => {
+        onVerifiedSuccess={async (result: VerifiedLedgerUpdateResult) => {
+          const updatedBal = result.reconciledBalances?.[agent.id];
+          if (updatedBal) {
+            setAgent((prev) =>
+              prev
+                ? {
+                    ...prev,
+                    cash_in_hand: updatedBal.cashInHand,
+                    advance_balance: updatedBal.advanceBalance,
+                  }
+                : prev
+            );
+          }
           await fetchAgentProfile();
-          showToast('✅ Ledger updated in Supabase database', 'success');
+          showToast('Ledger entry updated & agent cash balance recalculated.', 'success');
+        }}
+      />
+
+      <DeleteLedgerEntryModal
+        entry={deletingLedgerEntry}
+        actorRole={currentUser?.role || ''}
+        onClose={() => setDeletingLedgerEntry(null)}
+        onErrorToast={(errMsg) => showToast(`❌ ${errMsg}`, 'error')}
+        onVerifiedDelete={async (result: VerifiedLedgerDeleteResult, deletedEntry: FieldAuditLedgerRow) => {
+          if (deletedEntry.sourceTable === 'agent_cash_transactions') {
+            setCashTransactions((prev) => prev.filter((item) => String(item.id) !== deletedEntry.recordId));
+          } else {
+            setCollections((prev) =>
+              prev.filter(
+                (item) =>
+                  String(item.id) !== deletedEntry.recordId &&
+                  String(item.id) !== `inv-tx-${deletedEntry.recordId}`
+              )
+            );
+          }
+          const updatedBal = result.reconciledBalances?.[agent.id];
+          if (updatedBal) {
+            setAgent((prev) =>
+              prev
+                ? {
+                    ...prev,
+                    cash_in_hand: updatedBal.cashInHand,
+                    advance_balance: updatedBal.advanceBalance,
+                  }
+                : prev
+            );
+          }
+          await fetchAgentProfile();
+          showToast('Ledger entry deleted & agent cash balance recalculated.', 'success');
         }}
       />
 

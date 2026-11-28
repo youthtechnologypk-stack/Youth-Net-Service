@@ -2,7 +2,11 @@ import React, { useState, useEffect } from 'react';
 import { AlertTriangle, Loader2, Save, ShieldCheck, X } from 'lucide-react';
 import { supabase, SupabasePortalUser } from '../services/supabaseClient';
 import {
+  AGENT_CASH_TRANSACTION_TYPES,
   FieldAuditLedgerRow,
+  formatLedgerTransactionTypeLabel,
+  normalizeCashTransactionType,
+  stripEmbeddedAuditTrail,
   updateFieldAuditLedgerEntry,
   VerifiedLedgerUpdateResult,
 } from '../lib/ledgerAuditPersistence';
@@ -34,6 +38,7 @@ export const EditLedgerEntryModal: React.FC<EditLedgerEntryModalProps> = ({
   onVerifiedSuccess,
   onErrorToast,
 }) => {
+  const [transactionType, setTransactionType] = useState<string>('CASH_HANDOVER');
   const [amount, setAmount] = useState<string>('');
   const [paymentMethod, setPaymentMethod] = useState<string>('Cash Handover');
   const [collectedAtLocal, setCollectedAtLocal] = useState<string>('');
@@ -45,11 +50,12 @@ export const EditLedgerEntryModal: React.FC<EditLedgerEntryModalProps> = ({
 
   useEffect(() => {
     if (!entry) return;
+    setTransactionType(normalizeCashTransactionType(entry.entryType));
     setAmount(String(entry.amount ?? 0));
-    setPaymentMethod(entry.paymentMethod || 'Cash Handover');
+    setPaymentMethod(entry.paymentMethod || (entry.sourceTable === 'agent_cash_transactions' ? 'Admin' : 'Cash Handover'));
     setCollectedAtLocal(toDatetimeLocalValue(entry.collectedAt));
     setSelectedAgentId(entry.agentId || '');
-    setRemarks(entry.remarks || '');
+    setRemarks(stripEmbeddedAuditTrail(entry.remarks));
     setEditReason(entry.editReason || '');
     setDbError(null);
     setIsSaving(false);
@@ -86,8 +92,9 @@ export const EditLedgerEntryModal: React.FC<EditLedgerEntryModalProps> = ({
       const result = await updateFieldAuditLedgerEntry({
         supabaseClient: supabase,
         entry,
+        transactionType: isCollectionEntry ? undefined : normalizeCashTransactionType(transactionType),
         amount: Math.round(parsedAmount * 100) / 100,
-        paymentMethod: paymentMethod.trim() || 'Cash Handover',
+        paymentMethod: paymentMethod.trim() || (isCollectionEntry ? 'Cash Handover' : 'Admin'),
         collectedAtIso,
         agentId: selectedAgentId || entry.agentId,
         agentName: resolvedAgentName,
@@ -116,7 +123,11 @@ export const EditLedgerEntryModal: React.FC<EditLedgerEntryModalProps> = ({
           <div>
             <h3 className="font-bold text-white text-sm flex items-center gap-2">
               <ShieldCheck className="w-4 h-4 text-cyan-400" />
-              <span>Edit Field Agent Audit Ledger Entry</span>
+              <span>
+                {isCollectionEntry
+                  ? 'Edit Client Collection Entry'
+                  : 'Edit Handover & Settlement Entry'}
+              </span>
             </h3>
             <p className="text-[11px] font-mono text-slate-400 mt-0.5">
               Table: <code className="text-cyan-300">{entry.sourceTable}</code> · ID:{' '}
@@ -163,10 +174,30 @@ export const EditLedgerEntryModal: React.FC<EditLedgerEntryModalProps> = ({
             </div>
           ) : null}
 
+          {!isCollectionEntry && (
+            <div className="font-mono">
+              <label className="block text-slate-400 text-[11px] mb-1">
+                Transaction Type *
+              </label>
+              <select
+                disabled={isSaving}
+                value={transactionType}
+                onChange={(e) => setTransactionType(e.target.value)}
+                className="w-full bg-slate-950 border border-slate-700 rounded-lg px-3 py-2 text-white text-xs font-bold focus:outline-none focus:border-cyan-500"
+              >
+                {AGENT_CASH_TRANSACTION_TYPES.map((txType) => (
+                  <option key={txType} value={txType}>
+                    {formatLedgerTransactionTypeLabel(txType)}
+                  </option>
+                ))}
+              </select>
+            </div>
+          )}
+
           <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 font-mono">
             <div>
               <label className="block text-slate-400 text-[11px] mb-1">
-                Amount (PKR) *
+                Amount (Rs.) *
               </label>
               <input
                 type="number"
@@ -182,7 +213,7 @@ export const EditLedgerEntryModal: React.FC<EditLedgerEntryModalProps> = ({
 
             <div>
               <label className="block text-slate-400 text-[11px] mb-1">
-                {isCollectionEntry ? 'Payment Method' : 'Received By / Channel'}
+                {isCollectionEntry ? 'Payment Method' : 'Handed Over To / Received By'}
               </label>
               {isCollectionEntry ? (
                 <select
@@ -203,6 +234,7 @@ export const EditLedgerEntryModal: React.FC<EditLedgerEntryModalProps> = ({
                   disabled={isSaving}
                   value={paymentMethod}
                   onChange={(e) => setPaymentMethod(e.target.value)}
+                  placeholder="e.g. Admin / NOC Cashier"
                   className="w-full bg-slate-950 border border-slate-700 rounded-lg px-3 py-2 text-white text-xs focus:outline-none focus:border-cyan-500"
                 />
               )}
@@ -210,7 +242,7 @@ export const EditLedgerEntryModal: React.FC<EditLedgerEntryModalProps> = ({
 
             <div>
               <label className="block text-slate-400 text-[11px] mb-1">
-                Collection / Entry Date &amp; Time
+                {isCollectionEntry ? 'Collection Date & Time' : 'Timestamp'}
               </label>
               <input
                 type="datetime-local"
@@ -243,13 +275,13 @@ export const EditLedgerEntryModal: React.FC<EditLedgerEntryModalProps> = ({
 
           <div className="space-y-3 font-mono">
             <div>
-              <label className="block text-slate-400 text-[11px] mb-1">Remarks / Ledger Notes</label>
+              <label className="block text-slate-400 text-[11px] mb-1">Audit Notes</label>
               <textarea
                 rows={2}
                 disabled={isSaving}
                 value={remarks}
                 onChange={(e) => setRemarks(e.target.value)}
-                placeholder="Collection or handover remarks..."
+                placeholder="Handover, advance, or collection audit notes..."
                 className="w-full bg-slate-950 border border-slate-700 rounded-lg px-3 py-2 text-white text-xs focus:outline-none focus:border-cyan-500"
               />
             </div>

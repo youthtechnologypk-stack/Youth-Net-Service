@@ -59,6 +59,7 @@ export function getTabFromPath(path: string): string | null {
   if (clean === 'manager/dashboard' || clean === 'manager' || clean === 'dashboard/operations' || clean === 'operations') return 'operations';
   if (clean === 'dealers' || clean === 'resellers' || clean === 'dealers-subdealers') return 'dealers';
   if (clean === 'billing') return 'billing';
+  if (clean === 'daily-cash-report' || clean === 'daily_cash_report' || clean === 'daily-cash') return 'daily_cash_report';
   if (clean === 'profit-expenses' || clean === 'profit_expenses') return 'profit_expenses';
   if (clean === 'inventory' || clean === 'hardware-inventory') return 'inventory';
   if (clean === 'complaints') return 'complaints';
@@ -70,6 +71,7 @@ export function getTabFromPath(path: string): string | null {
   if (clean === 'architecture') return 'architecture';
   if (clean === 'logs' || clean === 'activity' || clean === 'audit') return 'logs';
   if (clean === 'fiber-gis' || clean === 'fiber_gis' || clean === 'gis' || clean === 'map') return 'fiber_gis';
+  if (clean === 'field-materials' || clean === 'field_materials' || clean === 'materials' || clean === 'pole-log') return 'field_materials';
   if (clean === 'whatsapp-gateway' || clean === 'whatsapp_gateway' || clean === 'whatsapp') return 'whatsapp_gateway';
   if (clean === 'mobile') return 'mobile';
   if (clean === 'login') return 'login';
@@ -88,12 +90,16 @@ export function getPathFromTab(tab: string): string {
       return '/manager/dashboard';
     case 'dealers':
       return '/dealers';
+    case 'daily_cash_report':
+      return '/daily-cash-report';
     case 'profit_expenses':
       return '/profit-expenses';
     case 'logs':
       return '/logs';
     case 'fiber_gis':
       return '/fiber-gis';
+    case 'field_materials':
+      return '/field-materials';
     case 'whatsapp_gateway':
       return '/whatsapp-gateway';
     default:
@@ -157,7 +163,11 @@ export function isRouteAllowedForRole(
       'complaints',
       'subscribers',
       'billing',
+      'daily_cash_report',
+      'daily-cash-report',
       'inventory',
+      'field_materials',
+      'field-materials',
       'logs',
     ];
     const managerForbidden = ['settings', 'architecture', 'users', 'permissions', 'dealers'];
@@ -166,7 +176,7 @@ export function isRouteAllowedForRole(
   }
 
   if (role === 'AGENT') {
-    const agentAllowed = ['agent', 'agent/portal', 'agent_portal', 'mobile', 'tickets', 'collections', 'ont_checker'];
+    const agentAllowed = ['agent', 'agent/portal', 'agent_portal', 'field_materials', 'field-materials', 'mobile', 'tickets', 'collections', 'ont_checker'];
     return agentAllowed.some((a) => clean === a || clean.includes(a));
   }
 

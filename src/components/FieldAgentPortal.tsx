@@ -22,6 +22,7 @@ import {
   CreditCard,
   FileText,
   Check,
+  Wrench,
 } from 'lucide-react';
 import { useISP } from '../context/ISPContext';
 import { useCurrency } from '../context/CurrencyContext';
@@ -30,6 +31,7 @@ import { Invoice } from '../types/isp';
 import { FeatureGate } from './FeatureGate';
 import { PWAInstallPrompt } from './PWAInstallPrompt';
 import { FiberGisMapView } from './FiberGisMapView';
+import { FieldMaterialLogView } from './FieldMaterialLogView';
 import {
   supabase,
   SupabaseInvoice,
@@ -93,7 +95,7 @@ export const FieldAgentPortal: React.FC<FieldAgentPortalProps> = ({
     permission: resolvedGisPerm,
   };
 
-  const [activeTab, setActiveTab] = useState<'tickets' | 'collections' | 'ledger' | 'ont_checker' | 'directory' | 'fiber_gis'>('tickets');
+  const [activeTab, setActiveTab] = useState<'tickets' | 'collections' | 'ledger' | 'ont_checker' | 'directory' | 'field_materials' | 'fiber_gis'>('tickets');
 
   useEffect(() => {
     if (!effectiveGisAccess.canAccess && activeTab === 'fiber_gis') {
@@ -813,7 +815,7 @@ export const FieldAgentPortal: React.FC<FieldAgentPortalProps> = ({
   return (
     <div
       className={`${
-        activeTab === 'fiber_gis' ? 'max-w-6xl' : 'max-w-md'
+        activeTab === 'fiber_gis' || activeTab === 'field_materials' ? 'max-w-6xl' : 'max-w-md'
       } mx-auto space-y-4 font-sans text-xs pb-12 transition-all`}
     >
       {/* Agent Identity & Cash Banner */}
@@ -938,7 +940,7 @@ export const FieldAgentPortal: React.FC<FieldAgentPortalProps> = ({
       {/* Navigation Tabs for Agent */}
       <div
         className={`grid grid-cols-3 ${
-          effectiveGisAccess.canAccess ? 'sm:grid-cols-6' : 'sm:grid-cols-5'
+          effectiveGisAccess.canAccess ? 'sm:grid-cols-7' : 'sm:grid-cols-6'
         } gap-1 bg-slate-900 p-1 rounded-xl border border-slate-800 text-[10px] sm:text-[11px] font-mono font-bold`}
       >
         <button
@@ -989,6 +991,16 @@ export const FieldAgentPortal: React.FC<FieldAgentPortalProps> = ({
         >
           <Users className="w-3 h-3" />
           <span>Directory</span>
+        </button>
+
+        <button
+          onClick={() => setActiveTab('field_materials')}
+          className={`min-h-[40px] py-2 rounded-lg transition flex items-center justify-center gap-1 cursor-pointer ${
+            activeTab === 'field_materials' ? 'bg-emerald-600 text-white shadow' : 'text-slate-400 hover:text-white'
+          }`}
+        >
+          <Wrench className="w-3 h-3" />
+          <span>Material</span>
         </button>
 
         {effectiveGisAccess.canAccess && (
@@ -1535,6 +1547,15 @@ export const FieldAgentPortal: React.FC<FieldAgentPortalProps> = ({
           currentUser={currentUser}
           gisPermission={effectiveGisAccess.permission}
           onReturnFromRestricted={() => setActiveTab('tickets')}
+          compactMobile
+        />
+      )}
+
+      {/* Tab 6: Field Material & FTTH Pole Deployment Log */}
+      {activeTab === 'field_materials' && (
+        <FieldMaterialLogView
+          currentUser={currentUser}
+          currentRole="AGENT"
           compactMobile
         />
       )}

@@ -20,8 +20,15 @@ import {
   Wallet,
   MapPin,
   Database,
+  Download,
+  FileSpreadsheet,
 } from 'lucide-react';
-import { supabase } from '../services/supabaseClient';
+import { supabase, SupabaseInvoice } from '../services/supabaseClient';
+import {
+  exportSubscribersToCsv,
+  exportSubscribersToExcel,
+} from '../lib/bulkSubscriberCsv';
+import { getCachedPackageTariffs } from '../lib/packageTariffs';
 import { buildStandardWhatsAppCredentialText, getPortalUrlForRole } from '../services/authUtils';
 import {
   GIS_PERMISSION_OPTIONS,
@@ -116,8 +123,11 @@ export const UsersTable: React.FC<UsersTableProps> = ({
   // 1. Strict Role Tabs State
   const [activeTab, setActiveTab] = useState<TabType>('ALL');
   const [dealerFilter, setDealerFilter] = useState<string>('ALL');
+  const [statusFilter, setStatusFilter] = useState<'ALL' | 'ACTIVE' | 'EXPIRED' | 'SUSPENDED'>('ALL');
+  const [areaFilter, setAreaFilter] = useState<string>('ALL');
   const [searchQuery, setSearchQuery] = useState('');
   const [users, setUsers] = useState<PortalUserRow[]>([]);
+  const [invoices, setInvoices] = useState<SupabaseInvoice[]>([]);
   const [isLoading, setIsLoading] = useState(false);
   const [copiedId, setCopiedId] = useState<string | null>(null);
   const [actionNotice, setActionNotice] = useState<string | null>(null);
@@ -138,16 +148,25 @@ export const UsersTable: React.FC<UsersTableProps> = ({
         localStorage.removeItem('netpulse_user_accounts_v1');
       } catch {}
 
-      const { data, error } = await supabase
-        .from('portal_users')
-        .select('*')
-        .order('created_at', { ascending: false });
+      const [usersRes, invoicesRes] = await Promise.all([
+        supabase
+          .from('portal_users')
+          .select('*')
+          .order('created_at', { ascending: false }),
+        supabase
+          .from('invoices')
+          .select('id, subscriber_username, amount, paid_amount, status'),
+      ]);
 
-      if (!error && data) {
+      if (!usersRes.error && usersRes.data) {
         // Direct state replacement - Never append or merge with dummy data
-        setUsers(data as PortalUserRow[]);
-      } else if (error) {
-        console.error('Error fetching portal_users from Supabase:', error);
+        setUsers(usersRes.data as PortalUserRow[]);
+      } else if (usersRes.error) {
+        console.error('Error fetching portal_users from Supabase:', usersRes.error);
+      }
+
+      if (!invoicesRes.error && Array.isArray(invoicesRes.data)) {
+        setInvoices(invoicesRes.data as SupabaseInvoice[]);
       }
     } catch (err) {
       console.error('Failed to load portal_users from Supabase:', err);
@@ -226,18 +245,28 @@ export const UsersTable: React.FC<UsersTableProps> = ({
     return doesRecordMatchAdminOwnerFilter(u, adminDealerSelection);
   });
 
+  const availableAreas = Array.from(
+    new Set(
+      scopedUsers
+        .map((u) => String(u.area || u.assignedArea || '').trim())
+        .filter((a) => a.length > 0)
+    )
+  ).sort((a, b) => a.localeCompare(b));
+
   const cleanSearch = (searchQuery || '').trim().toLowerCase();
   const filteredUsers = scopedUsers.filter((u) => {
     // Search filter
     const displayName = (u?.full_name || u?.fullName || u?.displayName || '').toLowerCase();
     const username = (u?.username || '').toLowerCase();
     const phone = u?.phone || '';
+    const areaVal = (u?.area || u?.assignedArea || '').toLowerCase();
 
     const matchesSearch =
       !cleanSearch ||
       displayName.includes(cleanSearch) ||
       username.includes(cleanSearch) ||
-      phone.includes(cleanSearch);
+      phone.includes(cleanSearch) ||
+      areaVal.includes(cleanSearch);
 
     // Strict Role filter (exact match)
     const userRole = (u?.role || '').toUpperCase();
@@ -248,8 +277,52 @@ export const UsersTable: React.FC<UsersTableProps> = ({
       (activeTab === 'DEALER' && userTier === 'DEALER') ||
       (activeTab === 'SUB_DEALER' && userTier === 'SUB_DEALER');
 
-    return matchesSearch && matchesRole;
+    // Status filter (All / Active / Expired / Suspended)
+    const effectiveStatus = String(
+      u.account_status || (u.isActive === false ? 'SUSPENDED' : 'ACTIVE')
+    )
+      .trim()
+      .toUpperCase();
+    const matchesStatus =
+      statusFilter === 'ALL' ||
+      (statusFilter === 'ACTIVE' && effectiveStatus === 'ACTIVE') ||
+      (statusFilter === 'EXPIRED' && effectiveStatus === 'EXPIRED') ||
+      (statusFilter === 'SUSPENDED' &&
+        (effectiveStatus === 'SUSPENDED' || effectiveStatus === 'DISABLED'));
+
+    // Coverage Area filter
+    const matchesArea =
+      areaFilter === 'ALL' ||
+      String(u.area || u.assignedArea || '').trim().toLowerCase() ===
+        areaFilter.trim().toLowerCase();
+
+    return matchesSearch && matchesRole && matchesStatus && matchesArea;
   });
+
+  const handleExportAccounts = (format: 'csv' | 'xlsx') => {
+    if (filteredUsers.length === 0) {
+      setActionNotice('No matching accounts to export under the current filters.');
+      setTimeout(() => setActionNotice(null), 3500);
+      return;
+    }
+
+    const exportInput = {
+      users: filteredUsers as any[],
+      allPortalUsers: users as any[],
+      invoices,
+      tariffMap: getCachedPackageTariffs(),
+    };
+
+    const result =
+      format === 'csv'
+        ? exportSubscribersToCsv(exportInput)
+        : exportSubscribersToExcel(exportInput);
+
+    setActionNotice(
+      `Exported ${result.count} account${result.count === 1 ? '' : 's'} to ${result.filename}.`
+    );
+    setTimeout(() => setActionNotice(null), 4000);
+  };
 
   // Dynamic Badge Counts based on live scoped data
   const totalCount = scopedUsers.length;
@@ -529,6 +602,34 @@ export const UsersTable: React.FC<UsersTableProps> = ({
                 ))}
             </select>
           )}
+          <select
+            value={statusFilter}
+            onChange={(e) => setStatusFilter(e.target.value as any)}
+            className="px-2.5 py-1.5 bg-slate-950 border border-slate-700 rounded-lg text-slate-200 text-xs focus:outline-none focus:border-cyan-500"
+            title="Filter by Account Status"
+          >
+            <option value="ALL">Status: All</option>
+            <option value="ACTIVE">Active Only</option>
+            <option value="EXPIRED">Expired Only</option>
+            <option value="SUSPENDED">Suspended Only</option>
+          </select>
+
+          {availableAreas.length > 0 && (
+            <select
+              value={areaFilter}
+              onChange={(e) => setAreaFilter(e.target.value)}
+              className="px-2.5 py-1.5 bg-slate-950 border border-slate-700 rounded-lg text-slate-200 text-xs focus:outline-none focus:border-cyan-500 max-w-[175px]"
+              title="Filter by Coverage Area"
+            >
+              <option value="ALL">Area: All Sectors</option>
+              {availableAreas.map((area) => (
+                <option key={area} value={area}>
+                  {area}
+                </option>
+              ))}
+            </select>
+          )}
+
           <div className="relative flex-1 sm:flex-none">
             <Search className="w-3.5 h-3.5 absolute left-3 top-1/2 -translate-y-1/2 text-slate-500" />
             <input
@@ -536,9 +637,30 @@ export const UsersTable: React.FC<UsersTableProps> = ({
               placeholder="Search full name, @username, phone..."
               value={searchQuery}
               onChange={(e) => setSearchQuery(e.target.value)}
-              className="w-full sm:w-64 pl-8 pr-3 py-1.5 bg-slate-950 border border-slate-700 rounded-lg text-slate-200 text-xs focus:outline-none focus:border-cyan-500 font-mono"
+              className="w-full sm:w-56 pl-8 pr-3 py-1.5 bg-slate-950 border border-slate-700 rounded-lg text-slate-200 text-xs focus:outline-none focus:border-cyan-500 font-mono"
             />
           </div>
+
+          <button
+            type="button"
+            onClick={() => handleExportAccounts('csv')}
+            className="inline-flex items-center gap-1.5 px-2.5 py-1.5 bg-cyan-950/60 hover:bg-cyan-900/75 border border-cyan-700/70 rounded-lg text-cyan-300 font-semibold text-xs transition cursor-pointer whitespace-nowrap"
+            title="Export filtered accounts to CSV (includes Net Arrears, Password & Package)"
+          >
+            <Download className="w-3.5 h-3.5 text-cyan-400" />
+            <span>Export CSV</span>
+          </button>
+
+          <button
+            type="button"
+            onClick={() => handleExportAccounts('xlsx')}
+            className="inline-flex items-center gap-1.5 px-2.5 py-1.5 bg-emerald-950/60 hover:bg-emerald-900/75 border border-emerald-700/70 rounded-lg text-emerald-300 font-semibold text-xs transition cursor-pointer whitespace-nowrap"
+            title="Export filtered accounts to Excel (.xlsx)"
+          >
+            <FileSpreadsheet className="w-3.5 h-3.5 text-emerald-400" />
+            <span>Export Excel</span>
+          </button>
+
           <button
             onClick={() => {
               fetchUsers();

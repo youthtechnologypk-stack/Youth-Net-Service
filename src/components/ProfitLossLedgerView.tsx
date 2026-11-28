@@ -1,7 +1,8 @@
 import React, { useState, useEffect, useMemo, useCallback } from 'react';
 import {
   ResponsiveContainer,
-  BarChart,
+  ComposedChart,
+  Area,
   Bar,
   XAxis,
   YAxis,
@@ -1056,29 +1057,46 @@ export const ProfitLossLedgerView: React.FC<ProfitLossLedgerViewProps> = ({
               </p>
             </div>
           ) : (
-            <div className="bg-slate-950/80 border border-slate-800/80 rounded-xl p-4 h-[290px]">
+            <div className="bg-slate-950/85 border border-slate-800/80 rounded-xl p-4 h-[300px]">
               <ResponsiveContainer width="100%" height="100%">
-                <BarChart
+                <ComposedChart
                   data={summary.periodSeries}
                   margin={{ top: 10, right: 12, left: 4, bottom: 4 }}
-                  barGap={4}
+                  barGap={6}
                 >
+                  <defs>
+                    <linearGradient id="plCollectionsGrad" x1="0" y1="0" x2="0" y2="1">
+                      <stop offset="0%" stopColor="#34d399" stopOpacity={0.95} />
+                      <stop offset="100%" stopColor="#059669" stopOpacity={0.4} />
+                    </linearGradient>
+                    <linearGradient id="plExpensesGrad" x1="0" y1="0" x2="0" y2="1">
+                      <stop offset="0%" stopColor="#fb7185" stopOpacity={0.95} />
+                      <stop offset="100%" stopColor="#e11d48" stopOpacity={0.4} />
+                    </linearGradient>
+                    <linearGradient id="plNetProfitArea" x1="0" y1="0" x2="0" y2="1">
+                      <stop offset="0%" stopColor="#22d3ee" stopOpacity={0.38} />
+                      <stop offset="100%" stopColor="#06b6d4" stopOpacity={0.0} />
+                    </linearGradient>
+                  </defs>
                   <CartesianGrid
                     stroke="#1e293b"
                     strokeDasharray="3 3"
-                    opacity={0.65}
+                    opacity={0.5}
+                    vertical={false}
                   />
                   <XAxis
                     dataKey="label"
                     stroke="#64748b"
                     fontSize={11}
                     tickLine={false}
+                    axisLine={false}
                     fontFamily="monospace"
                   />
                   <YAxis
                     stroke="#64748b"
                     fontSize={11}
                     tickLine={false}
+                    axisLine={false}
                     fontFamily="monospace"
                     tickFormatter={(val: number) =>
                       Math.abs(val) >= 1000
@@ -1088,11 +1106,12 @@ export const ProfitLossLedgerView: React.FC<ProfitLossLedgerViewProps> = ({
                   />
                   <Tooltip
                     content={<CustomBarTooltip />}
-                    cursor={{ fill: 'rgba(148, 163, 184, 0.08)' }}
+                    cursor={{ fill: 'rgba(56, 189, 248, 0.06)' }}
                   />
                   <Legend
                     verticalAlign="top"
                     align="right"
+                    iconType="circle"
                     wrapperStyle={{
                       fontSize: '11px',
                       fontFamily: 'monospace',
@@ -1102,25 +1121,27 @@ export const ProfitLossLedgerView: React.FC<ProfitLossLedgerViewProps> = ({
                   <Bar
                     dataKey="collections"
                     name="Total Collections"
-                    fill="#10b981"
-                    radius={[4, 4, 0, 0]}
-                    maxBarSize={36}
+                    fill="url(#plCollectionsGrad)"
+                    radius={[6, 6, 0, 0]}
+                    maxBarSize={32}
                   />
                   <Bar
                     dataKey="expenses"
                     name="Expenses & Salaries"
-                    fill="#f43f5e"
-                    radius={[4, 4, 0, 0]}
-                    maxBarSize={36}
+                    fill="url(#plExpensesGrad)"
+                    radius={[6, 6, 0, 0]}
+                    maxBarSize={32}
                   />
-                  <Bar
+                  <Area
+                    type="monotone"
                     dataKey="netProfit"
                     name="Net Profit"
-                    fill="#06b6d4"
-                    radius={[4, 4, 0, 0]}
-                    maxBarSize={36}
+                    stroke="#22d3ee"
+                    strokeWidth={2.5}
+                    fill="url(#plNetProfitArea)"
+                    activeDot={{ r: 5, fill: '#22d3ee', stroke: '#ecfeff', strokeWidth: 2 }}
                   />
-                </BarChart>
+                </ComposedChart>
               </ResponsiveContainer>
             </div>
           )}
@@ -1152,7 +1173,7 @@ export const ProfitLossLedgerView: React.FC<ProfitLossLedgerViewProps> = ({
             </div>
           ) : (
             <div className="grid grid-cols-1 sm:grid-cols-12 gap-3 items-center">
-              <div className="sm:col-span-5 h-[220px]">
+              <div className="sm:col-span-5 h-[225px] relative">
                 <ResponsiveContainer width="100%" height="100%">
                   <PieChart>
                     <Pie
@@ -1161,9 +1182,10 @@ export const ProfitLossLedgerView: React.FC<ProfitLossLedgerViewProps> = ({
                       nameKey="label"
                       cx="50%"
                       cy="50%"
-                      innerRadius={48}
-                      outerRadius={78}
-                      paddingAngle={2}
+                      innerRadius={54}
+                      outerRadius={82}
+                      paddingAngle={3}
+                      cornerRadius={4}
                       stroke="#0f172a"
                       strokeWidth={2}
                     >
@@ -1174,6 +1196,14 @@ export const ProfitLossLedgerView: React.FC<ProfitLossLedgerViewProps> = ({
                     <Tooltip content={<CustomPieTooltip />} />
                   </PieChart>
                 </ResponsiveContainer>
+                <div className="pointer-events-none absolute inset-0 flex flex-col items-center justify-center text-center">
+                  <span className="text-[9px] uppercase tracking-wider text-slate-400 font-mono">
+                    Outgoing
+                  </span>
+                  <span className="text-xs font-extrabold font-mono tabular-nums text-white mt-0.5">
+                    {formatCurrency(summary.totalOutgoing, 0)}
+                  </span>
+                </div>
               </div>
 
               <div className="sm:col-span-7 space-y-2">

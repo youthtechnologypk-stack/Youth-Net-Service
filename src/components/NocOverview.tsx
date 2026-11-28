@@ -26,6 +26,7 @@ import { useCurrency } from '../context/CurrencyContext';
 import { ActiveTab } from './Header';
 import { UsageAnalytics } from './UsageAnalytics';
 import { ReceivingVsDuesChart } from './ReceivingVsDuesChart';
+import { ModernNocAnalyticsSuite } from './ModernNocAnalyticsSuite';
 import { OutageBanner } from './OutageBanner';
 import { fetchMikrotikPppSecrets } from '../services/mikrotikRestClient';
 import {
@@ -642,6 +643,11 @@ export const NocOverview: React.FC<NocOverviewProps> = ({
           </div>
         </div>
       </div>
+
+      {/* Upgraded Modern NOC & Financial Charts Suite */}
+      <ModernNocAnalyticsSuite
+        onOpenDailyCashReport={() => onNavigateTab('daily_cash_report')}
+      />
 
       {/* Usage Analytics Component with Recharts */}
       <UsageAnalytics />

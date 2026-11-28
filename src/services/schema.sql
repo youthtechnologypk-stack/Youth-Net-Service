@@ -352,3 +352,75 @@ $$ LANGUAGE plpgsql;
 CREATE TRIGGER update_agent_cash_on_payment
 AFTER INSERT ON payments
 FOR EACH ROW EXECUTE PROCEDURE trigger_update_agent_cash();
+
+-- ============================================================================
+-- 5. FIELD MATERIAL & FTTH POLE DEPLOYMENT LOGS
+-- ============================================================================
+CREATE TABLE IF NOT EXISTS public.field_material_logs (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    action_type TEXT NOT NULL CHECK (action_type IN ('INSTALLED', 'REMOVED', 'REPLACED')),
+    material_category TEXT NOT NULL,
+    quantity NUMERIC(12, 2) NOT NULL CHECK (quantity > 0),
+    unit TEXT NOT NULL CHECK (unit IN ('Pieces', 'Meters', 'Rolls', 'Boxes')),
+    pole_id_or_location TEXT NOT NULL,
+    coverage_area TEXT NOT NULL DEFAULT 'General Zone',
+    performed_by_user_id TEXT NOT NULL,
+    performed_by_name TEXT NOT NULL,
+    performed_by_role TEXT NOT NULL CHECK (performed_by_role IN ('AGENT', 'MANAGER', 'ADMIN')),
+    remarks TEXT NOT NULL DEFAULT ''
+);
+
+CREATE INDEX IF NOT EXISTS idx_field_material_logs_created_at
+    ON public.field_material_logs (created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_field_material_logs_action_type
+    ON public.field_material_logs (action_type);
+CREATE INDEX IF NOT EXISTS idx_field_material_logs_area
+    ON public.field_material_logs (coverage_area);
+CREATE INDEX IF NOT EXISTS idx_field_material_logs_performed_by
+    ON public.field_material_logs (performed_by_user_id);
+
+ALTER TABLE public.field_material_logs ENABLE ROW LEVEL SECURITY;
+
+DROP POLICY IF EXISTS "Allow all portal access to field_material_logs" ON public.field_material_logs;
+CREATE POLICY "Allow all portal access to field_material_logs"
+    ON public.field_material_logs
+    FOR ALL
+    USING (true)
+    WITH CHECK (true);
+
+GRANT SELECT, INSERT, UPDATE, DELETE ON public.field_material_logs TO anon, authenticated, service_role;
+
+-- ============================================================================
+-- 6. DAILY PAYMENT, EXPENSE & COLLECTION REPORT (daily_expenses)
+-- ============================================================================
+CREATE TABLE IF NOT EXISTS public.daily_expenses (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    expense_date DATE NOT NULL DEFAULT CURRENT_DATE,
+    category TEXT NOT NULL,
+    description TEXT NOT NULL,
+    amount NUMERIC(12, 2) NOT NULL CHECK (amount > 0),
+    paid_by TEXT NOT NULL,
+    payment_method TEXT NOT NULL DEFAULT 'Cash' CHECK (payment_method IN ('Cash', 'JazzCash', 'EasyPaisa', 'Bank')),
+    recorded_by TEXT NOT NULL DEFAULT 'admin',
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+CREATE INDEX IF NOT EXISTS idx_daily_expenses_expense_date
+    ON public.daily_expenses (expense_date DESC);
+CREATE INDEX IF NOT EXISTS idx_daily_expenses_category
+    ON public.daily_expenses (category);
+CREATE INDEX IF NOT EXISTS idx_daily_expenses_created_at
+    ON public.daily_expenses (created_at DESC);
+
+ALTER TABLE public.daily_expenses ENABLE ROW LEVEL SECURITY;
+
+DROP POLICY IF EXISTS "Allow all portal access to daily_expenses" ON public.daily_expenses;
+CREATE POLICY "Allow all portal access to daily_expenses"
+    ON public.daily_expenses
+    FOR ALL
+    USING (true)
+    WITH CHECK (true);
+
+GRANT SELECT, INSERT, UPDATE, DELETE ON public.daily_expenses TO anon, authenticated, service_role;
+

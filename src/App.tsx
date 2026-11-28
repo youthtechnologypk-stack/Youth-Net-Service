@@ -11,7 +11,10 @@ import { CapacityPlannerView } from './components/CapacityPlannerView';
 import { MikrotikStudio } from './components/MikrotikStudio';
 import { VsolOltStudio } from './components/VsolOltStudio';
 import { FiberGisMapView } from './components/FiberGisMapView';
+import { FieldMaterialLogView } from './components/FieldMaterialLogView';
 import { BillingStudio } from './components/BillingStudio';
+import { DailyCashReportView } from './components/DailyCashReportView';
+import { BulkCsvImportModal } from './components/BulkCsvImportModal';
 import { DealersManagementView } from './components/DealersManagementView';
 import { WhatsAppGatewayView } from './components/WhatsAppGatewayView';
 import { ProfitLossLedgerView } from './components/ProfitLossLedgerView';
@@ -133,6 +136,7 @@ function ISPAppContent() {
     if (user.role === 'AGENT') {
       if (
         pathTab === 'fiber_gis' ||
+        pathTab === 'field_materials' ||
         pathTab === 'mikrotik' ||
         pathTab === 'olt' ||
         pathTab === 'profit_expenses'
@@ -401,6 +405,7 @@ function ISPAppContent() {
 
   // Modals state
   const [isProvisionOpen, setIsProvisionOpen] = useState(false);
+  const [isBulkCsvOpen, setIsBulkCsvOpen] = useState(false);
   const [isOutageOpen, setIsOutageOpen] = useState(false);
   const [isTicketOpen, setIsTicketOpen] = useState(false);
   const [isAddRouterOpen, setIsAddRouterOpen] = useState(false);
@@ -789,6 +794,10 @@ function ISPAppContent() {
           isSidebarOpen={isSidebarOpen}
           onToggleSidebar={() => setIsSidebarOpen((prev) => !prev)}
           onOpenProvisionModal={handleGuardedOpenProvision}
+          onOpenBulkCsvModal={() => {
+            if (!staffPerms.provision_pppoe) return;
+            setIsBulkCsvOpen(true);
+          }}
           onOpenOutageModal={handleGuardedOpenOutage}
           onOpenTicketModal={() => setIsTicketOpen(true)}
           onOpenAddRouterModal={() => setIsAddRouterOpen(true)}
@@ -1090,6 +1099,26 @@ function ISPAppContent() {
                   </div>
                 )}
 
+                {/* Field Material & FTTH Pole Deployment Log */}
+                {activeTab === 'field_materials' && (
+                  <div className="space-y-3">
+                    {isAgent && (
+                      <button
+                        type="button"
+                        onClick={() => setActiveTab('agent_portal')}
+                        className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-slate-900 hover:bg-slate-800 border border-slate-700 text-xs font-mono text-cyan-300 cursor-pointer transition"
+                      >
+                        <ArrowLeft className="w-3.5 h-3.5" />
+                        <span>Back to Field Recovery Portal</span>
+                      </button>
+                    )}
+                    <FieldMaterialLogView
+                      currentUser={currentUser}
+                      currentRole={currentRole}
+                    />
+                  </div>
+                )}
+
                 {/* Multi-Tier Dealers & Sub-Dealers Reseller Console */}
                 {activeTab === 'dealers' && (
                   <DealersManagementView
@@ -1114,6 +1143,14 @@ function ISPAppContent() {
                     staffPermissions={staffPerms}
                     onOpenReceiptModal={handleOpenReceipt}
                     onOpenPaymentModal={handleGuardedOpenPayment}
+                  />
+                )}
+
+                {/* Daily Payment, Expense & Collection Report */}
+                {activeTab === 'daily_cash_report' && (
+                  <DailyCashReportView
+                    currentUser={currentUser}
+                    currentRole={currentRole}
                   />
                 )}
 
@@ -1233,6 +1270,12 @@ function ISPAppContent() {
       <ProvisionSecretModal
         isOpen={isProvisionOpen && staffPerms.provision_pppoe}
         onClose={() => setIsProvisionOpen(false)}
+      />
+
+      <BulkCsvImportModal
+        isOpen={isBulkCsvOpen && staffPerms.provision_pppoe}
+        onClose={() => setIsBulkCsvOpen(false)}
+        currentUser={currentUser}
       />
 
       <OutageBroadcasterModal

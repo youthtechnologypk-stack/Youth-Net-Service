@@ -22,6 +22,10 @@ import {
   FileText,
   Copy,
   Check,
+  Trash2,
+  FileSpreadsheet,
+  FileDown,
+  Receipt,
 } from 'lucide-react';
 import { useISP } from '../context/ISPContext';
 import { useCurrency } from '../context/CurrencyContext';
@@ -59,16 +63,24 @@ import {
 import { safeMikrotikFetch } from '../services/mikrotikRestClient';
 import { AgentProfileView } from './AgentProfileView';
 import { EditLedgerEntryModal } from './EditLedgerEntryModal';
+import { DeleteLedgerEntryModal } from './DeleteLedgerEntryModal';
 import {
   FieldAuditLedgerRow,
   buildFieldAuditLedgerRows,
   computeDatabaseLedgerTotals,
 } from '../lib/ledgerAuditPersistence';
+import { getCachedGlobalSystemSettings } from '../lib/systemSettings';
+import {
+  exportSettlementLedgerToExcel,
+  exportSettlementLedgerToPdf,
+  SettlementExportPayload,
+} from '../lib/settlementLedgerExport';
 import { LEDGER_AUDIT_MIGRATION_SQL } from '../lib/ledgerMigrationSql';
 import {
   StaffPermissions,
   resolveStaffPermissions,
 } from '../lib/staffPermissions';
+import { DailyCashReportView } from './DailyCashReportView';
 
 interface ManagerOperationsDashboardProps {
   onOpenTicketModal: () => void;
@@ -117,6 +129,7 @@ export const ManagerOperationsDashboard: React.FC<ManagerOperationsDashboardProp
   const { currentUser: authUser } = useAuth();
 
   const activeManager = currentUser || authUser;
+  const isMasterAdmin = String(activeManager?.role || '').trim().toUpperCase() === 'ADMIN';
   const perms = useMemo(
     () => staffPermissions || resolveStaffPermissions(activeManager),
     [staffPermissions, activeManager]
@@ -149,7 +162,7 @@ export const ManagerOperationsDashboard: React.FC<ManagerOperationsDashboardProp
   const [sectorFilter, setSectorFilter] = useState<string>('ALL');
 
   const [activeSubTab, setActiveSubTab] = useState<
-    'tickets' | 'subscribers' | 'agent_cash' | 'outages' | 'olt_telemetry'
+    'tickets' | 'subscribers' | 'agent_cash' | 'daily_cash' | 'outages' | 'olt_telemetry'
   >('tickets');
   const [ticketFilter, setTicketFilter] = useState<'all' | 'open' | 'critical'>('all');
   const [searchSubscriber, setSearchSubscriber] = useState('');
@@ -162,8 +175,9 @@ export const ManagerOperationsDashboard: React.FC<ManagerOperationsDashboardProp
   const [kickingUsername, setKickingUsername] = useState<string | null>(null);
   const [approvingAgentId, setApprovingAgentId] = useState<string | null>(null);
 
-  // Verified Field Agent Audit Ledger edit modal state
+  // Verified Field Agent Audit Ledger edit/delete modal state
   const [editingLedgerEntry, setEditingLedgerEntry] = useState<FieldAuditLedgerRow | null>(null);
+  const [deletingLedgerEntry, setDeletingLedgerEntry] = useState<FieldAuditLedgerRow | null>(null);
   const [ledgerAgentFilter, setLedgerAgentFilter] = useState<string>('ALL');
   const [ledgerSearch, setLedgerSearch] = useState<string>('');
   const [ledgerSchemaNotice, setLedgerSchemaNotice] = useState<boolean>(false);
@@ -840,6 +854,82 @@ export const ManagerOperationsDashboard: React.FC<ManagerOperationsDashboardProp
     });
   }, [recoveryLedgerRows, paymentTxns, cashLedger, invoices, agents, dateFilter, ledgerAgentFilter, ledgerSearch]);
 
+  const buildManagerLedgerExportPayload = useCallback((): SettlementExportPayload => {
+    const settings = getCachedGlobalSystemSettings();
+    const companyName = settings.companyDisplayName || settings.ispName || 'Youth Net Service';
+    const selectedAg =
+      ledgerAgentFilter !== 'ALL' ? agents.find((a) => a.id === ledgerAgentFilter) : undefined;
+
+    const totalCollectionsPeriod = unifiedAuditLedger
+      .filter((r) => r.entryType === 'COLLECTION')
+      .reduce((sum, r) => sum + (Number(r.amount) || 0), 0);
+    const totalHandedOverPeriod = unifiedAuditLedger
+      .filter((r) => ['CASH_HANDOVER', 'HANDOVER'].includes(String(r.entryType || '').toUpperCase()))
+      .reduce((sum, r) => sum + (Number(r.amount) || 0), 0);
+    const totalAdvanceTakenPeriod = unifiedAuditLedger
+      .filter((r) => String(r.entryType || '').toUpperCase() === 'ADVANCE_TAKEN')
+      .reduce((sum, r) => sum + (Number(r.amount) || 0), 0);
+
+    const netCashForScope = selectedAg
+      ? Math.max(0, agentFinancials[selectedAg.id]?.cashInHand || 0)
+      : totalAgentCashInHand;
+
+    return {
+      companyName,
+      supportHelpline: settings.supportHelpline,
+      tab: 'unified',
+      tabTitle: 'Handover & Settlement Audit Ledger',
+      agentName: selectedAg ? selectedAg.full_name || selectedAg.username : 'All Field Agents',
+      agentUsername: selectedAg?.username,
+      agentPhone: selectedAg?.phone || undefined,
+      agentArea: selectedAg?.area || (sectorFilter !== 'ALL' ? sectorFilter : 'All Sectors'),
+      dateFilter,
+      generatedAt: new Date(),
+      summary: {
+        totalCollections: totalCollectionsPeriod,
+        totalCashHandedOver: totalHandedOverPeriod,
+        totalAdvanceTaken: totalAdvanceTakenPeriod,
+        totalCommissions: 0,
+        netCashInHand: netCashForScope,
+      },
+      rows: unifiedAuditLedger.map((r) => ({
+        timestamp: r.collectedAt || '',
+        transactionType: r.entryType || 'CASH_HANDOVER',
+        amount: Number(r.amount) || 0,
+        receivedByOrParty: r.subscriberUsername
+          ? `@${r.subscriberUsername} (${r.paymentMethod})`
+          : `${r.agentName} -> ${r.paymentMethod || 'Admin'}`,
+        auditNotes: r.remarks || '—',
+      })),
+    };
+  }, [
+    ledgerAgentFilter,
+    agents,
+    unifiedAuditLedger,
+    agentFinancials,
+    totalAgentCashInHand,
+    sectorFilter,
+    dateFilter,
+  ]);
+
+  const handleExportManagerExcel = () => {
+    try {
+      const filename = exportSettlementLedgerToExcel(buildManagerLedgerExportPayload());
+      showToast(`Exported Excel spreadsheet: ${filename}`, 'success');
+    } catch (err: any) {
+      showToast(`Excel export failed: ${err?.message || 'Unexpected error'}`, 'error');
+    }
+  };
+
+  const handleExportManagerPdf = () => {
+    try {
+      const filename = exportSettlementLedgerToPdf(buildManagerLedgerExportPayload());
+      showToast(`Exported PDF audit statement: ${filename}`, 'success');
+    } catch (err: any) {
+      showToast(`PDF export failed: ${err?.message || 'Unexpected error'}`, 'error');
+    }
+  };
+
   const databaseLedgerTotals = useMemo(
     () =>
       computeDatabaseLedgerTotals({
@@ -1012,6 +1102,17 @@ export const ManagerOperationsDashboard: React.FC<ManagerOperationsDashboardProp
             <span>Agent Cash ({formatCurrency(totalAgentCashInHand)})</span>
           </button>
           <button
+            onClick={() => setActiveSubTab('daily_cash')}
+            className={`px-3 py-1.5 rounded-lg font-bold transition flex items-center gap-1.5 cursor-pointer ${
+              activeSubTab === 'daily_cash'
+                ? 'bg-cyan-600 text-slate-950 shadow'
+                : 'text-slate-400 hover:text-white'
+            }`}
+          >
+            <Receipt className="w-3.5 h-3.5" />
+            <span>Daily Cash &amp; Expenses</span>
+          </button>
+          <button
             onClick={() => setActiveSubTab('outages')}
             className={`px-3 py-1.5 rounded-lg font-bold transition flex items-center gap-1.5 cursor-pointer ${
               activeSubTab === 'outages'
@@ -1037,13 +1138,39 @@ export const ManagerOperationsDashboard: React.FC<ManagerOperationsDashboardProp
       </div>
 
       {/* Month-Wise & Custom Date Range Filter Toolbar */}
-      <DateFilterToolbar
-        value={dateFilter}
-        onChange={setDateFilter}
-        totalCount={tickets.length}
-        filteredCount={scopedTickets.length}
-        recordLabel="tickets"
-      />
+      {activeSubTab !== 'daily_cash' && (
+        <DateFilterToolbar
+          value={dateFilter}
+          onChange={setDateFilter}
+          totalCount={activeSubTab === 'agent_cash' ? cashLedger.length + paymentTxns.length : tickets.length}
+          filteredCount={activeSubTab === 'agent_cash' ? unifiedAuditLedger.length : scopedTickets.length}
+          recordLabel={activeSubTab === 'agent_cash' ? 'ledger entries' : 'tickets'}
+          extraActions={
+            activeSubTab === 'agent_cash' ? (
+              <>
+                <button
+                  type="button"
+                  onClick={handleExportManagerExcel}
+                  className="px-3 py-1.5 rounded-lg bg-emerald-950/60 hover:bg-emerald-900/75 text-emerald-300 border border-emerald-700/80 font-semibold text-xs flex items-center gap-1.5 transition cursor-pointer whitespace-nowrap shrink-0"
+                  title="Download filtered Field Agent Settlement Ledger as Excel (.xlsx)"
+                >
+                  <FileSpreadsheet className="w-3.5 h-3.5 text-emerald-400" />
+                  <span>Export Excel</span>
+                </button>
+                <button
+                  type="button"
+                  onClick={handleExportManagerPdf}
+                  className="px-3 py-1.5 rounded-lg bg-rose-950/60 hover:bg-rose-900/75 text-rose-300 border border-rose-700/80 font-semibold text-xs flex items-center gap-1.5 transition cursor-pointer whitespace-nowrap shrink-0"
+                  title="Download printable A4 PDF audit statement"
+                >
+                  <FileDown className="w-3.5 h-3.5 text-rose-400" />
+                  <span>Export PDF</span>
+                </button>
+              </>
+            ) : undefined
+          }
+        />
+      )}
 
       {/* Live KPI Status Strip */}
       <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
@@ -1698,7 +1825,7 @@ export const ManagerOperationsDashboard: React.FC<ManagerOperationsDashboardProp
                     <th className="py-2.5 px-3">Method / Channel</th>
                     <th className="py-2.5 px-3 text-right">Amount</th>
                     <th className="py-2.5 px-3 font-sans">Remarks &amp; Audit</th>
-                    <th className="py-2.5 px-3 text-right font-sans">Action</th>
+                    <th className="py-2.5 px-3 text-right font-sans">Actions</th>
                   </tr>
                 </thead>
                 <tbody className="divide-y divide-slate-800/70">
@@ -1765,15 +1892,28 @@ export const ManagerOperationsDashboard: React.FC<ManagerOperationsDashboardProp
                             </div>
                           )}
                         </td>
-                        <td className="py-2.5 px-3 text-right">
-                          <button
-                            type="button"
-                            onClick={() => setEditingLedgerEntry(row)}
-                            className="px-2.5 py-1 rounded-lg bg-slate-800 hover:bg-slate-700 text-cyan-300 border border-slate-700 font-semibold text-xs inline-flex items-center gap-1 transition cursor-pointer"
-                          >
-                            <Edit className="w-3 h-3" />
-                            <span>Edit</span>
-                          </button>
+                        <td className="py-2.5 px-3 text-right whitespace-nowrap">
+                          <div className="inline-flex items-center justify-end gap-1.5">
+                            <button
+                              type="button"
+                              onClick={() => setEditingLedgerEntry(row)}
+                              className="px-2.5 py-1 rounded-lg bg-blue-950/70 hover:bg-blue-900/80 text-blue-300 border border-blue-800/80 font-semibold text-xs inline-flex items-center gap-1 transition cursor-pointer"
+                            >
+                              <Edit className="w-3 h-3" />
+                              <span>Edit</span>
+                            </button>
+                            {isMasterAdmin && (
+                              <button
+                                type="button"
+                                onClick={() => setDeletingLedgerEntry(row)}
+                                className="px-2.5 py-1 rounded-lg bg-rose-950/70 hover:bg-rose-900/80 text-rose-300 border border-rose-800/80 font-semibold text-xs inline-flex items-center gap-1 transition cursor-pointer"
+                                title="Delete ledger entry (Master Admin)"
+                              >
+                                <Trash2 className="w-3 h-3" />
+                                <span>Delete</span>
+                              </button>
+                            )}
+                          </div>
                         </td>
                       </tr>
                     ))
@@ -1989,6 +2129,14 @@ export const ManagerOperationsDashboard: React.FC<ManagerOperationsDashboardProp
         </FeatureGate>
       )}
 
+      {/* Subtab 6: Daily Payment, Expense & Collection Report */}
+      {activeSubTab === 'daily_cash' && (
+        <DailyCashReportView
+          currentUser={activeManager}
+          currentRole={isMasterAdmin ? 'ADMIN' : 'MANAGER'}
+        />
+      )}
+
       {/* Edit Subscriber Modal (Persisted to Supabase portal_users + AreaNodeSelector) */}
       {editingSubscriber && (
         <div className="fixed inset-0 z-[9999] flex items-center justify-center bg-black/75 backdrop-blur-sm p-3 overflow-y-auto">
@@ -2065,7 +2213,25 @@ export const ManagerOperationsDashboard: React.FC<ManagerOperationsDashboardProp
             setLedgerSchemaNotice(true);
           }
           await fetchOperationsData(true);
-          showToast('✅ Ledger updated in Supabase database', 'success');
+          showToast('Ledger entry updated & agent cash balance recalculated.', 'success');
+        }}
+      />
+
+      <DeleteLedgerEntryModal
+        entry={deletingLedgerEntry}
+        actorRole={activeManager?.role || ''}
+        onClose={() => setDeletingLedgerEntry(null)}
+        onErrorToast={(errMsg) => showToast(`❌ ${errMsg}`, 'error')}
+        onVerifiedDelete={async (_result, deletedEntry) => {
+          if (deletedEntry.sourceTable === 'agent_cash_transactions') {
+            setCashLedger((prev) => prev.filter((item) => String(item.id) !== deletedEntry.recordId));
+          } else if (deletedEntry.sourceTable === 'payment_transactions') {
+            setPaymentTxns((prev) => prev.filter((item) => String(item.id) !== deletedEntry.recordId));
+          } else if (deletedEntry.sourceTable === 'recovery_ledger') {
+            setRecoveryLedgerRows((prev) => prev.filter((item) => String(item.id) !== deletedEntry.recordId));
+          }
+          await fetchOperationsData(true);
+          showToast('Ledger entry deleted & agent cash balance recalculated.', 'success');
         }}
       />
 

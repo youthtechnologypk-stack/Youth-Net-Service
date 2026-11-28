@@ -28,6 +28,9 @@ import {
   Package,
   Building2,
   MessageSquare,
+  Wrench,
+  Upload,
+  Receipt,
 } from 'lucide-react';
 import { useISP } from '../context/ISPContext';
 import { SystemRole, UserAccount } from '../types/auth';
@@ -48,7 +51,9 @@ export type ActiveTab =
   | 'mikrotik'
   | 'olt'
   | 'fiber_gis'
+  | 'field_materials'
   | 'billing'
+  | 'daily_cash_report'
   | 'profit_expenses'
   | 'inventory'
   | 'complaints'
@@ -66,6 +71,7 @@ interface HeaderProps {
   activeTab: ActiveTab;
   setActiveTab: (tab: ActiveTab) => void;
   onOpenProvisionModal: () => void;
+  onOpenBulkCsvModal?: () => void;
   onOpenOutageModal: () => void;
   onOpenTicketModal: () => void;
   onOpenAddRouterModal?: () => void;
@@ -91,6 +97,7 @@ export const Header: React.FC<HeaderProps> = ({
   activeTab,
   setActiveTab,
   onOpenProvisionModal,
+  onOpenBulkCsvModal,
   onOpenOutageModal,
   onOpenTicketModal,
   onOpenAddRouterModal,
@@ -526,15 +533,29 @@ export const Header: React.FC<HeaderProps> = ({
             </div>
 
             {perms.provision_pppoe && (
-              <button
-                onClick={() => onOpenProvisionModal()}
-                className="flex items-center gap-1 bg-sky-600 hover:bg-sky-500 text-white font-bold px-2.5 py-1.5 rounded text-xs transition shadow-sm shrink-0 cursor-pointer"
-                title="Provision PPPoE Customer"
-              >
-                <PlusCircle className="w-3.5 h-3.5 shrink-0" />
-                <span>+ Provision</span>
-                <span className="hidden sm:inline">PPPoE</span>
-              </button>
+              <>
+                <button
+                  onClick={() => onOpenProvisionModal()}
+                  className="flex items-center gap-1 bg-sky-600 hover:bg-sky-500 text-white font-bold px-2.5 py-1.5 rounded text-xs transition shadow-sm shrink-0 cursor-pointer"
+                  title="Provision PPPoE Customer"
+                >
+                  <PlusCircle className="w-3.5 h-3.5 shrink-0" />
+                  <span>+ Provision</span>
+                  <span className="hidden sm:inline">PPPoE</span>
+                </button>
+
+                {onOpenBulkCsvModal && (
+                  <button
+                    onClick={() => onOpenBulkCsvModal()}
+                    className="flex items-center gap-1 bg-cyan-600/15 hover:bg-cyan-600/25 text-cyan-700 dark:text-cyan-300 border border-cyan-500/40 font-bold px-2.5 py-1.5 rounded text-xs transition shadow-sm shrink-0 cursor-pointer"
+                    title="Bulk CSV Import with MikroTik Smart Auto-Link"
+                  >
+                    <Upload className="w-3.5 h-3.5 shrink-0" />
+                    <span className="hidden sm:inline">Bulk CSV Import</span>
+                    <span className="sm:hidden">CSV</span>
+                  </button>
+                )}
+              </>
             )}
 
             {perms.outage_broadcast && (
@@ -645,6 +666,14 @@ export const Header: React.FC<HeaderProps> = ({
               </button>
 
               <button
+                onClick={() => setActiveTab('field_materials')}
+                className={`shrink-0 whitespace-nowrap snap-start flex items-center gap-2 px-3 py-2 text-xs sm:text-sm font-medium rounded-xl transition cursor-pointer ${getTabClassName('field_materials')}`}
+              >
+                <Wrench className={`w-4 h-4 shrink-0 ${activeTab === 'field_materials' ? 'text-white dark:text-sky-300' : 'text-emerald-500 dark:text-emerald-400'}`} />
+                <span>Field Material Log</span>
+              </button>
+
+              <button
                 onClick={() => setActiveTab('dealers')}
                 className={`shrink-0 whitespace-nowrap snap-start flex items-center gap-2 px-3 py-2 text-xs sm:text-sm font-medium rounded-xl transition cursor-pointer ${getTabClassName('dealers')}`}
               >
@@ -666,6 +695,14 @@ export const Header: React.FC<HeaderProps> = ({
               >
                 <CreditCard className="w-4 h-4 shrink-0" />
                 <span>Billing &amp; MRR</span>
+              </button>
+
+              <button
+                onClick={() => setActiveTab('daily_cash_report')}
+                className={`shrink-0 whitespace-nowrap snap-start flex items-center gap-2 px-3 py-2 text-xs sm:text-sm font-medium rounded-xl transition cursor-pointer ${getTabClassName('daily_cash_report')}`}
+              >
+                <Receipt className={`w-4 h-4 shrink-0 ${activeTab === 'daily_cash_report' ? 'text-white dark:text-sky-300' : 'text-cyan-500 dark:text-cyan-400'}`} />
+                <span>Daily Cash Report</span>
               </button>
 
               <button
@@ -818,11 +855,27 @@ export const Header: React.FC<HeaderProps> = ({
               )}
 
               <button
+                onClick={() => setActiveTab('field_materials')}
+                className={`shrink-0 whitespace-nowrap snap-start flex items-center gap-2 px-3 py-2 text-xs sm:text-sm font-medium rounded-xl transition cursor-pointer ${getTabClassName('field_materials', 'indigo')}`}
+              >
+                <Wrench className={`w-4 h-4 shrink-0 ${activeTab === 'field_materials' ? 'text-white dark:text-indigo-300' : 'text-emerald-500 dark:text-emerald-400'}`} />
+                <span>Field Material Log</span>
+              </button>
+
+              <button
                 onClick={() => setActiveTab('billing')}
                 className={`shrink-0 whitespace-nowrap snap-start flex items-center gap-2 px-3 py-2 text-xs sm:text-sm font-medium rounded-xl transition cursor-pointer ${getTabClassName('billing', 'indigo')}`}
               >
                 <CreditCard className="w-4 h-4 shrink-0" />
                 <span>Agent Cash &amp; Billing</span>
+              </button>
+
+              <button
+                onClick={() => setActiveTab('daily_cash_report')}
+                className={`shrink-0 whitespace-nowrap snap-start flex items-center gap-2 px-3 py-2 text-xs sm:text-sm font-medium rounded-xl transition cursor-pointer ${getTabClassName('daily_cash_report', 'indigo')}`}
+              >
+                <Receipt className={`w-4 h-4 shrink-0 ${activeTab === 'daily_cash_report' ? 'text-white dark:text-indigo-300' : 'text-cyan-500 dark:text-cyan-400'}`} />
+                <span>Daily Cash Report</span>
               </button>
 
               {perms.expenses_ledger && (

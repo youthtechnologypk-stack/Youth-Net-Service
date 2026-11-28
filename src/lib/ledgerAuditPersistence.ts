@@ -34,9 +34,39 @@ export interface FieldAuditLedgerRow {
   editReason?: string | null;
 }
 
+export const AGENT_CASH_TRANSACTION_TYPES = [
+  'CASH_HANDOVER',
+  'ADVANCE_TAKEN',
+  'ADVANCE_RETURN',
+  'SALARY_PAYOUT',
+] as const;
+
+export type AgentCashTransactionType = (typeof AGENT_CASH_TRANSACTION_TYPES)[number];
+
+export function normalizeCashTransactionType(raw?: string | null): AgentCashTransactionType {
+  const clean = String(raw || '')
+    .trim()
+    .toUpperCase()
+    .replace(/\s+/g, '_');
+  if (clean === 'HANDOVER' || clean === 'CASH_HANDOVER') return 'CASH_HANDOVER';
+  if (clean === 'ADVANCE_TAKEN' || clean === 'ADVANCE') return 'ADVANCE_TAKEN';
+  if (clean === 'ADVANCE_RETURN' || clean === 'ADVANCE_DEDUCTION') return 'ADVANCE_RETURN';
+  if (clean === 'SALARY_PAYOUT' || clean === 'SALARY') return 'SALARY_PAYOUT';
+  return 'CASH_HANDOVER';
+}
+
+export function formatLedgerTransactionTypeLabel(raw?: string | null): string {
+  const clean = String(raw || 'CASH_HANDOVER')
+    .trim()
+    .toUpperCase();
+  if (clean === 'COLLECTION') return 'CLIENT COLLECTION';
+  return clean.replace(/_/g, ' ');
+}
+
 export interface UpdateLedgerEntryParams {
   supabaseClient: SupabaseClient;
   entry: FieldAuditLedgerRow;
+  transactionType?: string;
   amount: number;
   paymentMethod: string;
   collectedAtIso: string;
@@ -47,24 +77,62 @@ export interface UpdateLedgerEntryParams {
   editReason?: string;
 }
 
+export interface ReconciledAgentBalance {
+  cashInHand: number;
+  advanceBalance: number;
+  totalCollected: number;
+  totalHandedOver: number;
+  totalAdvanceTaken: number;
+  totalAdvanceReturned: number;
+}
+
 export interface VerifiedLedgerUpdateResult {
   updatedRow: Record<string, any>;
   usedFallbackCoreColumns: boolean;
   linkedInvoiceUpdated: boolean;
   auditColumnsMissingInSchema: boolean;
+  reconciledBalances: Record<string, ReconciledAgentBalance>;
 }
 
-function appendAuditTrailToNotes(
+export interface DeleteLedgerEntryParams {
+  supabaseClient: SupabaseClient;
+  entry: FieldAuditLedgerRow;
+  actorRole?: string | null;
+}
+
+export interface VerifiedLedgerDeleteResult {
+  deletedId: string;
+  sourceTable: AuditLedgerSourceTable;
+  linkedInvoiceUpdated: boolean;
+  reconciledBalances: Record<string, ReconciledAgentBalance>;
+}
+
+export function stripEmbeddedAuditTrail(notes?: string | null): string {
+  return String(notes || '')
+    .replace(/\s*\[Audit Edit:[^\]]*\]/g, '')
+    .trim();
+}
+
+export function appendAuditTrailToNotes(
   baseRemarks: string,
   previousAmount: number,
   newAmount: number,
   editedBy: string,
   editedAtIso: string,
-  editReason?: string
+  editReason?: string,
+  typeChange?: { previousType: string; nextType: string } | null
 ): string {
-  const cleanBase = baseRemarks.replace(/\s*\[Audit Edit:[^\]]*\]/g, '').trim();
+  const cleanBase = stripEmbeddedAuditTrail(baseRemarks);
+  const typePart =
+    typeChange && typeChange.previousType !== typeChange.nextType
+      ? `${formatLedgerTransactionTypeLabel(typeChange.previousType)} -> ${formatLedgerTransactionTypeLabel(
+          typeChange.nextType
+        )} | `
+      : '';
   const reasonPart = editReason?.trim() ? ` | Reason: ${editReason.trim()}` : '';
-  const stamp = `[Audit Edit: Prev Rs.${Math.round(previousAmount)} -> Rs.${Math.round(newAmount)} by ${editedBy} @ ${editedAtIso.slice(0, 16).replace('T', ' ')}${reasonPart}]`;
+  const stamp = `[Audit Edit: ${typePart}Prev Rs.${Math.round(previousAmount)} -> Rs.${Math.round(
+    newAmount
+  )} by ${editedBy} @ ${editedAtIso.slice(0, 16).replace('T', ' ')}${reasonPart}]`;
   return cleanBase ? `${cleanBase} ${stamp}` : stamp;
 }
 
@@ -75,7 +143,7 @@ function parseEmbeddedAuditFromNotes(notes?: string | null): {
   editReason: string | null;
 } {
   const text = String(notes || '');
-  const match = text.match(/\[Audit Edit:\s*Prev Rs\.([\d.]+)\s*->\s*Rs\.[\d.]+\s*by\s*([^@|]+?)\s*@\s*([^|\]]+?)(?:\|\s*Reason:\s*([^\]]+))?\]/);
+  const match = text.match(/\[Audit Edit:\s*(?:[^|]+?->[^|]+?\|\s*)?Prev Rs\.([\d.]+)\s*->\s*Rs\.[\d.]+\s*by\s*([^@|]+?)\s*@\s*([^|\]]+?)(?:\|\s*Reason:\s*([^\]]+))?\]/);
   if (!match) {
     return { previousAmount: null, editedBy: null, editedAt: null, editReason: null };
   }
@@ -247,9 +315,10 @@ export function buildFieldAuditLedgerRows(params: {
 export async function reconcileAgentVaultBalancesInDb(
   supabaseClient: SupabaseClient,
   agentIds: string[]
-): Promise<void> {
+): Promise<Record<string, ReconciledAgentBalance>> {
   const uniqueIds = Array.from(new Set(agentIds.filter(Boolean)));
-  if (uniqueIds.length === 0) return;
+  const balances: Record<string, ReconciledAgentBalance> = {};
+  if (uniqueIds.length === 0) return balances;
 
   const [agentsRes, payRes, invRes, cashRes] = await Promise.all([
     supabaseClient.from('portal_users').select('id, full_name, username, cash_in_hand, advance_balance').in('id', uniqueIds),
@@ -282,6 +351,7 @@ export async function reconcileAgentVaultBalancesInDb(
       .filter((inv) => !recordedInvIds.has(inv.id) && (inv.assigned_agent_id === ag.id || (!inv.assigned_agent_id && matchesName(inv.assigned_agent_name))))
       .reduce((s, inv) => s + (Number(inv.paid_amount) || 0), 0);
 
+    const totalCollected = txTotal + invTotal;
     const agCashRows = cashRows.filter((c) => c.agent_id === ag.id);
     const handedOver = agCashRows
       .filter((c) => ['CASH_HANDOVER', 'HANDOVER'].includes(String(c.transaction_type || '').toUpperCase()))
@@ -294,8 +364,17 @@ export async function reconcileAgentVaultBalancesInDb(
       .filter((c) => ['ADVANCE_RETURN', 'ADVANCE_DEDUCTION'].includes(String(c.transaction_type || '').toUpperCase()))
       .reduce((s, c) => s + (Number(c.amount) || 0), 0);
 
-    const nextCashInHand = Math.max(0, txTotal + invTotal - handedOver);
+    const nextCashInHand = Math.max(0, totalCollected - handedOver);
     const nextAdvance = Math.max(0, advTaken - advRet);
+
+    balances[ag.id] = {
+      cashInHand: nextCashInHand,
+      advanceBalance: nextAdvance,
+      totalCollected,
+      totalHandedOver: handedOver,
+      totalAdvanceTaken: advTaken,
+      totalAdvanceReturned: advRet,
+    };
 
     if (Number(ag.cash_in_hand ?? 0) !== nextCashInHand || Number(ag.advance_balance ?? 0) !== nextAdvance) {
       await supabaseClient
@@ -306,6 +385,8 @@ export async function reconcileAgentVaultBalancesInDb(
         .maybeSingle();
     }
   }
+
+  return balances;
 }
 
 /**
@@ -320,6 +401,7 @@ export async function updateFieldAuditLedgerEntry(
   const {
     supabaseClient,
     entry,
+    transactionType,
     amount,
     paymentMethod,
     collectedAtIso,
@@ -339,6 +421,24 @@ export async function updateFieldAuditLedgerEntry(
 
   const nowIso = new Date().toISOString();
   const previousAmount = Number(entry.amount) || 0;
+  const previousTxType = normalizeCashTransactionType(entry.entryType);
+  const nextTxType =
+    entry.sourceTable === 'agent_cash_transactions'
+      ? normalizeCashTransactionType(transactionType || entry.entryType)
+      : entry.entryType;
+
+  const auditedNotes = appendAuditTrailToNotes(
+    remarks,
+    previousAmount,
+    amount,
+    editedBy,
+    nowIso,
+    editReason,
+    entry.sourceTable === 'agent_cash_transactions'
+      ? { previousType: previousTxType, nextType: nextTxType }
+      : null
+  );
+
   let updatedRow: Record<string, any> | null = null;
   let usedFallbackCoreColumns = false;
   let auditColumnsMissingInSchema = false;
@@ -353,7 +453,7 @@ export async function updateFieldAuditLedgerEntry(
         collected_at: collectedAtIso,
         agent_id: agentId || null,
         agent_name: agentName || null,
-        remarks,
+        remarks: auditedNotes,
         previous_amount: previousAmount,
         edited_by: editedBy,
         edited_at: nowIso,
@@ -378,7 +478,7 @@ export async function updateFieldAuditLedgerEntry(
       payment_date: collectedAtIso,
       collected_by_id: agentId || null,
       collected_by_name: agentName || null,
-      notes: remarks,
+      notes: auditedNotes,
       previous_amount: previousAmount,
       edited_by: editedBy,
       edited_at: nowIso,
@@ -395,14 +495,6 @@ export async function updateFieldAuditLedgerEntry(
     if (error && isMissingTableOrColumnError(error)) {
       auditColumnsMissingInSchema = true;
       usedFallbackCoreColumns = true;
-      const fallbackNotes = appendAuditTrailToNotes(
-        remarks,
-        previousAmount,
-        amount,
-        editedBy,
-        nowIso,
-        editReason
-      );
       const { data: coreData, error: coreErr } = await supabaseClient
         .from('payment_transactions')
         .update({
@@ -411,7 +503,7 @@ export async function updateFieldAuditLedgerEntry(
           payment_date: collectedAtIso,
           collected_by_id: agentId || null,
           collected_by_name: agentName || null,
-          notes: fallbackNotes,
+          notes: auditedNotes,
         })
         .eq('id', entry.recordId)
         .select()
@@ -433,12 +525,13 @@ export async function updateFieldAuditLedgerEntry(
     }
   } else if (entry.sourceTable === 'agent_cash_transactions') {
     const fullPayload = {
+      transaction_type: nextTxType,
       amount,
       received_by: paymentMethod,
       created_at: collectedAtIso,
       agent_id: agentId || entry.agentId,
       agent_name: agentName || entry.agentName,
-      notes: remarks,
+      notes: auditedNotes,
       previous_amount: previousAmount,
       edited_by: editedBy,
       edited_at: nowIso,
@@ -455,35 +548,49 @@ export async function updateFieldAuditLedgerEntry(
     if (error && isMissingTableOrColumnError(error)) {
       auditColumnsMissingInSchema = true;
       usedFallbackCoreColumns = true;
-      const fallbackNotes = appendAuditTrailToNotes(
-        remarks,
-        previousAmount,
-        amount,
-        editedBy,
-        nowIso,
-        editReason
-      );
       const { data: coreData, error: coreErr } = await supabaseClient
         .from('agent_cash_transactions')
         .update({
+          transaction_type: nextTxType,
           amount,
           received_by: paymentMethod,
           created_at: collectedAtIso,
           agent_id: agentId || entry.agentId,
           agent_name: agentName || entry.agentName,
-          notes: fallbackNotes,
+          notes: auditedNotes,
         })
         .eq('id', entry.recordId)
         .select()
         .single();
 
-      if (coreErr) {
+      if (coreErr && isMissingTableOrColumnError(coreErr)) {
+        const { data: minData, error: minErr } = await supabaseClient
+          .from('agent_cash_transactions')
+          .update({
+            transaction_type: nextTxType,
+            amount,
+            received_by: paymentMethod,
+            created_at: collectedAtIso,
+            notes: auditedNotes,
+          })
+          .eq('id', entry.recordId)
+          .select()
+          .single();
+
+        if (minErr) {
+          throw new Error(minErr.message);
+        }
+        if (!minData) {
+          throw new Error('Supabase update returned 0 rows on agent_cash_transactions (check RLS UPDATE policy).');
+        }
+        updatedRow = minData as Record<string, any>;
+      } else if (coreErr) {
         throw new Error(coreErr.message);
-      }
-      if (!coreData) {
+      } else if (!coreData) {
         throw new Error('Supabase update returned 0 rows on agent_cash_transactions (check RLS UPDATE policy).');
+      } else {
+        updatedRow = coreData as Record<string, any>;
       }
-      updatedRow = coreData as Record<string, any>;
     } else if (error) {
       throw new Error(error.message);
     } else if (!data) {
@@ -563,13 +670,147 @@ export async function updateFieldAuditLedgerEntry(
   }
 
   // Reconcile affected agent(s)' Cash in Hand & Advance Balance in portal_users
-  await reconcileAgentVaultBalancesInDb(supabaseClient, [entry.agentId, agentId]);
+  const reconciledBalances = await reconcileAgentVaultBalancesInDb(supabaseClient, [entry.agentId, agentId]);
 
   return {
     updatedRow: updatedRow!,
     usedFallbackCoreColumns,
     linkedInvoiceUpdated,
     auditColumnsMissingInSchema,
+    reconciledBalances,
+  };
+}
+
+/**
+ * STRICT VERIFIED SUPABASE DELETE (ADMIN ONLY):
+ * Deletes a ledger entry directly from PostgreSQL/Supabase, updates any linked invoice
+ * payment total so deleted collections never resurrect as synthetic invoice rows,
+ * and recalculates the agent's Cash Handover, Advance Balance, and Net Cash-in-Hand.
+ */
+export async function deleteFieldAuditLedgerEntry(
+  params: DeleteLedgerEntryParams
+): Promise<VerifiedLedgerDeleteResult> {
+  const { supabaseClient, entry, actorRole } = params;
+
+  if (String(actorRole || '').trim().toUpperCase() !== 'ADMIN') {
+    throw new Error('Only Master Admin (ADMIN) users can delete ledger entries.');
+  }
+  if (!entry.recordId) {
+    throw new Error('Missing database row ID for this ledger entry.');
+  }
+
+  let linkedInvoiceUpdated = false;
+
+  if (entry.sourceTable === 'agent_cash_transactions') {
+    const { data, error } = await supabaseClient
+      .from('agent_cash_transactions')
+      .delete()
+      .eq('id', entry.recordId)
+      .select('id');
+
+    if (error) {
+      throw new Error(error.message);
+    }
+    if (!data || data.length === 0) {
+      throw new Error(
+        'Supabase delete returned 0 rows on agent_cash_transactions (check RLS DELETE policy or record may already be deleted).'
+      );
+    }
+  } else if (entry.sourceTable === 'payment_transactions') {
+    const { data, error } = await supabaseClient
+      .from('payment_transactions')
+      .delete()
+      .eq('id', entry.recordId)
+      .select('id');
+
+    if (error) {
+      throw new Error(error.message);
+    }
+    if (!data || data.length === 0) {
+      throw new Error(
+        'Supabase delete returned 0 rows on payment_transactions (check RLS DELETE policy or record may already be deleted).'
+      );
+    }
+  } else if (entry.sourceTable === 'recovery_ledger') {
+    const { data, error } = await supabaseClient
+      .from('recovery_ledger')
+      .delete()
+      .eq('id', entry.recordId)
+      .select('id');
+
+    if (error) {
+      throw new Error(error.message);
+    }
+    if (!data || data.length === 0) {
+      throw new Error(
+        'Supabase delete returned 0 rows on recovery_ledger (check RLS DELETE policy or record may already be deleted).'
+      );
+    }
+  } else if (entry.sourceTable === 'invoices') {
+    const { data, error } = await supabaseClient
+      .from('invoices')
+      .update({
+        paid_amount: 0,
+        status: 'DUE',
+        paid_at: null,
+      })
+      .eq('id', entry.recordId)
+      .select('id');
+
+    if (error) {
+      throw new Error(error.message);
+    }
+    if (!data || data.length === 0) {
+      throw new Error('Supabase update returned 0 rows on invoices (check RLS UPDATE policy).');
+    }
+    linkedInvoiceUpdated = true;
+  }
+
+  // Reconcile linked invoice when a collection transaction is deleted
+  if (entry.invoiceId && entry.sourceTable !== 'invoices') {
+    const [{ data: invRow, error: invErr }, { data: remainingTxns }] = await Promise.all([
+      supabaseClient.from('invoices').select('id, amount').eq('id', entry.invoiceId).maybeSingle(),
+      supabaseClient.from('payment_transactions').select('id, amount_paid').eq('invoice_id', entry.invoiceId),
+    ]);
+
+    if (!invErr && invRow) {
+      const invoiceTotal = Number(invRow.amount) || 0;
+      const remainingPaid = Array.isArray(remainingTxns)
+        ? remainingTxns.reduce((sum, t: any) => sum + (Number(t.amount_paid) || 0), 0)
+        : 0;
+      const clampedPaid = Math.max(0, remainingPaid);
+      const nextStatus =
+        clampedPaid >= invoiceTotal && invoiceTotal > 0
+          ? 'PAID'
+          : clampedPaid > 0
+          ? 'PARTIAL'
+          : 'DUE';
+
+      const { error: invUpdErr } = await supabaseClient
+        .from('invoices')
+        .update({
+          paid_amount: clampedPaid,
+          status: nextStatus,
+          paid_at: clampedPaid > 0 ? new Date().toISOString() : null,
+        })
+        .eq('id', entry.invoiceId)
+        .select('id')
+        .maybeSingle();
+
+      if (invUpdErr) {
+        throw new Error(`Ledger entry deleted, but linked invoice sync failed: ${invUpdErr.message}`);
+      }
+      linkedInvoiceUpdated = true;
+    }
+  }
+
+  const reconciledBalances = await reconcileAgentVaultBalancesInDb(supabaseClient, [entry.agentId]);
+
+  return {
+    deletedId: entry.recordId,
+    sourceTable: entry.sourceTable,
+    linkedInvoiceUpdated,
+    reconciledBalances,
   };
 }
 

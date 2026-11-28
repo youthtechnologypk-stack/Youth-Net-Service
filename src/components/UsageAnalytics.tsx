@@ -336,32 +336,32 @@ export const UsageAnalytics: React.FC = () => {
     }
   }, [searchQuery, filteredSessions, selectedSubscriberUsername]);
 
-  // Custom Dark Recharts Tooltip for Interface Chart
+  // Custom Dark-NOC Glassmorphic Recharts Tooltip for Interface Chart
   const CustomInterfaceTooltip = ({ active, payload, label }: any) => {
     if (active && payload && payload.length) {
       return (
-        <div className="bg-slate-950 border border-slate-800 rounded-lg p-3 shadow-xl text-xs font-mono">
-          <div className="text-slate-400 font-semibold mb-1.5 flex items-center justify-between gap-4">
-            <span>Timestamp: {label}</span>
+        <div className="bg-slate-950/90 backdrop-blur-xl border border-cyan-500/30 rounded-xl p-3 shadow-[0_8px_32px_rgba(6,182,212,0.18)] text-xs font-mono tabular-nums min-w-[220px]">
+          <div className="text-slate-300 font-bold mb-1.5 pb-1 border-b border-slate-800/80 flex items-center justify-between gap-4">
+            <span>{label}</span>
             <span className="text-cyan-400">{selectedInterface}</span>
           </div>
-          <div className="space-y-1">
+          <div className="space-y-1.5">
             <div className="flex items-center justify-between gap-4 text-emerald-400">
               <span className="flex items-center gap-1.5">
-                <span className="w-2 h-2 rounded-full bg-emerald-400" />
+                <span className="w-2 h-2 rounded-full bg-emerald-400 shadow-[0_0_8px_#10b981]" />
                 Download (RX):
               </span>
               <span className="font-bold">{payload[0]?.value} Mbps</span>
             </div>
             <div className="flex items-center justify-between gap-4 text-cyan-400">
               <span className="flex items-center gap-1.5">
-                <span className="w-2 h-2 rounded-full bg-cyan-400" />
+                <span className="w-2 h-2 rounded-full bg-cyan-400 shadow-[0_0_8px_#06b6d4]" />
                 Upload (TX):
               </span>
               <span className="font-bold">{payload[1]?.value} Mbps</span>
             </div>
-            <div className="pt-1 mt-1 border-t border-slate-800 flex items-center justify-between gap-4 text-slate-300">
-              <span>Combined Aggregate:</span>
+            <div className="pt-1.5 mt-1 border-t border-slate-800/80 flex items-center justify-between gap-4 text-slate-300">
+              <span>Aggregate:</span>
               <span className="font-bold text-white">
                 {((payload[0]?.value || 0) + (payload[1]?.value || 0)).toFixed(1)} Mbps
               </span>
@@ -414,9 +414,9 @@ export const UsageAnalytics: React.FC = () => {
   };
 
   return (
-    <div className="bg-slate-900 border border-slate-800 rounded-xl p-5 shadow-lg space-y-5">
+    <div className="bg-[#0F172A]/90 backdrop-blur-xl border border-slate-800/90 rounded-2xl p-5 shadow-[0_12px_40px_rgba(2,6,23,0.45)] space-y-5">
       {/* Top Banner & Mode Selector */}
-      <div className="flex flex-col lg:flex-row items-start lg:items-center justify-between gap-4 pb-4 border-b border-slate-800">
+      <div className="flex flex-col lg:flex-row items-start lg:items-center justify-between gap-4 pb-4 border-b border-slate-800/80">
         <div>
           <div className="flex items-center gap-2">
             <Activity className="w-5 h-5 text-cyan-400" />
@@ -624,39 +624,53 @@ export const UsageAnalytics: React.FC = () => {
             </div>
           </div>
 
-          {/* Recharts Area Chart for Interface */}
-          <div className="bg-slate-950 rounded-xl p-4 border border-slate-800/80 h-[280px]">
+          {/* Recharts Area Chart for Interface (Neon Cyan/Emerald NOC Glow) */}
+          <div className="bg-slate-950/90 backdrop-blur-md rounded-xl p-4 border border-slate-800/80 shadow-inner h-[290px]">
             <ResponsiveContainer width="100%" height="100%">
               <AreaChart
                 data={interfaceChartData}
-                margin={{ top: 10, right: 10, left: -15, bottom: 0 }}
+                margin={{ top: 10, right: 12, left: -12, bottom: 0 }}
               >
                 <defs>
                   <linearGradient id="colorRx" x1="0" y1="0" x2="0" y2="1">
-                    <stop offset="5%" stopColor="#10b981" stopOpacity={0.4} />
-                    <stop offset="95%" stopColor="#10b981" stopOpacity={0.0} />
+                    <stop offset="0%" stopColor="#10b981" stopOpacity={0.48} />
+                    <stop offset="65%" stopColor="#10b981" stopOpacity={0.12} />
+                    <stop offset="100%" stopColor="#10b981" stopOpacity={0.0} />
                   </linearGradient>
                   <linearGradient id="colorTx" x1="0" y1="0" x2="0" y2="1">
-                    <stop offset="5%" stopColor="#06b6d4" stopOpacity={0.4} />
-                    <stop offset="95%" stopColor="#06b6d4" stopOpacity={0.0} />
+                    <stop offset="0%" stopColor="#22d3ee" stopOpacity={0.45} />
+                    <stop offset="65%" stopColor="#06b6d4" stopOpacity={0.12} />
+                    <stop offset="100%" stopColor="#06b6d4" stopOpacity={0.0} />
                   </linearGradient>
+                  <filter id="nocNeonGlow" x="-20%" y="-20%" width="140%" height="140%">
+                    <feGaussianBlur stdDeviation="2.5" result="coloredBlur" />
+                    <feMerge>
+                      <feMergeNode in="coloredBlur" />
+                      <feMergeNode in="SourceGraphic" />
+                    </feMerge>
+                  </filter>
                 </defs>
-                <CartesianGrid stroke="#1e293b" strokeDasharray="3 3" opacity={0.6} />
+                <CartesianGrid stroke="#1e293b" strokeDasharray="3 3" opacity={0.5} vertical={false} />
                 <XAxis
                   dataKey="time"
                   stroke="#64748b"
                   fontSize={10}
                   tickLine={false}
+                  axisLine={false}
                   fontFamily="monospace"
                 />
                 <YAxis
                   stroke="#64748b"
                   fontSize={10}
                   tickLine={false}
+                  axisLine={false}
                   fontFamily="monospace"
                   tickFormatter={(val) => `${val}M`}
                 />
-                <Tooltip content={<CustomInterfaceTooltip />} />
+                <Tooltip
+                  content={<CustomInterfaceTooltip />}
+                  cursor={{ stroke: '#38bdf8', strokeWidth: 1, strokeDasharray: '4 4' }}
+                />
                 <Legend
                   verticalAlign="top"
                   align="right"
@@ -678,20 +692,24 @@ export const UsageAnalytics: React.FC = () => {
                   type="monotone"
                   dataKey="rx"
                   name="Download (RX)"
-                  stroke="#10b981"
-                  strokeWidth={2.5}
+                  stroke="#34d399"
+                  strokeWidth={2.75}
                   fillOpacity={1}
                   fill="url(#colorRx)"
+                  filter="url(#nocNeonGlow)"
+                  activeDot={{ r: 5, fill: '#10b981', stroke: '#ecfdf5', strokeWidth: 2 }}
                   isAnimationActive={timeRange !== 'realtime'}
                 />
                 <Area
                   type="monotone"
                   dataKey="tx"
                   name="Upload (TX)"
-                  stroke="#06b6d4"
-                  strokeWidth={2}
+                  stroke="#22d3ee"
+                  strokeWidth={2.5}
                   fillOpacity={1}
                   fill="url(#colorTx)"
+                  filter="url(#nocNeonGlow)"
+                  activeDot={{ r: 5, fill: '#06b6d4', stroke: '#ecfeff', strokeWidth: 2 }}
                   isAnimationActive={timeRange !== 'realtime'}
                 />
               </AreaChart>
